@@ -61,9 +61,10 @@ impl Stage {
     }
 }
 
-/// 要約が採点のために残す呼び出し回数。採点が計画に無ければ、残しても使われないので 0。
-pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig, _has_profile: bool) -> u32 {
-    if stages.contains(&Stage::Score) {
+/// 要約が採点のために残す呼び出し回数。採点が計画に無いか、プロファイルが無くて採点が
+/// 何もしないときは、残しても使われないので 0。
+pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig, has_profile: bool) -> u32 {
+    if has_profile && stages.contains(&Stage::Score) {
         cfg.score_reserved_calls
     } else {
         0

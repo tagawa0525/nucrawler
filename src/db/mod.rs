@@ -1538,7 +1538,7 @@ impl Db {
     }
 
     #[cfg(test)]
-    fn conn(&self) -> &Connection {
+    pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
 }

@@ -487,6 +487,21 @@ mod tests {
         assert!(html.contains("和訳待ち"), "{html}");
     }
 
+    /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。
+    #[tokio::test]
+    async fn internal_errors_do_not_leak_details() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        db.conn().execute_batch("DROP TABLE events").unwrap();
+        let server = Server::start(db).await;
+        let (status, body) = server.get(&format!("/articles/{id}")).await;
+        assert_eq!(status, 500);
+        assert!(
+            !body.contains("events") && !body.contains("table"),
+            "{body}"
+        );
+    }
+
     /// 和訳の処理が拾えない記事（日本語、公開の本文が無い英語）への依頼は受け付けない。
     /// 受け付けると「和訳待ち」のまま永久に残る。
     #[tokio::test]

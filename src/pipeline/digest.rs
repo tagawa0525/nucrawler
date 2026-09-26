@@ -4,9 +4,9 @@
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Outcome, call_recorded};
-use super::{Cancel, Halt};
+use super::{Cancel, Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, StageKey};
+use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
 use crate::{digest, errors};
@@ -29,12 +29,14 @@ pub struct DigestSummary {
     pub cancelled: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn digest_articles<L: Llm>(
     db: &Db,
     llm: &L,
     quota: &mut Quota,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
+    target: &Target,
     now: DateTime<Utc>,
     cancel: &Cancel,
 ) -> Result<DigestSummary, DigestStageError> {
@@ -54,7 +56,23 @@ pub async fn digest_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?;
+        let batch = match target {
+            Target::Pending { .. } => {
+                db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?
+            }
+            Target::Redo(spec) => db.redo_digest(
+                RedoKey {
+                    user_id: spec.user_id,
+                    profile_hash: spec.profile_hash.as_deref(),
+                    backend,
+                    model,
+                    prompt_version: digest::PROMPT_VERSION,
+                },
+                &spec.filter,
+                now,
+                llm_cfg.digest_batch_size,
+            )?,
+        };
         if batch.is_empty() {
             break;
         }
@@ -215,6 +233,9 @@ mod tests {
             quota,
             &llm_cfg(batch),
             &PipelineConfig::default(),
+            &Target::Pending {
+                requests_only: false,
+            },
             now(),
             &Cancel::default(),
         )
@@ -321,6 +342,9 @@ mod tests {
             &mut q,
             &cfg,
             &PipelineConfig::default(),
+            &Target::Pending {
+                requests_only: false,
+            },
             now(),
             &Cancel::default(),
         )
@@ -411,6 +435,63 @@ mod tests {
         assert_eq!(summary.halted, None);
     }
 
+    /// 別のモデルで作り直す。同じ条件で再実行しても、作り直した記事は対象にならない（続きから）。
+    #[tokio::test]
+    async fn redo_rebuilds_with_another_model_and_resumes() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 2);
+        run(&db, &FakeLlm::new([ok(&ids, 0.1)]), &mut quota(10), 5).await;
+
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter {
+                ids: vec![ids[1]],
+                ..Default::default()
+            },
+            user_id: db.owner_id().unwrap(),
+            profile_hash: None,
+        });
+        let opus = LlmConfig {
+            digest_model: "opus".into(),
+            ..llm_cfg(5)
+        };
+        let llm = FakeLlm::new([ok(&ids[1..], 0.1)]);
+        let summary = digest_articles(
+            &db,
+            &llm,
+            &mut quota(10),
+            &opus,
+            &PipelineConfig::default(),
+            &target,
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.digested, summary.calls), (1, 1));
+        assert_eq!(llm.requests()[0].model, "opus");
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT model FROM artifacts WHERE article_id = {} ORDER BY id",
+                ids[1]
+            ))
+            .unwrap(),
+            ["sonnet", "opus"]
+        );
+        let again = digest_articles(
+            &db,
+            &FakeLlm::new([]),
+            &mut quota(10),
+            &opus,
+            &PipelineConfig::default(),
+            &target,
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.calls, 0);
+    }
+
     #[tokio::test]
     async fn stops_when_cancelled() {
         let db = Db::open_in_memory().unwrap();
@@ -423,6 +504,9 @@ mod tests {
             &mut quota(10),
             &llm_cfg(5),
             &PipelineConfig::default(),
+            &Target::Pending {
+                requests_only: false,
+            },
             now(),
             &cancel,
         )

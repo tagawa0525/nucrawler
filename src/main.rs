@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, ProfileArgs, SourcesArgs};
+use nucrawler::cli::{self, Command, ProfileArgs, RedoArgs, RedoKind, SourcesArgs};
 use nucrawler::config::{self, ConfigError, LlmConfig};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
@@ -14,7 +14,7 @@ use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::score::{self, ScoreStageError};
 use nucrawler::pipeline::translate::{self, TranslateStageError};
-use nucrawler::pipeline::{self, Cancel, Halt, Stage};
+use nucrawler::pipeline::{self, Cancel, Halt, Stage, Target};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
 use nucrawler::status;
@@ -108,6 +108,14 @@ async fn run() -> Result<(), Error> {
             crawl(inv.config_dir, inv.data_dir, &args).await
         }
         Command::Status => status(inv.config_dir, inv.data_dir),
+        Command::Redo => {
+            redo(
+                inv.config_dir,
+                inv.data_dir,
+                cli::parse_redo_args(&inv.args)?,
+            )
+            .await
+        }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
@@ -207,6 +215,9 @@ async fn crawl(
                     &mut quota,
                     &digest_cfg,
                     &config.pipeline,
+                    &Target::Pending {
+                        requests_only: false,
+                    },
                     chrono::Utc::now(),
                     &cancel,
                 )
@@ -247,7 +258,9 @@ async fn crawl(
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
-                    args.requests_only,
+                    &Target::Pending {
+                        requests_only: args.requests_only,
+                    },
                     chrono::Utc::now(),
                     &cancel,
                 )
@@ -287,6 +300,95 @@ async fn crawl(
     }
     if failed_sources > 0 {
         return Err(Error::SourcesFailed(failed_sources));
+    }
+    Ok(())
+}
+
+/// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の
+/// 成果物がまだ無いものだけを処理するので、途中で止めても同じコマンドで続きから再開できる。
+/// 新しい digest ができた記事は、次の crawl で自動的に採点し直される。
+async fn redo(config: Option<PathBuf>, data: Option<PathBuf>, args: RedoArgs) -> Result<(), Error> {
+    let (config, _) = config::load(&config_dir(config)?)?;
+    let data = data_dir(data)?;
+    let _lock = lock::acquire(&data)?;
+    let db = Db::open(&data.join("nucrawler.db"))?;
+    let cancel = Cancel::default();
+    spawn_signal_handler(cancel.clone());
+    let llm = ClaudeCli {
+        command: config.llm.command.clone().into(),
+        cwd: data.join("llm-cwd"),
+        timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
+    };
+    let mut quota = Quota::new(
+        config.quota.clone(),
+        db.latest_rate_limit()?,
+        args.max_llm_calls,
+    );
+    let owner = db.owner_id()?;
+    let target = Target::Redo(pipeline::RedoSpec {
+        filter: args.filter,
+        user_id: owner,
+        profile_hash: db.load_profile(owner)?.map(|(_, hash)| hash),
+    });
+    let mut llm_failure = None;
+    match args.kind {
+        RedoKind::Digest => {
+            let cfg = LlmConfig {
+                digest_model: args.model,
+                // redo では採点しないので、採点のための回数は残さない
+                score_reserved_calls: 0,
+                ..config.llm.clone()
+            };
+            let summary = digest::digest_articles(
+                &db,
+                &llm,
+                &mut quota,
+                &cfg,
+                &config.pipeline,
+                &target,
+                chrono::Utc::now(),
+                &cancel,
+            )
+            .await?;
+            tracing::info!(
+                digested = summary.digested,
+                failed = summary.failed,
+                calls = summary.calls,
+                "redo digest finished"
+            );
+            report_halt(summary.halted, &mut llm_failure);
+        }
+        RedoKind::Translate => {
+            let cfg = LlmConfig {
+                translate_model: args.model,
+                ..config.llm.clone()
+            };
+            let summary = translate::translate_articles(
+                &db,
+                &llm,
+                &mut quota,
+                &cfg,
+                &config.pipeline,
+                owner,
+                &target,
+                chrono::Utc::now(),
+                &cancel,
+            )
+            .await?;
+            tracing::info!(
+                translated = summary.translated,
+                failed = summary.failed,
+                calls = summary.calls,
+                "redo translate finished"
+            );
+            report_halt(summary.halted, &mut llm_failure);
+        }
+    }
+    if cancel.is_requested() {
+        return Err(Error::Interrupted);
+    }
+    if let Some(message) = llm_failure {
+        return Err(Error::LlmFailed(message));
     }
     Ok(())
 }

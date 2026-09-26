@@ -3,9 +3,9 @@
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Outcome, call_recorded};
-use super::{Cancel, Halt};
+use super::{Cancel, Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, StageKey, TranslateQuery};
+use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
 use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
 use crate::{errors, translate};
@@ -27,7 +27,7 @@ pub struct TranslateSummary {
     pub cancelled: bool,
 }
 
-/// `requests_only` なら依頼された記事だけを和訳する（先回りはしない）。
+/// 通常は依頼と先回りの対象を、`requests_only` なら依頼だけを、`Redo` なら条件に合う記事を和訳する。
 #[allow(clippy::too_many_arguments)]
 pub async fn translate_articles<L: Llm>(
     db: &Db,
@@ -36,7 +36,7 @@ pub async fn translate_articles<L: Llm>(
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
-    requests_only: bool,
+    target: &Target,
     now: DateTime<Utc>,
     cancel: &Cancel,
 ) -> Result<TranslateSummary, TranslateStageError> {
@@ -47,7 +47,12 @@ pub async fn translate_articles<L: Llm>(
         user_id,
         profile_hash: profile_hash.as_deref(),
         min_score: llm_cfg.translate_min_score,
-        requests_only,
+        requests_only: matches!(
+            target,
+            Target::Pending {
+                requests_only: true
+            }
+        ),
         backend,
         model,
     };
@@ -65,11 +70,23 @@ pub async fn translate_articles<L: Llm>(
             break;
         }
         // 全文は長いので 1 件ずつ訳す
-        let Some(input) = db
-            .pending_translate(query, cutoff, now, 1)?
-            .into_iter()
-            .next()
-        else {
+        let Some(input) = (match target {
+            Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1)?,
+            Target::Redo(spec) => db.redo_translate(
+                RedoKey {
+                    user_id: spec.user_id,
+                    profile_hash: spec.profile_hash.as_deref(),
+                    backend,
+                    model,
+                    prompt_version: translate::PROMPT_VERSION,
+                },
+                &spec.filter,
+                now,
+                1,
+            )?,
+        })
+        .into_iter()
+        .next() else {
             break;
         };
         let key = StageKey {
@@ -245,7 +262,7 @@ mod tests {
             &LlmConfig::default(),
             &PipelineConfig::default(),
             owner,
-            requests_only,
+            &Target::Pending { requests_only },
             now(),
             &Cancel::default(),
         )
@@ -357,6 +374,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redo_translates_again_with_another_model() {
+        let (db, owner) = setup();
+        let a = article(&db, 0, 90);
+        run(
+            &db,
+            owner,
+            &FakeLlm::new([ok("初訳")]),
+            &mut quota(10),
+            false,
+        )
+        .await;
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: owner,
+            profile_hash: None,
+        });
+        let opus = LlmConfig {
+            translate_model: "opus".into(),
+            ..LlmConfig::default()
+        };
+        let llm = FakeLlm::new([ok("再訳")]);
+        let summary = translate_articles(
+            &db,
+            &llm,
+            &mut quota(10),
+            &opus,
+            &PipelineConfig::default(),
+            owner,
+            &target,
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!(llm.requests()[0].model, "opus");
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT model FROM artifacts WHERE article_id = {a} AND kind = 'translation' ORDER BY id"
+            ))
+            .unwrap(),
+            ["sonnet", "opus"]
+        );
+    }
+
+    #[tokio::test]
     async fn stops_when_cancelled() {
         let (db, owner) = setup();
         article(&db, 0, 90);
@@ -369,7 +432,9 @@ mod tests {
             &LlmConfig::default(),
             &PipelineConfig::default(),
             owner,
-            false,
+            &Target::Pending {
+                requests_only: false,
+            },
             now(),
             &cancel,
         )

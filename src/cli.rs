@@ -13,6 +13,11 @@ pub enum ParseError {
     #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
     ProfileUsage,
     #[error(
+        "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
+         [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
+    )]
+    RedoUsage,
+    #[error(
         "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
@@ -52,7 +57,7 @@ options:
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
-  redo      指定モデルで要約・和訳をやり直す
+  redo      指定モデルで要約・和訳をやり直す（redo digest|translate --model M ...）
   status    ステージごとの未処理件数などを表示
   sources   ソースの取得確認（sources check [ID]）
   serve     Web UI / RSS / JSON API を起動
@@ -123,7 +128,9 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
             "--until" => &mut parsed.until,
             "--only" => &mut parsed.only,
             "--max-llm-calls" => {
-                let n = it.next().and_then(|n| n.parse().ok()).ok_or_else(usage)?;
+                let n = option_value(&mut it)
+                    .and_then(|n| n.parse().ok())
+                    .ok_or_else(usage)?;
                 parsed.max_llm_calls = Some(n);
                 continue;
             }
@@ -133,8 +140,7 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
             }
             _ => return Err(usage()),
         };
-        let stage = it
-            .next()
+        let stage = option_value(&mut it)
             .and_then(|name| Stage::from_name(name))
             .ok_or_else(usage)?;
         *slot = Some(stage);
@@ -147,6 +153,81 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         return Err(usage());
     }
     Ok(parsed)
+}
+
+/// `redo` で作り直す成果物。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedoKind {
+    Digest,
+    Translate,
+}
+
+/// `redo` サブコマンドの引数。
+#[derive(Debug, PartialEq)]
+pub struct RedoArgs {
+    pub kind: RedoKind,
+    pub model: String,
+    pub filter: crate::db::RedoFilter,
+    pub max_llm_calls: Option<u32>,
+}
+
+pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
+    let usage = || ParseError::RedoUsage;
+    let (kind, rest) = match args.split_first() {
+        Some((k, rest)) if k == "digest" => (RedoKind::Digest, rest),
+        Some((k, rest)) if k == "translate" => (RedoKind::Translate, rest),
+        _ => return Err(usage()),
+    };
+    let mut model = None;
+    let mut filter = crate::db::RedoFilter::default();
+    let mut max_llm_calls = None;
+    let mut it = rest.iter();
+    while let Some(opt) = it.next() {
+        let value = option_value(&mut it).ok_or_else(usage)?;
+        match opt.as_str() {
+            "--model" => model = Some(value.clone()),
+            "--source" => filter.source_id = Some(value.clone()),
+            "--since" => filter.since = Some(jst_midnight(value).ok_or_else(usage)?),
+            "--min-score" => {
+                let score: u8 = value.parse().map_err(|_| usage())?;
+                if score > 100 {
+                    return Err(usage());
+                }
+                filter.min_score = Some(score);
+            }
+            "--ids" => {
+                filter.ids = value
+                    .split(',')
+                    .map(|id| id.trim().parse().map_err(|_| usage()))
+                    .collect::<Result<_, _>>()?;
+            }
+            "--max-llm-calls" => max_llm_calls = Some(value.parse().map_err(|_| usage())?),
+            _ => return Err(usage()),
+        }
+    }
+    Ok(RedoArgs {
+        kind,
+        model: model.ok_or_else(usage)?,
+        filter,
+        max_llm_calls,
+    })
+}
+
+/// オプションの値を取り出す。値の書き忘れで次のオプションを値として読まないよう、
+/// 空の値と `--` で始まる値は受け付けない。
+fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Option<&'a String> {
+    it.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
+}
+
+/// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。
+fn jst_midnight(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let jst = chrono::FixedOffset::east_opt(9 * 3600)?;
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()?
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(jst)
+        .single()
+        .map(|t| t.to_utc())
 }
 
 /// `profile` サブコマンドの引数。
@@ -323,6 +404,7 @@ mod tests {
             &["--until"][..],
             &["--until", "nope"][..],
             &["--until", "fetch", "--only", "fetch"][..],
+            &["--max-llm-calls", "--requests-only"][..],
             &["extra"][..],
         ] {
             let err = parse_crawl_args(&args(bad)).unwrap_err();
@@ -354,6 +436,61 @@ mod tests {
                 id: Some("nrc-news".into())
             }
         );
+    }
+
+    #[test]
+    fn parses_redo_args() {
+        let parsed = parse_redo_args(&args(&[
+            "digest",
+            "--model",
+            "opus",
+            "--source",
+            "wnn",
+            "--since",
+            "2026-09-20",
+            "--min-score",
+            "70",
+            "--ids",
+            "3,5",
+            "--max-llm-calls",
+            "4",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.kind, RedoKind::Digest);
+        assert_eq!(parsed.model, "opus");
+        assert_eq!(parsed.filter.source_id.as_deref(), Some("wnn"));
+        // 日付は JST の 0 時（UTC では前日 15 時）
+        assert_eq!(
+            parsed.filter.since.map(|t| t.to_rfc3339()),
+            Some("2026-09-19T15:00:00+00:00".to_string())
+        );
+        assert_eq!(parsed.filter.min_score, Some(70));
+        assert_eq!(parsed.filter.ids, [3, 5]);
+        assert_eq!(parsed.max_llm_calls, Some(4));
+        let minimal = parse_redo_args(&args(&["translate", "--model", "opus"])).unwrap();
+        assert_eq!(minimal.kind, RedoKind::Translate);
+        assert_eq!(minimal.filter, crate::db::RedoFilter::default());
+    }
+
+    #[test]
+    fn rejects_bad_redo_args() {
+        for bad in [
+            &[][..],
+            &["score", "--model", "opus"][..],
+            &["digest"][..],
+            &["digest", "--model"][..],
+            &["digest", "--model", "opus", "--since", "2026/09/20"][..],
+            &["digest", "--model", "opus", "--min-score", "101"][..],
+            &["digest", "--model", "opus", "--ids", "a,b"][..],
+            &["digest", "--model", "opus", "--bogus"][..],
+            // 値を書き忘れて次のオプションを値として読まないこと、空の値を受け付けないこと
+            &["digest", "--model", "--source", "wnn"][..],
+            &["digest", "--model", ""][..],
+            &["digest", "--model", "opus", "--source", "--ids", "1"][..],
+        ] {
+            let err = parse_redo_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::RedoUsage), "{bad:?}: {err}");
+        }
     }
 
     #[test]

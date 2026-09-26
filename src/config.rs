@@ -42,6 +42,28 @@ pub struct LlmConfig {
     pub command: String,
     /// 1 回の呼び出しのタイムアウト
     pub timeout_secs: u64,
+    /// 要約に使うモデル
+    pub digest_model: String,
+    /// 1 回の呼び出しで要約する記事数
+    pub digest_batch_size: usize,
+    /// プロンプトに入れる本文の部分ごとの最大文字数
+    pub max_input_chars: usize,
+}
+
+impl LlmConfig {
+    /// 0 だと処理が黙って何もしなくなる値を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("digest_batch_size", self.digest_batch_size as u64),
+            ("max_input_chars", self.max_input_chars as u64),
+            ("timeout_secs", self.timeout_secs),
+        ] {
+            if value == 0 {
+                return Err(format!("llm.{name} must be at least 1"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for LlmConfig {
@@ -49,6 +71,9 @@ impl Default for LlmConfig {
         Self {
             command: "claude".into(),
             timeout_secs: 300,
+            digest_model: "sonnet".into(),
+            digest_batch_size: 5,
+            max_input_chars: 6000,
         }
     }
 }
@@ -167,6 +192,7 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
     config
         .quota
         .validate()
+        .and_then(|()| config.llm.validate())
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,
@@ -305,10 +331,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_positive_llm_settings() {
+        for (toml, needle) in [
+            ("[llm]\ndigest_batch_size = 0\n", "digest_batch_size"),
+            ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
+            ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
+        ] {
+            let err = parse_config(toml, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains(needle)),
+                "{toml}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn llm_defaults() {
         let d = LlmConfig::default();
         assert_eq!(d.command, "claude");
         assert_eq!(d.timeout_secs, 300);
+        assert_eq!(d.digest_model, "sonnet");
+        assert_eq!(d.digest_batch_size, 5);
+        assert_eq!(d.max_input_chars, 6000);
     }
 
     #[test]

@@ -10,7 +10,9 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
-    #[error("usage: nucrawler crawl [--until STAGE | --only STAGE]  (stages: {stages})")]
+    #[error(
+        "usage: nucrawler crawl [--until STAGE | --only STAGE] [--max-llm-calls N]  (stages: {stages})"
+    )]
     CrawlUsage { stages: String },
 }
 
@@ -98,6 +100,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
 pub struct CrawlArgs {
     pub until: Option<Stage>,
     pub only: Option<Stage>,
+    /// この実行で LLM を呼んでよい回数（設定の `quota.max_calls_per_run` より優先）
+    pub max_llm_calls: Option<u32>,
 }
 
 pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
@@ -114,6 +118,11 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         let slot = match opt.as_str() {
             "--until" => &mut parsed.until,
             "--only" => &mut parsed.only,
+            "--max-llm-calls" => {
+                let n = it.next().and_then(|n| n.parse().ok()).ok_or_else(usage)?;
+                parsed.max_llm_calls = Some(n);
+                continue;
+            }
             _ => return Err(usage()),
         };
         let stage = it
@@ -235,16 +244,31 @@ mod tests {
             parse_crawl_args(&args(&["--until", "fetch"])).unwrap(),
             CrawlArgs {
                 until: Some(Stage::Fetch),
-                only: None
+                only: None,
+                max_llm_calls: None,
             }
         );
         assert_eq!(
             parse_crawl_args(&args(&["--only", "fetch"])).unwrap(),
             CrawlArgs {
                 until: None,
-                only: Some(Stage::Fetch)
+                only: Some(Stage::Fetch),
+                max_llm_calls: None,
             }
         );
+    }
+
+    #[test]
+    fn parses_max_llm_calls() {
+        let args = parse_crawl_args(&args(&["--max-llm-calls", "3", "--only", "digest"])).unwrap();
+        assert_eq!(args.max_llm_calls, Some(3));
+        assert_eq!(args.only, Some(Stage::Digest));
+        for bad in [&["--max-llm-calls"][..], &["--max-llm-calls", "x"][..]] {
+            assert!(
+                parse_crawl_args(&super::tests::args(bad)).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

@@ -3,10 +3,14 @@
 
 use chrono::{DateTime, Utc};
 
+use url::Url;
+
 use super::Cancel;
 use crate::config::{PipelineConfig, Source};
-use crate::db::{Db, DbError};
-use crate::http::Fetcher;
+use crate::db::{ContentKind, ContentOrigin, Db, DbError, StageKey};
+use crate::extract::{self, ExtractError};
+use crate::http::{Fetcher, HttpError};
+use crate::{errors, text};
 
 pub const STAGE: &str = "extract";
 
@@ -29,14 +33,109 @@ pub struct ExtractSummary {
 
 /// 抽出待ちの記事を新しい順に最大 `extract_max_per_run` 件処理する。
 pub async fn extract_pages(
-    _db: &Db,
-    _fetcher: &Fetcher,
-    _sources: &[Source],
-    _cfg: &PipelineConfig,
-    _now: DateTime<Utc>,
-    _cancel: &Cancel,
+    db: &Db,
+    fetcher: &Fetcher,
+    sources: &[Source],
+    cfg: &PipelineConfig,
+    now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<ExtractSummary, ExtractStageError> {
-    todo!()
+    let cutoff = now - chrono::Duration::days(i64::from(cfg.backlog_days));
+    let pending = db.pending_extract(cutoff, now, cfg.extract_max_per_run)?;
+    let mut summary = ExtractSummary::default();
+    for page in pending {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        let selector = sources
+            .iter()
+            .find(|s| s.id == page.source_id)
+            .and_then(|s| s.body_selector.as_deref());
+        let key = StageKey {
+            article_id: page.article_id,
+            stage: STAGE,
+            backend: "",
+            model: "",
+        };
+        match extract_one(fetcher, &page.url, selector).await {
+            Ok(text) => {
+                db.insert_content(
+                    page.article_id,
+                    ContentKind::Body,
+                    ContentOrigin::Page,
+                    &text,
+                )?;
+                db.clear_stage_failure(key)?;
+                summary.extracted += 1;
+            }
+            Err(failure) => {
+                let message = errors::error_chain(&failure);
+                let permanent = failure.is_permanent();
+                tracing::warn!(url = %page.url, permanent, "extract failed: {message}");
+                db.record_stage_failure(key, &message, now, permanent)?;
+                if permanent {
+                    summary.gave_up += 1;
+                } else {
+                    summary.failed += 1;
+                }
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// 1 つの記事ページの失敗。
+#[derive(Debug, thiserror::Error)]
+enum PageFailure {
+    #[error("invalid article url {url:?}")]
+    InvalidUrl {
+        url: String,
+        source: url::ParseError,
+    },
+    #[error(transparent)]
+    Http(#[from] HttpError),
+    #[error("PDF is not supported yet ({content_type})")]
+    Pdf { content_type: String },
+    #[error(transparent)]
+    Extract(#[from] ExtractError),
+    #[error("no article text found")]
+    NoText,
+}
+
+impl PageFailure {
+    /// 再試行しても結果が変わらない失敗。
+    fn is_permanent(&self) -> bool {
+        match self {
+            Self::InvalidUrl { .. } | Self::Pdf { .. } => true,
+            Self::Http(HttpError::DisallowedByRobots { .. }) => true,
+            Self::Http(HttpError::Status { status, .. }) => {
+                matches!(status.as_u16(), 404 | 410)
+            }
+            // セレクタの誤りは設定を直せば解決するので、断念せず再試行に回す。
+            Self::Http(_) | Self::Extract(_) | Self::NoText => false,
+        }
+    }
+}
+
+async fn extract_one(
+    fetcher: &Fetcher,
+    url: &str,
+    selector: Option<&str>,
+) -> Result<String, PageFailure> {
+    let parsed = Url::parse(url).map_err(|source| PageFailure::InvalidUrl {
+        url: url.to_string(),
+        source,
+    })?;
+    let page = fetcher.get_page(&parsed).await?;
+    let content_type = page.content_type.as_deref().unwrap_or_default();
+    if content_type.to_ascii_lowercase().contains("pdf") {
+        return Err(PageFailure::Pdf {
+            content_type: content_type.to_string(),
+        });
+    }
+    let html = text::decode_html(&page.body, page.content_type.as_deref());
+    extract::extract_text(&html, page.url.as_str(), selector)?.ok_or(PageFailure::NoText)
 }
 
 #[cfg(test)]
@@ -167,7 +266,7 @@ mod tests {
                 cancelled: false,
             }
         );
-        assert_eq!(bodies(&db), ["/news/1|body|page|Unit 2 returns to se"]);
+        assert_eq!(bodies(&db), ["/news/1|body|page|Unit 2 of the exampl"]);
 
         // 同じ時刻に再実行しても、断念したものと再試行待ちのものは処理しない
         let again = extract_pages(

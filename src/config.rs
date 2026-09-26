@@ -43,7 +43,10 @@ pub struct PipelineConfig {
 
 impl Default for PipelineConfig {
     fn default() -> Self {
-        todo!()
+        Self {
+            backlog_days: 14,
+            extract_max_per_run: 100,
+        }
     }
 }
 

@@ -4,7 +4,7 @@
 use super::Cancel;
 use crate::check;
 use crate::config::Source;
-use crate::db::{ContentKind, ContentOrigin, Db, DbError, NewArticle};
+use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, NewArticle};
 use crate::errors;
 use crate::http::Fetcher;
 use crate::source::Candidate;
@@ -61,9 +61,7 @@ pub async fn fetch_sources(
 fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError> {
     let mut new = 0;
     for c in candidates {
-        let published_at = c
-            .published_at
-            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        let published_at = c.published_at.map(db::timestamp);
         let lead = c.summary.as_deref().map(text::html_to_text);
         let body = c.content.as_deref().map(text::html_to_text);
         let contents: Vec<_> = [(ContentKind::Lead, lead), (ContentKind::Body, body)]

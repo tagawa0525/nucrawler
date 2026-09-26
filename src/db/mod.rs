@@ -94,8 +94,14 @@ pub struct SourceOverview {
 }
 
 /// DB に書く時刻の書式。SQL の `NOW` と同じく UTC・ミリ秒・'Z' に揃え、文字列の大小で比較できるようにする。
-pub fn timestamp(_t: chrono::DateTime<chrono::Utc>) -> String {
-    todo!()
+pub fn timestamp(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+/// `attempts` 回目の失敗の後に待つ時間：1 時間から倍々で、最大 7 日。
+fn backoff(attempts: i64) -> chrono::Duration {
+    let hours = 1i64 << (attempts - 1).clamp(0, 16);
+    chrono::Duration::hours(hours).min(chrono::Duration::days(7))
 }
 
 /// 一時的な失敗の再試行は `MAX_ATTEMPTS` 回まで。間隔は 1 時間から倍々で、最大 7 日。
@@ -284,28 +290,97 @@ impl Db {
     /// そうでなければ試行回数を 1 増やし、次に試してよい時刻を指数的に先へ延ばす。
     pub fn record_stage_failure(
         &self,
-        _key: StageKey,
-        _error: &str,
-        _now: chrono::DateTime<chrono::Utc>,
-        _permanent: bool,
+        key: StageKey,
+        error: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        permanent: bool,
     ) -> Result<(), DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        let tx = self.conn.unchecked_transaction()?;
+        let previous: i64 = tx
+            .query_row(
+                "SELECT attempts FROM stage_errors
+                 WHERE article_id = ?1 AND stage = ?2 AND backend = ?3 AND model = ?4",
+                rusqlite::params![key.article_id, key.stage, key.backend, key.model],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        let attempts = if permanent {
+            MAX_ATTEMPTS
+        } else {
+            (previous + 1).min(MAX_ATTEMPTS)
+        };
+        tx.execute(
+            "INSERT INTO stage_errors
+               (article_id, stage, backend, model, attempts, last_error, next_retry_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (article_id, stage, backend, model) DO UPDATE SET
+               attempts = excluded.attempts,
+               last_error = excluded.last_error,
+               next_retry_at = excluded.next_retry_at",
+            rusqlite::params![
+                key.article_id,
+                key.stage,
+                key.backend,
+                key.model,
+                attempts,
+                error,
+                timestamp(now + backoff(attempts)),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// 成功したら失敗の記録を消す。
-    pub fn clear_stage_failure(&self, _key: StageKey) -> Result<(), DbError> {
-        todo!()
+    pub fn clear_stage_failure(&self, key: StageKey) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM stage_errors
+             WHERE article_id = ?1 AND stage = ?2 AND backend = ?3 AND model = ?4",
+            rusqlite::params![key.article_id, key.stage, key.backend, key.model],
+        )?;
+        Ok(())
     }
 
     /// 本文（body か fulltext）が無く、`cutoff` 以降に公開（無ければ取得）され、再試行待ちでも
     /// 断念済みでもない記事を、新しい順に最大 `limit` 件返す。
     pub fn pending_extract(
         &self,
-        _cutoff: chrono::DateTime<chrono::Utc>,
-        _now: chrono::DateTime<chrono::Utc>,
-        _limit: usize,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
     ) -> Result<Vec<PendingPage>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.source_id, a.url FROM articles AS a
+             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext'))
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = a.id AND e.stage = 'extract'
+                   AND e.backend = '' AND e.model = ''
+                   AND (e.attempts >= ?2 OR e.next_retry_at > ?3))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                timestamp(cutoff),
+                MAX_ATTEMPTS,
+                timestamp(now),
+                limit as i64
+            ],
+            |r| {
+                Ok(PendingPage {
+                    article_id: r.get(0)?,
+                    source_id: r.get(1)?,
+                    url: r.get(2)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     #[cfg(test)]

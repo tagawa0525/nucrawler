@@ -61,6 +61,11 @@ impl Stage {
     }
 }
 
+/// 要約が採点のために残す呼び出し回数。採点が計画に無ければ、残しても使われないので 0。
+pub fn score_reserve(_stages: &[Stage], _cfg: &crate::config::LlmConfig) -> u32 {
+    todo!()
+}
+
 /// `until` を指定すれば最初からそのステージまで、`only` を指定すればそのステージだけ。
 /// どちらも無ければ全ステージ。
 pub fn plan(until: Option<Stage>, only: Option<Stage>) -> Vec<Stage> {
@@ -87,6 +92,18 @@ mod tests {
             assert_eq!(Stage::from_name(s.name()), Some(s));
         }
         assert_eq!(Stage::from_name("nope"), None);
+    }
+
+    #[test]
+    fn reserves_calls_only_when_scoring_is_planned() {
+        let cfg = crate::config::LlmConfig {
+            score_reserved_calls: 2,
+            ..crate::config::LlmConfig::default()
+        };
+        assert_eq!(score_reserve(&plan(None, None), &cfg), 2);
+        assert_eq!(score_reserve(&plan(Some(Stage::Digest), None), &cfg), 0);
+        assert_eq!(score_reserve(&plan(None, Some(Stage::Digest)), &cfg), 0);
+        assert_eq!(score_reserve(&plan(None, Some(Stage::Score)), &cfg), 2);
     }
 
     #[test]

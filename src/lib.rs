@@ -8,6 +8,7 @@ pub mod extract;
 pub mod http;
 pub mod llm;
 pub mod pipeline;
+pub mod profile;
 pub mod quota;
 pub mod robots;
 pub mod source;

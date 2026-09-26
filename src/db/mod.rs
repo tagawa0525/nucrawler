@@ -492,6 +492,24 @@ impl Db {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
+    /// ユーザーのプロファイルを保存する（既にあれば置き換える）。
+    pub fn save_profile(
+        &self,
+        _user_id: i64,
+        _profile: &crate::profile::Profile,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// ユーザーのプロファイルとそのハッシュ。
+    pub fn load_profile(
+        &self,
+        _user_id: i64,
+    ) -> Result<Option<(crate::profile::Profile, String)>, DbError> {
+        todo!()
+    }
+
     /// 成果物と、その入力（artifact_inputs）を 1 つのトランザクションで登録する。
     /// `input_scope` は入力の会員資格から導出する（会員限定の部分が無ければ "public"）。
     pub fn insert_artifact(
@@ -1546,6 +1564,27 @@ mod tests {
             .unwrap();
         assert!(digest_ids(&db, "2026-09-27T00:30:00Z").is_empty());
         assert_eq!(digest_ids(&db, "2026-09-27T01:00:00Z"), [a]);
+    }
+
+    #[test]
+    fn saves_and_replaces_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        assert_eq!(db.load_profile(owner).unwrap(), None);
+        let mut p = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(owner, &p, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let (loaded, hash) = db.load_profile(owner).unwrap().unwrap();
+        assert_eq!(loaded, p);
+        assert_eq!(hash, crate::profile::hash(&p));
+
+        p.exclude.push("医療".into());
+        db.save_profile(owner, &p, t("2026-09-28T00:00:00Z"))
+            .unwrap();
+        let (loaded, new_hash) = db.load_profile(owner).unwrap().unwrap();
+        assert_eq!(loaded.exclude.last().map(String::as_str), Some("医療"));
+        assert_ne!(new_hash, hash);
+        assert_eq!(db.query_i64("SELECT count(*) FROM profiles").unwrap(), 1);
     }
 
     #[test]

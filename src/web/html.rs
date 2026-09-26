@@ -3,31 +3,153 @@
 use crate::db::{ArticleDetail, ListItem, Warning};
 
 /// HTML の特殊文字を実体参照にする。
-pub fn escape(_s: &str) -> String {
-    todo!()
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// 一覧を「前回見てから届いた記事」と「それより前の未読の記事」に分ける。
 /// `last_seen` が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
-    _items: Vec<ListItem>,
-    _last_seen: Option<&str>,
+    items: Vec<ListItem>,
+    last_seen: Option<&str>,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
-    todo!()
+    let Some(last_seen) = last_seen else {
+        return (items, Vec::new());
+    };
+    let (new, earlier): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|i| i.fetched_at.as_str() > last_seen);
+    (new, earlier.into_iter().filter(|i| !i.read).collect())
 }
 
+const STYLE: &str = "
+body { font-family: system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1d1d1b; }
+main { max-width: 42rem; margin: 0 auto; padding: 0.75rem; }
+a { color: #0b57a4; }
+h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+.card { background: #fff; border-radius: 0.6rem; padding: 0.8rem; margin: 0.6rem 0;
+  box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.card a.title { font-weight: 600; text-decoration: none; }
+.meta { color: #666; font-size: 0.8rem; margin: 0.3rem 0; }
+.score { display: inline-block; min-width: 2.2rem; text-align: center; border-radius: 0.4rem;
+  background: #0b57a4; color: #fff; font-weight: 700; margin-right: 0.4rem; }
+.read { opacity: 0.6; }
+.warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
+  font-size: 0.85rem; }
+.actions form { display: inline; }
+.actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
+  border: 1px solid #bbb; background: #fff; }
+.actions button.on { background: #0b57a4; color: #fff; }
+.versions a { margin-right: 0.6rem; font-size: 0.85rem; }
+.translation p { line-height: 1.7; }
+";
+
 /// 全ページ共通の外枠（スマホ向けの 1 カラム、警告のバナー）。
-pub fn layout(_title: &str, _warnings: &[Warning], _body: &str) -> String {
-    todo!()
+pub fn layout(title: &str, warnings: &[Warning], body: &str) -> String {
+    let banners: String = warnings.iter().map(warning_banner).collect();
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{} - nucrawler</title><style>{STYLE}</style></head>\
+         <body><main>{banners}{body}</main></body></html>\n",
+        escape(title)
+    )
+}
+
+fn warning_banner(w: &Warning) -> String {
+    match w {
+        Warning::SourceFailing {
+            source_id,
+            error,
+            at,
+        } => format!(
+            "<div class=\"warn\">⚠ ソース {} の取得に失敗しています（{}）：{}</div>",
+            escape(source_id),
+            crate::jst::format_local(at),
+            escape(error)
+        ),
+        Warning::LlmFailed { error, at } => {
+            // 認証切れは利用者にしか直せないので、対処を案内する
+            let hint = if error.contains("logged in") || error.contains("authenticat") {
+                "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
+            } else {
+                ""
+            };
+            format!(
+                "<div class=\"warn\">⚠ 要約・採点・和訳が失敗しています（{}）：{}{hint}</div>",
+                crate::jst::format_local(at),
+                escape(error)
+            )
+        }
+    }
 }
 
 pub fn list_page(
-    _new: &[ListItem],
-    _earlier: &[ListItem],
-    _show_all: bool,
-    _warnings: &[Warning],
+    new: &[ListItem],
+    earlier: &[ListItem],
+    show_all: bool,
+    warnings: &[Warning],
 ) -> String {
-    todo!()
+    let mut body = String::from("<h1>nucrawler</h1>");
+    let toggle = if show_all {
+        "<a href=\"/\">おすすめだけ表示</a>"
+    } else {
+        "<a href=\"/?all=1\">すべて表示（👎・低い点・未採点を含む）</a>"
+    };
+    body.push_str(&format!("<p class=\"meta\">{toggle}</p>"));
+    body.push_str("<h2>前回から</h2>");
+    if new.is_empty() {
+        body.push_str("<p class=\"meta\">新しい記事はありません</p>");
+    }
+    body.extend(new.iter().map(card));
+    if !earlier.is_empty() {
+        body.push_str("<h2>過去の未読</h2>");
+        body.extend(earlier.iter().map(card));
+    }
+    layout("一覧", warnings, &body)
+}
+
+fn card(i: &ListItem) -> String {
+    let title = i.title_ja.as_deref().unwrap_or(&i.title);
+    let score = i
+        .score
+        .map_or_else(String::new, |s| format!("<span class=\"score\">{s}</span>"));
+    let lock = if i.locked_by.is_empty() {
+        String::new()
+    } else {
+        format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
+    };
+    let translation = if i.has_translation {
+        " ・和訳あり"
+    } else if i.translation_requested {
+        " ・和訳待ち"
+    } else {
+        ""
+    };
+    let summary = i
+        .summary_ja
+        .as_deref()
+        .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
+    format!(
+        "<div class=\"card{read}\">{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
+         <div class=\"meta\">{source} ・{at}{lock}{translation}</div>{summary}</div>",
+        read = if i.read { " read" } else { "" },
+        id = i.article_id,
+        title = escape(title),
+        source = escape(&i.source_id),
+        at = crate::jst::format_local(&i.at),
+    )
 }
 
 /// 詳細画面の表示の選択。
@@ -40,8 +162,140 @@ pub struct DetailView {
     pub translation: Option<i64>,
 }
 
-pub fn detail_page(_d: &ArticleDetail, _view: DetailView, _warnings: &[Warning]) -> String {
-    todo!()
+pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) -> String {
+    let i = &d.item;
+    let id = i.article_id;
+    let digest = view
+        .digest
+        .and_then(|v| d.digests.iter().find(|x| x.id == v))
+        .or(d.digests.first());
+    let field = |key: &str| {
+        digest
+            .and_then(|x| x.payload[key].as_str())
+            .map(str::to_string)
+    };
+    let title = field("title_ja").unwrap_or_else(|| i.title.clone());
+    let mut body = format!(
+        "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>{}</h1>",
+        escape(&title)
+    );
+    body.push_str(&format!(
+        "<p class=\"meta\">{} ・{} ・<a href=\"{}\">原文</a>{}</p>",
+        escape(&i.source_id),
+        crate::jst::format_local(&i.at),
+        escape(&i.url),
+        if i.locked_by.is_empty() {
+            String::new()
+        } else {
+            format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
+        }
+    ));
+    if let Some(score) = i.score {
+        body.push_str(&format!(
+            "<p><span class=\"score\">{score}</span>{}</p>",
+            escape(i.reason.as_deref().unwrap_or(""))
+        ));
+    }
+    if let Some(summary) = field("summary_ja") {
+        body.push_str(&format!("<p>{}</p>", escape(&summary)));
+    }
+    if let Some(points) = digest.and_then(|x| x.payload["points_ja"].as_array()) {
+        body.push_str("<ul>");
+        for p in points.iter().filter_map(|p| p.as_str()) {
+            body.push_str(&format!("<li>{}</li>", escape(p)));
+        }
+        body.push_str("</ul>");
+    }
+    if let Some(implications) = field("implications_ja").filter(|s| !s.is_empty()) {
+        body.push_str(&format!(
+            "<p><b>日本の軽水炉への示唆：</b>{}</p>",
+            escape(&implications)
+        ));
+    }
+    if let Some(topics) = digest.and_then(|x| x.payload["topics"].as_array()) {
+        let topics: Vec<&str> = topics.iter().filter_map(|t| t.as_str()).collect();
+        body.push_str(&format!(
+            "<p class=\"meta\">トピック：{}</p>",
+            escape(&topics.join("、"))
+        ));
+    }
+    body.push_str(&feedback_forms(id, i.feedback));
+    if d.digests.len() > 1 {
+        body.push_str("<p class=\"versions meta\">要約の版：");
+        for v in &d.digests {
+            body.push_str(&format!(
+                "<a href=\"/articles/{id}?digest={}\">{} {}</a>",
+                v.id,
+                escape(&v.model),
+                crate::jst::format_local(&v.created_at)
+            ));
+        }
+        body.push_str("</p>");
+    }
+    body.push_str(&translation_section(d, view));
+    layout(&title, warnings, &body)
+}
+
+fn feedback_forms(id: i64, current: Option<crate::db::Feedback>) -> String {
+    use crate::db::Feedback;
+    let button = |value: &str, label: &str, on: bool| {
+        format!(
+            "<form method=\"post\" action=\"/articles/{id}/feedback\">\
+             <button name=\"kind\" value=\"{value}\"{}>{label}</button></form>",
+            if on { " class=\"on\"" } else { "" }
+        )
+    };
+    format!(
+        "<div class=\"actions\">{}{}</div>",
+        button("up", "👍", current == Some(Feedback::Up)),
+        button("down", "👎", current == Some(Feedback::Down))
+    )
+}
+
+fn translation_section(d: &ArticleDetail, view: DetailView) -> String {
+    let id = d.item.article_id;
+    if view.show_translation {
+        let chosen = view
+            .translation
+            .and_then(|v| d.translations.iter().find(|x| x.id == v))
+            .or(d.translations.first());
+        if let Some(t) = chosen {
+            let paragraphs: String = t.payload["body_ja"]
+                .as_str()
+                .unwrap_or_default()
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| format!("<p>{}</p>", escape(p)))
+                .collect();
+            let mut out = format!("<h2>全文和訳</h2><div class=\"translation\">{paragraphs}</div>");
+            if d.translations.len() > 1 {
+                out.push_str("<p class=\"versions meta\">和訳の版：");
+                for v in &d.translations {
+                    out.push_str(&format!(
+                        "<a href=\"/articles/{id}?view=translation&amp;translation={}\">{} {}</a>",
+                        v.id,
+                        escape(&v.model),
+                        crate::jst::format_local(&v.created_at)
+                    ));
+                }
+                out.push_str("</p>");
+            }
+            return out;
+        }
+    }
+    if d.item.has_translation && !d.translations.is_empty() {
+        format!("<p><a href=\"/articles/{id}?view=translation\">全文和訳を読む</a></p>")
+    } else if d.item.translation_requested {
+        "<p class=\"meta\">和訳待ち（次の依頼処理で和訳します）</p>".to_string()
+    } else if d.item.lang == "en" && d.has_body {
+        format!(
+            "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/translation-request\">\
+             <button>全文和訳を依頼</button></form></div>"
+        )
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]

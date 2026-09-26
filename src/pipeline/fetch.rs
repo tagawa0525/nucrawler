@@ -2,9 +2,12 @@
 //! フィードに概要や本文があれば、テキストにして本文の部分（contents）として保存する。
 
 use super::Cancel;
+use crate::check;
 use crate::config::Source;
-use crate::db::{Db, DbError};
+use crate::db::{ContentKind, ContentOrigin, Db, DbError, NewArticle};
 use crate::http::Fetcher;
+use crate::source::Candidate;
+use crate::text;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -24,12 +27,69 @@ pub struct FetchSummary {
 
 /// ソース単位の失敗は `source_state` に記録して次のソースへ進む。DB のエラーは即座に返す。
 pub async fn fetch_sources(
-    _db: &Db,
-    _fetcher: &Fetcher,
-    _sources: &[Source],
-    _cancel: &Cancel,
+    db: &Db,
+    fetcher: &Fetcher,
+    sources: &[Source],
+    cancel: &Cancel,
 ) -> Result<FetchSummary, FetchError> {
-    todo!()
+    let mut summary = FetchSummary::default();
+    for s in sources.iter().filter(|s| s.enabled) {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        match check::fetch_source(fetcher, s).await {
+            Ok(stats) => {
+                let new = store(db, s, &stats.matched)?;
+                db.record_source_success(&s.id)?;
+                tracing::info!(source = %s.id, total = stats.total, new, "fetched");
+                summary.new_articles += new;
+            }
+            Err(e) => {
+                let message = check::error_chain(&e);
+                tracing::warn!(source = %s.id, "{message}");
+                db.record_source_failure(&s.id, &message)?;
+                summary.failed_sources.push(s.id.clone());
+            }
+        }
+    }
+    Ok(summary)
+}
+
+/// 新しい記事を登録し、その数を返す。URL が不正な候補は記録せずに飛ばす。
+fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError> {
+    let mut new = 0;
+    for c in candidates {
+        let published_at = c
+            .published_at
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        let lead = c.summary.as_deref().map(text::html_to_text);
+        let body = c.content.as_deref().map(text::html_to_text);
+        let contents: Vec<_> = [(ContentKind::Lead, lead), (ContentKind::Body, body)]
+            .into_iter()
+            .filter_map(|(kind, text)| text.filter(|t| !t.is_empty()).map(|t| (kind, t)))
+            .collect();
+        let contents: Vec<_> = contents
+            .iter()
+            .map(|(kind, t)| (*kind, ContentOrigin::Feed, t.as_str()))
+            .collect();
+        let article = NewArticle {
+            source_id: &s.id,
+            url: &c.url,
+            title: &c.title,
+            lang: s.lang,
+            published_at: published_at.as_deref(),
+        };
+        match db.insert_article_with_contents(&article, &contents) {
+            Ok(Some(_)) => new += 1,
+            Ok(None) => {}
+            Err(e @ (DbError::InvalidUrl { .. } | DbError::UnsupportedScheme { .. })) => {
+                tracing::warn!(source = %s.id, "skipping candidate: {}", check::error_chain(&e));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(new)
 }
 
 #[cfg(test)]

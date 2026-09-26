@@ -60,7 +60,7 @@ pub async fn check(
     };
     let mut reports = Vec::with_capacity(targets.len());
     for s in targets {
-        let outcome = check_one(fetcher, s).await;
+        let outcome = fetch_source(fetcher, s).await;
         if let Err(e) = &outcome {
             tracing::warn!(source = %s.id, "{}", error_chain(e));
         }
@@ -72,7 +72,8 @@ pub async fn check(
     Ok(reports)
 }
 
-async fn check_one(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure> {
+/// 1 つのソースを取得・解析し、絞り込み条件に一致した候補を返す。
+pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure> {
     let url = Url::parse(&s.url).map_err(|source| SourceFailure::InvalidUrl {
         url: s.url.clone(),
         source,

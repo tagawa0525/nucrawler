@@ -1003,6 +1003,7 @@ name = "nucrawler"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ego-tree",
  "feed-rs",
  "reqwest",
  "rusqlite",

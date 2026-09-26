@@ -1,9 +1,10 @@
 //! 行儀の良い HTTP 取得：UA を名乗り、タイムアウトを設け、同じホストへの連続アクセスに間隔を空ける。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::time::Instant;
 use url::Url;
 
@@ -50,8 +51,9 @@ pub struct Fetcher {
     max_body_bytes: u64,
     /// robots.txt のグループ選択に使う UA の製品名（例 "nucrawler"）
     product: String,
-    /// オリジンごとの robots.txt の規則。取得中はロックを保持し、同じオリジンを二重に取らない。
-    robots: Mutex<HashMap<String, Rules>>,
+    /// オリジンごとの robots.txt の規則。マップのロックは表の出し入れの間だけ持ち、
+    /// 取得はオリジンごとの OnceCell で一度だけ行う（遅いオリジンが他を止めない）。
+    robots: Mutex<HashMap<String, Arc<OnceCell<Rules>>>>,
     /// ホストごとの、次にアクセスしてよい時刻
     next_allowed: Mutex<HashMap<String, Instant>>,
 }
@@ -93,10 +95,25 @@ impl Fetcher {
         )
     }
 
-    /// リダイレクトは `MAX_REDIRECTS` 回までたどる。最終的な応答が 2xx 以外ならエラーにする。
+    /// フィード用。リダイレクトは `MAX_REDIRECTS` 回までたどる。最終的な応答が 2xx 以外ならエラーにする。
     pub async fn get(&self, url: &Url) -> Result<Fetched, HttpError> {
+        self.fetch(url, false).await
+    }
+
+    /// 記事ページ用。各リクエストの前に（リダイレクト先も含めて）そのオリジンの robots.txt を
+    /// 確かめ、禁止されていれば取得しない。
+    pub async fn get_page(&self, url: &Url) -> Result<Fetched, HttpError> {
+        self.fetch(url, true).await
+    }
+
+    async fn fetch(&self, url: &Url, obey_robots: bool) -> Result<Fetched, HttpError> {
         let mut current = url.clone();
         for _ in 0..=MAX_REDIRECTS {
+            if obey_robots && !self.robots_allow(&current).await {
+                return Err(HttpError::DisallowedByRobots {
+                    url: current.to_string(),
+                });
+            }
             self.wait_for_turn(&current).await;
             let request_error = |source| HttpError::Request {
                 url: current.to_string(),
@@ -161,27 +178,21 @@ impl Fetcher {
         Ok(body)
     }
 
-    /// 記事ページ用。取得前にそのオリジンの robots.txt を確かめ、禁止されていれば取得しない。
-    pub async fn get_page(&self, url: &Url) -> Result<Fetched, HttpError> {
+    async fn robots_allow(&self, url: &Url) -> bool {
         let origin = url.origin().ascii_serialization();
-        let allowed = {
-            let mut robots = self.robots.lock().await;
-            if !robots.contains_key(&origin) {
-                let rules = self.fetch_robots(&origin).await;
-                robots.insert(origin.clone(), rules);
-            }
-            let path = match url.query() {
-                Some(q) => format!("{}?{q}", url.path()),
-                None => url.path().to_string(),
-            };
-            robots[&origin].allows(&path)
+        let cell = self
+            .robots
+            .lock()
+            .await
+            .entry(origin.clone())
+            .or_default()
+            .clone();
+        let rules = cell.get_or_init(|| self.fetch_robots(&origin)).await;
+        let path = match url.query() {
+            Some(q) => format!("{}?{q}", url.path()),
+            None => url.path().to_string(),
         };
-        if !allowed {
-            return Err(HttpError::DisallowedByRobots {
-                url: url.to_string(),
-            });
-        }
-        self.get(url).await
+        rules.allows(&path)
     }
 
     /// RFC 9309：4xx なら全許可、5xx や通信エラーなら全拒否。
@@ -189,7 +200,7 @@ impl Fetcher {
         let Ok(url) = Url::parse(&format!("{origin}/robots.txt")) else {
             return Rules::disallow_all();
         };
-        match self.get(&url).await {
+        match Box::pin(self.fetch(&url, false)).await {
             Ok(f) => Rules::parse(&String::from_utf8_lossy(&f.body), &self.product),
             Err(HttpError::Status { status, .. }) if status.is_client_error() => Rules::allow_all(),
             Err(e) => {

@@ -5,6 +5,7 @@ use nucrawler::check::{self, CheckError};
 use nucrawler::cli::{self, Command, SourcesArgs};
 use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
+use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
@@ -50,7 +51,7 @@ async fn main() -> ExitCode {
             ExitCode::from(130)
         }
         Err(e) => {
-            tracing::error!("{}", check::error_chain(&e));
+            tracing::error!("{}", errors::error_chain(&e));
             ExitCode::FAILURE
         }
     }

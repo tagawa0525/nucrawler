@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use url::Url;
 
 use crate::config::Source;
+use crate::errors::error_chain;
 use crate::http::{Fetcher, HttpError};
 use crate::source::{self, Candidate, SourceError};
 
@@ -91,17 +92,6 @@ pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, Source
 /// 表示は日本時間で行う。
 fn jst() -> chrono::FixedOffset {
     chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset")
-}
-
-/// エラーと、その原因（`source()`）を ": " でつないだ文字列。
-pub fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut out = e.to_string();
-    let mut cause = e.source();
-    while let Some(c) = cause {
-        let _ = write!(out, ": {c}");
-        cause = c.source();
-    }
-    out
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
@@ -326,38 +316,6 @@ mod tests {
         assert!(out.contains("first") && out.contains("second"), "{out}");
         assert!(!out.contains("third"), "samples are limited: {out}");
         assert!(out.contains("FAIL") && out.contains("bad"), "{out}");
-    }
-
-    /// 各エラーの Display は自分の文脈だけを書き、原因は source() に任せる。
-    /// そうしないと error_chain で原因の文言が 2 回出る。
-    #[test]
-    fn error_chain_does_not_repeat_causes() {
-        let cause = url::ParseError::RelativeUrlWithoutBase.to_string();
-        let errors: Vec<Box<dyn std::error::Error>> = vec![
-            Box::new(SourceFailure::InvalidUrl {
-                url: "::".into(),
-                source: url::ParseError::RelativeUrlWithoutBase,
-            }),
-            Box::new(SourceError::InvalidLink {
-                href: "::".into(),
-                source: url::ParseError::RelativeUrlWithoutBase,
-            }),
-            Box::new(crate::db::DbError::InvalidUrl {
-                url: "::".into(),
-                source: url::ParseError::RelativeUrlWithoutBase,
-            }),
-            Box::new(crate::config::ConfigError::Read {
-                path: "x".into(),
-                source: std::io::Error::other(cause.clone()),
-            }),
-        ];
-        for e in errors {
-            let chain = error_chain(e.as_ref());
-            assert_eq!(chain.matches(&cause).count(), 1, "{chain}");
-        }
-        let json = SourceError::Json(serde_json::from_str::<u8>("\"a\"").unwrap_err());
-        let chain = error_chain(&json);
-        assert_eq!(chain.matches("invalid type").count(), 1, "{chain}");
     }
 
     /// 通信エラーなどは原因のエラーまで表示しないと、何が起きたか分からない。

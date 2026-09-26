@@ -486,6 +486,36 @@ mod tests {
         assert!(html.contains("和訳待ち"), "{html}");
     }
 
+    /// 和訳の処理が拾えない記事（日本語、公開の本文が無い英語）への依頼は受け付けない。
+    /// 受け付けると「和訳待ち」のまま永久に残る。
+    #[tokio::test]
+    async fn untranslatable_articles_cannot_be_requested() {
+        let db = Db::open_in_memory().unwrap();
+        let article = |url, lang| {
+            db.insert_article(&NewArticle {
+                source_id: "wnn",
+                url,
+                title: "Title",
+                lang,
+                published_at: None,
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let ja = article("https://e.com/ja", Lang::Ja);
+        db.insert_content(ja, ContentKind::Body, ContentOrigin::Page, "本文")
+            .unwrap();
+        let no_body = article("https://e.com/no-body", Lang::En);
+        let server = Server::start(db).await;
+        for id in [ja, no_body] {
+            let res = server
+                .post(&format!("/articles/{id}/translation-request"), "")
+                .await;
+            assert_eq!(res.status().as_u16(), 400, "{id}");
+        }
+        assert_eq!(server.count("SELECT count(*) FROM translation_requests"), 0);
+    }
+
     /// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で
     /// 行動を書き込まれないようにする。
     #[tokio::test]
@@ -493,7 +523,14 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        for (origin, expected) in [("https://evil.example", 403), (server.base.as_str(), 303)] {
+        // http で待ち受けているので、同じホストでも https のページは別のオリジン
+        let https_same_host = server.base.replacen("http://", "https://", 1);
+        for (origin, expected) in [
+            ("https://evil.example", 403),
+            ("null", 403),
+            (https_same_host.as_str(), 403),
+            (server.base.as_str(), 303),
+        ] {
             let res = server
                 .form(&format!("/articles/{id}/feedback"), "kind=up")
                 .header("origin", origin)

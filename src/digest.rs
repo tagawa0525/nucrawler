@@ -2,6 +2,7 @@
 //! 応答の検証。LLM の呼び出しやステージの進行はここでは扱わない。
 
 use crate::db::DigestInput;
+use crate::prompt::escape_data;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
 pub const PROMPT_VERSION: i64 = 1;
@@ -168,11 +169,11 @@ pub fn build_prompt(inputs: &[DigestInput], max_chars: usize) -> String {
             input.article_id,
             attribute(&input.lang),
             attribute(&input.source_id),
-            neutralize(&input.title)
+            escape_data(&input.title)
         ));
         for content in &input.contents {
             let text: String = content.text.chars().take(max_chars).collect();
-            out.push_str(&format!("\n[{}]\n{}\n", content.kind, neutralize(&text)));
+            out.push_str(&format!("\n[{}]\n{}\n", content.kind, escape_data(&text)));
         }
         out.push_str("</article>\n\n");
     }
@@ -186,12 +187,6 @@ fn attribute(value: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-}
-
-/// 本文中の `<article` / `</article` で記事の区切りを偽装されないよう、山括弧を置き換える。
-fn neutralize(text: &str) -> String {
-    text.replace("</article", "&lt;/article")
-        .replace("<article", "&lt;article")
 }
 
 /// 応答から、依頼した記事の payload を取り出す。依頼していない id は無視し、欠けた id を報告する。

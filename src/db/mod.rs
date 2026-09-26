@@ -971,10 +971,21 @@ impl Db {
                       (SELECT tr.requested_at FROM translation_requests AS tr
                        WHERE tr.article_id = a.id AND tr.user_id = ?1 AND tr.done_at IS NULL)
                         AS requested_at,
-                      -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
+                      -- 点数は、利用者が閲覧できる最新の digest に付いた採点だけを見る
+                      -- （古い版の高得点で先回りしない）。プロファイルが無い（?2 が NULL）なら
+                      -- 点数は付かず、依頼だけが残る
                       (SELECT max(s.score) FROM scores AS s
-                       JOIN artifacts AS r ON r.id = s.artifact_id
-                       WHERE r.article_id = a.id AND s.user_id = ?1 AND s.profile_hash = ?2)
+                       WHERE s.user_id = ?1 AND s.profile_hash = ?2
+                         AND s.artifact_id = (
+                           SELECT r.id FROM artifacts AS r
+                           WHERE r.article_id = a.id AND r.kind = 'digest'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM artifact_access AS aa
+                               WHERE aa.artifact_id = r.id
+                                 AND aa.membership_id NOT IN (
+                                   SELECT membership_id FROM user_memberships
+                                   WHERE user_id = ?1))
+                           ORDER BY r.created_at DESC, r.id DESC LIMIT 1))
                         AS score
                FROM articles AS a
                WHERE a.lang = 'en'

@@ -3,6 +3,7 @@
 
 use crate::db::{ScoreInput, Signal, SignalKind};
 use crate::profile::Profile;
+use crate::prompt::escape_data;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScoringError {
@@ -65,7 +66,7 @@ pub fn system_prompt(profile: &Profile, signals: &[Signal]) -> String {
         };
         s.push_str(&format!(
             "<signal kind=\"{kind}\">{label}：{}</signal>\n",
-            neutralize_tag(&signal.title_ja, "signal")
+            escape_data(&signal.title_ja)
         ));
     }
     s
@@ -101,23 +102,12 @@ pub fn build_prompt(inputs: &[ScoreInput]) -> String {
         out.push_str(&format!(
             "<article id=\"{}\">\n見出し: {}\nトピック: {}\n要約: {}\n</article>\n\n",
             input.article_id,
-            neutralize(&input.title_ja),
-            neutralize(&input.topics.join("、")),
-            neutralize(&input.summary_ja),
+            escape_data(&input.title_ja),
+            escape_data(&input.topics.join("、")),
+            escape_data(&input.summary_ja),
         ));
     }
     out
-}
-
-/// 本文中の `<article` / `</article` で記事の区切りを偽装されないようにする。
-fn neutralize(text: &str) -> String {
-    neutralize_tag(text, "article")
-}
-
-/// `<tag` / `</tag` を実体参照にして、区切りを偽装されないようにする。
-fn neutralize_tag(text: &str, tag: &str) -> String {
-    text.replace(&format!("</{tag}"), &format!("&lt;/{tag}"))
-        .replace(&format!("<{tag}"), &format!("&lt;{tag}"))
 }
 
 /// スキーマどおりの 1 件。

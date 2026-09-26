@@ -1,6 +1,7 @@
 //! 全文和訳の依頼内容：system prompt（用語集は要約と共通）、出力の JSON Schema、プロンプト、応答の検証。
 
 use crate::db::TranslateInput;
+use crate::prompt::escape_data;
 
 pub const PROMPT_VERSION: i64 = 1;
 
@@ -38,25 +39,25 @@ pub fn schema() -> serde_json::Value {
     })
 }
 
-/// 1 件の記事の本文を `<article>` で囲む。本文は `max_chars` 文字で切り詰める。
+/// 1 件の記事の本文を `<article>` で囲む。本文は記事全体で `max_chars` 文字までに切り詰める。
 pub fn build_prompt(input: &TranslateInput, max_chars: usize) -> String {
     let mut out = format!(
         "次の記事の本文を全文翻訳してください。\n\n<article id=\"{}\">\nタイトル: {}\n",
         input.article_id,
-        neutralize(&input.title)
+        escape_data(&input.title)
     );
+    // 上限は記事全体に対してかける（本文の部分が複数あっても合計で max_chars まで）
+    let mut remaining = max_chars;
     for content in &input.contents {
-        let text: String = content.text.chars().take(max_chars).collect();
-        out.push_str(&format!("\n{}\n", neutralize(&text)));
+        if remaining == 0 {
+            break;
+        }
+        let text: String = content.text.chars().take(remaining).collect();
+        remaining -= text.chars().count();
+        out.push_str(&format!("\n{}\n", escape_data(&text)));
     }
     out.push_str("</article>\n");
     out
-}
-
-/// 本文中の `<article` / `</article` で区切りを偽装されないようにする。
-fn neutralize(text: &str) -> String {
-    text.replace("</article", "&lt;/article")
-        .replace("<article", "&lt;article")
 }
 
 #[derive(serde::Deserialize)]
@@ -126,11 +127,10 @@ mod tests {
             text: "b".repeat(15),
         });
         let prompt = build_prompt(&two, 20);
-        assert_eq!(
-            prompt.matches('a').count() + prompt.matches('b').count(),
-            20,
-            "{prompt}"
-        );
+        // 1 つ目の 15 文字を使い切り、2 つ目は残りの 5 文字だけ
+        assert!(prompt.contains(&"a".repeat(15)), "{prompt}");
+        assert!(prompt.contains(&"b".repeat(5)), "{prompt}");
+        assert!(!prompt.contains(&"b".repeat(6)), "{prompt}");
     }
 
     #[test]

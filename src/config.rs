@@ -163,7 +163,15 @@ pub struct Filter {
 }
 
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
-    parse_toml(text, path)
+    let config: Config = parse_toml(text, path)?;
+    config
+        .quota
+        .validate()
+        .map_err(|reason| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            reason,
+        })?;
+    Ok(config)
 }
 
 pub fn parse_sources(text: &str, path: &Path) -> Result<Sources, ConfigError> {

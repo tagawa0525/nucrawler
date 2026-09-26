@@ -55,6 +55,44 @@ impl Default for QuotaConfig {
     }
 }
 
+impl QuotaConfig {
+    /// 設定値の範囲を確かめる。割合は 0〜1、時差は -12〜14 時間、時間帯は `start < end <= 24`。
+    pub fn validate(&self) -> Result<(), String> {
+        fn ratio(name: &str, v: f64) -> Result<(), String> {
+            if v.is_finite() && (0.0..=1.0).contains(&v) {
+                Ok(())
+            } else {
+                Err(format!("quota.{name} must be between 0 and 1, got {v}"))
+            }
+        }
+        if !(-12..=14).contains(&self.timezone_offset_hours) {
+            return Err(format!(
+                "quota.timezone_offset_hours must be between -12 and 14, got {}",
+                self.timezone_offset_hours
+            ));
+        }
+        ratio("default_max_five_hour", self.default_max_five_hour)?;
+        ratio("weekly_max", self.weekly_max)?;
+        if !(self.pace_ahead_days.is_finite() && (0.0..=7.0).contains(&self.pace_ahead_days)) {
+            return Err(format!(
+                "quota.pace_ahead_days must be between 0 and 7, got {}",
+                self.pace_ahead_days
+            ));
+        }
+        for s in &self.slots {
+            if !(s.start < s.end && s.end <= 24) {
+                return Err(format!(
+                    "quota slot must satisfy start < end <= 24, got {}..{}",
+                    s.start, s.end
+                ));
+            }
+            ratio("slots.max_five_hour", s.max_five_hour)
+                .map_err(|e| format!("quota slot {}..{}: {e}", s.start, s.end))?;
+        }
+        Ok(())
+    }
+}
+
 /// 呼び出しを止める理由。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -165,15 +203,20 @@ impl Quota {
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
     pub fn record_call(&mut self, usage: Option<RateLimit>) {
         self.calls += 1;
-        if usage.is_some() {
-            self.usage = usage;
+        // 応答に含まれない枠は、それまでの値を残す。
+        if let Some(new) = usage {
+            let old = self.usage.unwrap_or_default();
+            self.usage = Some(RateLimit {
+                five_hour: new.five_hour.or(old.five_hour),
+                seven_day: new.seven_day.or(old.seven_day),
+            });
         }
     }
 
     /// 現地時刻の時間帯に応じた 5 時間枠の上限。
     fn five_hour_limit(&self, now: DateTime<Utc>) -> f64 {
         let offset = chrono::FixedOffset::east_opt(self.cfg.timezone_offset_hours * 3600)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("zero offset"));
+            .expect("timezone offset is validated when the config is loaded");
         let hour = now.with_timezone(&offset).hour();
         self.cfg
             .slots

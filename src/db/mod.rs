@@ -2397,6 +2397,39 @@ mod tests {
         );
     }
 
+    /// 先回りの判定は、利用者が閲覧できる最新の digest の採点だけで行う（古い版の高得点は使わない）。
+    #[test]
+    fn pending_translate_uses_score_of_latest_digest() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        assert_eq!(translate_ids(&db, false, now), [a]);
+        // 新しい digest ができ、まだ採点されていない → 先回りしない
+        let newer = add_digest(&db, a, "opus", "新版", true, "2026-09-26T05:00:00Z");
+        assert!(translate_ids(&db, false, now).is_empty());
+        // 新しい digest の採点が閾値未満 → 先回りしない
+        db.insert_score(
+            ScoreKey {
+                user_id: db.owner_id().unwrap(),
+                profile_hash: "h1",
+                backend: "claude-cli",
+                model: "sonnet",
+            },
+            newer,
+            50,
+            None,
+            t("2026-09-26T06:00:00Z"),
+        )
+        .unwrap();
+        assert!(translate_ids(&db, false, now).is_empty());
+    }
+
     #[test]
     fn pending_translate_without_profile_only_serves_requests() {
         let db = Db::open_in_memory().unwrap();

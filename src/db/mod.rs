@@ -626,51 +626,8 @@ impl Db {
         a: &NewArtifact,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        if a.inputs.is_empty() {
-            return Err(DbError::NoArtifactInputs {
-                article_id: a.article_id,
-            });
-        }
         let tx = self.conn.unchecked_transaction()?;
-        let mut codes = std::collections::BTreeSet::new();
-        for &content_id in a.inputs {
-            let code: Option<String> = tx.query_row(
-                "SELECT m.code FROM contents AS c
-                 LEFT JOIN memberships AS m ON m.id = c.access_membership_id
-                 WHERE c.id = ?1",
-                [content_id],
-                |r| r.get(0),
-            )?;
-            codes.extend(code);
-        }
-        let input_scope = if codes.is_empty() {
-            "public".to_string()
-        } else {
-            codes.into_iter().collect::<Vec<_>>().join("+")
-        };
-        let id: i64 = tx.query_row(
-            "INSERT INTO artifacts
-               (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
-            rusqlite::params![
-                a.article_id,
-                a.kind.as_str(),
-                a.backend,
-                a.model,
-                a.prompt_version,
-                input_scope,
-                a.payload.to_string(),
-                timestamp(now),
-            ],
-            |r| r.get(0),
-        )?;
-        for &content_id in a.inputs {
-            tx.execute(
-                "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
-                 VALUES (?1, ?2, ?3)",
-                [id, a.article_id, content_id],
-            )?;
-        }
+        let id = write_artifact(&tx, a, now)?;
         tx.commit()?;
         Ok(id)
     }
@@ -924,32 +881,46 @@ impl Db {
         .collect()
     }
 
-    /// 和訳を依頼する。既に依頼していれば何もしない。
+    /// 和訳の成果物を保存し、その記事への依頼を同じトランザクションで完了にする。
+    /// 別々に書くと、間で止まったときに依頼が完了しないまま残る（成果物があるので
+    /// 以後は和訳の対象にならず、依頼が永久に残る）。
+    pub fn insert_translation(
+        &self,
+        a: &NewArtifact,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = write_artifact(&tx, a, now)?;
+        tx.execute(
+            "UPDATE translation_requests SET done_at = ?2
+             WHERE article_id = ?1 AND done_at IS NULL",
+            rusqlite::params![a.article_id, timestamp(now)],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、
+    /// 和訳があるときだけ完了にし、そうでなければ何もしない。
     pub fn request_translation(
         &self,
         user_id: i64,
         article_id: i64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        // 既に和訳があれば、最初から完了として登録する（判定と登録は 1 文で行い、
+        // 和訳の保存と入れ違いになっても依頼が開いたまま残らないようにする）
         self.conn.execute(
-            "INSERT INTO translation_requests (user_id, article_id, requested_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT (user_id, article_id) DO NOTHING",
+            "INSERT INTO translation_requests (user_id, article_id, requested_at, done_at)
+             SELECT ?1, ?2, ?3,
+                    CASE WHEN EXISTS (
+                      SELECT 1 FROM artifacts
+                      WHERE article_id = ?2 AND kind = 'translation') THEN ?3 END
+             WHERE true
+             ON CONFLICT (user_id, article_id) DO UPDATE SET done_at = excluded.done_at
+               -- 開いたまま残っていた依頼も、和訳があれば完了にする（無ければ開いたまま）
+               WHERE translation_requests.done_at IS NULL AND excluded.done_at IS NOT NULL",
             rusqlite::params![user_id, article_id, timestamp(now)],
-        )?;
-        Ok(())
-    }
-
-    /// 和訳ができた記事への依頼を、すべての利用者について完了にする。
-    pub fn complete_translation_requests(
-        &self,
-        article_id: i64,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), DbError> {
-        self.conn.execute(
-            "UPDATE translation_requests SET done_at = ?2
-             WHERE article_id = ?1 AND done_at IS NULL",
-            rusqlite::params![article_id, timestamp(now)],
         )?;
         Ok(())
     }
@@ -1115,6 +1086,59 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     tx.pragma_update(None, "user_version", supported)?;
     tx.commit()?;
     Ok(())
+}
+
+/// 成果物と入力を、呼び出し側のトランザクションの中で書く。
+fn write_artifact(
+    tx: &Connection,
+    a: &NewArtifact,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<i64, DbError> {
+    if a.inputs.is_empty() {
+        return Err(DbError::NoArtifactInputs {
+            article_id: a.article_id,
+        });
+    }
+    let mut codes = std::collections::BTreeSet::new();
+    for &content_id in a.inputs {
+        let code: Option<String> = tx.query_row(
+            "SELECT m.code FROM contents AS c
+             LEFT JOIN memberships AS m ON m.id = c.access_membership_id
+             WHERE c.id = ?1",
+            [content_id],
+            |r| r.get(0),
+        )?;
+        codes.extend(code);
+    }
+    let input_scope = if codes.is_empty() {
+        "public".to_string()
+    } else {
+        codes.into_iter().collect::<Vec<_>>().join("+")
+    };
+    let id: i64 = tx.query_row(
+        "INSERT INTO artifacts
+           (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+        rusqlite::params![
+            a.article_id,
+            a.kind.as_str(),
+            a.backend,
+            a.model,
+            a.prompt_version,
+            input_scope,
+            a.payload.to_string(),
+            timestamp(now),
+        ],
+        |r| r.get(0),
+    )?;
+    for &content_id in a.inputs {
+        tx.execute(
+            "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
+             VALUES (?1, ?2, ?3)",
+            [id, a.article_id, content_id],
+        )?;
+    }
+    Ok(id)
 }
 
 /// 重複判定用に URL を正規化する：fragment と追跡用のクエリ（utm_*、fbclid、gclid）を除く。
@@ -2391,7 +2415,7 @@ mod tests {
             })
             .unwrap();
         let payload = serde_json::json!({"body_ja": "和訳"});
-        db.insert_artifact(
+        db.insert_translation(
             &NewArtifact {
                 article_id: a,
                 kind: ArtifactKind::Translation,
@@ -2404,7 +2428,6 @@ mod tests {
             t(now),
         )
         .unwrap();
-        db.complete_translation_requests(a, t(now)).unwrap();
         assert!(translate_ids(&db, false, now).is_empty());
         assert_eq!(
             db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NOT NULL")
@@ -2476,6 +2499,142 @@ mod tests {
         assert!(translate_ids(&db, false, now).is_empty());
         db.request_translation(owner, a, t(now)).unwrap();
         assert_eq!(translate_ids(&db, false, now), [a]);
+    }
+
+    #[test]
+    fn insert_translation_completes_requests_atomically() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.request_translation(owner, a, t(now)).unwrap();
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        let translation = |inputs| NewArtifact {
+            article_id: a,
+            kind: ArtifactKind::Translation,
+            backend: "claude-cli",
+            model: "sonnet",
+            prompt_version: 1,
+            payload: &payload,
+            inputs,
+        };
+        // 失敗したら（入力が空）依頼も完了にならない
+        assert!(db.insert_translation(&translation(&[]), t(now)).is_err());
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            1
+        );
+        db.insert_translation(&translation(&[body]), t(now))
+            .unwrap();
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM artifacts WHERE kind = 'translation'")
+                .unwrap(),
+            1
+        );
+    }
+
+    /// 和訳済みの記事への依頼は、最初から完了として登録する（開いたまま残らない）。
+    #[test]
+    fn requests_for_translated_articles_are_done_immediately() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        db.insert_translation(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[body],
+            },
+            t(now),
+        )
+        .unwrap();
+        db.request_translation(owner, a, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            0
+        );
+    }
+
+    /// 開いたまま残っていた依頼も、再度依頼すれば和訳の有無に応じて完了になる。
+    #[test]
+    fn repeated_request_repairs_open_request_for_translated_article() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.request_translation(owner, a, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 以前の実装で、和訳だけが保存され依頼が開いたまま残った状態を作る
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[body],
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.request_translation(owner, a, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

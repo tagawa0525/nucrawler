@@ -29,6 +29,10 @@ score_model = "sonnet"
 score_batch_size = 20
 # 要約が使い切らずに採点のために残す呼び出し回数
 score_reserved_calls = 1
+# 全文和訳に使うモデル、先回りで和訳する点数、和訳に入れる本文の最大文字数
+translate_model = "sonnet"
+translate_min_score = 80
+translate_max_input_chars = 20000
 
 [quota]
 # 時間帯の判定に使う時差（JST）

@@ -13,6 +13,7 @@ use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::score::{self, ScoreStageError};
+use nucrawler::pipeline::translate::{self, TranslateStageError};
 use nucrawler::pipeline::{self, Cancel, Halt, Stage};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
@@ -40,6 +41,8 @@ enum Error {
     Digest(#[from] DigestStageError),
     #[error(transparent)]
     Score(#[from] ScoreStageError),
+    #[error(transparent)]
+    Translate(#[from] TranslateStageError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
     #[error(transparent)]
@@ -138,7 +141,11 @@ async fn crawl(
     data: Option<PathBuf>,
     args: &cli::CrawlArgs,
 ) -> Result<(), Error> {
-    let stages = pipeline::plan(args.until, args.only);
+    let stages = if args.requests_only {
+        vec![Stage::Translate]
+    } else {
+        pipeline::plan(args.until, args.only)
+    };
     let (config, sources) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
     let _lock = lock::acquire(&data)?;
@@ -178,7 +185,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
-            Stage::Digest | Stage::Score if llm_blocked => {
+            Stage::Digest | Stage::Score | Stage::Translate if llm_blocked => {
                 tracing::warn!(
                     stage = stage.name(),
                     "skipped: the llm is unavailable in this run"
@@ -229,6 +236,27 @@ async fn crawl(
                     failed = summary.failed,
                     calls = summary.calls,
                     "score stage finished"
+                );
+                llm_blocked = report_halt(summary.halted, &mut llm_failure);
+            }
+            Stage::Translate => {
+                let summary = translate::translate_articles(
+                    &db,
+                    &llm,
+                    &mut quota,
+                    &config.llm,
+                    &config.pipeline,
+                    db.owner_id()?,
+                    args.requests_only,
+                    chrono::Utc::now(),
+                    &cancel,
+                )
+                .await?;
+                tracing::info!(
+                    translated = summary.translated,
+                    failed = summary.failed,
+                    calls = summary.calls,
+                    "translate stage finished"
                 );
                 llm_blocked = report_halt(summary.halted, &mut llm_failure);
             }

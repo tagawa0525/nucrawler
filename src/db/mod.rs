@@ -1064,24 +1064,86 @@ impl Db {
     /// このモデルの digest の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn redo_digest(
         &self,
-        _key: RedoKey,
-        _filter: &RedoFilter,
-        _now: chrono::DateTime<chrono::Utc>,
-        _limit: usize,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
     ) -> Result<Vec<DigestInput>, DbError> {
-        todo!()
+        let sql = format!(
+            "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
+             WHERE EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts AS r
+                 WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
+                   AND r.model = :model AND r.prompt_version = :version)
+               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(&*redo_params(key, "digest", filter, now, limit)?, |r| {
+                Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<Vec<(i64, String, String, String)>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, source_id, title, lang)| {
+                Ok(DigestInput {
+                    article_id,
+                    source_id,
+                    title,
+                    lang,
+                    contents: self.public_contents(article_id, ContentSet::All)?,
+                })
+            })
+            .collect()
     }
 
     /// 条件に合い、公開の本文（body/fulltext）がある英語の記事のうち、このキーの和訳がまだ無い
     /// ものを新しい順に返す。このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn redo_translate(
         &self,
-        _key: RedoKey,
-        _filter: &RedoFilter,
-        _now: chrono::DateTime<chrono::Utc>,
-        _limit: usize,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
-        todo!()
+        let sql = format!(
+            "SELECT a.id, a.title FROM articles AS a
+             WHERE a.lang = 'en'
+               AND EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                   AND c.access_membership_id IS NULL)
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts AS r
+                 WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
+                   AND r.model = :model AND r.prompt_version = :version)
+               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(&*redo_params(key, "translate", filter, now, limit)?, |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, title)| {
+                Ok(TranslateInput {
+                    article_id,
+                    title,
+                    contents: self.public_contents(article_id, ContentSet::Body)?,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -1142,6 +1204,58 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     tx.pragma_update(None, "user_version", supported)?;
     tx.commit()?;
     Ok(())
+}
+
+/// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事を除く条件。
+const REDO_NOT_BACKING_OFF: &str = "NOT EXISTS (
+    SELECT 1 FROM stage_errors AS e
+    WHERE e.article_id = a.id AND e.stage = :stage AND e.backend = :backend
+      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))";
+
+/// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
+/// 付いた、現在のプロファイルの採点で判定する。
+const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
+    AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
+    AND (:ids = '[]' OR a.id IN (SELECT value FROM json_each(:ids)))
+    AND (:min_score IS NULL OR (
+      SELECT max(s.score) FROM scores AS s
+      WHERE s.user_id = :user AND s.profile_hash = :profile
+        AND s.artifact_id = (
+          SELECT r.id FROM artifacts AS r
+          WHERE r.article_id = a.id AND r.kind = 'digest'
+            AND NOT EXISTS (
+              SELECT 1 FROM artifact_access AS aa
+              WHERE aa.artifact_id = r.id
+                AND aa.membership_id NOT IN (
+                  SELECT membership_id FROM user_memberships WHERE user_id = :user))
+          ORDER BY r.created_at DESC, r.id DESC LIMIT 1)) >= :min_score)";
+
+/// 名前付きパラメータ（名前と値）の並び。
+type NamedParams = Vec<(&'static str, Box<dyn rusqlite::ToSql>)>;
+
+/// `redo_digest` / `redo_translate` の名前付きパラメータ。
+fn redo_params(
+    key: RedoKey,
+    stage: &'static str,
+    filter: &RedoFilter,
+    now: chrono::DateTime<chrono::Utc>,
+    limit: usize,
+) -> Result<NamedParams, DbError> {
+    Ok(vec![
+        (":backend", Box::new(key.backend.to_string())),
+        (":model", Box::new(key.model.to_string())),
+        (":version", Box::new(key.prompt_version)),
+        (":stage", Box::new(stage)),
+        (":max_attempts", Box::new(MAX_ATTEMPTS)),
+        (":now", Box::new(timestamp(now))),
+        (":source", Box::new(filter.source_id.clone())),
+        (":since", Box::new(filter.since.map(timestamp))),
+        (":ids", Box::new(serde_json::to_string(&filter.ids)?)),
+        (":min_score", Box::new(filter.min_score)),
+        (":user", Box::new(key.user_id)),
+        (":profile", Box::new(key.profile_hash.map(str::to_string))),
+        (":limit", Box::new(i64::try_from(limit).unwrap_or(i64::MAX))),
+    ])
 }
 
 /// 成果物と入力を、呼び出し側のトランザクションの中で書く。

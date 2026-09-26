@@ -155,7 +155,7 @@ mod tests {
     }
 
     fn fetcher() -> Fetcher {
-        Fetcher::new("t", Duration::from_secs(2), Duration::ZERO).unwrap()
+        Fetcher::new("t", Duration::from_secs(2), Duration::ZERO, 1 << 20).unwrap()
     }
 
     fn setup() -> (Server, Vec<Source>) {

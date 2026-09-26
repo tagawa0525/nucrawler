@@ -23,6 +23,8 @@ pub enum HttpError {
     TooManyRedirects { url: String },
     #[error("bad redirect from {url}: {reason}")]
     BadRedirect { url: String, reason: String },
+    #[error("response from {url} exceeds {limit} bytes")]
+    BodyTooLarge { url: String, limit: u64 },
     #[error("{url} returned {status}")]
     Status {
         url: String,
@@ -42,6 +44,7 @@ pub struct Fetched {
 pub struct Fetcher {
     client: reqwest::Client,
     per_host_delay: Duration,
+    max_body_bytes: u64,
     /// ホストごとの、次にアクセスしてよい時刻
     next_allowed: Mutex<HashMap<String, Instant>>,
 }
@@ -51,6 +54,7 @@ impl Fetcher {
         user_agent: &str,
         timeout: Duration,
         per_host_delay: Duration,
+        max_body_bytes: u64,
     ) -> Result<Self, HttpError> {
         let client = reqwest::Client::builder()
             .user_agent(user_agent)
@@ -62,6 +66,7 @@ impl Fetcher {
         Ok(Self {
             client,
             per_host_delay,
+            max_body_bytes,
             next_allowed: Mutex::new(HashMap::new()),
         })
     }
@@ -71,6 +76,7 @@ impl Fetcher {
             &c.user_agent,
             Duration::from_secs(c.timeout_secs),
             Duration::from_secs(c.per_host_delay_secs),
+            c.max_body_bytes,
         )
     }
 
@@ -155,7 +161,7 @@ mod tests {
     use crate::testutil::{Route, Server};
 
     fn fetcher(delay: Duration) -> Fetcher {
-        Fetcher::new("nucrawler-test/1", Duration::from_millis(500), delay).unwrap()
+        Fetcher::new("nucrawler-test/1", Duration::from_millis(500), delay, 1024).unwrap()
     }
 
     fn url(s: &str) -> Url {
@@ -185,6 +191,30 @@ mod tests {
             matches!(&err, HttpError::Status { status, .. } if status.as_u16() == 403),
             "{err}"
         );
+    }
+
+    /// 巨大な応答でメモリを使い果たさないよう、上限を超えたら読み込みをやめる。
+    #[tokio::test]
+    async fn body_over_limit_is_error() {
+        for omit_length in [false, true] {
+            let big = Route {
+                omit_length,
+                ..Route::ok(vec![b'x'; 2048])
+            };
+            let fits = Route {
+                omit_length,
+                ..Route::ok(vec![b'x'; 1024])
+            };
+            let server = Server::start([("/big", big), ("/fits", fits)].into());
+            let f = fetcher(Duration::ZERO);
+            let err = f.get(&url(&server.url("/big"))).await.unwrap_err();
+            assert!(
+                matches!(err, HttpError::BodyTooLarge { limit: 1024, .. }),
+                "omit_length={omit_length}: {err}"
+            );
+            let ok = f.get(&url(&server.url("/fits"))).await.unwrap();
+            assert_eq!(ok.body.len(), 1024);
+        }
     }
 
     #[tokio::test]

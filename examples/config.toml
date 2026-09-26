@@ -6,3 +6,5 @@ user_agent = "nucrawler/0.1 (+https://github.com/tagawa0525/nucrawler)"
 # 同じホストへの連続アクセスの間隔
 per_host_delay_secs = 5
 timeout_secs = 30
+# 応答本文の上限（20 MiB）
+max_body_bytes = 20971520

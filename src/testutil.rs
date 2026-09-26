@@ -14,6 +14,8 @@ pub struct Route {
     pub delay: Duration,
     /// リダイレクト先（Location ヘッダ）
     pub location: Option<String>,
+    /// Content-Length を付けず、接続を閉じて本文の終わりを示す
+    pub omit_length: bool,
 }
 
 impl Route {
@@ -23,6 +25,7 @@ impl Route {
             body: body.into(),
             delay: Duration::ZERO,
             location: None,
+            omit_length: false,
         }
     }
 
@@ -39,6 +42,7 @@ impl Route {
             body: Vec::new(),
             delay: Duration::ZERO,
             location: None,
+            omit_length: false,
         }
     }
 }
@@ -125,10 +129,14 @@ fn handle(stream: TcpStream, routes: &HashMap<String, Route>, recorded: &Mutex<V
         .as_deref()
         .map(|l| format!("Location: {l}\r\n"))
         .unwrap_or_default();
+    let length = if route.omit_length {
+        String::new()
+    } else {
+        format!("Content-Length: {}\r\n", route.body.len())
+    };
     let head = format!(
-        "HTTP/1.1 {} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        route.status,
-        route.body.len()
+        "HTTP/1.1 {} X\r\n{location}{length}Connection: close\r\n\r\n",
+        route.status
     );
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(&route.body);

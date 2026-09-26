@@ -318,6 +318,36 @@ mod tests {
         assert_eq!((summary.failed, summary.gave_up), (1, 0));
     }
 
+    /// 一時的な失敗でも、再試行を使い切ったら断念した数に数える。
+    #[tokio::test]
+    async fn exhausted_retries_count_as_given_up() {
+        let server = server();
+        let db = Db::open_in_memory().unwrap();
+        let ids = add(&db, &server, "u", &["/down"]);
+        let key = StageKey {
+            article_id: ids[0],
+            stage: STAGE,
+            backend: "",
+            model: "",
+        };
+        let long_ago = now() - chrono::Duration::days(30);
+        for _ in 1..crate::db::MAX_ATTEMPTS {
+            db.record_stage_failure(key, "HTTP 500", long_ago, false)
+                .unwrap();
+        }
+        let summary = extract_pages(
+            &db,
+            &fetcher(),
+            &[source("u", None)],
+            &cfg(100),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.failed, summary.gave_up), (0, 1));
+    }
+
     /// Content-Type が PDF でなくても、中身が PDF なら断念する。
     #[tokio::test]
     async fn detects_pdf_by_signature() {

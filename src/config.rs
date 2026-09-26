@@ -69,11 +69,21 @@ impl LlmConfig {
             ("digest_batch_size", self.digest_batch_size as u64),
             ("max_input_chars", self.max_input_chars as u64),
             ("score_batch_size", self.score_batch_size as u64),
+            (
+                "translate_max_input_chars",
+                self.translate_max_input_chars as u64,
+            ),
             ("timeout_secs", self.timeout_secs),
         ] {
             if value == 0 {
                 return Err(format!("llm.{name} must be at least 1"));
             }
+        }
+        if self.translate_min_score > 100 {
+            return Err(format!(
+                "llm.translate_min_score must be 0..=100, got {}",
+                self.translate_min_score
+            ));
         }
         Ok(())
     }
@@ -90,9 +100,9 @@ impl Default for LlmConfig {
             score_model: "sonnet".into(),
             score_batch_size: 20,
             score_reserved_calls: 1,
-            translate_model: todo!(),
-            translate_min_score: todo!(),
-            translate_max_input_chars: todo!(),
+            translate_model: "sonnet".into(),
+            translate_min_score: 80,
+            translate_max_input_chars: 20000,
         }
     }
 }

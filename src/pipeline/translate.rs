@@ -2,11 +2,13 @@
 
 use chrono::{DateTime, Utc};
 
+use super::llm_call::{Outcome, call_recorded};
 use super::{Cancel, Halt};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{Db, DbError};
-use crate::llm::Llm;
+use crate::db::{ArtifactKind, Db, DbError, NewArtifact, StageKey, TranslateQuery};
+use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
+use crate::{errors, translate};
 
 pub const STAGE: &str = "translate";
 
@@ -28,17 +30,113 @@ pub struct TranslateSummary {
 /// `requests_only` なら依頼された記事だけを和訳する（先回りはしない）。
 #[allow(clippy::too_many_arguments)]
 pub async fn translate_articles<L: Llm>(
-    _db: &Db,
-    _llm: &L,
-    _quota: &mut Quota,
-    _llm_cfg: &LlmConfig,
-    _pipeline_cfg: &PipelineConfig,
-    _user_id: i64,
-    _requests_only: bool,
-    _now: DateTime<Utc>,
-    _cancel: &Cancel,
+    db: &Db,
+    llm: &L,
+    quota: &mut Quota,
+    llm_cfg: &LlmConfig,
+    pipeline_cfg: &PipelineConfig,
+    user_id: i64,
+    requests_only: bool,
+    now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<TranslateSummary, TranslateStageError> {
-    todo!()
+    let backend = llm.backend();
+    let model = llm_cfg.translate_model.as_str();
+    let profile_hash = db.load_profile(user_id)?.map(|(_, hash)| hash);
+    let query = TranslateQuery {
+        user_id,
+        profile_hash: profile_hash.as_deref(),
+        min_score: llm_cfg.translate_min_score,
+        requests_only,
+        backend,
+        model,
+    };
+    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+    let schema = translate::schema();
+    let mut summary = TranslateSummary::default();
+    loop {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        if let Err(stop) = quota.permit(now) {
+            tracing::info!("translate stops: {stop}");
+            summary.halted = Some(Halt::Quota(stop));
+            break;
+        }
+        // 全文は長いので 1 件ずつ訳す
+        let Some(input) = db
+            .pending_translate(query, cutoff, now, 1)?
+            .into_iter()
+            .next()
+        else {
+            break;
+        };
+        let key = StageKey {
+            article_id: input.article_id,
+            stage: STAGE,
+            backend,
+            model,
+        };
+        let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
+        let outcome = call_recorded(
+            db,
+            llm,
+            quota,
+            STAGE,
+            1,
+            LlmRequest {
+                system: translate::system_prompt(),
+                prompt: &prompt,
+                schema: &schema,
+                model,
+            },
+            now,
+        )
+        .await?;
+        summary.calls += 1;
+        let response = match outcome {
+            Outcome::Response(response) => response,
+            Outcome::Halted(halt) => {
+                if let Halt::LlmFailed(message) = &halt {
+                    db.record_stage_failure(key, message, now, false)?;
+                    summary.failed += 1;
+                }
+                summary.halted = Some(halt);
+                break;
+            }
+        };
+        let body_ja = match translate::parse(&response.output) {
+            Ok(body_ja) => body_ja,
+            Err(e) => {
+                let message = errors::error_chain(&e);
+                tracing::warn!(
+                    article_id = input.article_id,
+                    "translation rejected: {message}"
+                );
+                db.record_stage_failure(key, &message, now, false)?;
+                summary.failed += 1;
+                continue;
+            }
+        };
+        let inputs: Vec<i64> = input.contents.iter().map(|c| c.id).collect();
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: input.article_id,
+                kind: ArtifactKind::Translation,
+                backend,
+                model,
+                prompt_version: translate::PROMPT_VERSION,
+                payload: &serde_json::json!({ "body_ja": body_ja }),
+                inputs: &inputs,
+            },
+            now,
+        )?;
+        db.clear_stage_failure(key)?;
+        db.complete_translation_requests(input.article_id, now)?;
+        summary.translated += 1;
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]

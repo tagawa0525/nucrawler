@@ -13,7 +13,7 @@ pub enum ParseError {
     #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
     ProfileUsage,
     #[error(
-        "usage: nucrawler crawl [--until STAGE | --only STAGE] [--max-llm-calls N]  (stages: {stages})"
+        "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
 }
@@ -127,6 +127,10 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
                 parsed.max_llm_calls = Some(n);
                 continue;
             }
+            "--requests-only" => {
+                parsed.requests_only = true;
+                continue;
+            }
             _ => return Err(usage()),
         };
         let stage = it
@@ -136,6 +140,10 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         *slot = Some(stage);
     }
     if parsed.until.is_some() && parsed.only.is_some() {
+        return Err(usage());
+    }
+    // 依頼の処理は和訳ステージだけで行うので、ステージの指定とは併用できない
+    if parsed.requests_only && (parsed.until.is_some() || parsed.only.is_some()) {
         return Err(usage());
     }
     Ok(parsed)

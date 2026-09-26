@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_membership_code_check.sql"),
     include_str!("migrations/0003_last_seen.sql"),
+    include_str!("migrations/0004_visit_boundary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1250,24 +1251,32 @@ impl Db {
             .collect()
     }
 
-    /// 一覧を見た時刻を記録し、その前に見た時刻（初回は None）を返す。
-    pub fn touch_last_seen(
+    /// 一覧を見た時刻を記録し、この訪問の区切り（前の訪問で最後に見た時刻。初回は None）を返す。
+    /// 最後に見てから `gap` 以内の閲覧は同じ訪問とみなし、区切りを変えない。
+    pub fn begin_visit(
         &self,
         user_id: i64,
         now: chrono::DateTime<chrono::Utc>,
+        gap: chrono::Duration,
     ) -> Result<Option<String>, DbError> {
         let tx = self.conn.unchecked_transaction()?;
-        let previous: Option<String> = tx.query_row(
-            "SELECT last_seen_at FROM users WHERE id = ?1",
+        let (last_seen, boundary): (Option<String>, Option<String>) = tx.query_row(
+            "SELECT last_seen_at, visit_boundary_at FROM users WHERE id = ?1",
             [user_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        let boundary = match last_seen {
+            // 時刻はどれも timestamp() の書式なので、文字列の比較で前後がわかる
+            Some(last) if last < timestamp(now - gap) => Some(last),
+            Some(_) => boundary,
+            None => None,
+        };
         tx.execute(
-            "UPDATE users SET last_seen_at = ?2 WHERE id = ?1",
-            rusqlite::params![user_id, timestamp(now)],
+            "UPDATE users SET last_seen_at = ?2, visit_boundary_at = ?3 WHERE id = ?1",
+            rusqlite::params![user_id, timestamp(now), boundary],
         )?;
         tx.commit()?;
-        Ok(previous)
+        Ok(boundary)
     }
 
     /// 一覧。点数の高い順（未採点は後ろ）、同点なら新しい順。
@@ -3383,20 +3392,35 @@ mod tests {
             .collect()
     }
 
+    /// 一覧を開くたびに区切りが進むと、再読み込みや詳細からの戻りで「前回から」の記事が
+    /// 「それ以前」に移ってしまう。間隔の短い閲覧は同じ訪問とみなし、区切りを保つ。
     #[test]
-    fn touch_last_seen_returns_previous_visit() {
+    fn begin_visit_keeps_boundary_within_a_visit() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
+        let gap = chrono::Duration::minutes(30);
+        let visit = |at: &str| db.begin_visit(owner, t(at), gap).unwrap();
+        // 初回は区切りが無い（すべて新着）。同じ訪問のうちは無いまま
+        assert_eq!(visit("2026-09-27T00:00:00Z"), None);
+        assert_eq!(visit("2026-09-27T00:20:00Z"), None);
+        // 間が空いたら新しい訪問。区切りは前の訪問で最後に見た時刻
         assert_eq!(
-            db.touch_last_seen(owner, t("2026-09-27T00:00:00Z"))
-                .unwrap(),
-            None
+            visit("2026-09-27T12:00:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
+        );
+        // 同じ訪問の再読み込みでは区切りを保つ（最後に見た時刻は進む）
+        assert_eq!(
+            visit("2026-09-27T12:10:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
         );
         assert_eq!(
-            db.touch_last_seen(owner, t("2026-09-27T12:00:00Z"))
-                .unwrap()
-                .as_deref(),
-            Some("2026-09-27T00:00:00.000Z")
+            visit("2026-09-27T12:35:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
+        );
+        // 最後に見てから gap を超えたら次の訪問
+        assert_eq!(
+            visit("2026-09-27T13:10:00Z").as_deref(),
+            Some("2026-09-27T12:35:00.000Z")
         );
     }
 

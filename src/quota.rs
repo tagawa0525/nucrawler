@@ -212,8 +212,12 @@ impl Quota {
 
     /// `permit` に加え、残りの呼び出し回数が `reserve` 以下なら止める。前段のステージが
     /// 回数を使い切って、後段（採点）がいつまでも実行されない状態を防ぐ。
-    pub fn permit_reserving(&self, _now: DateTime<Utc>, _reserve: u32) -> Result<(), Stop> {
-        todo!()
+    pub fn permit_reserving(&self, now: DateTime<Utc>, reserve: u32) -> Result<(), Stop> {
+        self.permit(now)?;
+        if self.max_calls.saturating_sub(self.calls) <= reserve {
+            return Err(Stop::Reserved { reserved: reserve });
+        }
+        Ok(())
     }
 
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。

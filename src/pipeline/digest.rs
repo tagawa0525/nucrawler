@@ -47,7 +47,8 @@ pub async fn digest_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
+        if let Err(stop) = quota.permit_reserving(now, llm_cfg.score_reserved_calls) {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;
@@ -170,9 +171,11 @@ mod tests {
             .to_utc()
     }
 
+    /// 採点のための予約は `leaves_reserved_calls_for_scoring` で確かめるので、ほかのテストでは 0 にする。
     fn llm_cfg(batch: usize) -> LlmConfig {
         LlmConfig {
             digest_batch_size: batch,
+            score_reserved_calls: 0,
             ..LlmConfig::default()
         }
     }

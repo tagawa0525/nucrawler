@@ -83,7 +83,7 @@ impl Default for LlmConfig {
             max_input_chars: 6000,
             score_model: "sonnet".into(),
             score_batch_size: 20,
-            score_reserved_calls: todo!(),
+            score_reserved_calls: 1,
         }
     }
 }

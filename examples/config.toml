@@ -27,6 +27,8 @@ max_input_chars = 6000
 # 採点に使うモデルと、1 回の呼び出しで採点する記事数
 score_model = "sonnet"
 score_batch_size = 20
+# 要約が使い切らずに採点のために残す呼び出し回数
+score_reserved_calls = 1
 
 [quota]
 # 時間帯の判定に使う時差（JST）

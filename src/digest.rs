@@ -79,8 +79,27 @@ impl From<Item> for Payload {
     }
 }
 
+/// 要約と和訳で共有する表記と用語の決まり。
+pub const GLOSSARY: &str = r#"# 表記
+- 数値・日付・固有名詞は原文のとおりに書き、記事に無いことは推測で補わない。
+- 用語は次の訳に統一する：
+  - refueling outage → 燃料取替停止（定期検査）
+  - scram → スクラム（原子炉緊急停止）
+  - license renewal / subsequent license renewal → 運転認可更新 / 2 回目の運転認可更新（SLR）
+  - power uprate → 出力向上
+  - accident tolerant fuel (ATF) → 事故耐性燃料（ATF）
+  - high burnup → 高燃焼度
+  - probabilistic risk assessment (PRA) → 確率論的リスク評価（PRA）
+  - small modular reactor (SMR) → 小型モジュール炉（SMR）
+  - spent fuel → 使用済燃料、decommissioning → 廃止措置
+  - PWR / BWR → 加圧水型軽水炉（PWR）/ 沸騰水型軽水炉（BWR）
+  - NRC → 米国原子力規制委員会（NRC）、原子力規制委員会 → 原子力規制委員会（NRA）"#;
+
 pub fn system_prompt() -> &'static str {
-    r#"あなたは原子力（特に軽水炉）分野に詳しい技術記者です。
+    static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{}{GLOSSARY}",
+            r#"あなたは原子力（特に軽水炉）分野に詳しい技術記者です。
 与えられた記事を日本の原子力技術者向けに要約します。英語の記事は自然な日本語にし、日本語の記事は要約だけを行います。
 
 # 入力
@@ -96,20 +115,10 @@ pub fn system_prompt() -> &'static str {
 - lwr_relevant: 軽水炉（軽水炉型 SMR を含む）、燃料・燃料サイクル・バックエンド、廃止措置、原子力の政策・市場に関係すれば true。高速炉・高温ガス炉・溶融塩炉・核融合・医療や農業などの非発電利用だけの記事なら false
 - topics: 日本語の短いタグを 1〜5 個（例：規制・審査、燃料、高経年化、安全解析、SMR、廃止措置、政策・市場）
 
-# 表記
-- 数値・日付・固有名詞は原文のとおりに書き、記事に無いことは推測で補わない。
-- 用語は次の訳に統一する：
-  - refueling outage → 燃料取替停止（定期検査）
-  - scram → スクラム（原子炉緊急停止）
-  - license renewal / subsequent license renewal → 運転認可更新 / 2 回目の運転認可更新（SLR）
-  - power uprate → 出力向上
-  - accident tolerant fuel (ATF) → 事故耐性燃料（ATF）
-  - high burnup → 高燃焼度
-  - probabilistic risk assessment (PRA) → 確率論的リスク評価（PRA）
-  - small modular reactor (SMR) → 小型モジュール炉（SMR）
-  - spent fuel → 使用済燃料、decommissioning → 廃止措置
-  - PWR / BWR → 加圧水型軽水炉（PWR）/ 沸騰水型軽水炉（BWR）
-  - NRC → 米国原子力規制委員会（NRC）、原子力規制委員会 → 原子力規制委員会（NRA）"#
+"#
+        )
+    });
+    &PROMPT
 }
 
 /// 出力の JSON Schema。

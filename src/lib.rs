@@ -5,6 +5,7 @@ pub mod db;
 pub mod errors;
 pub mod extract;
 pub mod http;
+pub mod llm;
 pub mod pipeline;
 pub mod robots;
 pub mod source;

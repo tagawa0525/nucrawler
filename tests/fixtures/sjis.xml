@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="Shift_JIS"?>
+<rss version="2.0">
+  <channel>
+    <title>東北の例</title>
+    <link>https://utility3.example/</link>
+    <description>Shift_JIS のフィード</description>
+    <item>
+      <title>女川原子力発電所2号機の定期検査について</title>
+      <link>https://utility3.example/news/atom/2026/0917.html</link>
+      <pubDate>Thu, 17 Sep 2026 16:00:00 +0900</pubDate>
+    </item>
+  </channel>
+</rss>

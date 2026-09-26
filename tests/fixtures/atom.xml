@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Utility Press</title>
+  <id>https://utility.example/press/</id>
+  <updated>2026-09-20T10:00:00+09:00</updated>
+  <entry>
+    <title>島根原子力発電所2号機の運転状況について</title>
+    <link rel="alternate" href="https://utility.example/press/2026/0920.html"/>
+    <id>https://utility.example/press/2026/0920.html</id>
+    <updated>2026-09-20T10:00:00+09:00</updated>
+    <summary>2号機は定格熱出力一定運転中です。</summary>
+  </entry>
+  <entry>
+    <title>料金プランの改定について</title>
+    <link rel="alternate" href="https://utility.example/press/2026/0919.html"/>
+    <id>https://utility.example/press/2026/0919.html</id>
+    <updated>2026-09-19T15:00:00+09:00</updated>
+  </entry>
+</feed>

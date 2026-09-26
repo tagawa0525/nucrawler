@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel rdf:about="https://utility2.example/press.rdf">
+    <title>Example Utility 2</title>
+    <link>https://utility2.example/</link>
+    <description>RSS 1.0 fixture</description>
+    <items><rdf:Seq><rdf:li rdf:resource="https://utility2.example/press/1.html"/></rdf:Seq></items>
+  </channel>
+  <item rdf:about="https://utility2.example/press/1.html">
+    <title>志賀原子力発電所の安全対策工事の進捗</title>
+    <link>https://utility2.example/press/1.html</link>
+    <dc:date>2026-09-18T11:00:00+09:00</dc:date>
+  </item>
+</rdf:RDF>

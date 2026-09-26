@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod errors;
+pub mod extract;
 pub mod http;
 pub mod pipeline;
 pub mod robots;

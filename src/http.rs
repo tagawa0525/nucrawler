@@ -42,6 +42,8 @@ const MAX_REDIRECTS: usize = 5;
 #[derive(Debug)]
 pub struct Fetched {
     pub url: Url,
+    /// Content-Type ヘッダ（HTML の文字コードや PDF の判定に使う）
+    pub content_type: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -136,8 +138,17 @@ impl Fetcher {
                     status,
                 });
             }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
             let body = self.read_body(&current, response).await?;
-            return Ok(Fetched { url: current, body });
+            return Ok(Fetched {
+                url: current,
+                content_type,
+                body,
+            });
         }
         Err(HttpError::TooManyRedirects {
             url: url.to_string(),
@@ -273,6 +284,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body.body, b"hello");
+        assert_eq!(
+            body.content_type.as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
         let reqs = server.requests();
         assert_eq!(reqs[0].user_agent.as_deref(), Some("nucrawler-test/1"));
     }

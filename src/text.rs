@@ -190,6 +190,17 @@ mod tests {
         assert!(decode_html(&bytes, None).contains("原子力"));
     }
 
+    /// 不正なバイト列があっても失敗せず、置換文字にして残りを読む。
+    #[test]
+    fn malformed_bytes_become_replacement_chars() {
+        let mut bytes = b"<p>ok ".to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFE, 0x80]);
+        bytes.extend_from_slice(" end</p>".as_bytes());
+        let html = decode_html(&bytes, Some("text/html; charset=utf-8"));
+        assert!(html.contains("ok \u{FFFD}"), "{html:?}");
+        assert!(html.ends_with("end</p>"), "{html:?}");
+    }
+
     #[test]
     fn bom_wins_over_meta() {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];

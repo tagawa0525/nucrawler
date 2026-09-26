@@ -1,18 +1,20 @@
 //! HTML 断片からプレーンテキストへの変換。
 
-/// HTML のバイト列を文字列にする。文字コードは Content-Type の charset、BOM、
-/// 先頭 1024 バイト内の `<meta charset>` の順に探し、見つからなければ UTF-8 とみなす。
-/// 不正なバイト列は置換文字にする。
+/// HTML のバイト列を文字列にする。文字コードは BOM、Content-Type の charset、
+/// 先頭 1024 バイト内の `<meta>` の宣言の順に決め、どれも使えなければ UTF-8 とみなす。
+/// 解釈できないラベルは無いものとして次の候補を見る。不正なバイト列は置換文字にする。
 pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
-    let from_header = content_type.and_then(charset_param);
-    let encoding = match encoding_rs::Encoding::for_bom(bytes) {
-        Some((bom, _)) => bom,
-        None => from_header
-            .or_else(|| meta_charset(&bytes[..bytes.len().min(1024)]))
-            .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
-            .unwrap_or(encoding_rs::UTF_8),
-    };
-    // decode は BOM を見て文字コードを選び直し、BOM 自体は取り除く。
+    let label_encoding = |label: String| encoding_rs::Encoding::for_label(label.trim().as_bytes());
+    let encoding = encoding_rs::Encoding::for_bom(bytes)
+        .map(|(bom, _)| bom)
+        .or_else(|| {
+            content_type
+                .and_then(charset_param)
+                .and_then(label_encoding)
+        })
+        .or_else(|| meta_charset(&bytes[..bytes.len().min(1024)]).and_then(label_encoding))
+        .unwrap_or(encoding_rs::UTF_8);
+    // decode は BOM があればそれに従い、BOM 自体は取り除く。
     let (text, _, _) = encoding.decode(bytes);
     text.into_owned()
 }
@@ -27,18 +29,22 @@ fn charset_param(content_type: &str) -> Option<String> {
     })
 }
 
-/// `<meta charset="...">` と `<meta http-equiv="Content-Type" content="...; charset=...">` の両方に
-/// 当たるよう、ASCII として "charset=" の後ろを読む。
+/// 先頭部分を HTML として解析し、`<meta charset>` か
+/// `<meta http-equiv="Content-Type" content="...; charset=...">` の宣言を読む。
+/// コメントや script の中の文字列は要素ではないので拾わない。
+/// 文字コードが分かる前なので、ASCII 互換とみなして UTF-8（不正バイトは置換）で読む。
 fn meta_charset(head: &[u8]) -> Option<String> {
-    let lower = head.to_ascii_lowercase();
-    let pos = lower.windows(8).position(|w| w == b"charset=")? + 8;
-    let value: String = lower[pos..]
-        .iter()
-        .map(|&b| b as char)
-        .skip_while(|c| *c == '"' || *c == '\'')
-        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        .collect();
-    (!value.is_empty()).then_some(value)
+    let doc = scraper::Html::parse_document(&String::from_utf8_lossy(head));
+    let meta = scraper::Selector::parse("meta").expect("valid selector");
+    doc.select(&meta).find_map(|el| {
+        let attr = |name| el.value().attr(name);
+        attr("charset").map(String::from).or_else(|| {
+            attr("http-equiv")
+                .filter(|v| v.eq_ignore_ascii_case("content-type"))
+                .and(attr("content"))
+                .and_then(charset_param)
+        })
+    })
 }
 
 /// タグを除き、段落などのブロック要素は改行で区切る。script と style の中身は捨てる。

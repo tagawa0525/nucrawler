@@ -18,6 +18,7 @@ use nucrawler::pipeline::{self, Cancel, Halt, Stage, Target};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
 use nucrawler::status;
+use nucrawler::web::server::{self, ServeError};
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
@@ -47,6 +48,8 @@ enum Error {
     LlmFailed(String),
     #[error(transparent)]
     Profile(#[from] ProfileError),
+    #[error(transparent)]
+    Serve(#[from] ServeError),
     #[error("failed to read {path}")]
     ReadFile {
         path: PathBuf,
@@ -117,6 +120,14 @@ async fn run() -> Result<(), Error> {
             .await
         }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
+        Command::Serve => {
+            serve(
+                inv.config_dir,
+                inv.data_dir,
+                cli::parse_serve_args(&inv.args)?,
+            )
+            .await
+        }
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
         },
@@ -463,6 +474,39 @@ fn profile(data: Option<PathBuf>, args: ProfileArgs) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+async fn serve(
+    config: Option<PathBuf>,
+    data: Option<PathBuf>,
+    args: cli::ServeArgs,
+) -> Result<(), Error> {
+    let (config, _) = config::load(&config_dir(config)?)?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let addr = args.addr.unwrap_or(config.web.bind);
+    let state = server::AppState::new(db, config.web);
+    server::run(addr, state, shutdown_signal()).await?;
+    Ok(())
+}
+
+/// Ctrl-C か SIGTERM（systemd の停止）で、処理中の応答を終えてから止める。
+async fn shutdown_signal() {
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("cannot listen for SIGTERM: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = term => {}
+    }
+    tracing::info!("shutting down the web ui");
 }
 
 fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {

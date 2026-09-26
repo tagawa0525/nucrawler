@@ -21,6 +21,8 @@ pub enum ParseError {
         "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
+    #[error("usage: nucrawler serve [--addr IP:PORT]")]
+    ServeUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -60,7 +62,7 @@ commands:
   redo      指定モデルで要約・和訳をやり直す（redo digest|translate --model M ...）
   status    ステージごとの未処理件数などを表示
   sources   ソースの取得確認（sources check [ID]）
-  serve     Web UI / RSS / JSON API を起動
+  serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
@@ -222,6 +224,28 @@ fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Option<&'a Str
 /// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。
 fn jst_midnight(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     crate::jst::midnight(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?)
+}
+
+/// `serve` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServeArgs {
+    /// 待ち受けるアドレス（設定の `web.bind` より優先）
+    pub addr: Option<std::net::SocketAddr>,
+}
+
+pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, ParseError> {
+    let mut it = args.iter();
+    let mut addr = None;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--addr" => {
+                let value = option_value(&mut it).ok_or(ParseError::ServeUsage)?;
+                addr = Some(value.parse().map_err(|_| ParseError::ServeUsage)?);
+            }
+            _ => return Err(ParseError::ServeUsage),
+        }
+    }
+    Ok(ServeArgs { addr })
 }
 
 /// `profile` サブコマンドの引数。
@@ -484,6 +508,25 @@ mod tests {
         ] {
             let err = parse_redo_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::RedoUsage), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parses_serve_args() {
+        assert_eq!(parse_serve_args(&[]).unwrap(), ServeArgs { addr: None });
+        assert_eq!(
+            parse_serve_args(&args(&["--addr", "100.64.0.1:8080"])).unwrap(),
+            ServeArgs {
+                addr: Some("100.64.0.1:8080".parse().unwrap())
+            }
+        );
+        for bad in [
+            &["--addr"][..],
+            &["--addr", "localhost"],
+            &["--addr", "--x"],
+            &["extra"],
+        ] {
+            assert!(parse_serve_args(&args(bad)).is_err(), "{bad:?}");
         }
     }
 

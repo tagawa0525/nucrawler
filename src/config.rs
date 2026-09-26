@@ -33,6 +33,7 @@ pub struct Config {
     pub pipeline: PipelineConfig,
     pub llm: LlmConfig,
     pub quota: crate::quota::QuotaConfig,
+    pub web: WebConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -122,6 +123,52 @@ impl Default for PipelineConfig {
         Self {
             backlog_days: 14,
             extract_max_per_run: 100,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebConfig {
+    /// 待ち受けるアドレス。スマホから Tailscale 経由で見るなら tailnet の IP にする
+    pub bind: std::net::SocketAddr,
+    /// 一覧に既定で出す最低点（これ未満は「すべて表示」でだけ出す）
+    pub min_score: u8,
+    /// 一覧に出す記事の期間（日）
+    pub list_days: u32,
+    /// 一覧に出す最大件数
+    pub list_limit: usize,
+    /// 一覧を見てからこの分数以内の閲覧は、同じ訪問として「前回から」の区切りを保つ
+    pub visit_gap_minutes: u32,
+}
+
+impl WebConfig {
+    /// 一覧が常に空になる値を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min_score > 100 {
+            return Err(format!(
+                "web.min_score must be 0..=100, got {}",
+                self.min_score
+            ));
+        }
+        if self.list_days == 0 {
+            return Err("web.list_days must be at least 1".into());
+        }
+        if self.list_limit == 0 {
+            return Err("web.list_limit must be at least 1".into());
+        }
+        Ok(())
+    }
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            bind: std::net::SocketAddr::from(([127, 0, 0, 1], 8080)),
+            min_score: 50,
+            list_days: 7,
+            list_limit: 200,
+            visit_gap_minutes: 30,
         }
     }
 }
@@ -222,6 +269,7 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         .quota
         .validate()
         .and_then(|()| config.llm.validate())
+        .and_then(|()| config.web.validate())
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,
@@ -513,6 +561,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
+    }
+
+    #[test]
+    fn web_defaults_to_localhost() {
+        let c = parse_config("", p()).unwrap();
+        assert_eq!(c.web.bind, "127.0.0.1:8080".parse().unwrap());
+        let c = parse_config("[web]\nbind = \"100.64.0.1:8080\"\nmin_score = 70\n", p()).unwrap();
+        assert_eq!(c.web.bind, "100.64.0.1:8080".parse().unwrap());
+        assert_eq!(c.web.min_score, 70);
+    }
+
+    #[test]
+    fn rejects_web_values_that_hide_everything() {
+        for (text, reason) in [
+            ("[web]\nmin_score = 101\n", "web.min_score"),
+            ("[web]\nlist_days = 0\n", "web.list_days"),
+            ("[web]\nlist_limit = 0\n", "web.list_limit"),
+        ] {
+            let err = parse_config(text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason: r, .. } if r.contains(reason)),
+                "{text}: {err}"
+            );
+        }
     }
 
     #[test]

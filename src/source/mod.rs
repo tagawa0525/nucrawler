@@ -36,13 +36,102 @@ pub struct Candidate {
 }
 
 /// `base` は取得元の URL で、相対リンクの解決に使う。
-pub fn parse(_kind: SourceKind, _bytes: &[u8], _base: &Url) -> Result<Vec<Candidate>, SourceError> {
-    todo!()
+pub fn parse(kind: SourceKind, bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
+    match kind {
+        SourceKind::Feed => parse_feed(bytes, base),
+        SourceKind::FepcJson => parse_fepc_json(bytes, base),
+    }
+}
+
+/// RSS 0.9x/1.0/2.0 と Atom。文字コードは XML 宣言に従う（Shift_JIS も可）。
+fn parse_feed(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
+    let feed = feed_rs::parser::Builder::new()
+        .base_uri(Some(base.as_str()))
+        .build()
+        .parse(bytes)?;
+    let mut items = Vec::with_capacity(feed.entries.len());
+    for entry in feed.entries {
+        // 記事は URL で識別するので、リンクの無い項目は保存できない。
+        let Some(link) = entry
+            .links
+            .iter()
+            .find(|l| l.rel.as_deref().is_none_or(|r| r == "alternate"))
+        else {
+            tracing::warn!(id = %entry.id, "skipping feed entry without link");
+            continue;
+        };
+        items.push(Candidate {
+            url: resolve(base, &link.href)?,
+            title: entry.title.map(|t| t.content).unwrap_or_default(),
+            published_at: entry.published.or(entry.updated),
+            summary: entry.summary.map(|t| t.content),
+            content: entry.content.and_then(|c| c.body),
+        });
+    }
+    Ok(items)
+}
+
+/// 電事連の `/pr/news/index.json`。一覧ページは JS で描画されるので、元の JSON を読む。
+#[derive(serde::Deserialize)]
+struct FepcItem {
+    title: String,
+    href: String,
+    /// 例 "2026-9-18"
+    date: String,
+    category: String,
+}
+
+fn parse_fepc_json(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
+    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
+    let items: Vec<FepcItem> = serde_json::from_slice(bytes)?;
+    items
+        .into_iter()
+        .map(|it| {
+            // 日付しか無いので JST の 0 時とみなす。
+            let date =
+                chrono::NaiveDate::parse_from_str(&it.date, "%Y-%m-%d").map_err(|source| {
+                    SourceError::InvalidDate {
+                        value: it.date.clone(),
+                        source,
+                    }
+                })?;
+            let published_at = date
+                .and_hms_opt(0, 0, 0)
+                .and_then(|t| t.and_local_timezone(jst).single())
+                .map(|t| t.to_utc());
+            Ok(Candidate {
+                url: resolve(base, &it.href)?,
+                title: it.title,
+                published_at,
+                summary: Some(it.category),
+                content: None,
+            })
+        })
+        .collect()
+}
+
+fn resolve(base: &Url, href: &str) -> Result<String, SourceError> {
+    base.join(href)
+        .map(String::from)
+        .map_err(|source| SourceError::InvalidLink {
+            href: href.to_string(),
+            source,
+        })
 }
 
 /// 絞り込み条件に一致するか。条件が空なら常に一致する。
-pub fn matches(_filter: &Filter, _c: &Candidate) -> bool {
-    todo!()
+pub fn matches(filter: &Filter, c: &Candidate) -> bool {
+    if filter.keywords.is_empty() && filter.url_contains.is_empty() {
+        return true;
+    }
+    let text_has = |k: &String| {
+        c.title.contains(k.as_str()) || c.summary.as_deref().is_some_and(|s| s.contains(k.as_str()))
+    };
+    filter.keywords.iter().any(text_has)
+        || filter
+            .url_contains
+            .iter()
+            .any(|u| c.url.contains(u.as_str()))
 }
 
 #[cfg(test)]

@@ -128,7 +128,9 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
             "--until" => &mut parsed.until,
             "--only" => &mut parsed.only,
             "--max-llm-calls" => {
-                let n = it.next().and_then(|n| n.parse().ok()).ok_or_else(usage)?;
+                let n = option_value(&mut it)
+                    .and_then(|n| n.parse().ok())
+                    .ok_or_else(usage)?;
                 parsed.max_llm_calls = Some(n);
                 continue;
             }
@@ -138,8 +140,7 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
             }
             _ => return Err(usage()),
         };
-        let stage = it
-            .next()
+        let stage = option_value(&mut it)
             .and_then(|name| Stage::from_name(name))
             .ok_or_else(usage)?;
         *slot = Some(stage);
@@ -182,7 +183,7 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
     let mut max_llm_calls = None;
     let mut it = rest.iter();
     while let Some(opt) = it.next() {
-        let value = it.next().ok_or_else(usage)?;
+        let value = option_value(&mut it).ok_or_else(usage)?;
         match opt.as_str() {
             "--model" => model = Some(value.clone()),
             "--source" => filter.source_id = Some(value.clone()),
@@ -210,6 +211,12 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
         filter,
         max_llm_calls,
     })
+}
+
+/// オプションの値を取り出す。値の書き忘れで次のオプションを値として読まないよう、
+/// 空の値と `--` で始まる値は受け付けない。
+fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Option<&'a String> {
+    it.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
 }
 
 /// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。

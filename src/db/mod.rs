@@ -34,6 +34,7 @@ pub enum DbError {
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_membership_code_check.sql"),
+    include_str!("migrations/0003_last_seen.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -279,6 +280,87 @@ pub struct RedoKey<'a> {
     pub backend: &'a str,
     pub model: &'a str,
     pub prompt_version: i64,
+}
+
+/// 利用者の最新の 👍/👎。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feedback {
+    Up,
+    Down,
+}
+
+/// 一覧の 1 行。digest は利用者が閲覧できる最新の版。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListItem {
+    pub article_id: i64,
+    pub source_id: String,
+    pub url: String,
+    pub title: String,
+    pub lang: String,
+    /// 公開日時（無ければ取得日時）
+    pub at: String,
+    pub fetched_at: String,
+    pub title_ja: Option<String>,
+    pub summary_ja: Option<String>,
+    pub lwr_relevant: Option<bool>,
+    /// 現在のプロファイルでの点数（最新の digest に付いたもの）
+    pub score: Option<u8>,
+    pub reason: Option<String>,
+    /// 詳細か和訳を開いたことがある
+    pub read: bool,
+    pub feedback: Option<Feedback>,
+    pub has_translation: bool,
+    pub translation_requested: bool,
+    /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
+    pub locked_by: Vec<String>,
+}
+
+/// 一覧の条件。
+#[derive(Debug, Clone, Copy)]
+pub struct ListQuery<'a> {
+    pub user_id: i64,
+    pub profile_hash: Option<&'a str>,
+    /// `show_all` でないときに表示する最低点
+    pub min_score: u8,
+    /// これ以降に公開（無ければ取得）された記事
+    pub since: chrono::DateTime<chrono::Utc>,
+    /// 👎、閾値未満、未採点、非軽水炉の記事も表示する
+    pub show_all: bool,
+    pub limit: usize,
+}
+
+/// 成果物の 1 版。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArtifactVersion {
+    pub id: i64,
+    pub backend: String,
+    pub model: String,
+    pub prompt_version: i64,
+    pub created_at: String,
+    pub payload: serde_json::Value,
+}
+
+/// 詳細画面の内容。版は新しい順で、利用者が閲覧できるものだけ。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArticleDetail {
+    pub item: ListItem,
+    pub digests: Vec<ArtifactVersion>,
+    pub translations: Vec<ArtifactVersion>,
+    /// 和訳の依頼に使える公開の本文がある
+    pub has_body: bool,
+}
+
+/// 画面の上部に出す警告。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    /// 最後の取得が失敗している（最後の成功より新しい失敗がある）ソース
+    SourceFailing {
+        source_id: String,
+        error: String,
+        at: String,
+    },
+    /// 直近の LLM の呼び出しが失敗している
+    LlmFailed { error: String, at: String },
 }
 
 /// 入力に使う本文の部分の範囲。
@@ -1144,6 +1226,35 @@ impl Db {
                 })
             })
             .collect()
+    }
+
+    /// 一覧を見た時刻を記録し、その前に見た時刻（初回は None）を返す。
+    pub fn touch_last_seen(
+        &self,
+        _user_id: i64,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<String>, DbError> {
+        todo!()
+    }
+
+    /// 一覧。点数の高い順（未採点は後ろ）、同点なら新しい順。
+    pub fn list_articles(&self, _q: ListQuery) -> Result<Vec<ListItem>, DbError> {
+        todo!()
+    }
+
+    /// 詳細画面の内容。記事が無ければ None。
+    pub fn article_detail(
+        &self,
+        _user_id: i64,
+        _profile_hash: Option<&str>,
+        _article_id: i64,
+    ) -> Result<Option<ArticleDetail>, DbError> {
+        todo!()
+    }
+
+    /// 取得に失敗し続けているソースと、`since` 以降の直近の LLM の失敗。
+    pub fn warnings(&self, _since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Warning>, DbError> {
+        todo!()
     }
 
     #[cfg(test)]
@@ -2999,6 +3110,224 @@ mod tests {
         };
         assert!(ids("sonnet").is_empty());
         assert_eq!(ids("opus"), [en]);
+    }
+
+    fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
+        ListQuery {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            min_score: 60,
+            since: t("2026-09-20T00:00:00Z"),
+            show_all,
+            limit: 50,
+        }
+    }
+
+    fn list_ids(db: &Db, show_all: bool) -> Vec<i64> {
+        db.list_articles(list_query(db, show_all))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn touch_last_seen_returns_previous_visit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.touch_last_seen(owner, t("2026-09-27T00:00:00Z"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.touch_last_seen(owner, t("2026-09-27T12:00:00Z"))
+                .unwrap()
+                .as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn list_orders_by_score_and_hides_unwanted_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let high = scored_article(
+            &db,
+            "https://e.com/high",
+            Lang::En,
+            "2026-09-25T00:00:00.000Z",
+            90,
+        );
+        let mid = scored_article(
+            &db,
+            "https://e.com/mid",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            70,
+        );
+        let low = scored_article(
+            &db,
+            "https://e.com/low",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            30,
+        );
+        let disliked = scored_article(
+            &db,
+            "https://e.com/down",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        db.record_event(owner, disliked, SignalKind::Down, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let unscored = page_article(&db, "https://e.com/new", "2026-09-26T00:00:00.000Z");
+        let old = scored_article(
+            &db,
+            "https://e.com/old",
+            Lang::En,
+            "2026-09-01T00:00:00.000Z",
+            99,
+        );
+        let _ = old;
+
+        assert_eq!(list_ids(&db, false), [high, mid]);
+        let all = list_ids(&db, true);
+        assert_eq!(&all[..4], [disliked, high, mid, low]);
+        assert_eq!(all[4], unscored);
+        assert_eq!(all.len(), 5, "old articles stay hidden");
+
+        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let d = items.iter().find(|i| i.article_id == disliked).unwrap();
+        assert_eq!(d.feedback, Some(Feedback::Down));
+        let h = items.iter().find(|i| i.article_id == high).unwrap();
+        assert_eq!(
+            (h.score, h.title_ja.as_deref(), h.read),
+            (Some(90), Some("題"), false)
+        );
+    }
+
+    #[test]
+    fn list_marks_read_translation_and_locks() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(owner, a, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.request_translation(owner, a, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db.conn()
+            .execute("INSERT INTO article_access VALUES (?1, ?2)", [a, aesj])
+            .unwrap();
+        let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
+        assert!(item.read);
+        assert!(item.translation_requested);
+        assert!(!item.has_translation);
+        assert_eq!(item.locked_by, ["日本原子力学会"]);
+    }
+
+    #[test]
+    fn article_detail_lists_viewable_versions_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        add_digest(&db, a, "opus", "新版", true, "2026-09-26T05:00:00Z");
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({"title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"]});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "fable",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T09:00:00Z"),
+        )
+        .unwrap();
+        let detail = db.article_detail(owner, Some("h1"), a).unwrap().unwrap();
+        let models: Vec<_> = detail.digests.iter().map(|d| d.model.as_str()).collect();
+        assert_eq!(models, ["opus", "sonnet"], "gated version is hidden");
+        assert_eq!(detail.item.title_ja.as_deref(), Some("新版"));
+        assert!(detail.translations.is_empty());
+        assert!(detail.has_body);
+        assert_eq!(db.article_detail(owner, None, 9999).unwrap(), None);
+    }
+
+    #[test]
+    fn warnings_report_failing_sources_and_recent_llm_errors() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_source_success("ok").unwrap();
+        db.record_source_failure("recovered", "old").unwrap();
+        db.record_source_success("recovered").unwrap();
+        db.record_source_failure("nei", "HTTP 403").unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: false,
+                duration_ms: 1,
+                error: Some("Not logged in"),
+                rate_limit: None,
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            matches!(&warnings[0], Warning::SourceFailing { source_id, error, .. }
+            if source_id == "nei" && error == "HTTP 403")
+        );
+        assert!(
+            matches!(&warnings[1], Warning::LlmFailed { error, .. } if error == "Not logged in")
+        );
+        // 失敗の後に成功した呼び出しがあれば、LLM の警告は出さない
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: true,
+                duration_ms: 1,
+                error: None,
+                rate_limit: None,
+            },
+            t("2026-09-27T02:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(db.warnings(t("2026-09-26T00:00:00Z")).unwrap().len(), 1);
     }
 
     #[test]

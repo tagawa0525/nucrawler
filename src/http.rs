@@ -193,7 +193,11 @@ impl Fetcher {
             Ok(f) => Rules::parse(&String::from_utf8_lossy(&f.body), &self.product),
             Err(HttpError::Status { status, .. }) if status.is_client_error() => Rules::allow_all(),
             Err(e) => {
-                tracing::warn!(%origin, "robots.txt unavailable, disallowing: {e}");
+                tracing::warn!(
+                    %origin,
+                    "robots.txt unavailable, disallowing: {}",
+                    crate::errors::error_chain(&e)
+                );
                 Rules::disallow_all()
             }
         }

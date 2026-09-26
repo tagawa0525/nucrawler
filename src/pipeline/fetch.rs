@@ -5,6 +5,7 @@ use super::Cancel;
 use crate::check;
 use crate::config::Source;
 use crate::db::{ContentKind, ContentOrigin, Db, DbError, NewArticle};
+use crate::errors;
 use crate::http::Fetcher;
 use crate::source::Candidate;
 use crate::text;
@@ -46,7 +47,7 @@ pub async fn fetch_sources(
                 summary.new_articles += new;
             }
             Err(e) => {
-                let message = check::error_chain(&e);
+                let message = errors::error_chain(&e);
                 tracing::warn!(source = %s.id, "{message}");
                 db.record_source_failure(&s.id, &message)?;
                 summary.failed_sources.push(s.id.clone());
@@ -84,7 +85,7 @@ fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError
             Ok(Some(_)) => new += 1,
             Ok(None) => {}
             Err(e @ (DbError::InvalidUrl { .. } | DbError::UnsupportedScheme { .. })) => {
-                tracing::warn!(source = %s.id, "skipping candidate: {}", check::error_chain(&e));
+                tracing::warn!(source = %s.id, "skipping candidate: {}", errors::error_chain(&e));
             }
             Err(e) => return Err(e),
         }

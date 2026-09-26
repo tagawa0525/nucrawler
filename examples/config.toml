@@ -8,3 +8,9 @@ per_host_delay_secs = 5
 timeout_secs = 30
 # 応答本文の上限（20 MiB）
 max_body_bytes = 20971520
+
+[pipeline]
+# これより古い記事は本文抽出や LLM 処理の対象にしない
+backlog_days = 14
+# 1 回の実行で本文を抽出する記事数の上限
+extract_max_per_run = 100

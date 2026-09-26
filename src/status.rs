@@ -70,6 +70,7 @@ mod tests {
             category: Category::Industry,
             enabled,
             filter: Filter::default(),
+            body_selector: None,
         }
     }
 

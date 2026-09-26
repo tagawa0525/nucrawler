@@ -93,6 +93,31 @@ pub struct SourceOverview {
     pub last_error_at: Option<String>,
 }
 
+/// DB に書く時刻の書式。SQL の `NOW` と同じく UTC・ミリ秒・'Z' に揃え、文字列の大小で比較できるようにする。
+pub fn timestamp(_t: chrono::DateTime<chrono::Utc>) -> String {
+    todo!()
+}
+
+/// 一時的な失敗の再試行は `MAX_ATTEMPTS` 回まで。間隔は 1 時間から倍々で、最大 7 日。
+pub const MAX_ATTEMPTS: i64 = 5;
+
+/// `stage_errors` の行を特定するキー。LLM を使わないステージは backend と model を "" にする。
+#[derive(Debug, Clone, Copy)]
+pub struct StageKey<'a> {
+    pub article_id: i64,
+    pub stage: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+}
+
+/// 抽出待ちの記事。
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingPage {
+    pub article_id: i64,
+    pub source_id: String,
+    pub url: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SourceState {
     pub last_success_at: Option<String>,
@@ -253,6 +278,34 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。
+    /// そうでなければ試行回数を 1 増やし、次に試してよい時刻を指数的に先へ延ばす。
+    pub fn record_stage_failure(
+        &self,
+        _key: StageKey,
+        _error: &str,
+        _now: chrono::DateTime<chrono::Utc>,
+        _permanent: bool,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// 成功したら失敗の記録を消す。
+    pub fn clear_stage_failure(&self, _key: StageKey) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// 本文（body か fulltext）が無く、`cutoff` 以降に公開（無ければ取得）され、再試行待ちでも
+    /// 断念済みでもない記事を、新しい順に最大 `limit` 件返す。
+    pub fn pending_extract(
+        &self,
+        _cutoff: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
+        _limit: usize,
+    ) -> Result<Vec<PendingPage>, DbError> {
+        todo!()
     }
 
     #[cfg(test)]
@@ -675,6 +728,129 @@ mod tests {
         assert_eq!(ids, [("a", 2), ("b", 0)]);
         assert!(ov[0].last_success_at.is_some());
         assert_eq!(ov[1].last_error.as_deref(), Some("HTTP 403"));
+    }
+
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc()
+    }
+
+    #[test]
+    fn timestamp_matches_sql_now_format() {
+        assert_eq!(
+            timestamp(t("2026-09-27T01:02:03Z")),
+            "2026-09-27T01:02:03.000Z"
+        );
+        let db = Db::open_in_memory().unwrap();
+        let now: String = db
+            .conn()
+            .query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(now.len(), "2026-09-27T01:02:03.000Z".len(), "{now}");
+    }
+
+    fn page_article(db: &Db, url: &str, published: &str) -> i64 {
+        db.insert_article(&NewArticle {
+            published_at: Some(published),
+            ..article(url)
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn pending_ids(db: &Db, now: &str) -> Vec<i64> {
+        db.pending_extract(t("2026-09-10T00:00:00Z"), t(now), 10)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn pending_extract_selects_recent_articles_without_body_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let b = page_article(&db, "https://e.com/b", "2026-09-25T00:00:00.000Z");
+        let with_body = page_article(&db, "https://e.com/c", "2026-09-26T00:00:00.000Z");
+        db.insert_content(with_body, ContentKind::Body, ContentOrigin::Feed, "x")
+            .unwrap();
+        let with_lead = page_article(&db, "https://e.com/d", "2026-09-24T00:00:00.000Z");
+        db.insert_content(with_lead, ContentKind::Lead, ContentOrigin::Feed, "x")
+            .unwrap();
+        let _ = old;
+        assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [b, with_lead, a]);
+        let limited = db
+            .pending_extract(t("2026-09-10T00:00:00Z"), t("2026-09-27T00:00:00Z"), 1)
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].url, "https://e.com/b");
+    }
+
+    #[test]
+    fn transient_failures_back_off_exponentially_then_give_up() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let key = StageKey {
+            article_id: a,
+            stage: "extract",
+            backend: "",
+            model: "",
+        };
+        db.record_stage_failure(key, "HTTP 500", t("2026-09-27T00:00:00Z"), false)
+            .unwrap();
+        // 1 回目の失敗後は 1 時間待つ
+        assert!(pending_ids(&db, "2026-09-27T00:59:00Z").is_empty());
+        assert_eq!(pending_ids(&db, "2026-09-27T01:00:00Z"), [a]);
+        // 2 回目は 2 時間
+        db.record_stage_failure(key, "HTTP 500", t("2026-09-27T01:00:00Z"), false)
+            .unwrap();
+        assert!(pending_ids(&db, "2026-09-27T02:59:00Z").is_empty());
+        assert_eq!(pending_ids(&db, "2026-09-27T03:00:00Z"), [a]);
+        // 上限に達したら断念する
+        for _ in 2..MAX_ATTEMPTS {
+            db.record_stage_failure(key, "HTTP 500", t("2026-09-27T03:00:00Z"), false)
+                .unwrap();
+        }
+        assert!(pending_ids(&db, "2026-12-31T00:00:00Z").is_empty());
+        let err: String = db
+            .conn()
+            .query_row("SELECT last_error FROM stage_errors", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(err, "HTTP 500");
+    }
+
+    #[test]
+    fn permanent_failure_is_not_retried_and_success_clears() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let b = page_article(&db, "https://e.com/b", "2026-09-21T00:00:00.000Z");
+        let key = |article_id| StageKey {
+            article_id,
+            stage: "extract",
+            backend: "",
+            model: "",
+        };
+        db.record_stage_failure(key(a), "robots", t("2026-09-27T00:00:00Z"), true)
+            .unwrap();
+        db.record_stage_failure(key(b), "HTTP 500", t("2026-09-27T00:00:00Z"), false)
+            .unwrap();
+        db.clear_stage_failure(key(b)).unwrap();
+        assert_eq!(pending_ids(&db, "2026-12-31T00:00:00Z"), [b]);
+    }
+
+    #[test]
+    fn failures_of_other_stages_do_not_block_extract() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let key = StageKey {
+            article_id: a,
+            stage: "digest",
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        db.record_stage_failure(key, "x", t("2026-09-27T00:00:00Z"), true)
+            .unwrap();
+        assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [a]);
     }
 
     #[test]

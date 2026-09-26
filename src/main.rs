@@ -138,6 +138,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
+            Stage::Extract => todo!("extract stage"),
         }
     }
     if cancel.is_requested() {

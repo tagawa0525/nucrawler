@@ -371,7 +371,8 @@ impl Db {
                 timestamp(cutoff),
                 MAX_ATTEMPTS,
                 timestamp(now),
-                limit as i64
+                // 負の LIMIT は SQLite では無制限になるので、桁あふれさせずに丸める
+                i64::try_from(limit).unwrap_or(i64::MAX)
             ],
             |r| {
                 Ok(PendingPage {

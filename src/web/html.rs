@@ -79,9 +79,15 @@ fn warning_banner(w: &Warning) -> String {
             crate::jst::format_local(at),
             escape(error)
         ),
+        // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
+        Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
+            "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",
+            crate::jst::format_local(at),
+        ),
         Warning::LlmFailed { error, at } => {
             // 認証切れは利用者にしか直せないので、対処を案内する
-            let hint = if error.contains("logged in") || error.contains("authenticat") {
+            let lower = error.to_lowercase();
+            let hint = if lower.contains("logged in") || lower.contains("authenticat") {
                 "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
             } else {
                 ""
@@ -121,7 +127,7 @@ pub fn list_page(
 }
 
 fn card(i: &ListItem) -> String {
-    let title = i.title_ja.as_deref().unwrap_or(&i.title);
+    let title = display_title(i.title_ja.as_deref(), i);
     let score = i
         .score
         .map_or_else(String::new, |s| format!("<span class=\"score\">{s}</span>"));
@@ -152,6 +158,14 @@ fn card(i: &ListItem) -> String {
     )
 }
 
+/// 見出し。空だとリンクが押せなくなるので、和文の見出し、原題、URL の順に空でないものを使う。
+fn display_title<'a>(title_ja: Option<&'a str>, i: &'a ListItem) -> &'a str {
+    [title_ja.unwrap_or(""), &i.title]
+        .into_iter()
+        .find(|t| !t.trim().is_empty())
+        .unwrap_or(&i.url)
+}
+
 /// 詳細画面の表示の選択。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DetailView {
@@ -174,7 +188,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) ->
             .and_then(|x| x.payload[key].as_str())
             .map(str::to_string)
     };
-    let title = field("title_ja").unwrap_or_else(|| i.title.clone());
+    let title = display_title(field("title_ja").as_deref(), i).to_string();
     let mut body = format!(
         "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>{}</h1>",
         escape(&title)

@@ -28,12 +28,12 @@ let
         [
           bin
           "crawl"
+          # 停止明けに Persistent の timer が同時に動いても、見送らずに順に実行する
+          "--wait-lock"
         ]
         ++ args
       );
       Environment = [ "PATH=${path}" ];
-      # 別の crawl が実行中（EX_TEMPFAIL）なら今回は見送る。失敗扱いにしない
-      SuccessExitStatus = 75;
     };
   };
 

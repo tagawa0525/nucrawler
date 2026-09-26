@@ -404,6 +404,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_wait_lock() {
+        assert!(!parse_crawl_args(&[]).unwrap().wait_lock);
+        let parsed = parse_crawl_args(&args(&["--wait-lock", "--requests-only"])).unwrap();
+        assert!(parsed.wait_lock && parsed.requests_only);
+    }
+
+    #[test]
     fn parses_requests_only() {
         let parsed = parse_crawl_args(&args(&["--requests-only"])).unwrap();
         assert!(parsed.requests_only);

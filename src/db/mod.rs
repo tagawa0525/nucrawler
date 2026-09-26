@@ -40,6 +40,30 @@ pub struct NewArticle<'a> {
     pub published_at: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    Lead,
+    Body,
+    Abstract,
+    Fulltext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentOrigin {
+    Feed,
+    Page,
+    Pdf,
+    Upload,
+    Login,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourceState {
+    pub last_success_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self, DbError> {
         let conn = Connection::open(path)?;
@@ -83,6 +107,43 @@ impl Db {
             rusqlite::params![a.source_id, url, a.title, lang, a.published_at],
         )?;
         Ok((inserted > 0).then(|| self.conn.last_insert_rowid()))
+    }
+
+    /// 公開の本文の部分を登録する。会員限定の部分はログイン取得の実装時に別の関数で扱う。
+    pub fn insert_content(
+        &self,
+        _article_id: i64,
+        _kind: ContentKind,
+        _origin: ContentOrigin,
+        _text: &str,
+    ) -> Result<i64, DbError> {
+        todo!()
+    }
+
+    /// 取得に成功した時刻を記録する。直前のエラーは消す。
+    pub fn record_source_success(&self, _source_id: &str) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// 取得の失敗を記録する。最後に成功した時刻は残す。
+    pub fn record_source_failure(&self, _source_id: &str, _error: &str) -> Result<(), DbError> {
+        todo!()
+    }
+
+    pub fn source_state(&self, _source_id: &str) -> Result<Option<SourceState>, DbError> {
+        todo!()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_i64(&self, sql: &str) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_strings(&self, sql: &str) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     #[cfg(test)]
@@ -430,6 +491,47 @@ mod tests {
                 assert_eq!(version, MIGRATIONS.len() as i64);
             }
         }
+    }
+
+    #[test]
+    fn inserts_public_content() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        db.insert_content(a, ContentKind::Lead, ContentOrigin::Feed, "概要")
+            .unwrap();
+        let rows = db
+            .query_strings(
+                "SELECT kind || '|' || origin || '|' || coalesce(access_membership_id, 'public')
+                        || '|' || text || '|' || (fetched_at LIKE '____-__-__T__:__:__%Z')
+                 FROM contents",
+            )
+            .unwrap();
+        assert_eq!(rows, ["lead|feed|public|概要|1"]);
+    }
+
+    #[test]
+    fn records_source_success_and_failure() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.source_state("s").unwrap(), None);
+
+        db.record_source_failure("s", "HTTP 403").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert_eq!(st.last_error.as_deref(), Some("HTTP 403"));
+        assert!(st.last_error_at.is_some());
+        assert!(st.last_success_at.is_none());
+
+        db.record_source_success("s").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert!(st.last_success_at.is_some());
+        assert_eq!((st.last_error, st.last_error_at), (None, None));
+
+        db.record_source_failure("s", "timeout").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert!(st.last_success_at.is_some(), "last success is kept");
+        assert_eq!(st.last_error.as_deref(), Some("timeout"));
     }
 
     #[test]

@@ -58,6 +58,8 @@ pub struct Fetcher {
     /// オリジンごとの robots.txt の規則。マップのロックは表の出し入れの間だけ持ち、
     /// 取得はオリジンごとの OnceCell で一度だけ行う（遅いオリジンが他を止めない）。
     /// `None` は robots.txt を取得できなかった（5xx や通信エラー）ことを表す。
+    /// `Fetcher` は crawl 1 回の間だけ使うので、取得できなかった結果もその間はキャッシュし、
+    /// 同じ実行で何度も取りに行かない。再試行は次回以降の実行（新しいキャッシュ）で行われる。
     robots: Mutex<HashMap<String, Arc<OnceCell<Option<Rules>>>>>,
     /// ホストごとの、次にアクセスしてよい時刻
     next_allowed: Mutex<HashMap<String, Instant>>,

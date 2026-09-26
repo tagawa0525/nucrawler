@@ -288,13 +288,14 @@ impl Db {
 
     /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。
     /// そうでなければ試行回数を 1 増やし、次に試してよい時刻を指数的に先へ延ばす。
+    /// 以後は再試行しない（断念した）なら `true` を返す。
     pub fn record_stage_failure(
         &self,
         key: StageKey,
         error: &str,
         now: chrono::DateTime<chrono::Utc>,
         permanent: bool,
-    ) -> Result<(), DbError> {
+    ) -> Result<bool, DbError> {
         use rusqlite::OptionalExtension;
         let tx = self.conn.unchecked_transaction()?;
         let previous: i64 = tx
@@ -330,7 +331,7 @@ impl Db {
             ],
         )?;
         tx.commit()?;
-        Ok(())
+        Ok(attempts >= MAX_ATTEMPTS)
     }
 
     /// 成功したら失敗の記録を消す。

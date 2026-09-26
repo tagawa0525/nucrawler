@@ -72,9 +72,9 @@ pub async fn extract_pages(
             Err(failure) => {
                 let message = errors::error_chain(&failure);
                 let permanent = failure.is_permanent();
-                tracing::warn!(url = %page.url, permanent, "extract failed: {message}");
-                db.record_stage_failure(key, &message, now, permanent)?;
-                if permanent {
+                let gave_up = db.record_stage_failure(key, &message, now, permanent)?;
+                tracing::warn!(url = %page.url, gave_up, "extract failed: {message}");
+                if gave_up {
                     summary.gave_up += 1;
                 } else {
                     summary.failed += 1;

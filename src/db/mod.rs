@@ -34,6 +34,7 @@ pub enum DbError {
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_membership_code_check.sql"),
+    include_str!("migrations/0003_last_seen.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -279,6 +280,109 @@ pub struct RedoKey<'a> {
     pub backend: &'a str,
     pub model: &'a str,
     pub prompt_version: i64,
+}
+
+/// 利用者の最新の 👍/👎。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feedback {
+    Up,
+    Down,
+}
+
+/// 一覧の 1 行。digest は利用者が閲覧できる最新の版。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListItem {
+    pub article_id: i64,
+    pub source_id: String,
+    pub url: String,
+    pub title: String,
+    pub lang: String,
+    /// 公開日時（無ければ取得日時）
+    pub at: String,
+    pub fetched_at: String,
+    pub title_ja: Option<String>,
+    pub summary_ja: Option<String>,
+    pub lwr_relevant: Option<bool>,
+    /// 現在のプロファイルでの点数（最新の digest に付いたもの）
+    pub score: Option<u8>,
+    pub reason: Option<String>,
+    /// 詳細か和訳を開いたことがある
+    pub read: bool,
+    pub feedback: Option<Feedback>,
+    pub has_translation: bool,
+    pub translation_requested: bool,
+    /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
+    pub locked_by: Vec<String>,
+}
+
+/// 一覧の条件。
+#[derive(Debug, Clone, Copy)]
+pub struct ListQuery<'a> {
+    pub user_id: i64,
+    pub profile_hash: Option<&'a str>,
+    /// `show_all` でないときに表示する最低点
+    pub min_score: u8,
+    /// これ以降に公開（無ければ取得）された記事
+    pub since: chrono::DateTime<chrono::Utc>,
+    /// 👎、閾値未満、未採点、非軽水炉の記事も表示する
+    pub show_all: bool,
+    pub limit: usize,
+}
+
+/// 成果物の 1 版。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArtifactVersion {
+    pub id: i64,
+    pub backend: String,
+    pub model: String,
+    pub prompt_version: i64,
+    pub created_at: String,
+    pub payload: serde_json::Value,
+}
+
+/// 詳細画面の内容。版は新しい順で、利用者が閲覧できるものだけ。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArticleDetail {
+    pub item: ListItem,
+    pub digests: Vec<ArtifactVersion>,
+    pub translations: Vec<ArtifactVersion>,
+    /// 和訳の依頼に使える公開の本文がある
+    pub has_body: bool,
+}
+
+/// 画面の上部に出す警告。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warning {
+    /// 最後の取得が失敗している（最後の成功より新しい失敗がある）ソース
+    SourceFailing {
+        source_id: String,
+        error: String,
+        at: String,
+    },
+    /// 直近の LLM の呼び出しが失敗している
+    LlmFailed { error: String, at: String },
+}
+
+/// `query_items` の範囲：1 件（詳細）か、条件つきの一覧。
+enum ItemScope {
+    One(i64),
+    List {
+        since: chrono::DateTime<chrono::Utc>,
+        show_all: bool,
+        min_score: u8,
+        limit: usize,
+    },
+}
+
+/// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
+fn viewable(alias: &str) -> String {
+    format!(
+        "NOT EXISTS (
+           SELECT 1 FROM artifact_access AS aa
+           WHERE aa.artifact_id = {alias}.id
+             AND aa.membership_id NOT IN (
+               SELECT membership_id FROM user_memberships WHERE user_id = :user))"
+    )
 }
 
 /// 入力に使う本文の部分の範囲。
@@ -1144,6 +1248,265 @@ impl Db {
                 })
             })
             .collect()
+    }
+
+    /// 一覧を見た時刻を記録し、その前に見た時刻（初回は None）を返す。
+    pub fn touch_last_seen(
+        &self,
+        user_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<String>, DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT last_seen_at FROM users WHERE id = ?1",
+            [user_id],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "UPDATE users SET last_seen_at = ?2 WHERE id = ?1",
+            rusqlite::params![user_id, timestamp(now)],
+        )?;
+        tx.commit()?;
+        Ok(previous)
+    }
+
+    /// 一覧。点数の高い順（未採点は後ろ）、同点なら新しい順。
+    pub fn list_articles(&self, q: ListQuery) -> Result<Vec<ListItem>, DbError> {
+        self.query_items(
+            q.user_id,
+            q.profile_hash,
+            ItemScope::List {
+                since: q.since,
+                show_all: q.show_all,
+                min_score: q.min_score,
+                limit: q.limit,
+            },
+        )
+    }
+
+    /// 詳細画面の内容。記事が無ければ None。
+    pub fn article_detail(
+        &self,
+        user_id: i64,
+        profile_hash: Option<&str>,
+        article_id: i64,
+    ) -> Result<Option<ArticleDetail>, DbError> {
+        let Some(item) = self
+            .query_items(user_id, profile_hash, ItemScope::One(article_id))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let has_body = !self
+            .public_contents(article_id, ContentSet::Body)?
+            .is_empty();
+        Ok(Some(ArticleDetail {
+            digests: self.versions(user_id, article_id, ArtifactKind::Digest)?,
+            translations: self.versions(user_id, article_id, ArtifactKind::Translation)?,
+            item,
+            has_body,
+        }))
+    }
+
+    /// 利用者が閲覧できる版を新しい順に。
+    fn versions(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: ArtifactKind,
+    ) -> Result<Vec<ArtifactVersion>, DbError> {
+        let sql = format!(
+            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload
+             FROM artifacts AS r
+             WHERE r.article_id = :article AND r.kind = :kind AND {}
+             ORDER BY r.created_at DESC, r.id DESC",
+            viewable("r")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":article": article_id,
+                ":kind": kind.as_str(),
+                ":user": user_id,
+            },
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (id, backend, model, prompt_version, created_at, payload) = row?;
+            Ok(ArtifactVersion {
+                id,
+                backend,
+                model,
+                prompt_version,
+                created_at,
+                payload: serde_json::from_str(&payload)?,
+            })
+        })
+        .collect()
+    }
+
+    /// 一覧・詳細に共通の行の組み立て。
+    fn query_items(
+        &self,
+        user_id: i64,
+        profile_hash: Option<&str>,
+        scope: ItemScope,
+    ) -> Result<Vec<ListItem>, DbError> {
+        let (id, since, show_all, min_score, limit) = match scope {
+            ItemScope::One(id) => (Some(id), None, true, 0, 1),
+            ItemScope::List {
+                since,
+                show_all,
+                min_score,
+                limit,
+            } => (None, Some(since), show_all, min_score, limit),
+        };
+        let sql = format!(
+            "WITH items AS (
+               SELECT a.id, a.source_id, a.url, a.title, a.lang,
+                      coalesce(a.published_at, a.fetched_at) AS at, a.fetched_at,
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable_r}
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+               FROM articles AS a
+               WHERE (:id IS NULL OR a.id = :id)
+                 AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
+             ),
+             rows AS (
+               SELECT i.*, d.title_ja, d.summary_ja,
+                      json_extract(d.payload, '$.lwr_relevant') AS relevant,
+                      (SELECT s.id FROM scores AS s
+                       WHERE s.user_id = :user AND s.profile_hash = :profile
+                         AND s.artifact_id = i.digest_id
+                       -- 複数のモデルの採点があれば、先回り和訳と同じく最高点を使う
+                       ORDER BY s.score DESC, s.created_at DESC, s.id DESC LIMIT 1) AS score_id,
+                      EXISTS (
+                        SELECT 1 FROM events AS e
+                        WHERE e.user_id = :user AND e.article_id = i.id
+                          AND e.kind IN ('open_detail', 'open_translation')) AS read,
+                      (SELECT e.kind FROM events AS e
+                       WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
+                       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
+                      EXISTS (
+                        SELECT 1 FROM artifacts AS t
+                        WHERE t.article_id = i.id AND t.kind = 'translation' AND {viewable_t})
+                        AS has_translation,
+                      EXISTS (
+                        SELECT 1 FROM translation_requests AS tr
+                        WHERE tr.user_id = :user AND tr.article_id = i.id AND tr.done_at IS NULL)
+                        AS requested,
+                      -- 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒）
+                      (SELECT json_group_array(name) FROM (
+                         SELECT m.name FROM article_access AS aa
+                         JOIN memberships AS m ON m.id = aa.membership_id
+                         WHERE aa.article_id = i.id
+                           AND aa.membership_id NOT IN (
+                             SELECT membership_id FROM user_memberships WHERE user_id = :user)
+                         ORDER BY m.name)) AS locked_by
+               FROM items AS i
+               LEFT JOIN artifacts AS d ON d.id = i.digest_id
+             )
+             SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
+                    rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
+                    s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
+                    rows.requested, rows.locked_by
+             FROM rows
+             LEFT JOIN scores AS s ON s.id = rows.score_id
+             -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
+             WHERE :all = 1
+                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min)
+             ORDER BY s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC
+             LIMIT :limit",
+            viewable_r = viewable("r"),
+            viewable_t = viewable("t"),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":id": id,
+                ":since": since.map(timestamp),
+                ":user": user_id,
+                ":profile": profile_hash,
+                ":all": show_all,
+                ":min": min_score,
+                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+            },
+            |r| {
+                let feedback: Option<String> = r.get(13)?;
+                let item = ListItem {
+                    article_id: r.get(0)?,
+                    source_id: r.get(1)?,
+                    url: r.get(2)?,
+                    title: r.get(3)?,
+                    lang: r.get(4)?,
+                    at: r.get(5)?,
+                    fetched_at: r.get(6)?,
+                    title_ja: r.get(7)?,
+                    summary_ja: r.get(8)?,
+                    lwr_relevant: r.get(9)?,
+                    score: r.get(10)?,
+                    reason: r.get(11)?,
+                    read: r.get(12)?,
+                    feedback: match feedback.as_deref() {
+                        Some("up") => Some(Feedback::Up),
+                        Some("down") => Some(Feedback::Down),
+                        _ => None,
+                    },
+                    has_translation: r.get(14)?,
+                    translation_requested: r.get(15)?,
+                    locked_by: Vec::new(),
+                };
+                Ok((item, r.get::<_, String>(16)?))
+            },
+        )?;
+        rows.map(|row| {
+            let (mut item, locked_by) = row?;
+            item.locked_by = serde_json::from_str(&locked_by)?;
+            Ok(item)
+        })
+        .collect()
+    }
+
+    /// 取得に失敗し続けているソースと、`since` 以降の直近の LLM の失敗。
+    pub fn warnings(&self, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Warning>, DbError> {
+        use rusqlite::OptionalExtension;
+        // 取得に成功するとエラーは消えるので、残っているエラーは今も失敗しているもの
+        let mut stmt = self.conn.prepare(
+            "SELECT source_id, last_error, last_error_at FROM source_state
+             WHERE last_error IS NOT NULL ORDER BY source_id",
+        )?;
+        let mut warnings = stmt
+            .query_map([], |r| {
+                Ok(Warning::SourceFailing {
+                    source_id: r.get(0)?,
+                    error: r.get(1)?,
+                    at: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let latest: Option<(bool, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT ok, error, at FROM llm_calls WHERE at >= ?1
+                 ORDER BY at DESC, id DESC LIMIT 1",
+                [timestamp(since)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((false, Some(error), at)) = latest {
+            warnings.push(Warning::LlmFailed { error, at });
+        }
+        Ok(warnings)
     }
 
     #[cfg(test)]
@@ -2999,6 +3362,284 @@ mod tests {
         };
         assert!(ids("sonnet").is_empty());
         assert_eq!(ids("opus"), [en]);
+    }
+
+    fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
+        ListQuery {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            min_score: 60,
+            since: t("2026-09-20T00:00:00Z"),
+            show_all,
+            limit: 50,
+        }
+    }
+
+    fn list_ids(db: &Db, show_all: bool) -> Vec<i64> {
+        db.list_articles(list_query(db, show_all))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn touch_last_seen_returns_previous_visit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.touch_last_seen(owner, t("2026-09-27T00:00:00Z"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.touch_last_seen(owner, t("2026-09-27T12:00:00Z"))
+                .unwrap()
+                .as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn list_orders_by_score_and_hides_unwanted_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let high = scored_article(
+            &db,
+            "https://e.com/high",
+            Lang::En,
+            "2026-09-25T00:00:00.000Z",
+            90,
+        );
+        let mid = scored_article(
+            &db,
+            "https://e.com/mid",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            70,
+        );
+        let low = scored_article(
+            &db,
+            "https://e.com/low",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            30,
+        );
+        let disliked = scored_article(
+            &db,
+            "https://e.com/down",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        db.record_event(owner, disliked, SignalKind::Down, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let unscored = page_article(&db, "https://e.com/new", "2026-09-26T00:00:00.000Z");
+        let old = scored_article(
+            &db,
+            "https://e.com/old",
+            Lang::En,
+            "2026-09-01T00:00:00.000Z",
+            99,
+        );
+        let _ = old;
+
+        assert_eq!(list_ids(&db, false), [high, mid]);
+        let all = list_ids(&db, true);
+        assert_eq!(&all[..4], [disliked, high, mid, low]);
+        assert_eq!(all[4], unscored);
+        assert_eq!(all.len(), 5, "old articles stay hidden");
+
+        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let d = items.iter().find(|i| i.article_id == disliked).unwrap();
+        assert_eq!(d.feedback, Some(Feedback::Down));
+        let h = items.iter().find(|i| i.article_id == high).unwrap();
+        assert_eq!(
+            (h.score, h.title_ja.as_deref(), h.read),
+            (Some(90), Some("題"), false)
+        );
+    }
+
+    #[test]
+    fn list_marks_read_translation_and_locks() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(owner, a, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.request_translation(owner, a, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db.conn()
+            .execute("INSERT INTO article_access VALUES (?1, ?2)", [a, aesj])
+            .unwrap();
+        let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
+        assert!(item.read);
+        assert!(item.translation_requested);
+        assert!(!item.has_translation);
+        assert_eq!(item.locked_by, ["日本原子力学会"]);
+    }
+
+    #[test]
+    fn article_detail_lists_viewable_versions_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        add_digest(&db, a, "opus", "新版", true, "2026-09-26T05:00:00Z");
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({"title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"]});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "fable",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T09:00:00Z"),
+        )
+        .unwrap();
+        let detail = db.article_detail(owner, Some("h1"), a).unwrap().unwrap();
+        let models: Vec<_> = detail.digests.iter().map(|d| d.model.as_str()).collect();
+        assert_eq!(models, ["opus", "sonnet"], "gated version is hidden");
+        assert_eq!(detail.item.title_ja.as_deref(), Some("新版"));
+        assert!(detail.translations.is_empty());
+        assert!(detail.has_body);
+        assert_eq!(db.article_detail(owner, None, 9999).unwrap(), None);
+    }
+
+    #[test]
+    fn warnings_report_failing_sources_and_recent_llm_errors() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_source_success("ok").unwrap();
+        db.record_source_failure("recovered", "old").unwrap();
+        db.record_source_success("recovered").unwrap();
+        db.record_source_failure("nei", "HTTP 403").unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: false,
+                duration_ms: 1,
+                error: Some("Not logged in"),
+                rate_limit: None,
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            matches!(&warnings[0], Warning::SourceFailing { source_id, error, .. }
+            if source_id == "nei" && error == "HTTP 403")
+        );
+        assert!(
+            matches!(&warnings[1], Warning::LlmFailed { error, .. } if error == "Not logged in")
+        );
+        // 失敗の後に成功した呼び出しがあれば、LLM の警告は出さない
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: true,
+                duration_ms: 1,
+                error: None,
+                rate_limit: None,
+            },
+            t("2026-09-27T02:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(db.warnings(t("2026-09-26T00:00:00Z")).unwrap().len(), 1);
+    }
+
+    /// 同じ digest に複数のモデルの採点があれば、先回り和訳と同じく最高点を使う。
+    #[test]
+    fn list_uses_highest_score_across_scorers() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let digest: i64 = db
+            .conn()
+            .query_row("SELECT id FROM artifacts WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db.insert_score(
+            ScoreKey {
+                user_id: db.owner_id().unwrap(),
+                profile_hash: "h1",
+                backend: "claude-cli",
+                model: "haiku",
+            },
+            digest,
+            50,
+            Some("低い"),
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
+        assert_eq!(item.score, Some(90));
+    }
+
+    /// 「最新の呼び出し」は記録の順ではなく、呼び出した時刻で決める。
+    #[test]
+    fn warnings_use_call_time_not_insertion_order() {
+        let db = Db::open_in_memory().unwrap();
+        let call = |ok: bool| LlmCall {
+            stage: "digest",
+            backend: "claude-cli",
+            model: "sonnet",
+            n_items: 1,
+            ok,
+            duration_ms: 1,
+            error: (!ok).then_some("Not logged in"),
+            rate_limit: None,
+        };
+        db.record_llm_call(&call(false), t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        // 古い成功が後から記録された
+        db.record_llm_call(&call(true), t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        assert!(
+            matches!(&warnings[..], [Warning::LlmFailed { .. }]),
+            "{warnings:?}"
+        );
     }
 
     #[test]

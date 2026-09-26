@@ -1,0 +1,8 @@
+# nucrawler の設定。$XDG_CONFIG_HOME/nucrawler/config.toml に置く。
+# 省略した項目は既定値になる。
+
+[http]
+user_agent = "nucrawler/0.1 (+https://github.com/tagawa0525/nucrawler)"
+# 同じホストへの連続アクセスの間隔
+per_host_delay_secs = 5
+timeout_secs = 30

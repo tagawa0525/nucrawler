@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,16 @@ pub struct HttpConfig {
 
 impl Default for HttpConfig {
     fn default() -> Self {
-        todo!()
+        Self {
+            user_agent: concat!(
+                "nucrawler/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/tagawa0525/nucrawler)"
+            )
+            .to_string(),
+            per_host_delay_secs: 5,
+            timeout_secs: 30,
+        }
     }
 }
 
@@ -102,22 +112,62 @@ pub struct Filter {
     pub url_contains: Vec<String>,
 }
 
-pub fn parse_config(_text: &str, _path: &Path) -> Result<Config, ConfigError> {
-    todo!()
+pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
+    parse_toml(text, path)
 }
 
-pub fn parse_sources(_text: &str, _path: &Path) -> Result<Sources, ConfigError> {
-    todo!()
+pub fn parse_sources(text: &str, path: &Path) -> Result<Sources, ConfigError> {
+    let sources: Sources = parse_toml(text, path)?;
+    let mut seen = HashSet::new();
+    for s in &sources.sources {
+        if !seen.insert(s.id.as_str()) {
+            return Err(ConfigError::DuplicateSourceId {
+                path: path.to_path_buf(),
+                id: s.id.clone(),
+            });
+        }
+    }
+    Ok(sources)
+}
+
+fn parse_toml<T: serde::de::DeserializeOwned>(text: &str, path: &Path) -> Result<T, ConfigError> {
+    toml::from_str(text).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// `dir` の config.toml（無ければ既定値）と sources.toml（必須）を読む。
-pub fn load(_dir: &Path) -> Result<(Config, Sources), ConfigError> {
-    todo!()
+pub fn load(dir: &Path) -> Result<(Config, Sources), ConfigError> {
+    let config_path = dir.join("config.toml");
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(text) => parse_config(&text, &config_path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: config_path,
+                source,
+            });
+        }
+    };
+    let sources_path = dir.join("sources.toml");
+    let text = std::fs::read_to_string(&sources_path).map_err(|source| ConfigError::Read {
+        path: sources_path.clone(),
+        source,
+    })?;
+    let sources = parse_sources(&text, &sources_path)?;
+    Ok((config, sources))
 }
 
 /// `$XDG_CONFIG_HOME/nucrawler`、無ければ `$HOME/.config/nucrawler`。
-pub fn default_dir(_env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, ConfigError> {
-    todo!()
+pub fn default_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, ConfigError> {
+    let non_empty = |k| env(k).filter(|v: &OsString| !v.is_empty());
+    let base = match (non_empty("XDG_CONFIG_HOME"), non_empty("HOME")) {
+        (Some(xdg), _) => PathBuf::from(xdg),
+        (None, Some(home)) => PathBuf::from(home).join(".config"),
+        (None, None) => return Err(ConfigError::NoConfigDir),
+    };
+    Ok(base.join("nucrawler"))
 }
 
 #[cfg(test)]

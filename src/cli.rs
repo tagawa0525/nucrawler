@@ -6,6 +6,8 @@ pub enum ParseError {
     UnknownCommand(String),
     #[error("option {0} requires a value")]
     MissingValue(&'static str),
+    #[error("usage: nucrawler sources check [ID]")]
+    SourcesUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -76,6 +78,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
     })
 }
 
+/// `sources` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SourcesArgs {
+    /// `sources check [ID]`
+    Check { id: Option<String> },
+}
+
+pub fn parse_sources_args(_args: &[String]) -> Result<SourcesArgs, ParseError> {
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +156,28 @@ mod tests {
             matches!(err, ParseError::MissingValue("--config-dir")),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parses_sources_check() {
+        assert_eq!(
+            parse_sources_args(&args(&["check"])).unwrap(),
+            SourcesArgs::Check { id: None }
+        );
+        assert_eq!(
+            parse_sources_args(&args(&["check", "nrc-news"])).unwrap(),
+            SourcesArgs::Check {
+                id: Some("nrc-news".into())
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_sources_args() {
+        for bad in [&[][..], &["list"][..], &["check", "a", "b"][..]] {
+            let err = parse_sources_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::SourcesUsage), "{bad:?}: {err}");
+        }
     }
 
     #[test]

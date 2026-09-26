@@ -315,6 +315,22 @@ mod tests {
         assert!(quota(usage(0.1, 0.05, now, 0.0)).permit(now).is_ok());
     }
 
+    /// 応答に含まれない枠は、それまでの値を残す。
+    #[test]
+    fn record_call_keeps_windows_missing_from_response() {
+        let now = jst("2026-09-28T10:30:00");
+        let mut q = Quota::new(
+            QuotaConfig::default(),
+            Some(usage(0.1, 0.71, now, 6.9)),
+            None,
+        );
+        q.record_call(Some(RateLimit {
+            five_hour: window(0.2, now + chrono::Duration::hours(2)),
+            seven_day: None,
+        }));
+        assert!(matches!(q.permit(now), Err(Stop::Weekly { .. })));
+    }
+
     #[test]
     fn stops_after_max_calls_and_observes_new_usage() {
         let now = jst("2026-09-28T10:30:00");

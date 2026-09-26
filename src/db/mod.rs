@@ -35,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_membership_code_check.sql"),
     include_str!("migrations/0003_last_seen.sql"),
+    include_str!("migrations/0004_visit_boundary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1250,24 +1251,32 @@ impl Db {
             .collect()
     }
 
-    /// 一覧を見た時刻を記録し、その前に見た時刻（初回は None）を返す。
-    pub fn touch_last_seen(
+    /// 一覧を見た時刻を記録し、この訪問の区切り（前の訪問で最後に見た時刻。初回は None）を返す。
+    /// 最後に見てから `gap` 以内の閲覧は同じ訪問とみなし、区切りを変えない。
+    pub fn begin_visit(
         &self,
         user_id: i64,
         now: chrono::DateTime<chrono::Utc>,
+        gap: chrono::Duration,
     ) -> Result<Option<String>, DbError> {
         let tx = self.conn.unchecked_transaction()?;
-        let previous: Option<String> = tx.query_row(
-            "SELECT last_seen_at FROM users WHERE id = ?1",
+        let (last_seen, boundary): (Option<String>, Option<String>) = tx.query_row(
+            "SELECT last_seen_at, visit_boundary_at FROM users WHERE id = ?1",
             [user_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
+        let boundary = match last_seen {
+            // 時刻はどれも timestamp() の書式なので、文字列の比較で前後がわかる
+            Some(last) if last < timestamp(now - gap) => Some(last),
+            Some(_) => boundary,
+            None => None,
+        };
         tx.execute(
-            "UPDATE users SET last_seen_at = ?2 WHERE id = ?1",
-            rusqlite::params![user_id, timestamp(now)],
+            "UPDATE users SET last_seen_at = ?2, visit_boundary_at = ?3 WHERE id = ?1",
+            rusqlite::params![user_id, timestamp(now), boundary],
         )?;
         tx.commit()?;
-        Ok(previous)
+        Ok(boundary)
     }
 
     /// 一覧。点数の高い順（未採点は後ろ）、同点なら新しい順。

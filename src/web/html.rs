@@ -18,18 +18,18 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// 一覧を「前回見てから届いた記事」と「それより前の未読の記事」に分ける。
-/// `last_seen` が無ければ（初回）、すべてを前者にする。
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
+/// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
-    last_seen: Option<&str>,
+    boundary: Option<&str>,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
-    let Some(last_seen) = last_seen else {
+    let Some(boundary) = boundary else {
         return (items, Vec::new());
     };
     let (new, earlier): (Vec<_>, Vec<_>) = items
         .into_iter()
-        .partition(|i| i.fetched_at.as_str() > last_seen);
+        .partition(|i| i.fetched_at.as_str() > boundary);
     (new, earlier.into_iter().filter(|i| !i.read).collect())
 }
 

@@ -426,6 +426,56 @@ mod tests {
         assert!(!paths.contains(&"/mine/x".to_string()), "{paths:?}");
     }
 
+    /// 許可されたページから禁止されたページへの転送もたどらない。
+    #[tokio::test]
+    async fn get_page_checks_robots_for_each_redirect_target() {
+        let server = Server::start(
+            [
+                (
+                    "/robots.txt",
+                    Route::ok("User-agent: *\nDisallow: /private/\n"),
+                ),
+                ("/public", Route::redirect("/private/x")),
+                ("/private/x", Route::ok("secret")),
+            ]
+            .into(),
+        );
+        let err = fetcher(Duration::ZERO)
+            .get_page(&url(&server.url("/public")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::DisallowedByRobots { .. }), "{err}");
+        let paths: Vec<_> = server.requests().into_iter().map(|r| r.path).collect();
+        assert!(!paths.contains(&"/private/x".to_string()), "{paths:?}");
+    }
+
+    /// 遅い robots.txt を待つ間も、別のオリジンの取得は止めない。
+    #[tokio::test]
+    async fn slow_robots_txt_does_not_block_other_origins() {
+        let slow_robots = Route {
+            delay: Duration::from_millis(1500),
+            ..Route::ok("User-agent: *\nAllow: /\n")
+        };
+        let slow = Server::start([("/robots.txt", slow_robots), ("/a", Route::ok("a"))].into());
+        let fast = Server::start([("/b", Route::ok("b"))].into());
+        let f = Fetcher::new("t", Duration::from_secs(3), Duration::ZERO, 1024).unwrap();
+        let (slow_url, fast_url) = (url(&slow.url("/a")), url(&fast.url("/b")));
+        let started = tokio::time::Instant::now();
+        let slow_task = f.get_page(&slow_url);
+        let fast_task = async {
+            // 遅い側が robots.txt の取得を始めてから呼ぶ
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            f.get_page(&fast_url).await.unwrap();
+            started.elapsed()
+        };
+        let (slow_result, fast_elapsed) = tokio::join!(slow_task, fast_task);
+        slow_result.unwrap();
+        assert!(
+            fast_elapsed < Duration::from_millis(1000),
+            "{fast_elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn missing_robots_txt_allows_everything() {
         let server = Server::start([("/a", Route::ok("a"))].into());

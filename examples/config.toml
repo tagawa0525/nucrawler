@@ -24,6 +24,9 @@ timeout_secs = 300
 digest_model = "sonnet"
 digest_batch_size = 5
 max_input_chars = 6000
+# 採点に使うモデルと、1 回の呼び出しで採点する記事数
+score_model = "sonnet"
+score_batch_size = 20
 
 [quota]
 # 時間帯の判定に使う時差（JST）

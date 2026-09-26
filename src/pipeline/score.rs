@@ -5,9 +5,10 @@ use chrono::{DateTime, Utc};
 
 use super::{Cancel, Halt};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{Db, DbError};
-use crate::llm::Llm;
+use crate::db::{Db, DbError, LlmCall, ScoreKey, StageKey, score_stage};
+use crate::llm::{Llm, LlmError, LlmRequest};
 use crate::quota::Quota;
+use crate::{errors, scoring};
 
 pub const STAGE: &str = "score";
 
@@ -33,16 +34,132 @@ pub struct ScoreSummary {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn score_articles<L: Llm>(
-    _db: &Db,
-    _llm: &L,
-    _quota: &mut Quota,
-    _llm_cfg: &LlmConfig,
-    _pipeline_cfg: &PipelineConfig,
-    _user_id: i64,
-    _now: DateTime<Utc>,
-    _cancel: &Cancel,
+    db: &Db,
+    llm: &L,
+    quota: &mut Quota,
+    llm_cfg: &LlmConfig,
+    pipeline_cfg: &PipelineConfig,
+    user_id: i64,
+    now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<ScoreSummary, ScoreStageError> {
-    todo!()
+    let mut summary = ScoreSummary::default();
+    let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
+        tracing::warn!("no profile yet; run `nucrawler profile import FILE` to enable scoring");
+        summary.no_profile = true;
+        return Ok(summary);
+    };
+    let backend = llm.backend();
+    let model = llm_cfg.score_model.as_str();
+    let key = ScoreKey {
+        user_id,
+        profile_hash: &profile_hash,
+        backend,
+        model,
+    };
+    let failure_stage = score_stage(key);
+    let failure_key = |article_id| StageKey {
+        article_id,
+        stage: &failure_stage,
+        backend,
+        model,
+    };
+    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+    let system = scoring::system_prompt(&profile, &db.recent_signals(user_id, SIGNALS)?);
+    let schema = scoring::schema();
+    loop {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        if let Err(stop) = quota.permit(now) {
+            tracing::info!("score stops: {stop}");
+            summary.halted = Some(Halt::Quota(stop));
+            break;
+        }
+        let batch = db.pending_score(key, cutoff, now, llm_cfg.score_batch_size)?;
+        if batch.is_empty() {
+            break;
+        }
+        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+        let prompt = scoring::build_prompt(&batch);
+        let started = std::time::Instant::now();
+        let result = llm
+            .call(LlmRequest {
+                system: &system,
+                prompt: &prompt,
+                schema: &schema,
+                model,
+            })
+            .await;
+        let rate_limit = match &result {
+            Ok(response) => response.rate_limit,
+            Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
+            Err(_) => None,
+        };
+        quota.record_call(rate_limit);
+        summary.calls += 1;
+        let error = result.as_ref().err().map(|e| errors::error_chain(e));
+        db.record_llm_call(
+            &LlmCall {
+                stage: STAGE,
+                backend,
+                model,
+                n_items: batch.len(),
+                ok: result.is_ok(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                error: error.as_deref(),
+                rate_limit: rate_limit.as_ref(),
+            },
+            now,
+        )?;
+        let response = match result {
+            Ok(response) => response,
+            Err(LlmError::RateLimited { resets_at, .. }) => {
+                summary.halted = Some(Halt::UsageLimit { resets_at });
+                break;
+            }
+            Err(_) => {
+                let message = error.unwrap_or_default();
+                for &id in &ids {
+                    db.record_stage_failure(failure_key(id), &message, now, false)?;
+                }
+                summary.failed += ids.len();
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
+        let parsed = match scoring::parse(&response.output, &ids) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let message = errors::error_chain(&e);
+                tracing::warn!("score output rejected: {message}");
+                for &id in &ids {
+                    db.record_stage_failure(failure_key(id), &message, now, false)?;
+                }
+                summary.failed += ids.len();
+                continue;
+            }
+        };
+        for (article_id, score, reason) in &parsed.items {
+            let Some(input) = batch.iter().find(|b| b.article_id == *article_id) else {
+                continue;
+            };
+            db.insert_score(key, input.artifact_id, *score, Some(reason), now)?;
+            db.clear_stage_failure(failure_key(*article_id))?;
+            summary.scored += 1;
+        }
+        for &id in &parsed.missing {
+            db.record_stage_failure(
+                failure_key(id),
+                "missing or invalid in the llm output",
+                now,
+                false,
+            )?;
+        }
+        summary.failed += parsed.missing.len();
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -50,7 +167,7 @@ mod tests {
     use super::*;
     use crate::config::Lang;
     use crate::db::{
-        ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact, ScoreKey, SignalKind,
+        ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact, SignalKind,
     };
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};

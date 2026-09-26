@@ -12,6 +12,7 @@ use nucrawler::pipeline::digest::{self, DigestStageError};
 use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
+use nucrawler::pipeline::score::{self, ScoreStageError};
 use nucrawler::pipeline::{self, Cancel, Halt, Stage};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
@@ -37,6 +38,8 @@ enum Error {
     Extract(#[from] ExtractStageError),
     #[error(transparent)]
     Digest(#[from] DigestStageError),
+    #[error(transparent)]
+    Score(#[from] ScoreStageError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
     #[error(transparent)]
@@ -144,6 +147,19 @@ async fn crawl(
     spawn_signal_handler(cancel.clone());
     // 認証切れなど、利用者が対処すべき LLM の失敗（最後にエラーとして報告する）
     let mut llm_failure = None;
+    // LLM のステージで共有する。呼び出し回数や時間帯の上限は、この実行全体に効く。
+    let llm = ClaudeCli {
+        command: config.llm.command.clone().into(),
+        cwd: data.join("llm-cwd"),
+        timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
+    };
+    let mut quota = Quota::new(
+        config.quota.clone(),
+        db.latest_rate_limit()?,
+        args.max_llm_calls,
+    );
+    // 上限到達や LLM の失敗の後は、同じ実行の中で後続の LLM ステージを試さない
+    let mut llm_blocked = false;
 
     let mut failed_sources = 0;
     for &stage in &stages {
@@ -161,18 +177,13 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
-            Stage::Score => todo!("score stage"),
-            Stage::Digest => {
-                let llm = ClaudeCli {
-                    command: config.llm.command.clone().into(),
-                    cwd: data.join("llm-cwd"),
-                    timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
-                };
-                let mut quota = Quota::new(
-                    config.quota.clone(),
-                    db.latest_rate_limit()?,
-                    args.max_llm_calls,
+            Stage::Digest | Stage::Score if llm_blocked => {
+                tracing::warn!(
+                    stage = stage.name(),
+                    "skipped: the llm is unavailable in this run"
                 );
+            }
+            Stage::Digest => {
                 let summary = digest::digest_articles(
                     &db,
                     &llm,
@@ -189,14 +200,27 @@ async fn crawl(
                     calls = summary.calls,
                     "digest stage finished"
                 );
-                match summary.halted {
-                    Some(Halt::LlmFailed(message)) => llm_failure = Some(message),
-                    Some(Halt::UsageLimit { resets_at }) => {
-                        tracing::warn!(?resets_at, "stopped at the subscription usage limit")
-                    }
-                    Some(Halt::Quota(stop)) => tracing::info!("llm work deferred: {stop}"),
-                    None => {}
-                }
+                llm_blocked = report_halt(summary.halted, &mut llm_failure);
+            }
+            Stage::Score => {
+                let summary = score::score_articles(
+                    &db,
+                    &llm,
+                    &mut quota,
+                    &config.llm,
+                    &config.pipeline,
+                    db.owner_id()?,
+                    chrono::Utc::now(),
+                    &cancel,
+                )
+                .await?;
+                tracing::info!(
+                    scored = summary.scored,
+                    failed = summary.failed,
+                    calls = summary.calls,
+                    "score stage finished"
+                );
+                llm_blocked = report_halt(summary.halted, &mut llm_failure);
             }
             Stage::Extract => {
                 let summary = extract::extract_pages(
@@ -227,6 +251,26 @@ async fn crawl(
         return Err(Error::SourcesFailed(failed_sources));
     }
     Ok(())
+}
+
+/// 止めた理由をログに出し、同じ実行で LLM をもう使わないほうがよいなら true を返す。
+/// 認証切れなど利用者が対処すべき失敗は `llm_failure` に残し、最後にエラーとして報告する。
+fn report_halt(halt: Option<Halt>, llm_failure: &mut Option<String>) -> bool {
+    match halt {
+        Some(Halt::LlmFailed(message)) => {
+            *llm_failure = Some(message);
+            true
+        }
+        Some(Halt::UsageLimit { resets_at }) => {
+            tracing::warn!(?resets_at, "stopped at the subscription usage limit");
+            true
+        }
+        Some(Halt::Quota(stop)) => {
+            tracing::info!("llm work deferred: {stop}");
+            false
+        }
+        None => false,
+    }
 }
 
 /// 1 回目の SIGINT/SIGTERM では処理中の 1 件を終えてから止め、2 回目で即座に終了する。

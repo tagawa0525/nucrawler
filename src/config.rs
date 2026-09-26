@@ -60,6 +60,7 @@ impl LlmConfig {
         for (name, value) in [
             ("digest_batch_size", self.digest_batch_size as u64),
             ("max_input_chars", self.max_input_chars as u64),
+            ("score_batch_size", self.score_batch_size as u64),
             ("timeout_secs", self.timeout_secs),
         ] {
             if value == 0 {
@@ -78,8 +79,8 @@ impl Default for LlmConfig {
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
             max_input_chars: 6000,
-            score_model: todo!(),
-            score_batch_size: todo!(),
+            score_model: "sonnet".into(),
+            score_batch_size: 20,
         }
     }
 }

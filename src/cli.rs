@@ -397,6 +397,7 @@ mod tests {
             &["--until"][..],
             &["--until", "nope"][..],
             &["--until", "fetch", "--only", "fetch"][..],
+            &["--max-llm-calls", "--requests-only"][..],
             &["extra"][..],
         ] {
             let err = parse_crawl_args(&args(bad)).unwrap_err();
@@ -475,6 +476,10 @@ mod tests {
             &["digest", "--model", "opus", "--min-score", "101"][..],
             &["digest", "--model", "opus", "--ids", "a,b"][..],
             &["digest", "--model", "opus", "--bogus"][..],
+            // 値を書き忘れて次のオプションを値として読まないこと、空の値を受け付けないこと
+            &["digest", "--model", "--source", "wnn"][..],
+            &["digest", "--model", ""][..],
+            &["digest", "--model", "opus", "--source", "--ids", "1"][..],
         ] {
             let err = parse_redo_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::RedoUsage), "{bad:?}: {err}");

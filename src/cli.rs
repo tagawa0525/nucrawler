@@ -1,13 +1,21 @@
+use std::path::PathBuf;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("unknown command: {0}\n\n{USAGE}")]
     UnknownCommand(String),
+    #[error("option {0} requires a value")]
+    MissingValue(&'static str),
+    #[error("usage: nucrawler sources check [ID]")]
+    SourcesUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
 /// そのサブコマンドの実装側で解釈する。
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
+    /// `--config-dir DIR`（サブコマンドより前に置く共通オプション）
+    pub config_dir: Option<PathBuf>,
     pub command: Command,
     pub args: Vec<String>,
 }
@@ -26,13 +34,16 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: nucrawler <command> [args]
+usage: nucrawler [--config-dir DIR] <command> [args]
+
+options:
+  --config-dir DIR  設定ディレクトリ（既定 $XDG_CONFIG_HOME/nucrawler）
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
   redo      指定モデルで要約・和訳をやり直す
   status    ステージごとの未処理件数などを表示
-  sources   ソースの取得確認
+  sources   ソースの取得確認（sources check [ID]）
   serve     Web UI / RSS / JSON API を起動
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
@@ -42,7 +53,15 @@ commands:
 
 /// `args` はプログラム名を除いたコマンドライン引数。
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, ParseError> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    let mut config_dir = None;
+    while args.peek().is_some_and(|a| a == "--config-dir") {
+        args.next();
+        let dir = args
+            .next()
+            .ok_or(ParseError::MissingValue("--config-dir"))?;
+        config_dir = Some(PathBuf::from(dir));
+    }
     let command = match args.next().as_deref() {
         None | Some("help" | "--help" | "-h") => Command::Help,
         Some("crawl") => Command::Crawl,
@@ -56,9 +75,27 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
+        config_dir,
         command,
         args: args.collect(),
     })
+}
+
+/// `sources` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub enum SourcesArgs {
+    /// `sources check [ID]`
+    Check { id: Option<String> },
+}
+
+pub fn parse_sources_args(args: &[String]) -> Result<SourcesArgs, ParseError> {
+    match args {
+        [cmd] if cmd == "check" => Ok(SourcesArgs::Check { id: None }),
+        [cmd, id] if cmd == "check" => Ok(SourcesArgs::Check {
+            id: Some(id.clone()),
+        }),
+        _ => Err(ParseError::SourcesUsage),
+    }
 }
 
 #[cfg(test)]
@@ -75,6 +112,7 @@ mod tests {
         assert_eq!(
             inv,
             Invocation {
+                config_dir: None,
                 command: Command::Crawl,
                 args: args(&["--until", "digest"]),
             }
@@ -97,6 +135,62 @@ mod tests {
             ("-h", Command::Help),
         ] {
             assert_eq!(parse(args(&[name])).unwrap().command, cmd, "{name}");
+        }
+    }
+
+    #[test]
+    fn parses_global_config_dir_before_subcommand() {
+        let inv = parse(args(&[
+            "--config-dir",
+            "/etc/nc",
+            "sources",
+            "check",
+            "nrc",
+        ]))
+        .unwrap();
+        assert_eq!(
+            inv,
+            Invocation {
+                config_dir: Some(PathBuf::from("/etc/nc")),
+                command: Command::Sources,
+                args: args(&["check", "nrc"]),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_documents_global_options() {
+        assert!(USAGE.contains("--config-dir"), "{USAGE}");
+    }
+
+    #[test]
+    fn config_dir_without_value_is_error() {
+        let err = parse(args(&["--config-dir"])).unwrap_err();
+        assert!(
+            matches!(err, ParseError::MissingValue("--config-dir")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parses_sources_check() {
+        assert_eq!(
+            parse_sources_args(&args(&["check"])).unwrap(),
+            SourcesArgs::Check { id: None }
+        );
+        assert_eq!(
+            parse_sources_args(&args(&["check", "nrc-news"])).unwrap(),
+            SourcesArgs::Check {
+                id: Some("nrc-news".into())
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_sources_args() {
+        for bad in [&[][..], &["list"][..], &["check", "a", "b"][..]] {
+            let err = parse_sources_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::SourcesUsage), "{bad:?}: {err}");
         }
     }
 

@@ -8,16 +8,16 @@ use crate::config::{Filter, SourceKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
-    #[error("failed to parse feed: {0}")]
+    #[error("failed to parse feed")]
     Feed(#[from] feed_rs::parser::ParseFeedError),
-    #[error("failed to parse json: {0}")]
+    #[error("failed to parse json")]
     Json(#[from] serde_json::Error),
-    #[error("invalid date {value:?}: {source}")]
+    #[error("invalid date {value:?}")]
     InvalidDate {
         value: String,
         source: chrono::ParseError,
     },
-    #[error("invalid link {href:?}: {source}")]
+    #[error("invalid link {href:?}")]
     InvalidLink {
         href: String,
         source: url::ParseError,
@@ -73,7 +73,8 @@ fn parse_feed(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
 #[derive(serde::Deserialize)]
 struct FepcItem {
     title: String,
-    href: String,
+    /// リンクの無い項目は null（2026-09 時点で約 1 割）
+    href: Option<String>,
     /// 例 "2026-9-18"
     date: String,
     category: String,
@@ -82,38 +83,33 @@ struct FepcItem {
 fn parse_fepc_json(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
     let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
     let items: Vec<FepcItem> = serde_json::from_slice(bytes)?;
-    items
-        .into_iter()
-        .filter(|it| {
-            // 空の href は一覧 JSON 自体の URL に解決されてしまう。
-            let blank = it.href.trim().is_empty();
-            if blank {
-                tracing::warn!(title = %it.title, "skipping fepc item without href");
+    let mut candidates = Vec::with_capacity(items.len());
+    for it in items {
+        // 空の href は一覧 JSON 自体の URL に解決されてしまうので、無いものとして扱う。
+        let Some(href) = it.href.as_deref().filter(|h| !h.trim().is_empty()) else {
+            tracing::debug!(title = %it.title, "skipping fepc item without href");
+            continue;
+        };
+        // 日付しか無いので JST の 0 時とみなす。
+        let date = chrono::NaiveDate::parse_from_str(&it.date, "%Y-%m-%d").map_err(|source| {
+            SourceError::InvalidDate {
+                value: it.date.clone(),
+                source,
             }
-            !blank
-        })
-        .map(|it| {
-            // 日付しか無いので JST の 0 時とみなす。
-            let date =
-                chrono::NaiveDate::parse_from_str(&it.date, "%Y-%m-%d").map_err(|source| {
-                    SourceError::InvalidDate {
-                        value: it.date.clone(),
-                        source,
-                    }
-                })?;
-            let published_at = date
-                .and_hms_opt(0, 0, 0)
-                .and_then(|t| t.and_local_timezone(jst).single())
-                .map(|t| t.to_utc());
-            Ok(Candidate {
-                url: resolve(base, &it.href)?,
-                title: it.title,
-                published_at,
-                summary: Some(it.category),
-                content: None,
-            })
-        })
-        .collect()
+        })?;
+        let published_at = date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(jst).single())
+            .map(|t| t.to_utc());
+        candidates.push(Candidate {
+            url: resolve(base, href)?,
+            title: it.title,
+            published_at,
+            summary: Some(it.category),
+            content: None,
+        });
+    }
+    Ok(candidates)
 }
 
 fn resolve(base: &Url, href: &str) -> Result<String, SourceError> {
@@ -247,7 +243,9 @@ mod tests {
 
     #[test]
     fn skips_fepc_items_with_blank_href() {
+        // 実データには href が null の項目がある（2026-09 時点で 994 件中 102 件）
         let bytes = br#"[{"title": "blank", "href": "", "date": "2026-9-18", "category": "c"},
+                         {"title": "null", "href": null, "date": "2026-9-18", "category": "c"},
                          {"title": "ok", "href": "/a", "date": "2026-9-18", "category": "c"}]"#;
         let items = parse(
             SourceKind::FepcJson,

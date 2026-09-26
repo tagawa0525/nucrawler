@@ -6,12 +6,12 @@ use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("failed to read {path}: {source}")]
+    #[error("failed to read {path}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to parse {path}: {source}")]
+    #[error("failed to parse {path}")]
     Parse {
         path: PathBuf,
         source: toml::de::Error,
@@ -34,6 +34,8 @@ pub struct HttpConfig {
     pub user_agent: String,
     pub per_host_delay_secs: u64,
     pub timeout_secs: u64,
+    /// 応答本文の上限。これを超える応答は読み込まずにエラーにする。
+    pub max_body_bytes: u64,
 }
 
 impl Default for HttpConfig {
@@ -47,6 +49,7 @@ impl Default for HttpConfig {
             .to_string(),
             per_host_delay_secs: 5,
             timeout_secs: 30,
+            max_body_bytes: 20 * 1024 * 1024,
         }
     }
 }
@@ -185,6 +188,7 @@ mod tests {
         assert!(c.http.user_agent.starts_with("nucrawler/"));
         assert!(c.http.per_host_delay_secs > 0);
         assert!(c.http.timeout_secs > 0);
+        assert!(c.http.max_body_bytes > 0);
     }
 
     #[test]

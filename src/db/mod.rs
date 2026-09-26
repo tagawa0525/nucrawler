@@ -1371,14 +1371,26 @@ mod tests {
                 [],
             )
             .unwrap();
-        let err = db
-            .conn()
+        // 成果物の input_scope に code を複製して持つので、code は変更させない（正しい値にも）
+        for new_code in ["public", "ans_3"] {
+            let err = db
+                .conn()
+                .execute(
+                    "UPDATE memberships SET code = ?1 WHERE code = 'ans_2'",
+                    [new_code],
+                )
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("membership code"),
+                "{new_code}: {err}"
+            );
+        }
+        db.conn()
             .execute(
-                "UPDATE memberships SET code = 'public' WHERE code = 'ans_2'",
+                "UPDATE memberships SET name = 'ANS member' WHERE code = 'ans_2'",
                 [],
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("membership code"), "{err}");
+            .unwrap();
     }
 
     #[test]
@@ -1496,6 +1508,24 @@ mod tests {
             .unwrap();
         let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
         insert_content(&db, a, Some(aesj));
+        assert!(digest_ids(&db, "2026-09-27T00:00:00Z").is_empty());
+    }
+
+    /// 抽出の断念は、抽出ステージのキー（backend と model が空）の記録だけで判断する。
+    #[test]
+    fn pending_digest_checks_extract_failures_by_exact_key() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        db.insert_content(a, ContentKind::Lead, ContentOrigin::Feed, "lead")
+            .unwrap();
+        let other = StageKey {
+            article_id: a,
+            stage: "extract",
+            backend: "chromium",
+            model: "",
+        };
+        db.record_stage_failure(other, "x", t("2026-09-27T00:00:00Z"), true)
+            .unwrap();
         assert!(digest_ids(&db, "2026-09-27T00:00:00Z").is_empty());
     }
 

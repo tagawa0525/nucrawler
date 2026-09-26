@@ -247,7 +247,9 @@ mod tests {
 
     #[test]
     fn skips_fepc_items_with_blank_href() {
+        // 実データには href が null の項目がある（2026-09 時点で 994 件中 102 件）
         let bytes = br#"[{"title": "blank", "href": "", "date": "2026-9-18", "category": "c"},
+                         {"title": "null", "href": null, "date": "2026-9-18", "category": "c"},
                          {"title": "ok", "href": "/a", "date": "2026-9-18", "category": "c"}]"#;
         let items = parse(
             SourceKind::FepcJson,

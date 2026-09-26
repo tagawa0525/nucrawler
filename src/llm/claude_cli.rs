@@ -56,7 +56,11 @@ impl Llm for ClaudeCli {
         let run = async {
             // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
             let write = async {
-                stdin.write_all(prompt).await?;
+                match stdin.write_all(prompt).await {
+                    // 子が入力を読まずに終了した（認証エラーなど）。原因は終了コードと stderr で報告する
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    r => r?,
+                }
                 drop(stdin);
                 Ok::<_, std::io::Error>(())
             };

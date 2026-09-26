@@ -348,6 +348,26 @@ mod tests {
         assert_eq!((summary.failed, summary.gave_up), (0, 1));
     }
 
+    /// 本文サイズの上限を超えるページは、再試行しても小さくならないので断念する。
+    #[tokio::test]
+    async fn oversized_page_is_given_up() {
+        let server = Server::start([("/big", html(vec![b'x'; 4096]))].into());
+        let db = Db::open_in_memory().unwrap();
+        add(&db, &server, "u", &["/big"]);
+        let small = Fetcher::new("t", Duration::from_secs(2), Duration::ZERO, 1024).unwrap();
+        let summary = extract_pages(
+            &db,
+            &small,
+            &[source("u", None)],
+            &cfg(100),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.failed, summary.gave_up), (0, 1));
+    }
+
     /// Content-Type が PDF でなくても、中身が PDF なら断念する。
     #[tokio::test]
     async fn detects_pdf_by_signature() {

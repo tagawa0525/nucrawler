@@ -351,6 +351,13 @@ pub struct ArticleDetail {
     pub has_body: bool,
 }
 
+impl ArticleDetail {
+    /// 和訳を依頼できる（`pending_translate` が拾える）記事：公開の本文がある英語の記事。
+    pub fn can_request_translation(&self) -> bool {
+        self.item.lang == "en" && self.has_body
+    }
+}
+
 /// 画面の上部に出す警告。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {

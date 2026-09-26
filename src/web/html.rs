@@ -302,7 +302,7 @@ fn translation_section(d: &ArticleDetail, view: DetailView) -> String {
         format!("<p><a href=\"/articles/{id}?view=translation\">全文和訳を読む</a></p>")
     } else if d.item.translation_requested {
         "<p class=\"meta\">和訳待ち（次の依頼処理で和訳します）</p>".to_string()
-    } else if d.item.lang == "en" && d.has_body {
+    } else if d.can_request_translation() {
         format!(
             "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/translation-request\">\
              <button>全文和訳を依頼</button></form></div>"

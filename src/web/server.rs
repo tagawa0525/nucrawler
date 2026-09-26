@@ -212,7 +212,7 @@ async fn feedback(
     };
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        ensure_article(db, user, id)?;
+        find_article(db, user, id)?;
         Ok(db.record_event(user, id, kind, Utc::now())?)
     })
     .await?;
@@ -227,30 +227,31 @@ async fn translation_request(
     check_same_origin(&headers)?;
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        ensure_article(db, user, id)?;
+        let detail = find_article(db, user, id)?;
+        if !detail.can_request_translation() {
+            return Err(AppError::BadRequest(
+                "only english articles with a public body can be translated",
+            ));
+        }
         Ok(db.request_translation(user, id, Utc::now())?)
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))
 }
 
-fn ensure_article(db: &Db, user: i64, id: i64) -> Result<(), AppError> {
-    db.article_detail(user, None, id)?
-        .map(drop)
-        .ok_or(AppError::NotFound)
+fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {
+    db.article_detail(user, None, id)?.ok_or(AppError::NotFound)
 }
 
 /// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で書き込まれないよう、
-/// ブラウザが付ける Origin がこのサーバー自身でなければ拒否する（Origin の無い curl などは通す）。
+/// ブラウザが付ける Origin がこのサーバー自身（http で待ち受けているので `http://` + Host）で
+/// なければ拒否する（Origin の無い curl などは通す）。
 fn check_same_origin(headers: &HeaderMap) -> Result<(), AppError> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Ok(());
     };
+    let origin_host = origin.to_str().ok().and_then(|o| o.strip_prefix("http://"));
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
-    let origin_host = origin.to_str().ok().and_then(|o| {
-        o.strip_prefix("http://")
-            .or_else(|| o.strip_prefix("https://"))
-    });
     match (origin_host, host) {
         (Some(o), Some(h)) if o == h => Ok(()),
         _ => Err(AppError::CrossSite),

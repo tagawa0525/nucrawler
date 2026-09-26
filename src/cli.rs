@@ -34,7 +34,10 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: nucrawler <command> [args]
+usage: nucrawler [--config-dir DIR] <command> [args]
+
+options:
+  --config-dir DIR  設定ディレクトリ（既定 $XDG_CONFIG_HOME/nucrawler）
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）

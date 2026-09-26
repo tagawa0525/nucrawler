@@ -30,6 +30,8 @@ pub enum HttpError {
     },
 }
 
+const MAX_REDIRECTS: usize = 5;
+
 pub struct Fetcher {
     client: reqwest::Client,
     per_host_delay: Duration,
@@ -46,6 +48,8 @@ impl Fetcher {
         let client = reqwest::Client::builder()
             .user_agent(user_agent)
             .timeout(timeout)
+            // 転送先へのアクセスにもホストごとの間隔を守らせるため、リダイレクトは自前でたどる。
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(HttpError::Build)?;
         Ok(Self {
@@ -63,28 +67,38 @@ impl Fetcher {
         )
     }
 
-    /// 2xx 以外はエラーにする。
+    /// リダイレクトは `MAX_REDIRECTS` 回までたどる。最終的な応答が 2xx 以外ならエラーにする。
     pub async fn get(&self, url: &Url) -> Result<Vec<u8>, HttpError> {
-        self.wait_for_turn(url).await;
-        let request_error = |source| HttpError::Request {
-            url: url.to_string(),
-            source,
-        };
-        let response = self
-            .client
-            .get(url.clone())
-            .send()
-            .await
-            .map_err(request_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(HttpError::Status {
-                url: url.to_string(),
-                status,
-            });
+        let mut current = url.clone();
+        for _ in 0..=MAX_REDIRECTS {
+            self.wait_for_turn(&current).await;
+            let request_error = |source| HttpError::Request {
+                url: current.to_string(),
+                source,
+            };
+            let response = self
+                .client
+                .get(current.clone())
+                .send()
+                .await
+                .map_err(request_error)?;
+            let status = response.status();
+            if status.is_redirection() {
+                current = redirect_target(&current, &response)?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(HttpError::Status {
+                    url: current.to_string(),
+                    status,
+                });
+            }
+            let body = response.bytes().await.map_err(request_error)?;
+            return Ok(body.to_vec());
         }
-        let body = response.bytes().await.map_err(request_error)?;
-        Ok(body.to_vec())
+        Err(HttpError::TooManyRedirects {
+            url: url.to_string(),
+        })
     }
 
     /// 同じホストへのアクセスが `per_host_delay` 以上空くよう、順番を予約してから待つ。
@@ -104,6 +118,20 @@ impl Fetcher {
         };
         tokio::time::sleep_until(start).await;
     }
+}
+
+fn redirect_target(from: &Url, response: &reqwest::Response) -> Result<Url, HttpError> {
+    let bad = |reason: String| HttpError::BadRedirect {
+        url: from.to_string(),
+        reason,
+    };
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .ok_or_else(|| bad(format!("{} without Location header", response.status())))?
+        .to_str()
+        .map_err(|e| bad(e.to_string()))?;
+    from.join(location).map_err(|e| bad(e.to_string()))
 }
 
 #[cfg(test)]

@@ -20,3 +20,19 @@ extract_max_per_run = 100
 command = "claude"
 # 1 回の呼び出しのタイムアウト（秒）
 timeout_secs = 300
+
+[quota]
+# 時間帯の判定に使う時差（JST）
+timezone_offset_hours = 9
+# 時間帯ごとの 5 時間枠の上限（start <= 時 < end、現地時刻）。日中は多く、開発に使う深夜は少なく
+slots = [
+  { start = 3, end = 8, max_five_hour = 0.20 },
+  { start = 10, end = 15, max_five_hour = 0.85 },
+  { start = 16, end = 21, max_five_hour = 0.60 },
+]
+default_max_five_hour = 0.20
+# 週次枠の絶対上限と、直線的な消費より何日分先行してよいか
+weekly_max = 0.70
+pace_ahead_days = 1.0
+# 1 回の実行で呼び出してよい回数
+max_calls_per_run = 30

@@ -24,12 +24,13 @@ pub enum ConfigError {
     NoDataDir,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub http: HttpConfig,
     pub pipeline: PipelineConfig,
     pub llm: LlmConfig,
+    pub quota: crate::quota::QuotaConfig,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]

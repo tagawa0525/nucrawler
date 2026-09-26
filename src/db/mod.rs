@@ -425,6 +425,11 @@ impl Db {
         Ok(())
     }
 
+    /// 最後に記録された使用率（無ければ `None`）。
+    pub fn latest_rate_limit(&self) -> Result<Option<crate::llm::RateLimit>, DbError> {
+        todo!()
+    }
+
     #[cfg(test)]
     pub(crate) fn query_i64(&self, sql: &str) -> Result<i64, DbError> {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
@@ -1022,6 +1027,45 @@ mod tests {
                 "2026-09-27T01:05:00.000Z|digest|5|0|timeout|-",
             ]
         );
+    }
+
+    #[test]
+    fn latest_rate_limit_skips_calls_without_usage() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.latest_rate_limit().unwrap(), None);
+        fn call(rate: Option<&crate::llm::RateLimit>) -> LlmCall<'_> {
+            LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 1,
+                ok: rate.is_some(),
+                duration_ms: 1,
+                error: None,
+                rate_limit: rate,
+            }
+        }
+        let older = crate::llm::RateLimit {
+            five_hour: Some(crate::llm::Window {
+                utilization: 0.2,
+                resets_at: 1,
+            }),
+            seven_day: None,
+        };
+        let newer = crate::llm::RateLimit {
+            five_hour: Some(crate::llm::Window {
+                utilization: 0.4,
+                resets_at: 2,
+            }),
+            seven_day: None,
+        };
+        db.record_llm_call(&call(Some(&older)), t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call(Some(&newer)), t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call(None), t("2026-09-27T03:00:00Z"))
+            .unwrap();
+        assert_eq!(db.latest_rate_limit().unwrap(), Some(newer));
     }
 
     #[test]

@@ -1,5 +1,12 @@
 //! HTML 断片からプレーンテキストへの変換。
 
+/// HTML のバイト列を文字列にする。文字コードは Content-Type の charset、BOM、
+/// 先頭 1024 バイト内の `<meta charset>` の順に探し、見つからなければ UTF-8 とみなす。
+/// 不正なバイト列は置換文字にする。
+pub fn decode_html(_bytes: &[u8], _content_type: Option<&str>) -> String {
+    todo!()
+}
+
 /// タグを除き、段落などのブロック要素は改行で区切る。script と style の中身は捨てる。
 /// 行内の連続した空白は 1 つにまとめ、空行は除く。
 pub fn html_to_text(html: &str) -> String {
@@ -83,6 +90,37 @@ fn walk(node: ego_tree::NodeRef<'_, scraper::Node>, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        crate::testutil::fixture(name)
+    }
+
+    #[test]
+    fn decodes_utf8_by_default() {
+        assert_eq!(decode_html("日本語".as_bytes(), None), "日本語");
+    }
+
+    #[test]
+    fn decodes_charset_from_content_type() {
+        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode("原子力");
+        assert_eq!(
+            decode_html(&bytes, Some("text/html; charset=Shift_JIS")),
+            "原子力"
+        );
+    }
+
+    #[test]
+    fn decodes_charset_from_meta_tag() {
+        let html = decode_html(&fixture("article_sjis.html"), Some("text/html"));
+        assert!(html.contains("女川原子力発電所2号機"), "{html}");
+    }
+
+    #[test]
+    fn bom_wins_over_meta() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("<meta charset=\"shift_jis\">日本".as_bytes());
+        assert!(decode_html(&bytes, None).ends_with("日本"));
+    }
 
     #[test]
     fn strips_tags_and_splits_blocks() {

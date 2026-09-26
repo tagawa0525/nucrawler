@@ -66,7 +66,7 @@ artifacts(id, article_id, kind, backend, model, prompt_version, input_scope, pay
   -- kind: digest / translation / judgment
   -- UNIQUE(article_id, kind, backend, model, prompt_version, input_scope)
 artifact_inputs(artifact_id, content_id)
-artifact_access(artifact_id, membership_id)             -- 入力の資格の和集合。空なら公開
+artifact_access(artifact_id, membership_id)             -- VIEW：入力本文の資格の和集合として導出。空なら公開
 
 scores(id, user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
   -- UNIQUE(user_id, artifact_id, profile_hash, backend, model)
@@ -78,7 +78,7 @@ llm_calls(id, at, stage, backend, model, n_items, ok, duration_ms, error, rate_l
 source_state(source_id PK, last_success_at, last_error)
 ```
 
-- 閲覧判定：ユーザーが `artifact_access` の資格をすべて持っていれば閲覧できる。判定は `db` の 1 つの関数にまとめ、すべての出力で使う
+- 閲覧判定：ユーザーが `artifact_access` の資格をすべて持っていれば閲覧できる。判定は `db` の 1 つの関数にまとめ、すべての出力で使う。成果物は入力（artifact_inputs）と同じトランザクションで登録し、入力が空の成果物は作らない
 - 表示は記事単位：各ユーザーには、閲覧できる成果物のうち最も詳しい 1 つだけを表示する。会員には全部分から作った版、非会員には公開部分だけから作った版が見え、同じ記事を 2 度読むことはない。採点も記事ごとに 1 回で、その人に見える版を使う
 - `title_ja` と `summary_ja` は `payload` から生成列で取り出して検索に使う。全文検索（FTS5）は必要になったら追加する
 

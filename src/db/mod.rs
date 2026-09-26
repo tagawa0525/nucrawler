@@ -25,6 +25,8 @@ pub enum DbError {
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
 
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct Db {
     conn: Connection,
 }
@@ -41,6 +43,8 @@ pub struct NewArticle<'a> {
 impl Db {
     pub fn open(path: &Path) -> Result<Self, DbError> {
         let conn = Connection::open(path)?;
+        // WAL への切り替え自体がロック待ちになり得るので、先に busy_timeout を設定する。
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
     }
@@ -51,7 +55,7 @@ impl Db {
 
     fn init(mut conn: Connection) -> Result<Self, DbError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -95,6 +99,9 @@ fn schema_version(conn: &Connection) -> Result<i64, DbError> {
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     let found = schema_version(conn)?;
     let supported = MIGRATIONS.len() as i64;
+    if found < 0 {
+        return Err(DbError::InvalidSchemaVersion(found));
+    }
     if found > supported {
         return Err(DbError::SchemaTooNew { found, supported });
     }

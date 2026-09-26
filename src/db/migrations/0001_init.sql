@@ -20,7 +20,7 @@ CREATE TABLE memberships (
 -- 自己申告の会員資格。
 CREATE TABLE user_memberships (
     user_id       INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    membership_id INTEGER NOT NULL REFERENCES memberships (id),
+    membership_id INTEGER NOT NULL REFERENCES memberships (id) ON DELETE CASCADE,
     PRIMARY KEY (user_id, membership_id)
 ) WITHOUT ROWID;
 
@@ -48,16 +48,17 @@ CREATE INDEX articles_by_source ON articles (source_id, published_at);
 -- 原文を読むのに必要な会員資格（🔒 表示用）。
 CREATE TABLE article_access (
     article_id    INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
-    membership_id INTEGER NOT NULL REFERENCES memberships (id),
+    membership_id INTEGER NOT NULL REFERENCES memberships (id) ON DELETE CASCADE,
     PRIMARY KEY (article_id, membership_id)
 ) WITHOUT ROWID;
 
 -- 本文の部分。access_membership_id が NULL なら公開。
+-- 会員資格の削除で限定本文が公開扱いにならないよう、参照中の資格は削除させない（RESTRICT）。
 CREATE TABLE contents (
     id                   INTEGER PRIMARY KEY,
     article_id           INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
     kind                 TEXT NOT NULL CHECK (kind IN ('lead', 'body', 'abstract', 'fulltext')),
-    access_membership_id INTEGER REFERENCES memberships (id),
+    access_membership_id INTEGER REFERENCES memberships (id) ON DELETE RESTRICT,
     text                 TEXT NOT NULL,
     origin               TEXT NOT NULL CHECK (origin IN ('feed', 'page', 'pdf', 'upload', 'login')),
     fetched_at           TEXT NOT NULL
@@ -84,16 +85,18 @@ CREATE TABLE artifacts (
     UNIQUE (article_id, kind, backend, model, prompt_version, input_scope)
 );
 
+-- 成果物の出所。本文を消すと出所が黙って失われるので、先に成果物を消させる（RESTRICT）。
 CREATE TABLE artifact_inputs (
     artifact_id INTEGER NOT NULL REFERENCES artifacts (id) ON DELETE CASCADE,
-    content_id  INTEGER NOT NULL REFERENCES contents (id),
+    content_id  INTEGER NOT NULL REFERENCES contents (id) ON DELETE RESTRICT,
     PRIMARY KEY (artifact_id, content_id)
 ) WITHOUT ROWID;
 
 -- 閲覧に必要な会員資格（入力の資格の和集合）。行が無ければ公開。
+-- 行が消えると限定成果物が公開扱いになるため、参照中の資格は削除させない（RESTRICT）。
 CREATE TABLE artifact_access (
     artifact_id   INTEGER NOT NULL REFERENCES artifacts (id) ON DELETE CASCADE,
-    membership_id INTEGER NOT NULL REFERENCES memberships (id),
+    membership_id INTEGER NOT NULL REFERENCES memberships (id) ON DELETE RESTRICT,
     PRIMARY KEY (artifact_id, membership_id)
 ) WITHOUT ROWID;
 

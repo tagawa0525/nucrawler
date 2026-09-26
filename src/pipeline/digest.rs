@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use super::llm_call::{Outcome, call_recorded};
 use super::{Cancel, Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, StageKey};
+use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
 use crate::{digest, errors};
@@ -60,7 +60,18 @@ pub async fn digest_articles<L: Llm>(
             Target::Pending { .. } => {
                 db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?
             }
-            Target::Redo(_) => todo!("redo digest"),
+            Target::Redo(spec) => db.redo_digest(
+                RedoKey {
+                    user_id: spec.user_id,
+                    profile_hash: spec.profile_hash.as_deref(),
+                    backend,
+                    model,
+                    prompt_version: digest::PROMPT_VERSION,
+                },
+                &spec.filter,
+                now,
+                llm_cfg.digest_batch_size,
+            )?,
         };
         if batch.is_empty() {
             break;

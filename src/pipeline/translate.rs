@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use super::llm_call::{Outcome, call_recorded};
 use super::{Cancel, Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, StageKey, TranslateQuery};
+use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
 use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
 use crate::{errors, translate};
@@ -72,7 +72,18 @@ pub async fn translate_articles<L: Llm>(
         // 全文は長いので 1 件ずつ訳す
         let Some(input) = (match target {
             Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1)?,
-            Target::Redo(_) => todo!("redo translate"),
+            Target::Redo(spec) => db.redo_translate(
+                RedoKey {
+                    user_id: spec.user_id,
+                    profile_hash: spec.profile_hash.as_deref(),
+                    backend,
+                    model,
+                    prompt_version: translate::PROMPT_VERSION,
+                },
+                &spec.filter,
+                now,
+                1,
+            )?,
         })
         .into_iter()
         .next() else {

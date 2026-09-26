@@ -57,7 +57,7 @@ options:
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
-  redo      指定モデルで要約・和訳をやり直す
+  redo      指定モデルで要約・和訳をやり直す（redo digest|translate --model M ...）
   status    ステージごとの未処理件数などを表示
   sources   ソースの取得確認（sources check [ID]）
   serve     Web UI / RSS / JSON API を起動
@@ -170,8 +170,57 @@ pub struct RedoArgs {
     pub max_llm_calls: Option<u32>,
 }
 
-pub fn parse_redo_args(_args: &[String]) -> Result<RedoArgs, ParseError> {
-    todo!()
+pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
+    let usage = || ParseError::RedoUsage;
+    let (kind, rest) = match args.split_first() {
+        Some((k, rest)) if k == "digest" => (RedoKind::Digest, rest),
+        Some((k, rest)) if k == "translate" => (RedoKind::Translate, rest),
+        _ => return Err(usage()),
+    };
+    let mut model = None;
+    let mut filter = crate::db::RedoFilter::default();
+    let mut max_llm_calls = None;
+    let mut it = rest.iter();
+    while let Some(opt) = it.next() {
+        let value = it.next().ok_or_else(usage)?;
+        match opt.as_str() {
+            "--model" => model = Some(value.clone()),
+            "--source" => filter.source_id = Some(value.clone()),
+            "--since" => filter.since = Some(jst_midnight(value).ok_or_else(usage)?),
+            "--min-score" => {
+                let score: u8 = value.parse().map_err(|_| usage())?;
+                if score > 100 {
+                    return Err(usage());
+                }
+                filter.min_score = Some(score);
+            }
+            "--ids" => {
+                filter.ids = value
+                    .split(',')
+                    .map(|id| id.trim().parse().map_err(|_| usage()))
+                    .collect::<Result<_, _>>()?;
+            }
+            "--max-llm-calls" => max_llm_calls = Some(value.parse().map_err(|_| usage())?),
+            _ => return Err(usage()),
+        }
+    }
+    Ok(RedoArgs {
+        kind,
+        model: model.ok_or_else(usage)?,
+        filter,
+        max_llm_calls,
+    })
+}
+
+/// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。
+fn jst_midnight(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let jst = chrono::FixedOffset::east_opt(9 * 3600)?;
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()?
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(jst)
+        .single()
+        .map(|t| t.to_utc())
 }
 
 /// `profile` サブコマンドの引数。

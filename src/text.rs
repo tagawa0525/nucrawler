@@ -149,6 +149,33 @@ mod tests {
         assert!(html.contains("女川原子力発電所2号機"), "{html}");
     }
 
+    fn sjis(html: &str) -> Vec<u8> {
+        encoding_rs::SHIFT_JIS.encode(html).0.into_owned()
+    }
+
+    #[test]
+    fn unknown_header_charset_falls_back_to_meta() {
+        let bytes = sjis("<meta charset=\"Shift_JIS\"><p>原子力</p>");
+        let html = decode_html(&bytes, Some("text/html; charset=x-unknown"));
+        assert!(html.contains("原子力"), "{html}");
+    }
+
+    #[test]
+    fn ignores_charset_text_outside_meta_tags() {
+        let bytes = sjis(
+            "<!-- charset=utf-8 --><script>var s = \"charset=utf-8\";</script>\
+             <meta charset=\"shift_jis\"><p>原子力</p>",
+        );
+        let html = decode_html(&bytes, None);
+        assert!(html.contains("原子力"), "{html}");
+    }
+
+    #[test]
+    fn meta_charset_allows_spaces_around_equals() {
+        let bytes = sjis("<meta charset = \"shift_jis\"><p>原子力</p>");
+        assert!(decode_html(&bytes, None).contains("原子力"));
+    }
+
     #[test]
     fn bom_wins_over_meta() {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];

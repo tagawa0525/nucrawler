@@ -50,6 +50,22 @@ pub struct LlmConfig {
     pub max_input_chars: usize,
 }
 
+impl LlmConfig {
+    /// 0 だと処理が黙って何もしなくなる値を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("digest_batch_size", self.digest_batch_size as u64),
+            ("max_input_chars", self.max_input_chars as u64),
+            ("timeout_secs", self.timeout_secs),
+        ] {
+            if value == 0 {
+                return Err(format!("llm.{name} must be at least 1"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
@@ -176,6 +192,7 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
     config
         .quota
         .validate()
+        .and_then(|()| config.llm.validate())
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,

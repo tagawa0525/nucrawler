@@ -111,7 +111,7 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
         if let Some(resets_at) = rejected {
             return Err(LlmError::RateLimited {
                 resets_at,
-                rate_limit: None,
+                rate_limit,
             });
         }
         return Err(LlmError::Reported {

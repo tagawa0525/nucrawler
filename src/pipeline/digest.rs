@@ -78,7 +78,12 @@ pub async fn digest_articles<L: Llm>(
                 model,
             })
             .await;
-        let rate_limit = result.as_ref().ok().and_then(|r| r.rate_limit);
+        // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。
+        let rate_limit = match &result {
+            Ok(response) => response.rate_limit,
+            Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
+            Err(_) => None,
+        };
         quota.record_call(rate_limit);
         summary.calls += 1;
         let error = result.as_ref().err().map(|e| errors::error_chain(e));

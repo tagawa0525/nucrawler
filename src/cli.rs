@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::pipeline::Stage;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("unknown command: {0}\n\n{USAGE}")]
@@ -8,6 +10,8 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
+    #[error("usage: nucrawler crawl [--until STAGE | --only STAGE]  (stages: {stages})")]
+    CrawlUsage { stages: String },
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -16,6 +20,8 @@ pub enum ParseError {
 pub struct Invocation {
     /// `--config-dir DIR`（サブコマンドより前に置く共通オプション）
     pub config_dir: Option<PathBuf>,
+    /// `--data-dir DIR`（DB とロックファイルの置き場所）
+    pub data_dir: Option<PathBuf>,
     pub command: Command,
     pub args: Vec<String>,
 }
@@ -34,10 +40,11 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: nucrawler [--config-dir DIR] <command> [args]
+usage: nucrawler [--config-dir DIR] [--data-dir DIR] <command> [args]
 
 options:
   --config-dir DIR  設定ディレクトリ（既定 $XDG_CONFIG_HOME/nucrawler）
+  --data-dir DIR    DB などの置き場所（既定 $XDG_DATA_HOME/nucrawler）
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
@@ -55,12 +62,16 @@ commands:
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, ParseError> {
     let mut args = args.into_iter().peekable();
     let mut config_dir = None;
-    while args.peek().is_some_and(|a| a == "--config-dir") {
+    let mut data_dir = None;
+    loop {
+        let (slot, name) = match args.peek().map(String::as_str) {
+            Some("--config-dir") => (&mut config_dir, "--config-dir"),
+            Some("--data-dir") => (&mut data_dir, "--data-dir"),
+            _ => break,
+        };
         args.next();
-        let dir = args
-            .next()
-            .ok_or(ParseError::MissingValue("--config-dir"))?;
-        config_dir = Some(PathBuf::from(dir));
+        let dir = args.next().ok_or(ParseError::MissingValue(name))?;
+        *slot = Some(PathBuf::from(dir));
     }
     let command = match args.next().as_deref() {
         None | Some("help" | "--help" | "-h") => Command::Help,
@@ -76,9 +87,45 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
     };
     Ok(Invocation {
         config_dir,
+        data_dir,
         command,
         args: args.collect(),
     })
+}
+
+/// `crawl` サブコマンドの引数。`until` と `only` は同時に指定できない。
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct CrawlArgs {
+    pub until: Option<Stage>,
+    pub only: Option<Stage>,
+}
+
+pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
+    let usage = || ParseError::CrawlUsage {
+        stages: Stage::ALL
+            .iter()
+            .map(|s| s.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let mut parsed = CrawlArgs::default();
+    let mut it = args.iter();
+    while let Some(opt) = it.next() {
+        let slot = match opt.as_str() {
+            "--until" => &mut parsed.until,
+            "--only" => &mut parsed.only,
+            _ => return Err(usage()),
+        };
+        let stage = it
+            .next()
+            .and_then(|name| Stage::from_name(name))
+            .ok_or_else(usage)?;
+        *slot = Some(stage);
+    }
+    if parsed.until.is_some() && parsed.only.is_some() {
+        return Err(usage());
+    }
+    Ok(parsed)
 }
 
 /// `sources` サブコマンドの引数。
@@ -113,6 +160,7 @@ mod tests {
             inv,
             Invocation {
                 config_dir: None,
+                data_dir: None,
                 command: Command::Crawl,
                 args: args(&["--until", "digest"]),
             }
@@ -152,6 +200,7 @@ mod tests {
             inv,
             Invocation {
                 config_dir: Some(PathBuf::from("/etc/nc")),
+                data_dir: None,
                 command: Command::Sources,
                 args: args(&["check", "nrc"]),
             }
@@ -161,6 +210,57 @@ mod tests {
     #[test]
     fn usage_documents_global_options() {
         assert!(USAGE.contains("--config-dir"), "{USAGE}");
+    }
+
+    #[test]
+    fn parses_global_data_dir_with_config_dir() {
+        let inv = parse(args(&[
+            "--data-dir",
+            "/var/nc",
+            "--config-dir",
+            "/etc/nc",
+            "status",
+        ]))
+        .unwrap();
+        assert_eq!(inv.data_dir, Some(PathBuf::from("/var/nc")));
+        assert_eq!(inv.config_dir, Some(PathBuf::from("/etc/nc")));
+        assert_eq!(inv.command, Command::Status);
+        assert!(USAGE.contains("--data-dir"), "{USAGE}");
+    }
+
+    #[test]
+    fn parses_crawl_args() {
+        assert_eq!(parse_crawl_args(&[]).unwrap(), CrawlArgs::default());
+        assert_eq!(
+            parse_crawl_args(&args(&["--until", "fetch"])).unwrap(),
+            CrawlArgs {
+                until: Some(Stage::Fetch),
+                only: None
+            }
+        );
+        assert_eq!(
+            parse_crawl_args(&args(&["--only", "fetch"])).unwrap(),
+            CrawlArgs {
+                until: None,
+                only: Some(Stage::Fetch)
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_crawl_args() {
+        for bad in [
+            &["--until"][..],
+            &["--until", "nope"][..],
+            &["--until", "fetch", "--only", "fetch"][..],
+            &["extra"][..],
+        ] {
+            let err = parse_crawl_args(&args(bad)).unwrap_err();
+            assert!(
+                matches!(err, ParseError::CrawlUsage { .. }),
+                "{bad:?}: {err}"
+            );
+        }
     }
 
     #[test]

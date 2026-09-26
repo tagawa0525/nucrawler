@@ -20,6 +20,8 @@ pub enum ConfigError {
     DuplicateSourceId { path: PathBuf, id: String },
     #[error("cannot determine config directory: neither XDG_CONFIG_HOME nor HOME is set")]
     NoConfigDir,
+    #[error("cannot determine data directory: neither XDG_DATA_HOME nor HOME is set")]
+    NoDataDir,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
@@ -169,6 +171,17 @@ pub fn default_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, Co
         (Some(xdg), _) => PathBuf::from(xdg),
         (None, Some(home)) => PathBuf::from(home).join(".config"),
         (None, None) => return Err(ConfigError::NoConfigDir),
+    };
+    Ok(base.join("nucrawler"))
+}
+
+/// `$XDG_DATA_HOME/nucrawler`、無ければ `$HOME/.local/share/nucrawler`（DB やロックファイルを置く）。
+pub fn default_data_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, ConfigError> {
+    let non_empty = |k| env(k).filter(|v: &OsString| !v.is_empty());
+    let base = match (non_empty("XDG_DATA_HOME"), non_empty("HOME")) {
+        (Some(xdg), _) => PathBuf::from(xdg),
+        (None, Some(home)) => PathBuf::from(home).join(".local/share"),
+        (None, None) => return Err(ConfigError::NoDataDir),
     };
     Ok(base.join("nucrawler"))
 }
@@ -338,6 +351,21 @@ mod tests {
     fn default_dir_falls_back_to_home() {
         let dir = default_dir(|k| (k == "HOME").then(|| "/home/u".into())).unwrap();
         assert_eq!(dir, PathBuf::from("/home/u/.config/nucrawler"));
+    }
+
+    #[test]
+    fn default_data_dir_prefers_xdg_then_home() {
+        let xdg = default_data_dir(|k| match k {
+            "XDG_DATA_HOME" => Some("/xdg".into()),
+            "HOME" => Some("/home/u".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(xdg, PathBuf::from("/xdg/nucrawler"));
+        let home = default_data_dir(|k| (k == "HOME").then(|| "/home/u".into())).unwrap();
+        assert_eq!(home, PathBuf::from("/home/u/.local/share/nucrawler"));
+        let err = default_data_dir(|_| None).unwrap_err();
+        assert!(matches!(err, ConfigError::NoDataDir), "{err}");
     }
 
     #[test]

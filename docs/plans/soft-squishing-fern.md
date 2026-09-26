@@ -162,9 +162,9 @@ source_state(source_id PK, last_success_at, last_error)
 
 ## 依存 crate
 
-- 使うもの：tokio、reqwest（rustls）、axum、rusqlite（bundled）、serde、serde_json、toml、feed-rs、encoding_rs（Shift_JIS）、scraper、dom_smoothie、texting_robots、chrono、anyhow
+- 使うもの：tokio、reqwest（rustls）、axum、rusqlite（bundled）、serde、serde_json、toml、feed-rs、encoding_rs（Shift_JIS）、scraper、dom_smoothie、texting_robots、chrono、thiserror（モジュールごとのエラー型）、tracing と tracing-subscriber（ログは stderr）
 - 後から追加するもの：rmcp（MCP）、pdf-extract（PDF）、CDP クライアント（Chromium）
-- 使わないもの：clap、テンプレートエンジン、wiremock（代わりにローカルの axum を使う）、tracing（ログは eprintln）
+- 使わないもの：clap、テンプレートエンジン、wiremock（代わりにローカルの axum を使う）、anyhow
 
 ## PR の順序
 

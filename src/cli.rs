@@ -488,6 +488,25 @@ mod tests {
     }
 
     #[test]
+    fn parses_serve_args() {
+        assert_eq!(parse_serve_args(&[]).unwrap(), ServeArgs { addr: None });
+        assert_eq!(
+            parse_serve_args(&args(&["--addr", "100.64.0.1:8080"])).unwrap(),
+            ServeArgs {
+                addr: Some("100.64.0.1:8080".parse().unwrap())
+            }
+        );
+        for bad in [
+            &["--addr"][..],
+            &["--addr", "localhost"],
+            &["--addr", "--x"],
+            &["extra"],
+        ] {
+            assert!(parse_serve_args(&args(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn parses_profile_args() {
         assert_eq!(
             parse_profile_args(&args(&["import", "p.toml"])).unwrap(),

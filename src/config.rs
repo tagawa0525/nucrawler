@@ -516,6 +516,30 @@ mod tests {
     }
 
     #[test]
+    fn web_defaults_to_localhost() {
+        let c = parse_config("", p()).unwrap();
+        assert_eq!(c.web.bind, "127.0.0.1:8080".parse().unwrap());
+        let c = parse_config("[web]\nbind = \"100.64.0.1:8080\"\nmin_score = 70\n", p()).unwrap();
+        assert_eq!(c.web.bind, "100.64.0.1:8080".parse().unwrap());
+        assert_eq!(c.web.min_score, 70);
+    }
+
+    #[test]
+    fn rejects_web_values_that_hide_everything() {
+        for (text, reason) in [
+            ("[web]\nmin_score = 101\n", "web.min_score"),
+            ("[web]\nlist_days = 0\n", "web.list_days"),
+            ("[web]\nlist_limit = 0\n", "web.list_limit"),
+        ] {
+            let err = parse_config(text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason: r, .. } if r.contains(reason)),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn examples_are_valid() {
         parse_config(include_str!("../examples/config.toml"), p()).unwrap();
         let s = parse_sources(include_str!("../examples/sources.toml"), p()).unwrap();

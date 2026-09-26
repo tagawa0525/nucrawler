@@ -49,3 +49,13 @@ weekly_max = 0.70
 pace_ahead_days = 1.0
 # 1 回の実行で呼び出してよい回数
 max_calls_per_run = 30
+
+[web]
+# 待ち受けるアドレス。スマホから Tailscale 経由で見るなら tailnet の IP（100.x.y.z:8080 など）にする
+bind = "127.0.0.1:8080"
+# 一覧に既定で出す最低点、期間（日）、最大件数
+min_score = 50
+list_days = 7
+list_limit = 200
+# 一覧を見てからこの分数以内は同じ訪問として「前回から」の区切りを保つ
+visit_gap_minutes = 30

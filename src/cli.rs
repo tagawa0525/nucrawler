@@ -21,6 +21,8 @@ pub enum ParseError {
         "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
+    #[error("usage: nucrawler serve [--addr IP:PORT]")]
+    ServeUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -222,6 +224,28 @@ fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Option<&'a Str
 /// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。
 fn jst_midnight(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     crate::jst::midnight(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?)
+}
+
+/// `serve` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServeArgs {
+    /// 待ち受けるアドレス（設定の `web.bind` より優先）
+    pub addr: Option<std::net::SocketAddr>,
+}
+
+pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, ParseError> {
+    let mut it = args.iter();
+    let mut addr = None;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--addr" => {
+                let value = option_value(&mut it).ok_or(ParseError::ServeUsage)?;
+                addr = Some(value.parse().map_err(|_| ParseError::ServeUsage)?);
+            }
+            _ => return Err(ParseError::ServeUsage),
+        }
+    }
+    Ok(ServeArgs { addr })
 }
 
 /// `profile` サブコマンドの引数。

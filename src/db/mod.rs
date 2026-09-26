@@ -200,13 +200,13 @@ mod tests {
         db.conn().last_insert_rowid()
     }
 
-    fn insert_artifact(db: &Db, article_id: i64) -> i64 {
+    fn insert_artifact(db: &Db, article_id: i64, input_scope: &str) -> i64 {
         db.conn()
             .execute(
                 "INSERT INTO artifacts
                    (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
-                 VALUES (?1, 'digest', 'b', 'm', 1, 'm', '{}', '2026-09-27T00:00:00Z')",
-                [article_id],
+                 VALUES (?1, 'digest', 'b', 'm', 1, ?2, '{}', '2026-09-27T00:00:00Z')",
+                rusqlite::params![article_id, input_scope],
             )
             .unwrap();
         db.conn().last_insert_rowid()
@@ -242,6 +242,78 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    fn insert_content(db: &Db, article_id: i64, membership: Option<i64>) -> i64 {
+        db.conn()
+            .execute(
+                "INSERT INTO contents (article_id, kind, access_membership_id, text, origin, fetched_at)
+                 VALUES (?1, 'body', ?2, 'x', 'page', '2026-09-27T00:00:00Z')",
+                rusqlite::params![article_id, membership],
+            )
+            .unwrap();
+        db.conn().last_insert_rowid()
+    }
+
+    fn access_of(db: &Db, artifact_id: i64) -> Vec<i64> {
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT membership_id FROM artifact_access WHERE artifact_id = ?1 ORDER BY 1")
+            .unwrap();
+        stmt.query_map([artifact_id], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// 閲覧に必要な資格は、入力に使った本文の資格から必ず導出されること。
+    #[test]
+    fn artifact_access_is_derived_from_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let public = insert_content(&db, a, None);
+        let gated = insert_content(&db, a, Some(m));
+
+        let public_only = insert_artifact(&db, a, "public");
+        db.conn()
+            .execute(
+                "INSERT INTO artifact_inputs VALUES (?1, ?2)",
+                [public_only, public],
+            )
+            .unwrap();
+        assert!(access_of(&db, public_only).is_empty());
+
+        let mixed = insert_artifact(&db, a, "m");
+        for c in [public, gated] {
+            db.conn()
+                .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [mixed, c])
+                .unwrap();
+        }
+        assert_eq!(access_of(&db, mixed), vec![m]);
+    }
+
+    /// 閲覧資格を直接書き込んで、入力と食い違わせることはできないこと。
+    #[test]
+    fn artifact_access_cannot_be_written_directly() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let art = insert_artifact(&db, a, "m");
+        let insert = db
+            .conn()
+            .execute("INSERT INTO artifact_access VALUES (?1, ?2)", [art, m]);
+        assert!(insert.is_err(), "{insert:?}");
+        let delete = db
+            .conn()
+            .execute("DELETE FROM artifact_access WHERE artifact_id = ?1", [art]);
+        assert!(delete.is_err(), "{delete:?}");
+    }
+
     /// 会員資格を消しても、会員限定の成果物が公開扱いにならないこと。
     #[test]
     fn deleting_membership_used_by_gated_artifact_is_rejected() {
@@ -251,15 +323,17 @@ mod tests {
             .insert_article(&article("https://e.com/a"))
             .unwrap()
             .unwrap();
-        let art = insert_artifact(&db, a);
+        let gated = insert_content(&db, a, Some(m));
+        let art = insert_artifact(&db, a, "m");
         db.conn()
-            .execute("INSERT INTO artifact_access VALUES (?1, ?2)", [art, m])
+            .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [art, gated])
             .unwrap();
         let err = db
             .conn()
             .execute("DELETE FROM memberships WHERE id = ?1", [m])
             .unwrap_err();
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+        assert_eq!(access_of(&db, art), vec![m]);
     }
 
     /// 記事を消せば、本文・成果物・出所の記録がまとめて消えること。
@@ -278,7 +352,7 @@ mod tests {
             )
             .unwrap();
         let c = db.conn().last_insert_rowid();
-        let art = insert_artifact(&db, a);
+        let art = insert_artifact(&db, a, "m");
         db.conn()
             .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [art, c])
             .unwrap();

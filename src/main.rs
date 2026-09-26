@@ -81,13 +81,14 @@ async fn main() -> ExitCode {
 }
 
 /// ログは stderr に出す（stdout は help 出力や将来の MCP の JSON-RPC 用）。
-/// 詳細度は RUST_LOG で変えられ、既定は info。
+/// 詳細度は RUST_LOG で変えられ、既定は info。readability が HTML を書き出すときの
+/// html5ever の警告（"weird namespace" など）は利用者が対処できないので、既定では出さない。
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,html5ever=error")),
         )
         .init();
 }

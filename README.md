@@ -55,10 +55,12 @@ users.users.<name>.linger = true;
 
 1. `claude` にログインしておく（`claude` を一度起動する）。unit は利用者のプロファイルの `claude` を使う。
    別の場所にあるなら `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す
-2. 関心プロファイルを取り込む
+2. 関心プロファイルを用意して取り込む。パッケージに入っている例をコピーして編集するとよい
 
    ```sh
-   nucrawler profile import examples/profile.toml
+   cp "$(dirname "$(readlink -f "$(command -v nucrawler)")")/../share/nucrawler/profile.toml" ~/nucrawler-profile.toml
+   $EDITOR ~/nucrawler-profile.toml
+   nucrawler profile import ~/nucrawler-profile.toml
    ```
 
 3. ソースから取得できるか確かめる
@@ -77,7 +79,7 @@ users.users.<name>.linger = true;
 ## 使い方
 
 ```text
-nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]
+nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N] [--wait-lock]
 nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--min-score N] [--ids 1,2,3]
 nucrawler status
 nucrawler sources check [ID]
@@ -86,7 +88,7 @@ nucrawler profile import FILE | nucrawler profile export
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
-- 別の `crawl` が実行中なら終了コード 75（EX_TEMPFAIL）で終わる。unit ではこれを失敗扱いにしない
+- 別の `crawl` が実行中なら終了コード 75（EX_TEMPFAIL）で終わる。`--wait-lock` を付けると終わるのを待ってから始める（unit はこちらを使う）
 - `status` はソースごとの記事数と取得状況を表示する
 
 ## Web UI

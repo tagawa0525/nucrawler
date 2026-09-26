@@ -966,27 +966,21 @@ impl Db {
         limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
         let mut stmt = self.conn.prepare(
-            "WITH candidates AS (
+            "WITH base AS (
                SELECT a.id, a.title, coalesce(a.published_at, a.fetched_at) AS at,
                       (SELECT tr.requested_at FROM translation_requests AS tr
                        WHERE tr.article_id = a.id AND tr.user_id = ?1 AND tr.done_at IS NULL)
                         AS requested_at,
-                      -- 点数は、利用者が閲覧できる最新の digest に付いた採点だけを見る
-                      -- （古い版の高得点で先回りしない）。プロファイルが無い（?2 が NULL）なら
-                      -- 点数は付かず、依頼だけが残る
-                      (SELECT max(s.score) FROM scores AS s
-                       WHERE s.user_id = ?1 AND s.profile_hash = ?2
-                         AND s.artifact_id = (
-                           SELECT r.id FROM artifacts AS r
-                           WHERE r.article_id = a.id AND r.kind = 'digest'
-                             AND NOT EXISTS (
-                               SELECT 1 FROM artifact_access AS aa
-                               WHERE aa.artifact_id = r.id
-                                 AND aa.membership_id NOT IN (
-                                   SELECT membership_id FROM user_memberships
-                                   WHERE user_id = ?1))
-                           ORDER BY r.created_at DESC, r.id DESC LIMIT 1))
-                        AS score
+                      -- 利用者が閲覧できる最新の digest。先回りの判定（点数と lwr_relevant）は
+                      -- この版だけで行い、古い版の高得点では先回りしない
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = a.id AND r.kind = 'digest'
+                         AND NOT EXISTS (
+                           SELECT 1 FROM artifact_access AS aa
+                           WHERE aa.artifact_id = r.id
+                             AND aa.membership_id NOT IN (
+                               SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
                FROM articles AS a
                WHERE a.lang = 'en'
                  AND NOT EXISTS (
@@ -1001,10 +995,21 @@ impl Db {
                    WHERE e.article_id = a.id AND e.stage = 'translate'
                      AND e.backend = ?3 AND e.model = ?4
                      AND (e.attempts >= ?5 OR e.next_retry_at > ?6))
+             ),
+             candidates AS (
+               SELECT b.*,
+                      -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
+                      (SELECT max(s.score) FROM scores AS s
+                       WHERE s.user_id = ?1 AND s.profile_hash = ?2
+                         AND s.artifact_id = b.digest_id) AS score,
+                      (SELECT json_extract(r.payload, '$.lwr_relevant') FROM artifacts AS r
+                       WHERE r.id = b.digest_id) AS relevant
+               FROM base AS b
              )
              SELECT id, title FROM candidates
+             -- 依頼は明示的なので、軽水炉と無関係な記事でも和訳する
              WHERE requested_at IS NOT NULL
-                OR (?7 = 0 AND score >= ?8 AND at >= ?9)
+                OR (?7 = 0 AND relevant = 1 AND score >= ?8 AND at >= ?9)
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
         )?;

@@ -108,7 +108,9 @@ impl PageFailure {
     fn is_permanent(&self) -> bool {
         match self {
             Self::InvalidUrl { .. } | Self::Pdf { .. } => true,
-            Self::Http(HttpError::DisallowedByRobots { .. }) => true,
+            Self::Http(HttpError::DisallowedByRobots { .. } | HttpError::BodyTooLarge { .. }) => {
+                true
+            }
             // 401/403 は多くが bot 対策で、待っても変わらない（回避はしない方針）。
             Self::Http(HttpError::Status { status, .. }) => {
                 matches!(status.as_u16(), 401 | 403 | 404 | 410)

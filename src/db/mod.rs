@@ -2590,6 +2590,50 @@ mod tests {
         );
     }
 
+    /// 開いたまま残っていた依頼も、再度依頼すれば和訳の有無に応じて完了になる。
+    #[test]
+    fn repeated_request_repairs_open_request_for_translated_article() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.request_translation(owner, a, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 以前の実装で、和訳だけが保存され依頼が開いたまま残った状態を作る
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[body],
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.request_translation(owner, a, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn pending_translate_without_profile_only_serves_requests() {
         let db = Db::open_in_memory().unwrap();

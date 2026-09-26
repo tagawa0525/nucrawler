@@ -295,6 +295,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requests_only_translates_requested_articles() {
+        let (db, owner) = setup();
+        let _high = article(&db, 0, 99);
+        let requested = article(&db, 1, 10);
+        db.request_translation(owner, requested, now()).unwrap();
+        let llm = FakeLlm::new([ok("依頼の和訳")]);
+        let summary = run(&db, owner, &llm, &mut quota(10), true).await;
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert!(llm.requests()[0].prompt.contains("Body 1"));
+    }
+
+    #[tokio::test]
     async fn requests_only_skips_proactive_translation() {
         let (db, owner) = setup();
         article(&db, 0, 99);

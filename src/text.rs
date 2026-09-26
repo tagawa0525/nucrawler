@@ -183,6 +183,12 @@ mod tests {
     }
 
     #[test]
+    fn skips_unknown_meta_charset_for_a_later_valid_one() {
+        let bytes = sjis("<meta charset=\"x-unknown\"><meta charset=\"shift_jis\"><p>原子力</p>");
+        assert!(decode_html(&bytes, None).contains("原子力"));
+    }
+
+    #[test]
     fn bom_wins_over_meta() {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice("<meta charset=\"shift_jis\">日本".as_bytes());

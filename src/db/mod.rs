@@ -1403,14 +1403,22 @@ impl Db {
                       EXISTS (
                         SELECT 1 FROM translation_requests AS tr
                         WHERE tr.user_id = :user AND tr.article_id = i.id AND tr.done_at IS NULL)
-                        AS requested
+                        AS requested,
+                      -- 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒）
+                      (SELECT json_group_array(name) FROM (
+                         SELECT m.name FROM article_access AS aa
+                         JOIN memberships AS m ON m.id = aa.membership_id
+                         WHERE aa.article_id = i.id
+                           AND aa.membership_id NOT IN (
+                             SELECT membership_id FROM user_memberships WHERE user_id = :user)
+                         ORDER BY m.name)) AS locked_by
                FROM items AS i
                LEFT JOIN artifacts AS d ON d.id = i.digest_id
              )
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
-                    rows.requested
+                    rows.requested, rows.locked_by
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
@@ -1434,7 +1442,7 @@ impl Db {
             },
             |r| {
                 let feedback: Option<String> = r.get(13)?;
-                Ok(ListItem {
+                let item = ListItem {
                     article_id: r.get(0)?,
                     source_id: r.get(1)?,
                     url: r.get(2)?,
@@ -1456,24 +1464,16 @@ impl Db {
                     has_translation: r.get(14)?,
                     translation_requested: r.get(15)?,
                     locked_by: Vec::new(),
-                })
+                };
+                Ok((item, r.get::<_, String>(16)?))
             },
         )?;
-        let mut items = rows.collect::<Result<Vec<_>, _>>()?;
-        let mut locks = self.conn.prepare_cached(
-            "SELECT m.name FROM article_access AS aa
-             JOIN memberships AS m ON m.id = aa.membership_id
-             WHERE aa.article_id = ?1
-               AND aa.membership_id NOT IN (
-                 SELECT membership_id FROM user_memberships WHERE user_id = ?2)
-             ORDER BY m.name",
-        )?;
-        for item in &mut items {
-            item.locked_by = locks
-                .query_map([item.article_id, user_id], |r| r.get(0))?
-                .collect::<Result<_, _>>()?;
-        }
-        Ok(items)
+        rows.map(|row| {
+            let (mut item, locked_by) = row?;
+            item.locked_by = serde_json::from_str(&locked_by)?;
+            Ok(item)
+        })
+        .collect()
     }
 
     /// 取得に失敗し続けているソースと、`since` 以降の直近の LLM の失敗。

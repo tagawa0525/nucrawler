@@ -15,6 +15,8 @@ pub enum DbError {
     },
     #[error("unsupported url scheme {scheme:?} in {url:?}")]
     UnsupportedScheme { url: String, scheme: String },
+    #[error("invalid database schema version {0}")]
+    InvalidSchemaVersion(i64),
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
 }
@@ -174,6 +176,83 @@ mod tests {
             matches!(err, DbError::SchemaTooNew { found: 999, .. }),
             "{err}"
         );
+    }
+
+    #[test]
+    fn rejects_negative_schema_version() {
+        let mut db = Db::open_in_memory().unwrap();
+        db.conn.pragma_update(None, "user_version", -1).unwrap();
+        let err = migrate(&mut db.conn).unwrap_err();
+        assert!(matches!(err, DbError::InvalidSchemaVersion(-1)), "{err}");
+    }
+
+    fn insert_membership(db: &Db) -> i64 {
+        db.conn()
+            .execute("INSERT INTO memberships (code, name) VALUES ('m', 'M')", [])
+            .unwrap();
+        db.conn().last_insert_rowid()
+    }
+
+    fn insert_artifact(db: &Db, article_id: i64) -> i64 {
+        db.conn()
+            .execute(
+                "INSERT INTO artifacts
+                   (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+                 VALUES (?1, 'digest', 'b', 'm', 1, 'm', '{}', '2026-09-27T00:00:00Z')",
+                [article_id],
+            )
+            .unwrap();
+        db.conn().last_insert_rowid()
+    }
+
+    #[test]
+    fn deleting_membership_removes_claims_and_article_markers() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let owner = db.owner_id().unwrap();
+        db.conn()
+            .execute("INSERT INTO user_memberships VALUES (?1, ?2)", [owner, m])
+            .unwrap();
+        db.conn()
+            .execute("INSERT INTO article_access VALUES (?1, ?2)", [a, m])
+            .unwrap();
+        db.conn()
+            .execute("DELETE FROM memberships WHERE id = ?1", [m])
+            .unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row(
+                "SELECT (SELECT count(*) FROM user_memberships)
+                      + (SELECT count(*) FROM article_access)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// 会員資格を消しても、会員限定の成果物が公開扱いにならないこと。
+    #[test]
+    fn deleting_membership_used_by_gated_artifact_is_rejected() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let art = insert_artifact(&db, a);
+        db.conn()
+            .execute("INSERT INTO artifact_access VALUES (?1, ?2)", [art, m])
+            .unwrap();
+        let err = db
+            .conn()
+            .execute("DELETE FROM memberships WHERE id = ?1", [m])
+            .unwrap_err();
+        assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
     }
 
     #[test]

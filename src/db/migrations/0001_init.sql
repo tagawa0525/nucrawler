@@ -92,13 +92,14 @@ CREATE TABLE artifact_inputs (
     PRIMARY KEY (artifact_id, content_id)
 ) WITHOUT ROWID;
 
--- 閲覧に必要な会員資格（入力の資格の和集合）。行が無ければ公開。
--- 行が消えると限定成果物が公開扱いになるため、参照中の資格は削除させない（RESTRICT）。
-CREATE TABLE artifact_access (
-    artifact_id   INTEGER NOT NULL REFERENCES artifacts (id) ON DELETE CASCADE,
-    membership_id INTEGER NOT NULL REFERENCES memberships (id) ON DELETE RESTRICT,
-    PRIMARY KEY (artifact_id, membership_id)
-) WITHOUT ROWID;
+-- 閲覧に必要な会員資格。入力に使った本文の資格の和集合として導出し、行が無ければ公開。
+-- テーブルにすると入力と食い違い得る（会員限定の本文から作った成果物が公開扱いになる）ため、
+-- ビューにして書き込めないようにする。資格の削除は contents 側の RESTRICT で防ぐ。
+CREATE VIEW artifact_access (artifact_id, membership_id) AS
+SELECT DISTINCT ai.artifact_id, c.access_membership_id
+FROM artifact_inputs AS ai
+JOIN contents AS c ON c.id = ai.content_id
+WHERE c.access_membership_id IS NOT NULL;
 
 -- 推薦 -----------------------------------------------------------------------
 

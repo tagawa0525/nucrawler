@@ -195,6 +195,12 @@ pub struct ScoreKey<'a> {
     pub model: &'a str,
 }
 
+/// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
+/// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
+pub fn score_stage(_key: ScoreKey) -> String {
+    todo!()
+}
+
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreInput {
@@ -1956,6 +1962,80 @@ mod tests {
             )
             .unwrap();
         assert_eq!(score_ids(&db, key, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    /// 採点の失敗は利用者とプロファイルごと。あるプロファイルの失敗が、別のプロファイルを止めない。
+    #[test]
+    fn score_failures_are_scoped_to_user_and_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let now = "2026-09-27T00:00:00Z";
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: &score_stage(key),
+                backend: key.backend,
+                model: key.model,
+            },
+            "bad output",
+            t(now),
+            true,
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let other_profile = ScoreKey {
+            profile_hash: "h2",
+            ..key
+        };
+        assert_eq!(score_ids(&db, other_profile, now), [a]);
+    }
+
+    /// 見出しは、利用者が閲覧できる digest からだけ取る。
+    #[test]
+    fn recent_signals_use_viewable_digests_only() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "公開の見出し",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({
+            "title_ja": "会員限定の見出し", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "opus",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T02:00:00Z"),
+        )
+        .unwrap();
+        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap()[0].title_ja,
+            "公開の見出し"
+        );
     }
 
     #[test]

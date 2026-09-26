@@ -21,6 +21,9 @@ pub enum DbError {
     InvalidSchemaVersion(i64),
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// CHECK 制約で防いでいるはずの値が入っていた
+    #[error("unexpected value in the database: {0}")]
+    UnexpectedValue(String),
     /// 入力の無い成果物は閲覧資格を導出できず、公開扱いになってしまうので登録しない。
     #[error("artifact for article {article_id} has no input contents")]
     NoArtifactInputs { article_id: i64 },
@@ -181,6 +184,58 @@ pub struct InputContent {
     pub id: i64,
     pub kind: String,
     pub text: String,
+}
+
+/// 採点の対象を特定するキー（誰の・どのプロファイルで・どのモデルで）。
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreKey<'a> {
+    pub user_id: i64,
+    pub profile_hash: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+}
+
+/// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
+/// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
+pub fn score_stage(key: ScoreKey) -> String {
+    format!("score:{}:{}", key.user_id, key.profile_hash)
+}
+
+/// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreInput {
+    pub article_id: i64,
+    pub artifact_id: i64,
+    pub title_ja: String,
+    pub summary_ja: String,
+    pub topics: Vec<String>,
+}
+
+/// 利用者の行動。推薦への効き方は 👎 ≫ 詳細を開いた ＜ 和訳を開いた ≪ 👍。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalKind {
+    OpenDetail,
+    OpenTranslation,
+    Up,
+    Down,
+}
+
+impl SignalKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenDetail => "open_detail",
+            Self::OpenTranslation => "open_translation",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// 採点の参考にする直近の行動と、その記事の見出し。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signal {
+    pub kind: SignalKind,
+    pub title_ja: String,
 }
 
 /// 抽出待ちの記事。
@@ -678,6 +733,173 @@ impl Db {
                 })
             })
             .collect()
+    }
+
+    /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
+    /// `cutoff` 以降の記事で、このキーの採点がまだ無いものを新しい順に返す。
+    /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn pending_score(
+        &self,
+        key: ScoreKey,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<ScoreInput>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "WITH viewable AS (
+               -- 利用者が持っていない会員資格を必要とする digest は見せない
+               SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
+               FROM artifacts AS r
+               WHERE r.kind = 'digest'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifact_access AS aa
+                   WHERE aa.artifact_id = r.id
+                     AND aa.membership_id NOT IN (
+                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+             ),
+             latest AS (
+               SELECT v.* FROM viewable AS v
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewable AS w
+                 WHERE w.article_id = v.article_id
+                   AND (w.created_at > v.created_at
+                        OR (w.created_at = v.created_at AND w.id > v.id)))
+             )
+             SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
+                    json_extract(l.payload, '$.topics')
+             FROM latest AS l
+             JOIN articles AS a ON a.id = l.article_id
+             WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+               AND coalesce(a.published_at, a.fetched_at) >= ?2
+               AND NOT EXISTS (
+                 SELECT 1 FROM scores AS s
+                 WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
+                   AND s.backend = ?4 AND s.model = ?5)
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = l.article_id AND e.stage = ?9
+                   AND e.backend = ?4 AND e.model = ?5
+                   AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?8",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                key.user_id,
+                timestamp(cutoff),
+                key.profile_hash,
+                key.backend,
+                key.model,
+                MAX_ATTEMPTS,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                score_stage(key),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (article_id, artifact_id, title_ja, summary_ja, topics) = row?;
+            let topics = match topics {
+                Some(json) => serde_json::from_str(&json)?,
+                None => Vec::new(),
+            };
+            Ok(ScoreInput {
+                article_id,
+                artifact_id,
+                title_ja,
+                summary_ja,
+                topics,
+            })
+        })
+        .collect()
+    }
+
+    pub fn insert_score(
+        &self,
+        key: ScoreKey,
+        artifact_id: i64,
+        score: u8,
+        reason: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                key.user_id,
+                artifact_id,
+                key.profile_hash,
+                key.backend,
+                key.model,
+                score,
+                reason,
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_event(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: SignalKind,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
+        )?;
+        Ok(())
+    }
+
+    /// 直近の行動を新しい順に最大 `limit` 件。digest の無い記事の行動は含めない。
+    pub fn recent_signals(&self, user_id: i64, limit: usize) -> Result<Vec<Signal>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, title_ja FROM (
+               SELECT e.id, e.created_at, e.kind,
+                      (SELECT r.title_ja FROM artifacts AS r
+                       WHERE r.article_id = e.article_id AND r.kind = 'digest'
+                         -- 利用者が閲覧できない（会員限定の）digest の見出しは使わない
+                         AND NOT EXISTS (
+                           SELECT 1 FROM artifact_access AS aa
+                           WHERE aa.artifact_id = r.id
+                             AND aa.membership_id NOT IN (
+                               SELECT membership_id FROM user_memberships
+                               WHERE user_id = ?1))
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS title_ja
+               FROM events AS e WHERE e.user_id = ?1)
+             WHERE title_ja IS NOT NULL
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![user_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (kind, title_ja) = row?;
+            let kind = match kind.as_str() {
+                "open_detail" => SignalKind::OpenDetail,
+                "open_translation" => SignalKind::OpenTranslation,
+                "up" => SignalKind::Up,
+                "down" => SignalKind::Down,
+                other => {
+                    return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}")));
+                }
+            };
+            Ok(Signal { kind, title_ja })
+        })
+        .collect()
     }
 
     #[cfg(test)]
@@ -1617,6 +1839,260 @@ mod tests {
         assert_eq!(loaded.exclude.last().map(String::as_str), Some("医療"));
         assert_ne!(new_hash, hash);
         assert_eq!(db.query_i64("SELECT count(*) FROM profiles").unwrap(), 1);
+    }
+
+    fn add_digest(
+        db: &Db,
+        article_id: i64,
+        model: &str,
+        title: &str,
+        relevant: bool,
+        at: &str,
+    ) -> i64 {
+        let c = db
+            .insert_content(article_id, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let payload = serde_json::json!({
+            "title_ja": title, "summary_ja": format!("{title}の要約"), "points_ja": ["点"],
+            "implications_ja": "", "lwr_relevant": relevant, "topics": ["規制・審査"],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model,
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[c],
+            },
+            t(at),
+        )
+        .unwrap()
+    }
+
+    fn score_key(db: &Db) -> ScoreKey<'static> {
+        ScoreKey {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: "h1",
+            backend: "claude-cli",
+            model: "sonnet",
+        }
+    }
+
+    fn score_ids(db: &Db, key: ScoreKey, now: &str) -> Vec<i64> {
+        db.pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn pending_score_uses_latest_relevant_digest_without_score() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "haiku", "古い版", true, "2026-09-26T01:00:00Z");
+        let latest = add_digest(&db, a, "sonnet", "新しい版", true, "2026-09-26T02:00:00Z");
+        let unrelated = page_article(&db, "https://e.com/u", "2026-09-25T00:00:00.000Z");
+        add_digest(
+            &db,
+            unrelated,
+            "sonnet",
+            "非軽水炉",
+            false,
+            "2026-09-26T02:00:00Z",
+        );
+        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
+        add_digest(&db, old, "sonnet", "期間外", true, "2026-09-26T02:00:00Z");
+
+        let pending = db
+            .pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .unwrap();
+        assert_eq!(
+            pending,
+            [ScoreInput {
+                article_id: a,
+                artifact_id: latest,
+                title_ja: "新しい版".into(),
+                summary_ja: "新しい版の要約".into(),
+                topics: vec!["規制・審査".into()],
+            }]
+        );
+
+        db.insert_score(key, latest, 80, Some("規制に直結"), t(now))
+            .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        // プロファイルが変われば採点し直しの対象になる
+        let changed = ScoreKey {
+            profile_hash: "h2",
+            ..key
+        };
+        assert_eq!(score_ids(&db, changed, now), [a]);
+    }
+
+    #[test]
+    fn pending_score_hides_digests_the_user_cannot_view() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({
+            "title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T01:00:00Z"),
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, "2026-09-27T00:00:00Z").is_empty());
+        db.conn()
+            .execute(
+                "INSERT INTO user_memberships VALUES (?1, ?2)",
+                [key.user_id, aesj],
+            )
+            .unwrap();
+        assert_eq!(score_ids(&db, key, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    /// 採点の失敗は利用者とプロファイルごと。あるプロファイルの失敗が、別のプロファイルを止めない。
+    #[test]
+    fn score_failures_are_scoped_to_user_and_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let now = "2026-09-27T00:00:00Z";
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: &score_stage(key),
+                backend: key.backend,
+                model: key.model,
+            },
+            "bad output",
+            t(now),
+            true,
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let other_profile = ScoreKey {
+            profile_hash: "h2",
+            ..key
+        };
+        assert_eq!(score_ids(&db, other_profile, now), [a]);
+    }
+
+    /// 見出しは、利用者が閲覧できる digest からだけ取る。
+    #[test]
+    fn recent_signals_use_viewable_digests_only() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "公開の見出し",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({
+            "title_ja": "会員限定の見出し", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "opus",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T02:00:00Z"),
+        )
+        .unwrap();
+        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap()[0].title_ja,
+            "公開の見出し"
+        );
+    }
+
+    #[test]
+    fn score_is_limited_to_0_through_100() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let d = add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        assert!(
+            db.insert_score(key, d, 101, None, t("2026-09-27T00:00:00Z"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn recent_signals_are_newest_first_with_titles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "記事A", true, "2026-09-26T01:00:00Z");
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, b, "sonnet", "記事B", true, "2026-09-26T01:00:00Z");
+        let no_digest = page_article(&db, "https://e.com/c", "2026-09-26T00:00:00.000Z");
+        db.record_event(owner, a, SignalKind::OpenDetail, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::Down, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        db.record_event(owner, no_digest, SignalKind::Up, t("2026-09-27T03:00:00Z"))
+            .unwrap();
+        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T04:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [
+                Signal {
+                    kind: SignalKind::Up,
+                    title_ja: "記事A".into()
+                },
+                Signal {
+                    kind: SignalKind::Down,
+                    title_ja: "記事B".into()
+                },
+                Signal {
+                    kind: SignalKind::OpenDetail,
+                    title_ja: "記事A".into()
+                },
+            ]
+        );
+        assert_eq!(db.recent_signals(owner, 1).unwrap().len(), 1);
     }
 
     #[test]

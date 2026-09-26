@@ -32,6 +32,13 @@ pub enum HttpError {
 
 const MAX_REDIRECTS: usize = 5;
 
+/// 取得結果。`url` はリダイレクトをたどった後の、実際に応答した URL（相対リンクの基準）。
+#[derive(Debug)]
+pub struct Fetched {
+    pub url: Url,
+    pub body: Vec<u8>,
+}
+
 pub struct Fetcher {
     client: reqwest::Client,
     per_host_delay: Duration,
@@ -68,7 +75,7 @@ impl Fetcher {
     }
 
     /// リダイレクトは `MAX_REDIRECTS` 回までたどる。最終的な応答が 2xx 以外ならエラーにする。
-    pub async fn get(&self, url: &Url) -> Result<Vec<u8>, HttpError> {
+    pub async fn get(&self, url: &Url) -> Result<Fetched, HttpError> {
         let mut current = url.clone();
         for _ in 0..=MAX_REDIRECTS {
             self.wait_for_turn(&current).await;
@@ -94,7 +101,10 @@ impl Fetcher {
                 });
             }
             let body = response.bytes().await.map_err(request_error)?;
-            return Ok(body.to_vec());
+            return Ok(Fetched {
+                url: current,
+                body: body.to_vec(),
+            });
         }
         Err(HttpError::TooManyRedirects {
             url: url.to_string(),
@@ -154,7 +164,7 @@ mod tests {
             .get(&url(&server.url("/feed")))
             .await
             .unwrap();
-        assert_eq!(body, b"hello");
+        assert_eq!(body.body, b"hello");
         let reqs = server.requests();
         assert_eq!(reqs[0].user_agent.as_deref(), Some("nucrawler-test/1"));
     }
@@ -211,7 +221,8 @@ mod tests {
             .get(&url(&server.url("/old")))
             .await
             .unwrap();
-        assert_eq!(body, b"moved");
+        assert_eq!(body.body, b"moved");
+        assert_eq!(body.url.as_str(), server.url("/new"));
         let reqs = server.requests();
         let paths: Vec<_> = reqs.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, ["/old", "/new"]);

@@ -77,8 +77,8 @@ async fn check_one(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure
         url: s.url.clone(),
         source,
     })?;
-    let bytes = fetcher.get(&url).await?;
-    let candidates = source::parse(s.kind, &bytes, &url)?;
+    let fetched = fetcher.get(&url).await?;
+    let candidates = source::parse(s.kind, &fetched.body, &fetched.url)?;
     let total = candidates.len();
     let matched = candidates
         .into_iter()

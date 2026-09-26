@@ -21,6 +21,9 @@ pub enum DbError {
     InvalidSchemaVersion(i64),
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
     SchemaTooNew { found: i64, supported: i64 },
+    /// CHECK 制約で防いでいるはずの値が入っていた
+    #[error("unexpected value in the database: {0}")]
+    UnexpectedValue(String),
     /// 入力の無い成果物は閲覧資格を導出できず、公開扱いになってしまうので登録しない。
     #[error("artifact for article {article_id} has no input contents")]
     NoArtifactInputs { article_id: i64 },
@@ -731,38 +734,158 @@ impl Db {
     /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_score(
         &self,
-        _key: ScoreKey,
-        _cutoff: chrono::DateTime<chrono::Utc>,
-        _now: chrono::DateTime<chrono::Utc>,
-        _limit: usize,
+        key: ScoreKey,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "WITH viewable AS (
+               -- 利用者が持っていない会員資格を必要とする digest は見せない
+               SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
+               FROM artifacts AS r
+               WHERE r.kind = 'digest'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifact_access AS aa
+                   WHERE aa.artifact_id = r.id
+                     AND aa.membership_id NOT IN (
+                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+             ),
+             latest AS (
+               SELECT v.* FROM viewable AS v
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewable AS w
+                 WHERE w.article_id = v.article_id
+                   AND (w.created_at > v.created_at
+                        OR (w.created_at = v.created_at AND w.id > v.id)))
+             )
+             SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
+                    json_extract(l.payload, '$.topics')
+             FROM latest AS l
+             JOIN articles AS a ON a.id = l.article_id
+             WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+               AND coalesce(a.published_at, a.fetched_at) >= ?2
+               AND NOT EXISTS (
+                 SELECT 1 FROM scores AS s
+                 WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
+                   AND s.backend = ?4 AND s.model = ?5)
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = l.article_id AND e.stage = 'score'
+                   AND e.backend = ?4 AND e.model = ?5
+                   AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?8",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                key.user_id,
+                timestamp(cutoff),
+                key.profile_hash,
+                key.backend,
+                key.model,
+                MAX_ATTEMPTS,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (article_id, artifact_id, title_ja, summary_ja, topics) = row?;
+            let topics = match topics {
+                Some(json) => serde_json::from_str(&json)?,
+                None => Vec::new(),
+            };
+            Ok(ScoreInput {
+                article_id,
+                artifact_id,
+                title_ja,
+                summary_ja,
+                topics,
+            })
+        })
+        .collect()
     }
 
     pub fn insert_score(
         &self,
-        _key: ScoreKey,
-        _artifact_id: i64,
-        _score: u8,
-        _reason: Option<&str>,
-        _now: chrono::DateTime<chrono::Utc>,
+        key: ScoreKey,
+        artifact_id: i64,
+        score: u8,
+        reason: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                key.user_id,
+                artifact_id,
+                key.profile_hash,
+                key.backend,
+                key.model,
+                score,
+                reason,
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn record_event(
         &self,
-        _user_id: i64,
-        _article_id: i64,
-        _kind: SignalKind,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        article_id: i64,
+        kind: SignalKind,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
+        )?;
+        Ok(())
     }
 
     /// 直近の行動を新しい順に最大 `limit` 件。digest の無い記事の行動は含めない。
-    pub fn recent_signals(&self, _user_id: i64, _limit: usize) -> Result<Vec<Signal>, DbError> {
-        todo!()
+    pub fn recent_signals(&self, user_id: i64, limit: usize) -> Result<Vec<Signal>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, title_ja FROM (
+               SELECT e.id, e.created_at, e.kind,
+                      (SELECT r.title_ja FROM artifacts AS r
+                       WHERE r.article_id = e.article_id AND r.kind = 'digest'
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS title_ja
+               FROM events AS e WHERE e.user_id = ?1)
+             WHERE title_ja IS NOT NULL
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![user_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (kind, title_ja) = row?;
+            let kind = match kind.as_str() {
+                "open_detail" => SignalKind::OpenDetail,
+                "open_translation" => SignalKind::OpenTranslation,
+                "up" => SignalKind::Up,
+                "down" => SignalKind::Down,
+                other => {
+                    return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}")));
+                }
+            };
+            Ok(Signal { kind, title_ja })
+        })
+        .collect()
     }
 
     #[cfg(test)]

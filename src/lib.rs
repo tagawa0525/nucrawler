@@ -18,6 +18,7 @@ pub mod source;
 pub mod status;
 pub mod text;
 pub mod translate;
+pub mod web;
 
 #[cfg(test)]
 mod testutil;

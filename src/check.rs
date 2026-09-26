@@ -216,6 +216,33 @@ mod tests {
         assert!(fepc.matched[0].url.starts_with(&server.base));
     }
 
+    /// 有効なソースが失敗しても、後続のソースの確認を続ける。
+    #[tokio::test]
+    async fn continues_after_an_enabled_source_fails() {
+        let (server, _) = setup();
+        let sources = vec![
+            src(
+                "blocked",
+                SourceKind::Feed,
+                server.url("/blocked"),
+                true,
+                Filter::default(),
+            ),
+            src(
+                "fepc",
+                SourceKind::FepcJson,
+                server.url("/fepc.json"),
+                true,
+                Filter::default(),
+            ),
+        ];
+        let reports = check(&fetcher(), &sources, None).await.unwrap();
+        let ids: Vec<_> = reports.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["blocked", "fepc"]);
+        assert!(reports[0].outcome.is_err());
+        assert!(reports[1].outcome.is_ok());
+    }
+
     /// 転送された場合、相対リンクは実際にフィードを返した URL を基準に解決する。
     #[tokio::test]
     async fn resolves_links_against_final_redirected_url() {

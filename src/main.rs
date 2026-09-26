@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
 use nucrawler::cli::{self, Command, ProfileArgs, SourcesArgs};
-use nucrawler::config::{self, ConfigError};
+use nucrawler::config::{self, ConfigError, LlmConfig};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
@@ -185,11 +185,16 @@ async fn crawl(
                 );
             }
             Stage::Digest => {
+                // 採点が計画に無ければ、採点のための予約はしない
+                let digest_cfg = LlmConfig {
+                    score_reserved_calls: pipeline::score_reserve(&stages, &config.llm),
+                    ..config.llm.clone()
+                };
                 let summary = digest::digest_articles(
                     &db,
                     &llm,
                     &mut quota,
-                    &config.llm,
+                    &digest_cfg,
                     &config.pipeline,
                     chrono::Utc::now(),
                     &cancel,

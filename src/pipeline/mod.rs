@@ -62,8 +62,12 @@ impl Stage {
 }
 
 /// 要約が採点のために残す呼び出し回数。採点が計画に無ければ、残しても使われないので 0。
-pub fn score_reserve(_stages: &[Stage], _cfg: &crate::config::LlmConfig) -> u32 {
-    todo!()
+pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig) -> u32 {
+    if stages.contains(&Stage::Score) {
+        cfg.score_reserved_calls
+    } else {
+        0
+    }
 }
 
 /// `until` を指定すれば最初からそのステージまで、`only` を指定すればそのステージだけ。

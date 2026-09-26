@@ -35,7 +35,7 @@ pub struct Config {
     pub quota: crate::quota::QuotaConfig,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     /// `claude` の実行ファイル（PATH から探す）

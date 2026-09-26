@@ -45,18 +45,16 @@ pub fn parse(kind: SourceKind, bytes: &[u8], base: &Url) -> Result<Vec<Candidate
 
 /// RSS 0.9x/1.0/2.0 と Atom。文字コードは XML 宣言に従う（Shift_JIS も可）。
 fn parse_feed(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
-    let feed = feed_rs::parser::Builder::new()
-        .base_uri(Some(base.as_str()))
-        .build()
-        .parse(bytes)?;
+    // 相対リンクは空かどうかを確かめてから自分で解決する（feed-rs に base_uri を渡すと、
+    // 空の href が取得元の URL に解決されて区別できなくなる）。
+    let feed = feed_rs::parser::parse(bytes)?;
     let mut items = Vec::with_capacity(feed.entries.len());
     for entry in feed.entries {
         // 記事は URL で識別するので、リンクの無い項目は保存できない。
-        let Some(link) = entry
-            .links
-            .iter()
-            .find(|l| l.rel.as_deref().is_none_or(|r| r == "alternate"))
-        else {
+        // 空の href は取得元の URL に解決されてしまうので、無いものとして扱う。
+        let Some(link) = entry.links.iter().find(|l| {
+            l.rel.as_deref().is_none_or(|r| r == "alternate") && !l.href.trim().is_empty()
+        }) else {
             tracing::warn!(id = %entry.id, "skipping feed entry without link");
             continue;
         };
@@ -86,6 +84,14 @@ fn parse_fepc_json(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceErr
     let items: Vec<FepcItem> = serde_json::from_slice(bytes)?;
     items
         .into_iter()
+        .filter(|it| {
+            // 空の href は一覧 JSON 自体の URL に解決されてしまう。
+            let blank = it.href.trim().is_empty();
+            if blank {
+                tracing::warn!(title = %it.title, "skipping fepc item without href");
+            }
+            !blank
+        })
         .map(|it| {
             // 日付しか無いので JST の 0 時とみなす。
             let date =

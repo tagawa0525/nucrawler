@@ -87,6 +87,11 @@ async fn check_one(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure
     Ok(Stats { total, matched })
 }
 
+/// エラーと、その原因（`source()`）を ": " でつないだ文字列。
+pub fn error_chain(_e: &dyn std::error::Error) -> String {
+    todo!()
+}
+
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
 pub fn render(reports: &[Report], samples: usize) -> String {
     let width = reports.iter().map(|r| r.id.len()).max().unwrap_or(0);
@@ -251,9 +256,35 @@ mod tests {
         assert!(out.contains("ok"), "{out}");
         assert!(out.contains("reg"), "{out}");
         assert!(out.contains("5 items, 3 matched"), "{out}");
-        assert!(out.contains("2026-09-25"), "{out}");
+        // 2026-09-25T18:30Z は JST では 9/26
+        assert!(out.contains("2026-09-26"), "{out}");
         assert!(out.contains("first") && out.contains("second"), "{out}");
         assert!(!out.contains("third"), "samples are limited: {out}");
         assert!(out.contains("FAIL") && out.contains("bad"), "{out}");
+    }
+
+    /// 通信エラーなどは原因のエラーまで表示しないと、何が起きたか分からない。
+    #[test]
+    fn renders_error_causes() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("connection reset by peer")]
+        struct Root;
+        #[derive(Debug, thiserror::Error)]
+        #[error("error sending request")]
+        struct Outer(#[source] Root);
+
+        let reports = vec![Report {
+            id: "x".into(),
+            outcome: Err(SourceFailure::Parse(SourceError::Json(
+                serde_json::from_str::<u8>("\"a\"").unwrap_err(),
+            ))),
+        }];
+        let out = render(&reports, 0);
+        assert!(out.contains("failed to parse json"), "{out}");
+
+        assert_eq!(
+            error_chain(&Outer(Root)),
+            "error sending request: connection reset by peer"
+        );
     }
 }

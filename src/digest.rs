@@ -133,8 +133,8 @@ pub fn build_prompt(inputs: &[DigestInput], max_chars: usize) -> String {
         out.push_str(&format!(
             "<article id=\"{}\" lang=\"{}\" source=\"{}\">\nタイトル: {}\n",
             input.article_id,
-            input.lang,
-            input.source_id,
+            attribute(&input.lang),
+            attribute(&input.source_id),
             neutralize(&input.title)
         ));
         for content in &input.contents {
@@ -146,6 +146,15 @@ pub fn build_prompt(inputs: &[DigestInput], max_chars: usize) -> String {
     out
 }
 
+/// 属性値の引用符などを実体参照にして、タグの構造を壊させない。
+fn attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// 本文中の `<article` / `</article` で記事の区切りを偽装されないよう、山括弧を置き換える。
 fn neutralize(text: &str) -> String {
     text.replace("</article", "&lt;/article")
@@ -154,8 +163,17 @@ fn neutralize(text: &str) -> String {
 
 /// 応答から、依頼した記事の payload を取り出す。依頼していない id は無視し、欠けた id を報告する。
 pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, DigestError> {
-    let items = output["items"]
-        .as_array()
+    let top = output
+        .as_object()
+        .ok_or_else(|| DigestError::Malformed("the output is not an object".into()))?;
+    if let Some(extra) = top.keys().find(|k| *k != "items") {
+        return Err(DigestError::Malformed(format!(
+            "unexpected property `{extra}`"
+        )));
+    }
+    let items = top
+        .get("items")
+        .and_then(|v| v.as_array())
         .ok_or_else(|| DigestError::Malformed("`items` is not an array".into()))?;
     let mut found: Vec<(i64, serde_json::Value)> = Vec::new();
     for item in items {

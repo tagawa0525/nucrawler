@@ -57,7 +57,18 @@ mod tests {
         let err = acquire(&dir).unwrap_err();
         assert!(matches!(err, LockError::Held { .. }), "{err}");
         drop(first);
-        acquire(&dir).unwrap();
+        // 並行するテストが子プロセスを fork すると、exec までの一瞬だけロックの fd を引き継ぎ、
+        // 解放後もロックが残って見える（flock はオープンファイル記述単位）。その間だけ待つ。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match acquire(&dir) {
+                Ok(_) => break,
+                Err(LockError::Held { .. }) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
     }
 
     #[test]

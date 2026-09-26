@@ -8,6 +8,8 @@ use crate::config::Lang;
 pub enum DbError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error("failed to encode json")]
+    Json(#[from] serde_json::Error),
     #[error("invalid url {url:?}")]
     InvalidUrl {
         url: String,
@@ -400,10 +402,27 @@ impl Db {
 
     pub fn record_llm_call(
         &self,
-        _call: &LlmCall,
-        _at: chrono::DateTime<chrono::Utc>,
+        call: &LlmCall,
+        at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        let rate_limit = call.rate_limit.map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "INSERT INTO llm_calls
+               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                timestamp(at),
+                call.stage,
+                call.backend,
+                call.model,
+                i64::try_from(call.n_items).unwrap_or(i64::MAX),
+                call.ok,
+                i64::try_from(call.duration_ms).unwrap_or(i64::MAX),
+                call.error,
+                rate_limit,
+            ],
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]

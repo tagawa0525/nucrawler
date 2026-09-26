@@ -43,7 +43,10 @@ pub struct LlmConfig {
 
 impl Default for LlmConfig {
     fn default() -> Self {
-        todo!()
+        Self {
+            command: "claude".into(),
+            timeout_secs: 300,
+        }
     }
 }
 

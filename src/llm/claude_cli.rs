@@ -6,9 +6,12 @@
 //! - 出力は stream-json。`rate_limit_event` から使用率を、`result` から構造化出力を得る。
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
-use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit};
+use tokio::io::AsyncWriteExt;
+
+use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Window};
 
 pub struct ClaudeCli {
     pub command: PathBuf,
@@ -22,14 +25,117 @@ impl Llm for ClaudeCli {
         "claude-cli"
     }
 
-    async fn call(&self, _req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
-        todo!()
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
+        let schema = req.schema.to_string();
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(["-p", "--output-format", "stream-json", "--verbose"])
+            .args(["--json-schema", &schema])
+            .args(["--tools", ""])
+            .args([
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+            ])
+            .args(["--setting-sources", ""])
+            .args(["--system-prompt", req.system])
+            .args(["--model", req.model])
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // タイムアウトで future を捨てたときに子プロセスも止める。
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| LlmError::Spawn {
+                command: self.command.display().to_string(),
+                source,
+            })?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let prompt = req.prompt.as_bytes();
+        let run = async {
+            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
+            let write = async {
+                stdin.write_all(prompt).await?;
+                drop(stdin);
+                Ok::<_, std::io::Error>(())
+            };
+            let (written, output) = tokio::join!(write, child.wait_with_output());
+            written?;
+            output
+        };
+        let output = tokio::time::timeout(self.timeout, run)
+            .await
+            .map_err(|_| LlmError::Timeout {
+                secs: self.timeout.as_secs(),
+            })?
+            .map_err(LlmError::Io)?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed = parse_stream(&stdout);
+        if output.status.success() {
+            let (output, rate_limit) = parsed?;
+            return Ok(LlmResponse { output, rate_limit });
+        }
+        // 失敗しても結果行があれば、そちらの方が原因を正確に表す。
+        match parsed {
+            Err(e @ (LlmError::Reported { .. } | LlmError::RateLimited { .. })) => Err(e),
+            _ => Err(LlmError::Exit {
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }),
+        }
     }
 }
 
 /// stream-json の出力から、構造化出力と最後の使用率を取り出す。
-pub fn parse_stream(_stdout: &str) -> Result<(serde_json::Value, Option<RateLimit>), LlmError> {
-    todo!()
+pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit>), LlmError> {
+    let mut rate_limit = None;
+    let mut rejected = None;
+    let mut result = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| LlmError::Protocol(format!("invalid json line ({e}): {line}")))?;
+        match event["type"].as_str() {
+            Some("rate_limit_event") => {
+                let info = &event["rate_limit_info"];
+                rate_limit = Some(parse_rate_limit(info));
+                if info["status"] == "rejected" {
+                    rejected = Some(info["resetsAt"].as_i64());
+                }
+            }
+            Some("result") => result = Some(event),
+            _ => {}
+        }
+    }
+    let result = result.ok_or_else(|| LlmError::Protocol("no result event".into()))?;
+    if result["is_error"].as_bool().unwrap_or(false) {
+        if let Some(resets_at) = rejected {
+            return Err(LlmError::RateLimited { resets_at });
+        }
+        return Err(LlmError::Reported {
+            subtype: result["subtype"].as_str().unwrap_or_default().to_string(),
+            message: result["result"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+    match result.get("structured_output") {
+        Some(output) if !output.is_null() => Ok((output.clone(), rate_limit)),
+        _ => Err(LlmError::NoStructuredOutput),
+    }
+}
+
+fn parse_rate_limit(info: &serde_json::Value) -> RateLimit {
+    let window = |name: &str| {
+        let w = &info["unifiedWindows"][name];
+        Some(Window {
+            utilization: w["utilization"].as_f64()?,
+            resets_at: w["resetsAt"].as_i64()?,
+        })
+    };
+    RateLimit {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    }
 }
 
 #[cfg(test)]
@@ -37,7 +143,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
-    use crate::llm::Window;
 
     fn fixture() -> String {
         String::from_utf8(crate::testutil::fixture("claude-success.jsonl")).unwrap()

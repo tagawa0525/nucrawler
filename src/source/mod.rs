@@ -226,6 +226,33 @@ mod tests {
         );
     }
 
+    /// 空の href を解決すると取得元（フィード自体）の URL になり、別の記事と区別できなくなる。
+    #[test]
+    fn skips_entries_with_blank_link() {
+        let xml = br#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>t</title><link>https://e.example/</link><description>d</description>
+  <item><title>blank</title><link>  </link></item>
+  <item><title>ok</title><link>https://e.example/a</link></item>
+</channel></rss>"#;
+        let items = parse(SourceKind::Feed, xml, &base("https://e.example/rss")).unwrap();
+        let titles: Vec<_> = items.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["ok"]);
+    }
+
+    #[test]
+    fn skips_fepc_items_with_blank_href() {
+        let bytes = br#"[{"title": "blank", "href": "", "date": "2026-9-18", "category": "c"},
+                         {"title": "ok", "href": "/a", "date": "2026-9-18", "category": "c"}]"#;
+        let items = parse(
+            SourceKind::FepcJson,
+            bytes,
+            &base("https://www.fepc.example/pr/news/index.json"),
+        )
+        .unwrap();
+        let titles: Vec<_> = items.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["ok"]);
+    }
+
     #[test]
     fn parses_fepc_json_as_jst_dates() {
         let items = parse(

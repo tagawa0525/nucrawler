@@ -3,10 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
+use super::llm_call::{Outcome, call_recorded};
 use super::{Cancel, Halt};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{Db, DbError, LlmCall, ScoreKey, StageKey, score_stage};
-use crate::llm::{Llm, LlmError, LlmRequest};
+use crate::db::{Db, DbError, ScoreKey, StageKey, score_stage};
+use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
 use crate::{errors, scoring};
 
@@ -83,49 +84,32 @@ pub async fn score_articles<L: Llm>(
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
         let prompt = scoring::build_prompt(&batch);
-        let started = std::time::Instant::now();
-        let result = llm
-            .call(LlmRequest {
+        let outcome = call_recorded(
+            db,
+            llm,
+            quota,
+            STAGE,
+            batch.len(),
+            LlmRequest {
                 system: &system,
                 prompt: &prompt,
                 schema: &schema,
                 model,
-            })
-            .await;
-        let rate_limit = match &result {
-            Ok(response) => response.rate_limit,
-            Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
-            Err(_) => None,
-        };
-        quota.record_call(rate_limit);
-        summary.calls += 1;
-        let error = result.as_ref().err().map(|e| errors::error_chain(e));
-        db.record_llm_call(
-            &LlmCall {
-                stage: STAGE,
-                backend,
-                model,
-                n_items: batch.len(),
-                ok: result.is_ok(),
-                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                error: error.as_deref(),
-                rate_limit: rate_limit.as_ref(),
             },
             now,
-        )?;
-        let response = match result {
-            Ok(response) => response,
-            Err(LlmError::RateLimited { resets_at, .. }) => {
-                summary.halted = Some(Halt::UsageLimit { resets_at });
-                break;
-            }
-            Err(_) => {
-                let message = error.unwrap_or_default();
-                for &id in &ids {
-                    db.record_stage_failure(failure_key(id), &message, now, false)?;
+        )
+        .await?;
+        summary.calls += 1;
+        let response = match outcome {
+            Outcome::Response(response) => response,
+            Outcome::Halted(halt) => {
+                if let Halt::LlmFailed(message) = &halt {
+                    for &id in &ids {
+                        db.record_stage_failure(failure_key(id), message, now, false)?;
+                    }
+                    summary.failed += ids.len();
                 }
-                summary.failed += ids.len();
-                summary.halted = Some(Halt::LlmFailed(message));
+                summary.halted = Some(halt);
                 break;
             }
         };

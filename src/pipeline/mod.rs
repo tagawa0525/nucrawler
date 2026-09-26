@@ -4,6 +4,7 @@
 pub mod digest;
 pub mod extract;
 pub mod fetch;
+pub mod llm_call;
 pub mod lock;
 pub mod score;
 

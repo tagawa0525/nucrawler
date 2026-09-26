@@ -62,7 +62,7 @@ pub async fn check(
     for s in targets {
         let outcome = check_one(fetcher, s).await;
         if let Err(e) = &outcome {
-            tracing::warn!(source = %s.id, "{e}");
+            tracing::warn!(source = %s.id, "{}", error_chain(e));
         }
         reports.push(Report {
             id: s.id.clone(),
@@ -87,9 +87,20 @@ async fn check_one(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure
     Ok(Stats { total, matched })
 }
 
+/// 表示は日本時間で行う。
+fn jst() -> chrono::FixedOffset {
+    chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset")
+}
+
 /// エラーと、その原因（`source()`）を ": " でつないだ文字列。
-pub fn error_chain(_e: &dyn std::error::Error) -> String {
-    todo!()
+pub fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let _ = write!(out, ": {c}");
+        cause = c.source();
+    }
+    out
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
@@ -109,13 +120,13 @@ pub fn render(reports: &[Report], samples: usize) -> String {
                 for c in stats.matched.iter().take(samples) {
                     let date = c.published_at.map_or_else(
                         || "----------".to_string(),
-                        |d| d.format("%Y-%m-%d").to_string(),
+                        |d| d.with_timezone(&jst()).format("%Y-%m-%d").to_string(),
                     );
                     let _ = writeln!(out, "      {:width$}  {date}  {}", "", c.title);
                 }
             }
             Err(e) => {
-                let _ = writeln!(out, "FAIL  {:width$}  {e}", r.id);
+                let _ = writeln!(out, "FAIL  {:width$}  {}", r.id, error_chain(e));
             }
         }
     }

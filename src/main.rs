@@ -28,7 +28,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            tracing::error!("{e}");
+            tracing::error!("{}", check::error_chain(&e));
             ExitCode::FAILURE
         }
     }

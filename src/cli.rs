@@ -118,6 +118,11 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         let slot = match opt.as_str() {
             "--until" => &mut parsed.until,
             "--only" => &mut parsed.only,
+            "--max-llm-calls" => {
+                let n = it.next().and_then(|n| n.parse().ok()).ok_or_else(usage)?;
+                parsed.max_llm_calls = Some(n);
+                continue;
+            }
             _ => return Err(usage()),
         };
         let stage = it

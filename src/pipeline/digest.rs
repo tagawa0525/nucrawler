@@ -5,9 +5,10 @@ use chrono::{DateTime, Utc};
 
 use super::Cancel;
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{Db, DbError};
-use crate::llm::Llm;
+use crate::db::{ArtifactKind, Db, DbError, LlmCall, NewArtifact, StageKey};
+use crate::llm::{Llm, LlmError, LlmRequest};
 use crate::quota::{Quota, Stop};
+use crate::{digest, errors};
 
 pub const STAGE: &str = "digest";
 
@@ -39,15 +40,124 @@ pub struct DigestSummary {
 }
 
 pub async fn digest_articles<L: Llm>(
-    _db: &Db,
-    _llm: &L,
-    _quota: &mut Quota,
-    _llm_cfg: &LlmConfig,
-    _pipeline_cfg: &PipelineConfig,
-    _now: DateTime<Utc>,
-    _cancel: &Cancel,
+    db: &Db,
+    llm: &L,
+    quota: &mut Quota,
+    llm_cfg: &LlmConfig,
+    pipeline_cfg: &PipelineConfig,
+    now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<DigestSummary, DigestStageError> {
-    todo!()
+    let backend = llm.backend();
+    let model = llm_cfg.digest_model.as_str();
+    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+    let schema = digest::schema();
+    let mut summary = DigestSummary::default();
+    loop {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        if let Err(stop) = quota.permit(now) {
+            tracing::info!("digest stops: {stop}");
+            summary.halted = Some(Halt::Quota(stop));
+            break;
+        }
+        let batch = db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?;
+        if batch.is_empty() {
+            break;
+        }
+        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+        let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
+        let started = std::time::Instant::now();
+        let result = llm
+            .call(LlmRequest {
+                system: digest::system_prompt(),
+                prompt: &prompt,
+                schema: &schema,
+                model,
+            })
+            .await;
+        let rate_limit = result.as_ref().ok().and_then(|r| r.rate_limit);
+        quota.record_call(rate_limit);
+        summary.calls += 1;
+        let error = result.as_ref().err().map(|e| errors::error_chain(e));
+        db.record_llm_call(
+            &LlmCall {
+                stage: STAGE,
+                backend,
+                model,
+                n_items: batch.len(),
+                ok: result.is_ok(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                error: error.as_deref(),
+                rate_limit: rate_limit.as_ref(),
+            },
+            now,
+        )?;
+        let key = |article_id| StageKey {
+            article_id,
+            stage: STAGE,
+            backend,
+            model,
+        };
+        let response = match result {
+            Ok(response) => response,
+            Err(LlmError::RateLimited { resets_at }) => {
+                // 上限は記事の問題ではないので、失敗として記録しない。
+                summary.halted = Some(Halt::UsageLimit { resets_at });
+                break;
+            }
+            Err(_) => {
+                // 認証切れなど記事によらない原因かもしれないので、このバッチだけ失敗にして止める。
+                let message = error.unwrap_or_default();
+                for &id in &ids {
+                    db.record_stage_failure(key(id), &message, now, false)?;
+                }
+                summary.failed += ids.len();
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
+        let parsed = match digest::parse(&response.output, &ids) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let message = errors::error_chain(&e);
+                tracing::warn!("digest output rejected: {message}");
+                for &id in &ids {
+                    db.record_stage_failure(key(id), &message, now, false)?;
+                }
+                summary.failed += ids.len();
+                continue;
+            }
+        };
+        for (id, payload) in &parsed.items {
+            let inputs: Vec<i64> = batch
+                .iter()
+                .find(|b| b.article_id == *id)
+                .map(|b| b.contents.iter().map(|c| c.id).collect())
+                .unwrap_or_default();
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: *id,
+                    kind: ArtifactKind::Digest,
+                    backend,
+                    model,
+                    prompt_version: digest::PROMPT_VERSION,
+                    payload,
+                    inputs: &inputs,
+                },
+                now,
+            )?;
+            db.clear_stage_failure(key(*id))?;
+            summary.digested += 1;
+        }
+        for &id in &parsed.missing {
+            db.record_stage_failure(key(id), "missing or invalid in the llm output", now, false)?;
+        }
+        summary.failed += parsed.missing.len();
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]

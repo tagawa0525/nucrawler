@@ -55,9 +55,9 @@ impl Default for LlmConfig {
         Self {
             command: "claude".into(),
             timeout_secs: 300,
-            digest_model: todo!(),
-            digest_batch_size: todo!(),
-            max_input_chars: todo!(),
+            digest_model: "sonnet".into(),
+            digest_batch_size: 5,
+            max_input_chars: 6000,
         }
     }
 }

@@ -7,10 +7,13 @@ use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
+use nucrawler::llm::claude_cli::ClaudeCli;
+use nucrawler::pipeline::digest::{self, DigestStageError, Halt};
 use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::{self, Cancel, Stage};
+use nucrawler::quota::Quota;
 use nucrawler::status;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +34,10 @@ enum Error {
     Fetch(#[from] FetchError),
     #[error(transparent)]
     Extract(#[from] ExtractStageError),
+    #[error(transparent)]
+    Digest(#[from] DigestStageError),
+    #[error("llm call failed: {0}")]
+    LlmFailed(String),
     #[error("failed to create data directory {path}")]
     DataDir {
         path: PathBuf,
@@ -81,8 +88,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Crawl => {
             let args = cli::parse_crawl_args(&inv.args)?;
-            let stages = pipeline::plan(args.until, args.only);
-            crawl(inv.config_dir, inv.data_dir, &stages).await
+            crawl(inv.config_dir, inv.data_dir, &args).await
         }
         Command::Status => status(inv.config_dir, inv.data_dir),
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
@@ -115,8 +121,9 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Error> {
 async fn crawl(
     config: Option<PathBuf>,
     data: Option<PathBuf>,
-    stages: &[Stage],
+    args: &cli::CrawlArgs,
 ) -> Result<(), Error> {
+    let stages = pipeline::plan(args.until, args.only);
     let (config, sources) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
     let _lock = lock::acquire(&data)?;
@@ -124,9 +131,11 @@ async fn crawl(
     let fetcher = Fetcher::from_config(&config.http)?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
+    // 認証切れなど、利用者が対処すべき LLM の失敗（最後にエラーとして報告する）
+    let mut llm_failure = None;
 
     let mut failed_sources = 0;
-    for &stage in stages {
+    for &stage in &stages {
         if cancel.is_requested() {
             break;
         }
@@ -141,7 +150,42 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
-            Stage::Digest => todo!("digest stage"),
+            Stage::Digest => {
+                let llm = ClaudeCli {
+                    command: config.llm.command.clone().into(),
+                    cwd: data.join("llm-cwd"),
+                    timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
+                };
+                let mut quota = Quota::new(
+                    config.quota.clone(),
+                    db.latest_rate_limit()?,
+                    args.max_llm_calls,
+                );
+                let summary = digest::digest_articles(
+                    &db,
+                    &llm,
+                    &mut quota,
+                    &config.llm,
+                    &config.pipeline,
+                    chrono::Utc::now(),
+                    &cancel,
+                )
+                .await?;
+                tracing::info!(
+                    digested = summary.digested,
+                    failed = summary.failed,
+                    calls = summary.calls,
+                    "digest stage finished"
+                );
+                match summary.halted {
+                    Some(Halt::LlmFailed(message)) => llm_failure = Some(message),
+                    Some(Halt::UsageLimit { resets_at }) => {
+                        tracing::warn!(?resets_at, "stopped at the subscription usage limit")
+                    }
+                    Some(Halt::Quota(stop)) => tracing::info!("llm work deferred: {stop}"),
+                    None => {}
+                }
+            }
             Stage::Extract => {
                 let summary = extract::extract_pages(
                     &db,
@@ -163,6 +207,9 @@ async fn crawl(
     }
     if cancel.is_requested() {
         return Err(Error::Interrupted);
+    }
+    if let Some(message) = llm_failure {
+        return Err(Error::LlmFailed(message));
     }
     if failed_sources > 0 {
         return Err(Error::SourcesFailed(failed_sources));

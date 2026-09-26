@@ -20,6 +20,10 @@ extract_max_per_run = 100
 command = "claude"
 # 1 回の呼び出しのタイムアウト（秒）
 timeout_secs = 300
+# 要約に使うモデル、1 回の呼び出しで要約する記事数、本文の部分ごとの最大文字数
+digest_model = "sonnet"
+digest_batch_size = 5
+max_input_chars = 6000
 
 [quota]
 # 時間帯の判定に使う時差（JST）

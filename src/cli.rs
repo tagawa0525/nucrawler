@@ -40,7 +40,7 @@ commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
   redo      指定モデルで要約・和訳をやり直す
   status    ステージごとの未処理件数などを表示
-  sources   ソースの取得確認
+  sources   ソースの取得確認（sources check [ID]）
   serve     Web UI / RSS / JSON API を起動
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
@@ -85,8 +85,14 @@ pub enum SourcesArgs {
     Check { id: Option<String> },
 }
 
-pub fn parse_sources_args(_args: &[String]) -> Result<SourcesArgs, ParseError> {
-    todo!()
+pub fn parse_sources_args(args: &[String]) -> Result<SourcesArgs, ParseError> {
+    match args {
+        [cmd] if cmd == "check" => Ok(SourcesArgs::Check { id: None }),
+        [cmd, id] if cmd == "check" => Ok(SourcesArgs::Check {
+            id: Some(id.clone()),
+        }),
+        _ => Err(ParseError::SourcesUsage),
+    }
 }
 
 #[cfg(test)]

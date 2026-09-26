@@ -1,0 +1,45 @@
+# 関心プロファイル。`nucrawler profile import examples/profile.toml` で DB に取り込む。
+# weight は 0〜1（大きいほど推薦で重視）。note は採点の際に LLM へ渡す補足。
+
+# 推薦から外したい話題（TOML の仕様上、[[interest]] より前に書く）
+exclude = ["核兵器", "核融合"]
+
+[[interest]]
+topic = "規制・審査"
+weight = 1.0
+note = "再稼働審査、新規制基準、バックフィット、検査制度（ROP）"
+
+[[interest]]
+topic = "燃料"
+weight = 0.9
+note = "事故耐性燃料（ATF）、高燃焼度、MOX"
+
+[[interest]]
+topic = "高経年化"
+weight = 0.8
+note = "60 年超運転、材料劣化、長期施設管理計画"
+
+[[interest]]
+topic = "安全解析"
+weight = 0.7
+note = "確率論的リスク評価（PRA）、熱水力、シビアアクシデント"
+
+[[interest]]
+topic = "新設・SMR"
+weight = 0.4
+note = "革新軽水炉、BWRX-300、NuScale など軽水炉型"
+
+[[interest]]
+topic = "バックエンド"
+weight = 0.4
+note = "使用済燃料の中間貯蔵、再処理、処分"
+
+[[interest]]
+topic = "廃止措置"
+weight = 0.4
+note = "福島第一、一般炉の廃止措置"
+
+[[interest]]
+topic = "政策・市場"
+weight = 0.4
+note = "エネルギー基本計画、電力市場、海外の新設動向"

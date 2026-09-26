@@ -10,6 +10,8 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
+    #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
+    ProfileUsage,
     #[error(
         "usage: nucrawler crawl [--until STAGE | --only STAGE] [--max-llm-calls N]  (stages: {stages})"
     )]
@@ -56,7 +58,7 @@ commands:
   serve     Web UI / RSS / JSON API を起動
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
-  profile   プロファイル関連の操作
+  profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   help      このヘルプを表示
 ";
 
@@ -135,6 +137,25 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         return Err(usage());
     }
     Ok(parsed)
+}
+
+/// `profile` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProfileArgs {
+    /// `profile import FILE`
+    Import { file: PathBuf },
+    /// `profile export`（標準出力へ）
+    Export,
+}
+
+pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
+    match args {
+        [cmd, file] if cmd == "import" => Ok(ProfileArgs::Import {
+            file: PathBuf::from(file),
+        }),
+        [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
+        _ => Err(ParseError::ProfileUsage),
+    }
 }
 
 /// `sources` サブコマンドの引数。
@@ -308,6 +329,29 @@ mod tests {
                 id: Some("nrc-news".into())
             }
         );
+    }
+
+    #[test]
+    fn parses_profile_args() {
+        assert_eq!(
+            parse_profile_args(&args(&["import", "p.toml"])).unwrap(),
+            ProfileArgs::Import {
+                file: PathBuf::from("p.toml")
+            }
+        );
+        assert_eq!(
+            parse_profile_args(&args(&["export"])).unwrap(),
+            ProfileArgs::Export
+        );
+        for bad in [
+            &[][..],
+            &["import"][..],
+            &["export", "x"][..],
+            &["show"][..],
+        ] {
+            let err = parse_profile_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::ProfileUsage), "{bad:?}");
+        }
     }
 
     #[test]

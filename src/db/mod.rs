@@ -492,6 +492,56 @@ impl Db {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
+    /// ユーザーのプロファイルを保存する（既にあれば置き換える）。
+    pub fn save_profile(
+        &self,
+        user_id: i64,
+        profile: &crate::profile::Profile,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (user_id) DO UPDATE SET
+               interests = excluded.interests,
+               excludes = excluded.excludes,
+               hash = excluded.hash,
+               updated_at = excluded.updated_at",
+            rusqlite::params![
+                user_id,
+                serde_json::to_string(&profile.interests)?,
+                serde_json::to_string(&profile.exclude)?,
+                crate::profile::hash(profile),
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// ユーザーのプロファイルとそのハッシュ。
+    pub fn load_profile(
+        &self,
+        user_id: i64,
+    ) -> Result<Option<(crate::profile::Profile, String)>, DbError> {
+        use rusqlite::OptionalExtension;
+        let row: Option<(String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT interests, excludes, hash FROM profiles WHERE user_id = ?1",
+                [user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(interests, excludes, hash)| {
+            let profile = crate::profile::Profile {
+                interests: serde_json::from_str(&interests)?,
+                exclude: serde_json::from_str(&excludes)?,
+            };
+            Ok((profile, hash))
+        })
+        .transpose()
+    }
+
     /// 成果物と、その入力（artifact_inputs）を 1 つのトランザクションで登録する。
     /// `input_scope` は入力の会員資格から導出する（会員限定の部分が無ければ "public"）。
     pub fn insert_artifact(
@@ -1546,6 +1596,27 @@ mod tests {
             .unwrap();
         assert!(digest_ids(&db, "2026-09-27T00:30:00Z").is_empty());
         assert_eq!(digest_ids(&db, "2026-09-27T01:00:00Z"), [a]);
+    }
+
+    #[test]
+    fn saves_and_replaces_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        assert_eq!(db.load_profile(owner).unwrap(), None);
+        let mut p = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(owner, &p, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let (loaded, hash) = db.load_profile(owner).unwrap().unwrap();
+        assert_eq!(loaded, p);
+        assert_eq!(hash, crate::profile::hash(&p));
+
+        p.exclude.push("医療".into());
+        db.save_profile(owner, &p, t("2026-09-28T00:00:00Z"))
+            .unwrap();
+        let (loaded, new_hash) = db.load_profile(owner).unwrap().unwrap();
+        assert_eq!(loaded.exclude.last().map(String::as_str), Some("医療"));
+        assert_ne!(new_hash, hash);
+        assert_eq!(db.query_i64("SELECT count(*) FROM profiles").unwrap(), 1);
     }
 
     #[test]

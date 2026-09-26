@@ -176,8 +176,14 @@ pub fn default_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, Co
 }
 
 /// `$XDG_DATA_HOME/nucrawler`、無ければ `$HOME/.local/share/nucrawler`（DB やロックファイルを置く）。
-pub fn default_data_dir(_env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, ConfigError> {
-    todo!()
+pub fn default_data_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, ConfigError> {
+    let non_empty = |k| env(k).filter(|v: &OsString| !v.is_empty());
+    let base = match (non_empty("XDG_DATA_HOME"), non_empty("HOME")) {
+        (Some(xdg), _) => PathBuf::from(xdg),
+        (None, Some(home)) => PathBuf::from(home).join(".local/share"),
+        (None, None) => return Err(ConfigError::NoDataDir),
+    };
+    Ok(base.join("nucrawler"))
 }
 
 #[cfg(test)]

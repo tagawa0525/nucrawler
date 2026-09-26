@@ -36,15 +36,25 @@ impl Stage {
         }
     }
 
-    pub fn from_name(_name: &str) -> Option<Stage> {
-        todo!()
+    pub fn from_name(name: &str) -> Option<Stage> {
+        Stage::ALL.iter().copied().find(|s| s.name() == name)
     }
 }
 
 /// `until` を指定すれば最初からそのステージまで、`only` を指定すればそのステージだけ。
 /// どちらも無ければ全ステージ。
-pub fn plan(_until: Option<Stage>, _only: Option<Stage>) -> Vec<Stage> {
-    todo!()
+pub fn plan(until: Option<Stage>, only: Option<Stage>) -> Vec<Stage> {
+    match (only, until) {
+        (Some(s), _) => vec![s],
+        (None, Some(last)) => {
+            let end = Stage::ALL
+                .iter()
+                .position(|&s| s == last)
+                .expect("every stage is in ALL");
+            Stage::ALL[..=end].to_vec()
+        }
+        (None, None) => Stage::ALL.to_vec(),
+    }
 }
 
 #[cfg(test)]

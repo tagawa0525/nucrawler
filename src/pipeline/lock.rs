@@ -21,8 +21,22 @@ pub struct Lock {
 }
 
 /// `dir/crawl.lock` の排他ロックを待たずに取る。既に取られていれば `Held`。
-pub fn acquire(_dir: &Path) -> Result<Lock, LockError> {
-    todo!()
+pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
+    let path = dir.join("crawl.lock");
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|source| LockError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(Lock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
+        Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
+    }
 }
 
 #[cfg(test)]

@@ -6,8 +6,53 @@ use crate::config::Source;
 use crate::db::SourceOverview;
 
 /// 設定にあるソースを設定順に表示し、DB にだけ残っている（設定から消した）ソースを後ろに並べる。
-pub fn render(_sources: &[Source], _overview: &[SourceOverview]) -> String {
-    todo!()
+pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
+    let find = |id: &str| overview.iter().find(|o| o.source_id == id);
+    let mut rows: Vec<(&str, &str, Option<&SourceOverview>)> = sources
+        .iter()
+        .map(|s| {
+            let state = if s.enabled { "enabled" } else { "disabled" };
+            (s.id.as_str(), state, find(&s.id))
+        })
+        .collect();
+    rows.extend(
+        overview
+            .iter()
+            .filter(|o| !sources.iter().any(|s| s.id == o.source_id))
+            .map(|o| (o.source_id.as_str(), "not in config", Some(o))),
+    );
+    let width = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for (id, state, ov) in rows {
+        let articles = ov.map_or(0, |o| o.articles);
+        let success = ov
+            .and_then(|o| o.last_success_at.as_deref())
+            .map_or_else(|| "never".to_string(), local_time);
+        let _ = write!(
+            out,
+            "{id:width$}  {state:13}  {articles:>6} articles  last success {success}"
+        );
+        if let Some(o) = ov
+            && let Some(error) = &o.last_error
+        {
+            let at = o
+                .last_error_at
+                .as_deref()
+                .map_or_else(String::new, local_time);
+            let _ = write!(out, "  last error {at}: {error}");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// DB の UTC 時刻を日本時間の "YYYY-MM-DD HH:MM" にする。解釈できなければそのまま。
+fn local_time(utc: &str) -> String {
+    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
+    chrono::DateTime::parse_from_rfc3339(utc).map_or_else(
+        |_| utc.to_string(),
+        |t| t.with_timezone(&jst).format("%Y-%m-%d %H:%M").to_string(),
+    )
 }
 
 #[cfg(test)]

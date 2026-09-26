@@ -40,10 +40,11 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: nucrawler [--config-dir DIR] <command> [args]
+usage: nucrawler [--config-dir DIR] [--data-dir DIR] <command> [args]
 
 options:
   --config-dir DIR  設定ディレクトリ（既定 $XDG_CONFIG_HOME/nucrawler）
+  --data-dir DIR    DB などの置き場所（既定 $XDG_DATA_HOME/nucrawler）
 
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
@@ -61,12 +62,16 @@ commands:
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, ParseError> {
     let mut args = args.into_iter().peekable();
     let mut config_dir = None;
-    while args.peek().is_some_and(|a| a == "--config-dir") {
+    let mut data_dir = None;
+    loop {
+        let (slot, name) = match args.peek().map(String::as_str) {
+            Some("--config-dir") => (&mut config_dir, "--config-dir"),
+            Some("--data-dir") => (&mut data_dir, "--data-dir"),
+            _ => break,
+        };
         args.next();
-        let dir = args
-            .next()
-            .ok_or(ParseError::MissingValue("--config-dir"))?;
-        config_dir = Some(PathBuf::from(dir));
+        let dir = args.next().ok_or(ParseError::MissingValue(name))?;
+        *slot = Some(PathBuf::from(dir));
     }
     let command = match args.next().as_deref() {
         None | Some("help" | "--help" | "-h") => Command::Help,
@@ -82,7 +87,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
     };
     Ok(Invocation {
         config_dir,
-        data_dir: None,
+        data_dir,
         command,
         args: args.collect(),
     })
@@ -95,8 +100,32 @@ pub struct CrawlArgs {
     pub only: Option<Stage>,
 }
 
-pub fn parse_crawl_args(_args: &[String]) -> Result<CrawlArgs, ParseError> {
-    todo!()
+pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
+    let usage = || ParseError::CrawlUsage {
+        stages: Stage::ALL
+            .iter()
+            .map(|s| s.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let mut parsed = CrawlArgs::default();
+    let mut it = args.iter();
+    while let Some(opt) = it.next() {
+        let slot = match opt.as_str() {
+            "--until" => &mut parsed.until,
+            "--only" => &mut parsed.only,
+            _ => return Err(usage()),
+        };
+        let stage = it
+            .next()
+            .and_then(|name| Stage::from_name(name))
+            .ok_or_else(usage)?;
+        *slot = Some(stage);
+    }
+    if parsed.until.is_some() && parsed.only.is_some() {
+        return Err(usage());
+    }
+    Ok(parsed)
 }
 
 /// `sources` サブコマンドの引数。

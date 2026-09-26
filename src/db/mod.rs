@@ -233,7 +233,26 @@ impl Db {
 
     /// 記事か取得記録のあるソースすべて（source_id 順）。
     pub fn source_overview(&self) -> Result<Vec<SourceOverview>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "WITH ids AS (SELECT source_id FROM articles UNION SELECT source_id FROM source_state),
+                  counts AS (SELECT source_id, count(*) AS n FROM articles GROUP BY source_id)
+             SELECT ids.source_id, coalesce(counts.n, 0),
+                    st.last_success_at, st.last_error, st.last_error_at
+             FROM ids
+             LEFT JOIN counts USING (source_id)
+             LEFT JOIN source_state AS st USING (source_id)
+             ORDER BY ids.source_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SourceOverview {
+                source_id: r.get(0)?,
+                articles: r.get(1)?,
+                last_success_at: r.get(2)?,
+                last_error: r.get(3)?,
+                last_error_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     #[cfg(test)]

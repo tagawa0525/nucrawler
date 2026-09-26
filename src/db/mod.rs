@@ -387,6 +387,32 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    /// serve と timer の crawl が同時に新しい DB を開いても、マイグレーションが競合しないこと。
+    #[test]
+    fn concurrent_opens_migrate_once() {
+        let dir = std::env::temp_dir().join(format!("nucrawler-{}-concurrent", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for round in 0..10 {
+            let path = dir.join(format!("{round}.db"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Db::open(&path).map(|db| db.schema_version().unwrap())
+                    })
+                })
+                .collect();
+            for h in handles {
+                let version = h.join().unwrap().unwrap();
+                assert_eq!(version, MIGRATIONS.len() as i64);
+            }
+        }
+    }
+
     #[test]
     fn open_file_persists_schema() {
         let dir = std::env::temp_dir().join(format!("nucrawler-{}-db", std::process::id()));

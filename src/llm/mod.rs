@@ -66,3 +66,59 @@ pub trait Llm {
         req: LlmRequest<'_>,
     ) -> impl std::future::Future<Output = Result<LlmResponse, LlmError>>;
 }
+
+/// テスト用の偽のバックエンド。用意した応答を順に返し、受け取った依頼を記録する。
+#[cfg(test)]
+pub mod fake {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::{Llm, LlmError, LlmRequest, LlmResponse};
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Recorded {
+        pub system: String,
+        pub prompt: String,
+        pub schema: serde_json::Value,
+        pub model: String,
+    }
+
+    #[derive(Default)]
+    pub struct FakeLlm {
+        responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
+        requests: Mutex<Vec<Recorded>>,
+    }
+
+    impl FakeLlm {
+        pub fn new(responses: impl IntoIterator<Item = Result<LlmResponse, LlmError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                requests: Mutex::default(),
+            }
+        }
+
+        pub fn requests(&self) -> Vec<Recorded> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Llm for FakeLlm {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+            self.requests.lock().unwrap().push(Recorded {
+                system: req.system.into(),
+                prompt: req.prompt.into(),
+                schema: req.schema.clone(),
+                model: req.model.into(),
+            });
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("FakeLlm ran out of prepared responses")
+        }
+    }
+}

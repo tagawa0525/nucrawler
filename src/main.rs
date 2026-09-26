@@ -141,6 +141,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
+            Stage::Digest => todo!("digest stage"),
             Stage::Extract => {
                 let summary = extract::extract_pages(
                     &db,

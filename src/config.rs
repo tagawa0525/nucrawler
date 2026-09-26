@@ -42,6 +42,12 @@ pub struct LlmConfig {
     pub command: String,
     /// 1 回の呼び出しのタイムアウト
     pub timeout_secs: u64,
+    /// 要約に使うモデル
+    pub digest_model: String,
+    /// 1 回の呼び出しで要約する記事数
+    pub digest_batch_size: usize,
+    /// プロンプトに入れる本文の部分ごとの最大文字数
+    pub max_input_chars: usize,
 }
 
 impl Default for LlmConfig {
@@ -49,6 +55,9 @@ impl Default for LlmConfig {
         Self {
             command: "claude".into(),
             timeout_secs: 300,
+            digest_model: todo!(),
+            digest_batch_size: todo!(),
+            max_input_chars: todo!(),
         }
     }
 }
@@ -309,6 +318,9 @@ mod tests {
         let d = LlmConfig::default();
         assert_eq!(d.command, "claude");
         assert_eq!(d.timeout_secs, 300);
+        assert_eq!(d.digest_model, "sonnet");
+        assert_eq!(d.digest_batch_size, 5);
+        assert_eq!(d.max_input_chars, 6000);
     }
 
     #[test]

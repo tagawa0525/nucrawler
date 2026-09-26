@@ -493,10 +493,56 @@ impl Db {
     /// `input_scope` は入力の会員資格から導出する（会員限定の部分が無ければ "public"）。
     pub fn insert_artifact(
         &self,
-        _a: &NewArtifact,
-        _now: chrono::DateTime<chrono::Utc>,
+        a: &NewArtifact,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        todo!()
+        if a.inputs.is_empty() {
+            return Err(DbError::NoArtifactInputs {
+                article_id: a.article_id,
+            });
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut codes = std::collections::BTreeSet::new();
+        for &content_id in a.inputs {
+            let code: Option<String> = tx.query_row(
+                "SELECT m.code FROM contents AS c
+                 LEFT JOIN memberships AS m ON m.id = c.access_membership_id
+                 WHERE c.id = ?1",
+                [content_id],
+                |r| r.get(0),
+            )?;
+            codes.extend(code);
+        }
+        let input_scope = if codes.is_empty() {
+            "public".to_string()
+        } else {
+            codes.into_iter().collect::<Vec<_>>().join("+")
+        };
+        let id: i64 = tx.query_row(
+            "INSERT INTO artifacts
+               (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+            rusqlite::params![
+                a.article_id,
+                a.kind.as_str(),
+                a.backend,
+                a.model,
+                a.prompt_version,
+                input_scope,
+                a.payload.to_string(),
+                timestamp(now),
+            ],
+            |r| r.get(0),
+        )?;
+        for &content_id in a.inputs {
+            tx.execute(
+                "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
+                 VALUES (?1, ?2, ?3)",
+                [id, a.article_id, content_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     /// まだ digest が 1 つも無い記事を、新しい順に最大 `limit` 件、入力とともに返す。
@@ -505,13 +551,76 @@ impl Db {
     /// `backend`/`model` の digest の失敗で再試行待ち・断念済みの記事も含めない。
     pub fn pending_digest(
         &self,
-        _cutoff: chrono::DateTime<chrono::Utc>,
-        _now: chrono::DateTime<chrono::Utc>,
-        _backend: &str,
-        _model: &str,
-        _limit: usize,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        backend: &str,
+        model: &str,
+        limit: usize,
     ) -> Result<Vec<DigestInput>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
+             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'digest')
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM contents AS c
+                   WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext'))
+                 OR (
+                   EXISTS (
+                     SELECT 1 FROM contents AS c
+                     WHERE c.article_id = a.id AND c.kind IN ('lead', 'abstract'))
+                   AND EXISTS (
+                     SELECT 1 FROM stage_errors AS e
+                     WHERE e.article_id = a.id AND e.stage = 'extract' AND e.attempts >= ?2)))
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = a.id AND e.stage = 'digest'
+                   AND e.backend = ?3 AND e.model = ?4
+                   AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?6",
+        )?;
+        let articles = stmt
+            .query_map(
+                rusqlite::params![
+                    timestamp(cutoff),
+                    MAX_ATTEMPTS,
+                    backend,
+                    model,
+                    timestamp(now),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ],
+                |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?
+            .collect::<Result<Vec<(i64, String, String, String)>, _>>()?;
+        let mut contents = self.conn.prepare(
+            "SELECT id, kind, text FROM contents
+             WHERE article_id = ?1 AND access_membership_id IS NULL
+             ORDER BY CASE kind WHEN 'lead' THEN 0 WHEN 'abstract' THEN 1
+                                WHEN 'body' THEN 2 ELSE 3 END, id",
+        )?;
+        articles
+            .into_iter()
+            .map(|(article_id, source_id, title, lang)| {
+                let contents = contents
+                    .query_map([article_id], |r| {
+                        Ok(InputContent {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            text: r.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
+                Ok(DigestInput {
+                    article_id,
+                    source_id,
+                    title,
+                    lang,
+                    contents,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]

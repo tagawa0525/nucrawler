@@ -52,6 +52,8 @@ pub struct LlmConfig {
     pub score_model: String,
     /// 1 回の呼び出しで採点する記事数
     pub score_batch_size: usize,
+    /// 要約が使い切らずに採点のために残す呼び出し回数（要約待ちが多くても推薦が止まらないように）
+    pub score_reserved_calls: u32,
 }
 
 impl LlmConfig {
@@ -81,6 +83,7 @@ impl Default for LlmConfig {
             max_input_chars: 6000,
             score_model: "sonnet".into(),
             score_batch_size: 20,
+            score_reserved_calls: todo!(),
         }
     }
 }
@@ -363,6 +366,7 @@ mod tests {
         assert_eq!(d.max_input_chars, 6000);
         assert_eq!(d.score_model, "sonnet");
         assert_eq!(d.score_batch_size, 20);
+        assert_eq!(d.score_reserved_calls, 1);
     }
 
     #[test]

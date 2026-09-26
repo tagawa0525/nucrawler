@@ -320,6 +320,36 @@ mod tests {
         ));
     }
 
+    /// 採点のために残す回数に達したら、要約は止まる。
+    #[tokio::test]
+    async fn leaves_reserved_calls_for_scoring() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 3);
+        let llm = FakeLlm::new([ok(&ids[..1], 0.1), ok(&ids[1..2], 0.1)]);
+        let mut q = quota(3);
+        let cfg = LlmConfig {
+            score_reserved_calls: 1,
+            ..llm_cfg(1)
+        };
+        let summary = digest_articles(
+            &db,
+            &llm,
+            &mut q,
+            &cfg,
+            &PipelineConfig::default(),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.calls, 2);
+        assert_eq!(
+            summary.halted,
+            Some(Halt::Quota(Stop::Reserved { reserved: 1 }))
+        );
+        assert!(q.permit(now()).is_ok(), "one call is left for scoring");
+    }
+
     #[tokio::test]
     async fn usage_limit_halts_without_blaming_articles() {
         let db = Db::open_in_memory().unwrap();

@@ -578,7 +578,8 @@ impl Db {
                        AND c.access_membership_id IS NULL)
                    AND EXISTS (
                      SELECT 1 FROM stage_errors AS e
-                     WHERE e.article_id = a.id AND e.stage = 'extract' AND e.attempts >= ?2)))
+                     WHERE e.article_id = a.id AND e.stage = 'extract'
+                       AND e.backend = '' AND e.model = '' AND e.attempts >= ?2)))
                AND NOT EXISTS (
                  SELECT 1 FROM stage_errors AS e
                  WHERE e.article_id = a.id AND e.stage = 'digest'

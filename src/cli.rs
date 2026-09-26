@@ -156,6 +156,11 @@ mod tests {
     }
 
     #[test]
+    fn usage_documents_global_options() {
+        assert!(USAGE.contains("--config-dir"), "{USAGE}");
+    }
+
+    #[test]
     fn config_dir_without_value_is_error() {
         let err = parse(args(&["--config-dir"])).unwrap_err();
         assert!(

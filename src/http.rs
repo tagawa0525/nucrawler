@@ -19,6 +19,10 @@ pub enum HttpError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("too many redirects starting from {url}")]
+    TooManyRedirects { url: String },
+    #[error("bad redirect from {url}: {reason}")]
+    BadRedirect { url: String, reason: String },
     #[error("{url} returned {status}")]
     Status {
         url: String,
@@ -163,6 +167,49 @@ mod tests {
         let reqs = server.requests();
         let gap = reqs[1].at - reqs[0].at;
         assert!(gap >= Duration::from_millis(280), "{gap:?}");
+    }
+
+    /// リダイレクトも自前でたどり、転送先へのアクセスにも間隔を空ける。
+    #[tokio::test]
+    async fn follows_redirects_with_per_host_delay() {
+        let server = Server::start(
+            [
+                ("/old", Route::redirect("/new")),
+                ("/new", Route::ok("moved")),
+            ]
+            .into(),
+        );
+        let body = fetcher(Duration::from_millis(300))
+            .get(&url(&server.url("/old")))
+            .await
+            .unwrap();
+        assert_eq!(body, b"moved");
+        let reqs = server.requests();
+        let paths: Vec<_> = reqs.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, ["/old", "/new"]);
+        let gap = reqs[1].at - reqs[0].at;
+        assert!(gap >= Duration::from_millis(280), "{gap:?}");
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_is_error() {
+        let server =
+            Server::start([("/a", Route::redirect("/b")), ("/b", Route::redirect("/a"))].into());
+        let err = fetcher(Duration::ZERO)
+            .get(&url(&server.url("/a")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::TooManyRedirects { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_without_location_is_error() {
+        let server = Server::start([("/a", Route::status(302))].into());
+        let err = fetcher(Duration::ZERO)
+            .get(&url(&server.url("/a")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::BadRedirect { .. }), "{err}");
     }
 
     #[tokio::test]

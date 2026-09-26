@@ -12,6 +12,8 @@ pub struct Route {
     pub body: Vec<u8>,
     /// 応答を返すまでの待ち時間（タイムアウトの確認用）
     pub delay: Duration,
+    /// リダイレクト先（Location ヘッダ）
+    pub location: Option<String>,
 }
 
 impl Route {
@@ -20,6 +22,14 @@ impl Route {
             status: 200,
             body: body.into(),
             delay: Duration::ZERO,
+            location: None,
+        }
+    }
+
+    pub fn redirect(location: &str) -> Self {
+        Self {
+            location: Some(location.to_string()),
+            ..Self::status(302)
         }
     }
 
@@ -28,12 +38,14 @@ impl Route {
             status,
             body: Vec::new(),
             delay: Duration::ZERO,
+            location: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub path: String,
     pub user_agent: Option<String>,
     pub at: Instant,
 }
@@ -100,12 +112,21 @@ fn handle(stream: TcpStream, routes: &HashMap<String, Route>, recorded: &Mutex<V
             user_agent = Some(v.trim().to_string());
         }
     }
-    recorded.lock().unwrap().push(Request { user_agent, at });
+    recorded.lock().unwrap().push(Request {
+        path: path.clone(),
+        user_agent,
+        at,
+    });
     let route = routes.get(&path).cloned().unwrap_or(Route::status(404));
     std::thread::sleep(route.delay);
     let mut stream = stream;
+    let location = route
+        .location
+        .as_deref()
+        .map(|l| format!("Location: {l}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
         route.status,
         route.body.len()
     );

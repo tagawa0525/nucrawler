@@ -174,6 +174,18 @@ CREATE TABLE source_state (
     last_error_at   TEXT
 );
 
+-- 外部キーの子側のインデックス ---------------------------------------------------
+-- 親の削除時（CASCADE や RESTRICT の判定）に子テーブルを全件走査しないようにする。
+-- 子側の列が主キーや UNIQUE の先頭にあるものは不要なので除く。
+
+CREATE INDEX user_memberships_by_membership ON user_memberships (membership_id);
+CREATE INDEX article_access_by_membership ON article_access (membership_id);
+CREATE INDEX contents_by_membership ON contents (access_membership_id);
+CREATE INDEX artifact_inputs_by_content ON artifact_inputs (content_id, article_id);
+CREATE INDEX scores_by_artifact ON scores (artifact_id);
+CREATE INDEX events_by_article ON events (article_id);
+CREATE INDEX translation_requests_by_article ON translation_requests (article_id);
+
 -- 初期データ -------------------------------------------------------------------
 
 INSERT INTO users (login, display_name, is_owner) VALUES ('owner', 'owner', 1);

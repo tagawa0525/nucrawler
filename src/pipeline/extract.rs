@@ -292,6 +292,59 @@ mod tests {
         assert_eq!(again, ExtractSummary::default());
     }
 
+    /// robots.txt の一時的な障害では断念せず、後で再試行する。
+    #[tokio::test]
+    async fn robots_outage_is_retried_later() {
+        let server = Server::start(
+            [
+                ("/robots.txt", Route::status(503)),
+                ("/news/1", html(fixture("article.html"))),
+            ]
+            .into(),
+        );
+        let db = Db::open_in_memory().unwrap();
+        add(&db, &server, "u", &["/news/1"]);
+        let summary = extract_pages(
+            &db,
+            &fetcher(),
+            &[source("u", None)],
+            &cfg(100),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.failed, summary.gave_up), (1, 0));
+    }
+
+    /// Content-Type が PDF でなくても、中身が PDF なら断念する。
+    #[tokio::test]
+    async fn detects_pdf_by_signature() {
+        let server = Server::start(
+            [(
+                "/file",
+                Route {
+                    content_type: "application/octet-stream",
+                    ..Route::ok(b"%PDF-1.7 binary".to_vec())
+                },
+            )]
+            .into(),
+        );
+        let db = Db::open_in_memory().unwrap();
+        add(&db, &server, "u", &["/file"]);
+        let summary = extract_pages(
+            &db,
+            &fetcher(),
+            &[source("u", None)],
+            &cfg(100),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.failed, summary.gave_up), (0, 1));
+    }
+
     #[tokio::test]
     async fn uses_source_body_selector() {
         let server = server();

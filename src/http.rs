@@ -29,6 +29,8 @@ pub enum HttpError {
     BodyTooLarge { url: String, limit: u64 },
     #[error("robots.txt disallows {url}")]
     DisallowedByRobots { url: String },
+    #[error("robots.txt for {url} is unavailable, so fetching is not allowed for now")]
+    RobotsUnavailable { url: String },
     #[error("{url} returned {status}")]
     Status {
         url: String,
@@ -515,6 +517,7 @@ mod tests {
             .unwrap();
     }
 
+    /// robots.txt が取れないときも取得しないが、明示的な禁止とは区別する（後で再試行できるように）。
     #[tokio::test]
     async fn unreachable_robots_txt_disallows_everything() {
         let server =
@@ -523,7 +526,7 @@ mod tests {
             .get_page(&url(&server.url("/a")))
             .await
             .unwrap_err();
-        assert!(matches!(err, HttpError::DisallowedByRobots { .. }), "{err}");
+        assert!(matches!(err, HttpError::RobotsUnavailable { .. }), "{err}");
     }
 
     #[tokio::test]

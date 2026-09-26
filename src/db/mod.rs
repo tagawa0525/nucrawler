@@ -253,6 +253,33 @@ mod tests {
         db.conn().last_insert_rowid()
     }
 
+    /// 成果物の記事 id を使って入力を紐付ける。
+    fn link_input(db: &Db, artifact_id: i64, content_id: i64) -> rusqlite::Result<usize> {
+        db.conn().execute(
+            "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
+             SELECT id, article_id, ?2 FROM artifacts WHERE id = ?1",
+            [artifact_id, content_id],
+        )
+    }
+
+    /// 別の記事の本文を成果物の入力にできないこと。
+    #[test]
+    fn artifact_input_must_belong_to_same_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_article(&article("https://e.com/b"))
+            .unwrap()
+            .unwrap();
+        let content_of_b = insert_content(&db, b, None);
+        let art = insert_artifact(&db, a, "public");
+        let err = link_input(&db, art, content_of_b).unwrap_err();
+        assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+    }
+
     fn access_of(db: &Db, artifact_id: i64) -> Vec<i64> {
         let mut stmt = db
             .conn()
@@ -277,19 +304,12 @@ mod tests {
         let gated = insert_content(&db, a, Some(m));
 
         let public_only = insert_artifact(&db, a, "public");
-        db.conn()
-            .execute(
-                "INSERT INTO artifact_inputs VALUES (?1, ?2)",
-                [public_only, public],
-            )
-            .unwrap();
+        link_input(&db, public_only, public).unwrap();
         assert!(access_of(&db, public_only).is_empty());
 
         let mixed = insert_artifact(&db, a, "m");
         for c in [public, gated] {
-            db.conn()
-                .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [mixed, c])
-                .unwrap();
+            link_input(&db, mixed, c).unwrap();
         }
         assert_eq!(access_of(&db, mixed), vec![m]);
     }
@@ -325,9 +345,7 @@ mod tests {
             .unwrap();
         let gated = insert_content(&db, a, Some(m));
         let art = insert_artifact(&db, a, "m");
-        db.conn()
-            .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [art, gated])
-            .unwrap();
+        link_input(&db, art, gated).unwrap();
         let err = db
             .conn()
             .execute("DELETE FROM memberships WHERE id = ?1", [m])
@@ -353,9 +371,7 @@ mod tests {
             .unwrap();
         let c = db.conn().last_insert_rowid();
         let art = insert_artifact(&db, a, "m");
-        db.conn()
-            .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [art, c])
-            .unwrap();
+        link_input(&db, art, c).unwrap();
         db.conn()
             .execute("DELETE FROM articles WHERE id = ?1", [a])
             .unwrap();

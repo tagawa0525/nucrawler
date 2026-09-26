@@ -282,6 +282,22 @@ mod tests {
         assert_eq!(parsed.items[0].1["title_ja"], "題");
     }
 
+    /// スキーマに合わない項目は採らず、欠けたものとして扱う（ほかの記事の結果は残す）。
+    #[test]
+    fn parse_treats_items_violating_schema_as_missing() {
+        let mut wrong_type = item(2);
+        wrong_type["title_ja"] = serde_json::json!(42);
+        let mut extra = item(3);
+        extra["unexpected"] = serde_json::json!("x");
+        let mut lacking = item(4);
+        lacking.as_object_mut().unwrap().remove("topics");
+        let output = serde_json::json!({"items": [item(1), wrong_type, extra, lacking]});
+        let parsed = parse(&output, &[1, 2, 3, 4]).unwrap();
+        let ids: Vec<i64> = parsed.items.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [1]);
+        assert_eq!(parsed.missing, [2, 3, 4]);
+    }
+
     #[test]
     fn parse_rejects_malformed_output() {
         for bad in [

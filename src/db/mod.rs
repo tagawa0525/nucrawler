@@ -1445,6 +1445,21 @@ mod tests {
         assert_eq!(inputs[0].source_id, "s");
     }
 
+    /// 公開の本文が無ければ（会員限定の本文しか無ければ）、入力が作れないので選ばない。
+    #[test]
+    fn pending_digest_ignores_member_only_contents() {
+        let db = Db::open_in_memory().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        insert_content(&db, a, Some(aesj));
+        assert!(digest_ids(&db, "2026-09-27T00:00:00Z").is_empty());
+    }
+
     #[test]
     fn pending_digest_skips_articles_backing_off_for_this_model() {
         let db = Db::open_in_memory().unwrap();

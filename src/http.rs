@@ -106,15 +106,46 @@ impl Fetcher {
                     status,
                 });
             }
-            let body = response.bytes().await.map_err(request_error)?;
-            return Ok(Fetched {
-                url: current,
-                body: body.to_vec(),
-            });
+            let body = self.read_body(&current, response).await?;
+            return Ok(Fetched { url: current, body });
         }
         Err(HttpError::TooManyRedirects {
             url: url.to_string(),
         })
+    }
+
+    /// 本文を `max_body_bytes` まで読む。Content-Length で超過が分かれば読まずに、
+    /// 分からなければ受信しながら、上限を超えた時点で打ち切る。
+    async fn read_body(
+        &self,
+        url: &Url,
+        mut response: reqwest::Response,
+    ) -> Result<Vec<u8>, HttpError> {
+        let too_large = || HttpError::BodyTooLarge {
+            url: url.to_string(),
+            limit: self.max_body_bytes,
+        };
+        if response
+            .content_length()
+            .is_some_and(|n| n > self.max_body_bytes)
+        {
+            return Err(too_large());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|source| HttpError::Request {
+                url: url.to_string(),
+                source,
+            })?
+        {
+            if (body.len() + chunk.len()) as u64 > self.max_body_bytes {
+                return Err(too_large());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// 同じホストへのアクセスが `per_host_delay` 以上空くよう、順番を予約してから待つ。

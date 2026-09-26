@@ -72,18 +72,17 @@ impl Llm for ClaudeCli {
             .map_err(LlmError::Io)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parsed = parse_stream(&stdout);
-        if output.status.success() {
-            let (output, rate_limit) = parsed?;
-            return Ok(LlmResponse { output, rate_limit });
-        }
-        // 失敗しても結果行があれば、そちらの方が原因を正確に表す。
-        match parsed {
-            Err(e @ (LlmError::Reported { .. } | LlmError::RateLimited { .. })) => Err(e),
-            _ => Err(LlmError::Exit {
+        match parse_stream(&stdout) {
+            // 結果行が無い（途中で落ちた）ときだけ、終了コードと stderr で報告する。
+            // 結果行があれば、終了コードに関わらずそちらが結果と原因を正確に表す。
+            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
                 status: output.status.to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             }),
+            parsed => {
+                let (output, rate_limit) = parsed?;
+                Ok(LlmResponse { output, rate_limit })
+            }
         }
     }
 }
@@ -100,9 +99,8 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
             Some("rate_limit_event") => {
                 let info = &event["rate_limit_info"];
                 rate_limit = Some(parse_rate_limit(info));
-                if info["status"] == "rejected" {
-                    rejected = Some(info["resetsAt"].as_i64());
-                }
+                // 最後のイベントの状態で判断する（途中で拒否されても、後で許可されれば上限ではない）。
+                rejected = (info["status"] == "rejected").then(|| info["resetsAt"].as_i64());
             }
             Some("result") => result = Some(event),
             _ => {}

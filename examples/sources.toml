@@ -1,0 +1,145 @@
+# 巡回するソースの一覧。$XDG_CONFIG_HOME/nucrawler/sources.toml に置く。
+#
+# kind:     feed（RSS/Atom/RDF）| fepc_json（電事連のニュース JSON）
+# lang:     en（要約と和訳）| ja（要約のみ）
+# category: regulator | industry | research | utility | vendor | paper
+# enabled:  省略時 true
+# filter:   原子力関連に絞り込む。keywords（タイトル・概要に含む）か url_contains（URL に含む）の
+#           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
+
+# --- 規制当局 ---
+
+[[source]]
+id = "nrc-news"
+name = "US NRC News Releases"
+kind = "feed"
+url = "https://www.nrc.gov/public-involve/rss?feed=news"
+lang = "en"
+category = "regulator"
+
+[[source]]
+id = "nrc-event"
+name = "US NRC Event Notification Reports"
+kind = "feed"
+url = "https://www.nrc.gov/public-involve/rss?feed=event"
+lang = "en"
+category = "regulator"
+filter = { keywords = ["Power Reactor"] }
+
+[[source]]
+id = "iaea"
+name = "IAEA Top News"
+kind = "feed"
+url = "https://www.iaea.org/feeds/topnews"
+lang = "en"
+category = "regulator"
+
+# --- 業界 ---
+
+[[source]]
+id = "wnn"
+name = "World Nuclear News"
+kind = "feed"
+url = "https://www.world-nuclear-news.org/rss"
+lang = "en"
+category = "industry"
+
+[[source]]
+id = "ans"
+name = "ANS Nuclear Newswire"
+kind = "feed"
+url = "https://www.ans.org/news/feed/"
+lang = "en"
+category = "industry"
+
+[[source]]
+id = "fepc"
+name = "電気事業連合会"
+kind = "fepc_json"
+url = "https://www.fepc.or.jp/pr/news/index.json"
+lang = "ja"
+category = "industry"
+
+# --- 研究機関・学会 ---
+
+[[source]]
+id = "doe-ne"
+name = "DOE Office of Nuclear Energy"
+kind = "feed"
+url = "https://www.energy.gov/ne/rss.xml"
+lang = "en"
+category = "research"
+
+[[source]]
+id = "aesj"
+name = "日本原子力学会"
+kind = "feed"
+url = "https://www.aesj.net/feed"
+lang = "ja"
+category = "research"
+
+# --- 電力会社（原子力専用フィードは無いので絞り込む） ---
+
+[[source]]
+id = "hepco"
+name = "北海道電力"
+kind = "feed"
+url = "https://www.hepco.co.jp/info/rss/press_rss.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "泊"] }
+
+[[source]]
+id = "tohoku-epco"
+name = "東北電力"
+kind = "feed"
+url = "https://www.tohoku-epco.co.jp/rss/index.xml"
+lang = "ja"
+category = "utility"
+filter = { url_contains = ["/news/atom/"] }
+
+[[source]]
+id = "rikuden"
+name = "北陸電力"
+kind = "feed"
+url = "https://www.rikuden.co.jp/press.rdf"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "志賀"] }
+
+[[source]]
+id = "energia"
+name = "中国電力"
+kind = "feed"
+url = "https://www.energia.co.jp/press/atom.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "島根"] }
+
+[[source]]
+id = "kyuden"
+name = "九州電力"
+kind = "feed"
+url = "https://www.kyuden.co.jp/rss/news.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "玄海", "川内"] }
+
+[[source]]
+id = "jpower"
+name = "電源開発（J-POWER）"
+kind = "feed"
+url = "https://www.jpower.co.jp/rss/news.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "大間"] }
+
+# --- ベンダー ---
+
+[[source]]
+id = "westinghouse"
+name = "Westinghouse"
+kind = "feed"
+url = "https://info.westinghousenuclear.com/news/rss.xml"
+lang = "en"
+category = "vendor"

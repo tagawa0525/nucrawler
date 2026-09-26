@@ -1,8 +1,6 @@
-mod cli;
-
 use std::process::ExitCode;
 
-use cli::Command;
+use nucrawler::cli::{self, Command};
 
 #[derive(Debug, thiserror::Error)]
 enum Error {

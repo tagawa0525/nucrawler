@@ -108,7 +108,9 @@ impl PageFailure {
     fn is_permanent(&self) -> bool {
         match self {
             Self::InvalidUrl { .. } | Self::Pdf { .. } => true,
-            Self::Http(HttpError::DisallowedByRobots { .. }) => true,
+            Self::Http(HttpError::DisallowedByRobots { .. } | HttpError::BodyTooLarge { .. }) => {
+                true
+            }
             // 401/403 は多くが bot 対策で、待っても変わらない（回避はしない方針）。
             Self::Http(HttpError::Status { status, .. }) => {
                 matches!(status.as_u16(), 401 | 403 | 404 | 410)
@@ -338,6 +340,26 @@ mod tests {
         let summary = extract_pages(
             &db,
             &fetcher(),
+            &[source("u", None)],
+            &cfg(100),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.failed, summary.gave_up), (0, 1));
+    }
+
+    /// 本文サイズの上限を超えるページは、再試行しても小さくならないので断念する。
+    #[tokio::test]
+    async fn oversized_page_is_given_up() {
+        let server = Server::start([("/big", html(vec![b'x'; 4096]))].into());
+        let db = Db::open_in_memory().unwrap();
+        add(&db, &server, "u", &["/big"]);
+        let small = Fetcher::new("t", Duration::from_secs(2), Duration::ZERO, 1024).unwrap();
+        let summary = extract_pages(
+            &db,
+            &small,
             &[source("u", None)],
             &cfg(100),
             now(),

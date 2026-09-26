@@ -25,6 +25,8 @@ pub enum HttpError {
     BadRedirect { url: String, reason: String },
     #[error("response from {url} exceeds {limit} bytes")]
     BodyTooLarge { url: String, limit: u64 },
+    #[error("robots.txt disallows {url}")]
+    DisallowedByRobots { url: String },
     #[error("{url} returned {status}")]
     Status {
         url: String,
@@ -146,6 +148,11 @@ impl Fetcher {
             body.extend_from_slice(&chunk);
         }
         Ok(body)
+    }
+
+    /// 記事ページ用。取得前にそのオリジンの robots.txt を確かめ、禁止されていれば取得しない。
+    pub async fn get_page(&self, _url: &Url) -> Result<Fetched, HttpError> {
+        todo!()
     }
 
     /// 同じホストへのアクセスが `per_host_delay` 以上空くよう、順番を予約してから待つ。
@@ -335,6 +342,81 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, HttpError::BadRedirect { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn get_page_obeys_robots_txt_and_caches_it() {
+        let robots =
+            "User-agent: *\nDisallow: /private/\n\nUser-agent: nucrawler-test\nDisallow: /mine/\n";
+        let server = Server::start(
+            [
+                ("/robots.txt", Route::ok(robots)),
+                ("/private/a", Route::ok("p")),
+                ("/news/1", Route::ok("n1")),
+                ("/news/2", Route::ok("n2")),
+                ("/mine/x", Route::ok("m")),
+            ]
+            .into(),
+        );
+        let f = fetcher(Duration::ZERO);
+        // UA の製品名 nucrawler-test のグループが適用される（* のグループは使わない）
+        assert_eq!(
+            f.get_page(&url(&server.url("/news/1"))).await.unwrap().body,
+            b"n1"
+        );
+        f.get_page(&url(&server.url("/private/a"))).await.unwrap();
+        let err = f.get_page(&url(&server.url("/mine/x"))).await.unwrap_err();
+        assert!(matches!(err, HttpError::DisallowedByRobots { .. }), "{err}");
+        f.get_page(&url(&server.url("/news/2"))).await.unwrap();
+
+        let paths: Vec<_> = server.requests().into_iter().map(|r| r.path).collect();
+        assert_eq!(
+            paths.iter().filter(|p| *p == "/robots.txt").count(),
+            1,
+            "{paths:?}"
+        );
+        assert!(!paths.contains(&"/mine/x".to_string()), "{paths:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_robots_txt_allows_everything() {
+        let server = Server::start([("/a", Route::ok("a"))].into());
+        f_ok(&server, "/a").await;
+    }
+
+    async fn f_ok(server: &Server, path: &str) {
+        fetcher(Duration::ZERO)
+            .get_page(&url(&server.url(path)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreachable_robots_txt_disallows_everything() {
+        let server =
+            Server::start([("/robots.txt", Route::status(503)), ("/a", Route::ok("a"))].into());
+        let err = fetcher(Duration::ZERO)
+            .get_page(&url(&server.url("/a")))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::DisallowedByRobots { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn feeds_are_fetched_without_robots_check() {
+        let server = Server::start(
+            [
+                ("/robots.txt", Route::ok("User-agent: *\nDisallow: /\n")),
+                ("/feed", Route::ok("f")),
+            ]
+            .into(),
+        );
+        fetcher(Duration::ZERO)
+            .get(&url(&server.url("/feed")))
+            .await
+            .unwrap();
+        let paths: Vec<_> = server.requests().into_iter().map(|r| r.path).collect();
+        assert_eq!(paths, ["/feed"]);
     }
 
     #[tokio::test]

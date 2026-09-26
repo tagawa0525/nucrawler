@@ -1388,7 +1388,8 @@ impl Db {
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile
                          AND s.artifact_id = i.digest_id
-                       ORDER BY s.created_at DESC, s.id DESC LIMIT 1) AS score_id,
+                       -- 複数のモデルの採点があれば、先回り和訳と同じく最高点を使う
+                       ORDER BY s.score DESC, s.created_at DESC, s.id DESC LIMIT 1) AS score_id,
                       EXISTS (
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id

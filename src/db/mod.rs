@@ -8,6 +8,8 @@ use crate::config::Lang;
 pub enum DbError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error("failed to encode json")]
+    Json(#[from] serde_json::Error),
     #[error("invalid url {url:?}")]
     InvalidUrl {
         url: String,
@@ -114,6 +116,19 @@ pub struct StageKey<'a> {
     pub stage: &'a str,
     pub backend: &'a str,
     pub model: &'a str,
+}
+
+/// `llm_calls` に記録する 1 回の呼び出し。
+#[derive(Debug)]
+pub struct LlmCall<'a> {
+    pub stage: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+    pub n_items: usize,
+    pub ok: bool,
+    pub duration_ms: u64,
+    pub error: Option<&'a str>,
+    pub rate_limit: Option<&'a crate::llm::RateLimit>,
 }
 
 /// 抽出待ちの記事。
@@ -383,6 +398,31 @@ impl Db {
             },
         )?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn record_llm_call(
+        &self,
+        call: &LlmCall,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        let rate_limit = call.rate_limit.map(serde_json::to_string).transpose()?;
+        self.conn.execute(
+            "INSERT INTO llm_calls
+               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                timestamp(at),
+                call.stage,
+                call.backend,
+                call.model,
+                i64::try_from(call.n_items).unwrap_or(i64::MAX),
+                call.ok,
+                i64::try_from(call.duration_ms).unwrap_or(i64::MAX),
+                call.error,
+                rate_limit,
+            ],
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -928,6 +968,60 @@ mod tests {
         db.record_stage_failure(key, "x", t("2026-09-27T00:00:00Z"), true)
             .unwrap();
         assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    #[test]
+    fn records_llm_calls_with_rate_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let rate = crate::llm::RateLimit {
+            five_hour: Some(crate::llm::Window {
+                utilization: 0.5,
+                resets_at: 1790457000,
+            }),
+            seven_day: None,
+        };
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: true,
+                duration_ms: 1234,
+                error: None,
+                rate_limit: Some(&rate),
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "digest",
+                backend: "claude-cli",
+                model: "sonnet",
+                n_items: 5,
+                ok: false,
+                duration_ms: 10,
+                error: Some("timeout"),
+                rate_limit: None,
+            },
+            t("2026-09-27T01:05:00Z"),
+        )
+        .unwrap();
+        let rows = db
+            .query_strings(
+                "SELECT at || '|' || stage || '|' || n_items || '|' || ok || '|' || coalesce(error, '-')
+                        || '|' || coalesce(json_extract(rate_limit, '$.five_hour.utilization'), '-')
+                 FROM llm_calls ORDER BY id",
+            )
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                "2026-09-27T01:00:00.000Z|digest|5|1|-|0.5",
+                "2026-09-27T01:05:00.000Z|digest|5|0|timeout|-",
+            ]
+        );
     }
 
     #[test]

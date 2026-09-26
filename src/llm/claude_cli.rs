@@ -1,0 +1,396 @@
+//! `claude -p` を子プロセスとして呼ぶバックエンド。
+//!
+//! - `--bare` は API キー認証を強制するので使わない（サブスクの OAuth で動かすため）。
+//! - ツールをすべて無効にし、MCP・スラッシュコマンド・設定ファイルを読まない。
+//! - cwd は中立なディレクトリにして、プロジェクトの CLAUDE.md などを読ませない。
+//! - 出力は stream-json。`rate_limit_event` から使用率を、`result` から構造化出力を得る。
+
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
+
+use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Window};
+
+pub struct ClaudeCli {
+    pub command: PathBuf,
+    /// 子プロセスの作業ディレクトリ（無ければ作る）
+    pub cwd: PathBuf,
+    pub timeout: Duration,
+}
+
+impl Llm for ClaudeCli {
+    fn backend(&self) -> &'static str {
+        "claude-cli"
+    }
+
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
+        let schema = req.schema.to_string();
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(["-p", "--output-format", "stream-json", "--verbose"])
+            .args(["--json-schema", &schema])
+            .args(["--tools", ""])
+            .args([
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+            ])
+            .args(["--setting-sources", ""])
+            .args(["--system-prompt", req.system])
+            .args(["--model", req.model])
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // タイムアウトで future を捨てたときに子プロセスも止める。
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| LlmError::Spawn {
+                command: self.command.display().to_string(),
+                source,
+            })?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let prompt = req.prompt.as_bytes();
+        let run = async {
+            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
+            let write = async {
+                stdin.write_all(prompt).await?;
+                drop(stdin);
+                Ok::<_, std::io::Error>(())
+            };
+            let (written, output) = tokio::join!(write, child.wait_with_output());
+            written?;
+            output
+        };
+        let output = tokio::time::timeout(self.timeout, run)
+            .await
+            .map_err(|_| LlmError::Timeout {
+                secs: self.timeout.as_secs(),
+            })?
+            .map_err(LlmError::Io)?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        match parse_stream(&stdout) {
+            // 結果行が無い（途中で落ちた）ときだけ、終了コードと stderr で報告する。
+            // 結果行があれば、終了コードに関わらずそちらが結果と原因を正確に表す。
+            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }),
+            parsed => {
+                let (output, rate_limit) = parsed?;
+                Ok(LlmResponse { output, rate_limit })
+            }
+        }
+    }
+}
+
+/// stream-json の出力から、構造化出力と最後の使用率を取り出す。
+pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit>), LlmError> {
+    let mut rate_limit = None;
+    let mut rejected = None;
+    let mut result = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| LlmError::Protocol(format!("invalid json line ({e}): {line}")))?;
+        match event["type"].as_str() {
+            Some("rate_limit_event") => {
+                let info = &event["rate_limit_info"];
+                rate_limit = Some(parse_rate_limit(info));
+                // 最後のイベントの状態で判断する（途中で拒否されても、後で許可されれば上限ではない）。
+                rejected = (info["status"] == "rejected").then(|| info["resetsAt"].as_i64());
+            }
+            Some("result") => result = Some(event),
+            _ => {}
+        }
+    }
+    let result = result.ok_or_else(|| LlmError::Protocol("no result event".into()))?;
+    if result["is_error"].as_bool().unwrap_or(false) {
+        if let Some(resets_at) = rejected {
+            return Err(LlmError::RateLimited { resets_at });
+        }
+        return Err(LlmError::Reported {
+            subtype: result["subtype"].as_str().unwrap_or_default().to_string(),
+            message: result["result"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+    match result.get("structured_output") {
+        Some(output) if !output.is_null() => Ok((output.clone(), rate_limit)),
+        _ => Err(LlmError::NoStructuredOutput),
+    }
+}
+
+fn parse_rate_limit(info: &serde_json::Value) -> RateLimit {
+    let window = |name: &str| {
+        let w = &info["unifiedWindows"][name];
+        Some(Window {
+            utilization: w["utilization"].as_f64()?,
+            resets_at: w["resetsAt"].as_i64()?,
+        })
+    };
+    RateLimit {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    fn fixture() -> String {
+        String::from_utf8(crate::testutil::fixture("claude-success.jsonl")).unwrap()
+    }
+
+    #[test]
+    fn parses_structured_output_and_rate_limit() {
+        let (output, rate) = parse_stream(&fixture()).unwrap();
+        assert_eq!(
+            output,
+            serde_json::json!({"items": [{"id": 1, "ok": true}]})
+        );
+        assert_eq!(
+            rate,
+            Some(RateLimit {
+                five_hour: Some(Window {
+                    utilization: 0.12,
+                    resets_at: 1790457000
+                }),
+                seven_day: Some(Window {
+                    utilization: 0.06,
+                    resets_at: 1790650800
+                }),
+            })
+        );
+    }
+
+    fn result_line(is_error: bool, subtype: &str, result: &str) -> String {
+        serde_json::json!({"type": "result", "subtype": subtype, "is_error": is_error, "result": result})
+            .to_string()
+    }
+
+    #[test]
+    fn reported_error_carries_message() {
+        let err = parse_stream(&result_line(
+            true,
+            "error_during_execution",
+            "Not logged in",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, LlmError::Reported { message, .. } if message == "Not logged in"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejected_rate_limit_is_rate_limited() {
+        let rate = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "rejected", "resetsAt": 1790457000, "rateLimitType": "five_hour",
+            "unifiedWindows": {"five_hour": {"utilization": 1.0, "resetsAt": 1790457000}}}});
+        let out = format!(
+            "{rate}\n{}\n",
+            result_line(true, "error", "You've hit your session limit")
+        );
+        let err = parse_stream(&out).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LlmError::RateLimited {
+                    resets_at: Some(1790457000)
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// 判定には最後の rate_limit_event を使う。
+    #[test]
+    fn later_allowed_event_clears_rejection() {
+        let event = |status: &str| {
+            serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+                "status": status, "resetsAt": 1790457000,
+                "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": 1790457000}}}})
+        };
+        let out = format!(
+            "{}\n{}\n{}\n",
+            event("rejected"),
+            event("allowed"),
+            result_line(true, "error_during_execution", "boom")
+        );
+        let err = parse_stream(&out).unwrap_err();
+        assert!(matches!(err, LlmError::Reported { .. }), "{err}");
+    }
+
+    #[test]
+    fn missing_result_or_output_is_error() {
+        let err = parse_stream("{\"type\":\"system\"}\n").unwrap_err();
+        assert!(matches!(err, LlmError::Protocol(_)), "{err}");
+        let err = parse_stream(&result_line(false, "success", "plain text")).unwrap_err();
+        assert!(matches!(err, LlmError::NoStructuredOutput), "{err}");
+        let err = parse_stream("not json\n").unwrap_err();
+        assert!(matches!(err, LlmError::Protocol(_)), "{err}");
+    }
+
+    /// テストごとの一時ディレクトリに、偽の claude（シェルスクリプト）を置く。
+    fn fake_claude(name: &str, body: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nucrawler-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("claude");
+        let probe = "[ \"$1\" = --nucrawler-probe ] && exit 0";
+        std::fs::write(&script, format!("#!/bin/sh\n{probe}\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 並行するテストが fork した直後の子プロセスは、exec するまで書き込み用の fd を
+        // 引き継いでいる。その間に実行すると ETXTBSY になるので、実行できるまで待つ。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(&script)
+                .arg("--nucrawler-probe")
+                .status()
+            {
+                Ok(_) => break,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("cannot run {}: {e}", script.display()),
+            }
+        }
+        (script, dir)
+    }
+
+    fn request(schema: &serde_json::Value) -> LlmRequest<'_> {
+        LlmRequest {
+            system: "SYSTEM",
+            prompt: "PROMPT 日本語",
+            schema,
+            model: "sonnet",
+        }
+    }
+
+    #[tokio::test]
+    async fn passes_arguments_and_stdin_and_parses_output() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-success.jsonl");
+        let (script, dir) = fake_claude(
+            "cli-ok",
+            &format!(
+                "printf '%s\\n' \"$@\" > \"$PWD/args.txt\"\ncat > \"$PWD/stdin.txt\"\ncat '{}'",
+                fixture_path.display()
+            ),
+        );
+        let cwd = dir.join("cwd");
+        let cli = ClaudeCli {
+            command: script,
+            cwd: cwd.clone(),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({"type": "object"});
+        let resp = cli.call(request(&schema)).await.unwrap();
+        assert_eq!(resp.output["items"][0]["id"], 1);
+        assert!(resp.rate_limit.is_some());
+
+        let args: Vec<String> = std::fs::read_to_string(cwd.join("args.txt"))
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        let after = |flag: &str| {
+            let i = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("{flag} in {args:?}"));
+            args[i + 1].clone()
+        };
+        assert!(args.contains(&"-p".to_string()), "{args:?}");
+        assert_eq!(after("--output-format"), "stream-json");
+        assert!(args.contains(&"--verbose".to_string()));
+        assert_eq!(after("--json-schema"), schema.to_string());
+        assert_eq!(after("--tools"), "");
+        assert_eq!(after("--model"), "sonnet");
+        assert_eq!(after("--system-prompt"), "SYSTEM");
+        assert_eq!(after("--setting-sources"), "");
+        for flag in [
+            "--no-session-persistence",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+        ] {
+            assert!(args.contains(&flag.to_string()), "{flag} in {args:?}");
+        }
+        assert!(!args.contains(&"--bare".to_string()));
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("stdin.txt")).unwrap(),
+            "PROMPT 日本語"
+        );
+    }
+
+    /// 結果行が成功していれば、終了コードが 0 以外でも結果を使う。
+    #[tokio::test]
+    async fn result_line_wins_over_nonzero_exit() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-success.jsonl");
+        let (script, dir) = fake_claude(
+            "cli-exit-with-result",
+            &format!("cat >/dev/null\ncat '{}'\nexit 1", fixture_path.display()),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        let resp = cli.call(request(&schema)).await.unwrap();
+        assert_eq!(resp.output["items"][0]["id"], 1);
+        assert!(resp.rate_limit.is_some());
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_reports_stderr() {
+        let (script, dir) = fake_claude("cli-exit", "echo boom >&2\nexit 3");
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(&err, LlmError::Exit { stderr, .. } if stderr.contains("boom")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_process_times_out() {
+        let (script, dir) = fake_claude("cli-slow", "cat >/dev/null\nsleep 5");
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_millis(300),
+        };
+        let schema = serde_json::json!({});
+        let started = std::time::Instant::now();
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        assert!(matches!(err, LlmError::Timeout { .. }), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn missing_command_is_spawn_error() {
+        let cli = ClaudeCli {
+            command: "/nonexistent/claude".into(),
+            cwd: std::env::temp_dir(),
+            timeout: Duration::from_secs(1),
+        };
+        let schema = serde_json::json!({});
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        assert!(matches!(err, LlmError::Spawn { .. }), "{err}");
+    }
+}

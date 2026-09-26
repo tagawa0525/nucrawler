@@ -29,6 +29,25 @@ pub enum ConfigError {
 pub struct Config {
     pub http: HttpConfig,
     pub pipeline: PipelineConfig,
+    pub llm: LlmConfig,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LlmConfig {
+    /// `claude` の実行ファイル（PATH から探す）
+    pub command: String,
+    /// 1 回の呼び出しのタイムアウト
+    pub timeout_secs: u64,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            command: "claude".into(),
+            timeout_secs: 300,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -234,6 +253,13 @@ mod tests {
         let c = parse_config("[pipeline]\nbacklog_days = 3\n", p()).unwrap();
         assert_eq!(c.pipeline.backlog_days, 3);
         assert_eq!(c.pipeline.extract_max_per_run, 100);
+    }
+
+    #[test]
+    fn llm_defaults() {
+        let d = LlmConfig::default();
+        assert_eq!(d.command, "claude");
+        assert_eq!(d.timeout_secs, 300);
     }
 
     #[test]

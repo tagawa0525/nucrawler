@@ -14,3 +14,9 @@ max_body_bytes = 20971520
 backlog_days = 14
 # 1 回の実行で本文を抽出する記事数の上限
 extract_max_per_run = 100
+
+[llm]
+# Claude Code の実行ファイル（サブスクリプションの枠内で headless 実行する）
+command = "claude"
+# 1 回の呼び出しのタイムアウト（秒）
+timeout_secs = 300

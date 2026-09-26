@@ -17,7 +17,7 @@ pub enum CheckError {
 /// 1 つのソースの取得失敗。他のソースの確認は続ける。
 #[derive(Debug, thiserror::Error)]
 pub enum SourceFailure {
-    #[error("invalid source url {url:?}: {source}")]
+    #[error("invalid source url {url:?}")]
     InvalidUrl {
         url: String,
         source: url::ParseError,

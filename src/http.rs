@@ -11,9 +11,9 @@ use crate::config::HttpConfig;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
-    #[error("failed to build http client: {0}")]
+    #[error("failed to build http client")]
     Build(#[source] reqwest::Error),
-    #[error("request to {url} failed: {source}")]
+    #[error("request to {url} failed")]
     Request {
         url: String,
         #[source]

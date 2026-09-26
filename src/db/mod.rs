@@ -8,7 +8,7 @@ use crate::config::Lang;
 pub enum DbError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    #[error("invalid url {url:?}: {source}")]
+    #[error("invalid url {url:?}")]
     InvalidUrl {
         url: String,
         source: url::ParseError,

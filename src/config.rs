@@ -6,12 +6,12 @@ use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("failed to read {path}: {source}")]
+    #[error("failed to read {path}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("failed to parse {path}: {source}")]
+    #[error("failed to parse {path}")]
     Parse {
         path: PathBuf,
         source: toml::de::Error,

@@ -8,16 +8,16 @@ use crate::config::{Filter, SourceKind};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
-    #[error("failed to parse feed: {0}")]
+    #[error("failed to parse feed")]
     Feed(#[from] feed_rs::parser::ParseFeedError),
-    #[error("failed to parse json: {0}")]
+    #[error("failed to parse json")]
     Json(#[from] serde_json::Error),
-    #[error("invalid date {value:?}: {source}")]
+    #[error("invalid date {value:?}")]
     InvalidDate {
         value: String,
         source: chrono::ParseError,
     },
-    #[error("invalid link {href:?}: {source}")]
+    #[error("invalid link {href:?}")]
     InvalidLink {
         href: String,
         source: url::ParseError,

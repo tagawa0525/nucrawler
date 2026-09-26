@@ -35,7 +35,7 @@ pub struct Config {
     pub quota: crate::quota::QuotaConfig,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     /// `claude` の実行ファイル（PATH から探す）
@@ -48,6 +48,12 @@ pub struct LlmConfig {
     pub digest_batch_size: usize,
     /// プロンプトに入れる本文の部分ごとの最大文字数
     pub max_input_chars: usize,
+    /// 採点に使うモデル
+    pub score_model: String,
+    /// 1 回の呼び出しで採点する記事数
+    pub score_batch_size: usize,
+    /// 要約が使い切らずに採点のために残す呼び出し回数（要約待ちが多くても推薦が止まらないように）
+    pub score_reserved_calls: u32,
 }
 
 impl LlmConfig {
@@ -56,6 +62,7 @@ impl LlmConfig {
         for (name, value) in [
             ("digest_batch_size", self.digest_batch_size as u64),
             ("max_input_chars", self.max_input_chars as u64),
+            ("score_batch_size", self.score_batch_size as u64),
             ("timeout_secs", self.timeout_secs),
         ] {
             if value == 0 {
@@ -74,6 +81,9 @@ impl Default for LlmConfig {
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
             max_input_chars: 6000,
+            score_model: "sonnet".into(),
+            score_batch_size: 20,
+            score_reserved_calls: 1,
         }
     }
 }
@@ -336,6 +346,7 @@ mod tests {
             ("[llm]\ndigest_batch_size = 0\n", "digest_batch_size"),
             ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
             ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
+            ("[llm]\nscore_batch_size = 0\n", "score_batch_size"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -353,6 +364,9 @@ mod tests {
         assert_eq!(d.digest_model, "sonnet");
         assert_eq!(d.digest_batch_size, 5);
         assert_eq!(d.max_input_chars, 6000);
+        assert_eq!(d.score_model, "sonnet");
+        assert_eq!(d.score_batch_size, 20);
+        assert_eq!(d.score_reserved_calls, 1);
     }
 
     #[test]

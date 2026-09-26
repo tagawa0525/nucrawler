@@ -5,6 +5,7 @@ pub mod digest;
 pub mod extract;
 pub mod fetch;
 pub mod lock;
+pub mod score;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,27 +24,50 @@ impl Cancel {
     }
 }
 
+/// ステージを途中で止めた理由。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Halt {
+    /// クォータの判定で止めた（正常。残りは次回）
+    Quota(crate::quota::Stop),
+    /// サブスクリプションの上限に達した（記事の失敗としては数えない）
+    UsageLimit { resets_at: Option<i64> },
+    /// 認証切れなど記事によらない失敗の可能性があるので、失敗を広げないよう止めた
+    LlmFailed(String),
+}
+
 /// パイプラインのステージ（実行順）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Fetch,
     Extract,
     Digest,
+    Score,
 }
 
 impl Stage {
-    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract, Stage::Digest];
+    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract, Stage::Digest, Stage::Score];
 
     pub fn name(self) -> &'static str {
         match self {
             Stage::Fetch => "fetch",
             Stage::Extract => "extract",
             Stage::Digest => "digest",
+            Stage::Score => "score",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Stage> {
         Stage::ALL.iter().copied().find(|s| s.name() == name)
+    }
+}
+
+/// 要約が採点のために残す呼び出し回数。採点が計画に無いか、プロファイルが無くて採点が
+/// 何もしないときは、残しても使われないので 0。
+pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig, has_profile: bool) -> u32 {
+    if has_profile && stages.contains(&Stage::Score) {
+        cfg.score_reserved_calls
+    } else {
+        0
     }
 }
 
@@ -73,6 +97,29 @@ mod tests {
             assert_eq!(Stage::from_name(s.name()), Some(s));
         }
         assert_eq!(Stage::from_name("nope"), None);
+    }
+
+    #[test]
+    fn reserves_calls_only_when_scoring_is_planned() {
+        let cfg = crate::config::LlmConfig {
+            score_reserved_calls: 2,
+            ..crate::config::LlmConfig::default()
+        };
+        assert_eq!(score_reserve(&plan(None, None), &cfg, true), 2);
+        assert_eq!(
+            score_reserve(&plan(Some(Stage::Digest), None), &cfg, true),
+            0
+        );
+        assert_eq!(
+            score_reserve(&plan(None, Some(Stage::Digest)), &cfg, true),
+            0
+        );
+        assert_eq!(
+            score_reserve(&plan(None, Some(Stage::Score)), &cfg, true),
+            2
+        );
+        // プロファイルが無ければ採点は何もしないので、残しても使われない
+        assert_eq!(score_reserve(&plan(None, None), &cfg, false), 0);
     }
 
     #[test]

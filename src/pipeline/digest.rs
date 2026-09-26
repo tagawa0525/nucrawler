@@ -3,11 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::Cancel;
+use super::{Cancel, Halt};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, Db, DbError, LlmCall, NewArtifact, StageKey};
 use crate::llm::{Llm, LlmError, LlmRequest};
-use crate::quota::{Quota, Stop};
+use crate::quota::Quota;
 use crate::{digest, errors};
 
 pub const STAGE: &str = "digest";
@@ -16,17 +16,6 @@ pub const STAGE: &str = "digest";
 pub enum DigestStageError {
     #[error("database error")]
     Db(#[from] DbError),
-}
-
-/// ステージを途中で止めた理由。
-#[derive(Debug, Clone, PartialEq)]
-pub enum Halt {
-    /// クォータの判定で止めた（正常。残りは次回）
-    Quota(Stop),
-    /// サブスクリプションの上限に達した（記事の失敗としては数えない）
-    UsageLimit { resets_at: Option<i64> },
-    /// 認証切れなど記事によらない失敗の可能性があるので、失敗を広げないよう止めた
-    LlmFailed(String),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -58,7 +47,8 @@ pub async fn digest_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
+        if let Err(stop) = quota.permit_reserving(now, llm_cfg.score_reserved_calls) {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;
@@ -172,7 +162,7 @@ mod tests {
     use crate::db::{ContentKind, ContentOrigin, NewArticle};
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse, RateLimit, Window};
-    use crate::quota::QuotaConfig;
+    use crate::quota::{QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         // JST 11:00（10〜15 時の枠）
@@ -181,9 +171,11 @@ mod tests {
             .to_utc()
     }
 
+    /// 採点のための予約は `leaves_reserved_calls_for_scoring` で確かめるので、ほかのテストでは 0 にする。
     fn llm_cfg(batch: usize) -> LlmConfig {
         LlmConfig {
             digest_batch_size: batch,
+            score_reserved_calls: 0,
             ..LlmConfig::default()
         }
     }
@@ -329,6 +321,36 @@ mod tests {
             summary.halted,
             Some(Halt::Quota(Stop::FiveHour { .. }))
         ));
+    }
+
+    /// 採点のために残す回数に達したら、要約は止まる。
+    #[tokio::test]
+    async fn leaves_reserved_calls_for_scoring() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 3);
+        let llm = FakeLlm::new([ok(&ids[..1], 0.1), ok(&ids[1..2], 0.1)]);
+        let mut q = quota(3);
+        let cfg = LlmConfig {
+            score_reserved_calls: 1,
+            ..llm_cfg(1)
+        };
+        let summary = digest_articles(
+            &db,
+            &llm,
+            &mut q,
+            &cfg,
+            &PipelineConfig::default(),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.calls, 2);
+        assert_eq!(
+            summary.halted,
+            Some(Halt::Quota(Stop::Reserved { reserved: 1 }))
+        );
+        assert!(q.permit(now()).is_ok(), "one call is left for scoring");
     }
 
     #[tokio::test]

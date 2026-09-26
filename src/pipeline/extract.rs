@@ -198,6 +198,7 @@ mod tests {
                     },
                 ),
                 ("/down", Route::status(500)),
+                ("/blocked", Route::status(403)),
                 ("/private/x", html(fixture("article.html"))),
             ]
             .into(),
@@ -244,7 +245,15 @@ mod tests {
             &db,
             &server,
             "u",
-            &["/news/1", "/doc.pdf", "/missing", "/down", "/private/x"],
+            // PDF、404、403（bot 対策）、robots.txt の禁止は断念し、500 は再試行に回す
+            &[
+                "/news/1",
+                "/doc.pdf",
+                "/missing",
+                "/down",
+                "/blocked",
+                "/private/x",
+            ],
         );
         let sources = [source("u", None)];
         let summary = extract_pages(
@@ -262,7 +271,7 @@ mod tests {
             ExtractSummary {
                 extracted: 1,
                 failed: 1,
-                gave_up: 3,
+                gave_up: 4,
                 cancelled: false,
             }
         );

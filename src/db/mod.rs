@@ -83,6 +83,16 @@ impl ContentOrigin {
     }
 }
 
+/// `status` 用：ソースごとの記事数と取得状況。
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourceOverview {
+    pub source_id: String,
+    pub articles: i64,
+    pub last_success_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SourceState {
     pub last_success_at: Option<String>,
@@ -219,6 +229,11 @@ impl Db {
                 },
             )
             .optional()?)
+    }
+
+    /// 記事か取得記録のあるソースすべて（source_id 順）。
+    pub fn source_overview(&self) -> Result<Vec<SourceOverview>, DbError> {
+        todo!()
     }
 
     #[cfg(test)]
@@ -619,6 +634,28 @@ mod tests {
         let st = db.source_state("s").unwrap().unwrap();
         assert!(st.last_success_at.is_some(), "last success is kept");
         assert_eq!(st.last_error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn overview_combines_articles_and_state() {
+        let db = Db::open_in_memory().unwrap();
+        for url in ["https://e.com/1", "https://e.com/2"] {
+            db.insert_article(&NewArticle {
+                source_id: "a",
+                ..article(url)
+            })
+            .unwrap();
+        }
+        db.record_source_success("a").unwrap();
+        db.record_source_failure("b", "HTTP 403").unwrap();
+        let ov = db.source_overview().unwrap();
+        let ids: Vec<_> = ov
+            .iter()
+            .map(|o| (o.source_id.as_str(), o.articles))
+            .collect();
+        assert_eq!(ids, [("a", 2), ("b", 0)]);
+        assert!(ov[0].last_success_at.is_some());
+        assert_eq!(ov[1].last_error.as_deref(), Some("HTTP 403"));
     }
 
     #[test]

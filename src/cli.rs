@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::pipeline::Stage;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("unknown command: {0}\n\n{USAGE}")]
@@ -8,6 +10,8 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
+    #[error("usage: nucrawler crawl [--until STAGE | --only STAGE]  (stages: {stages})")]
+    CrawlUsage { stages: String },
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -16,6 +20,8 @@ pub enum ParseError {
 pub struct Invocation {
     /// `--config-dir DIR`（サブコマンドより前に置く共通オプション）
     pub config_dir: Option<PathBuf>,
+    /// `--data-dir DIR`（DB とロックファイルの置き場所）
+    pub data_dir: Option<PathBuf>,
     pub command: Command,
     pub args: Vec<String>,
 }
@@ -76,9 +82,21 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
     };
     Ok(Invocation {
         config_dir,
+        data_dir: None,
         command,
         args: args.collect(),
     })
+}
+
+/// `crawl` サブコマンドの引数。`until` と `only` は同時に指定できない。
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct CrawlArgs {
+    pub until: Option<Stage>,
+    pub only: Option<Stage>,
+}
+
+pub fn parse_crawl_args(_args: &[String]) -> Result<CrawlArgs, ParseError> {
+    todo!()
 }
 
 /// `sources` サブコマンドの引数。
@@ -113,6 +131,7 @@ mod tests {
             inv,
             Invocation {
                 config_dir: None,
+                data_dir: None,
                 command: Command::Crawl,
                 args: args(&["--until", "digest"]),
             }
@@ -152,6 +171,7 @@ mod tests {
             inv,
             Invocation {
                 config_dir: Some(PathBuf::from("/etc/nc")),
+                data_dir: None,
                 command: Command::Sources,
                 args: args(&["check", "nrc"]),
             }
@@ -161,6 +181,57 @@ mod tests {
     #[test]
     fn usage_documents_global_options() {
         assert!(USAGE.contains("--config-dir"), "{USAGE}");
+    }
+
+    #[test]
+    fn parses_global_data_dir_with_config_dir() {
+        let inv = parse(args(&[
+            "--data-dir",
+            "/var/nc",
+            "--config-dir",
+            "/etc/nc",
+            "status",
+        ]))
+        .unwrap();
+        assert_eq!(inv.data_dir, Some(PathBuf::from("/var/nc")));
+        assert_eq!(inv.config_dir, Some(PathBuf::from("/etc/nc")));
+        assert_eq!(inv.command, Command::Status);
+        assert!(USAGE.contains("--data-dir"), "{USAGE}");
+    }
+
+    #[test]
+    fn parses_crawl_args() {
+        assert_eq!(parse_crawl_args(&[]).unwrap(), CrawlArgs::default());
+        assert_eq!(
+            parse_crawl_args(&args(&["--until", "fetch"])).unwrap(),
+            CrawlArgs {
+                until: Some(Stage::Fetch),
+                only: None
+            }
+        );
+        assert_eq!(
+            parse_crawl_args(&args(&["--only", "fetch"])).unwrap(),
+            CrawlArgs {
+                until: None,
+                only: Some(Stage::Fetch)
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_bad_crawl_args() {
+        for bad in [
+            &["--until"][..],
+            &["--until", "nope"][..],
+            &["--until", "fetch", "--only", "fetch"][..],
+            &["extra"][..],
+        ] {
+            let err = parse_crawl_args(&args(bad)).unwrap_err();
+            assert!(
+                matches!(err, ParseError::CrawlUsage { .. }),
+                "{bad:?}: {err}"
+            );
+        }
     }
 
     #[test]

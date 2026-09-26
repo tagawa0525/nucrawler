@@ -7,6 +7,12 @@ pub struct Rules {
     rules: Vec<Rule>,
 }
 
+#[derive(Default)]
+struct Group {
+    agents: Vec<String>,
+    rules: Vec<Rule>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rule {
     allow: bool,
@@ -30,13 +36,109 @@ impl Rules {
     }
 
     /// `product` は UA の製品名（例 "nucrawler"）。大文字小文字は区別しない。
-    pub fn parse(_txt: &str, _product: &str) -> Self {
-        todo!()
+    pub fn parse(txt: &str, product: &str) -> Self {
+        let mut groups: Vec<Group> = Vec::new();
+        // 直前の行が user-agent なら、続く user-agent は同じグループに加える。
+        let mut in_agent_lines = false;
+        for line in txt.lines() {
+            let line = line.split('#').next().unwrap_or_default().trim();
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
+            match key.as_str() {
+                "user-agent" => {
+                    if !in_agent_lines {
+                        groups.push(Group::default());
+                    }
+                    in_agent_lines = true;
+                    if let Some(g) = groups.last_mut() {
+                        g.agents.push(value.to_ascii_lowercase());
+                    }
+                }
+                "allow" | "disallow" => {
+                    in_agent_lines = false;
+                    // 最初の user-agent より前の規則と、空の値（何も指定しない）は無視する。
+                    if let Some(g) = groups.last_mut()
+                        && !value.is_empty()
+                    {
+                        g.rules.push(Rule {
+                            allow: key == "allow",
+                            pattern: normalize(value),
+                        });
+                    }
+                }
+                _ => in_agent_lines = false,
+            }
+        }
+        let product = product.to_ascii_lowercase();
+        let pick = |agent: &str| -> Vec<Rule> {
+            groups
+                .iter()
+                .filter(|g| g.agents.iter().any(|a| a == agent))
+                .flat_map(|g| g.rules.iter().cloned())
+                .collect()
+        };
+        let specific = pick(&product);
+        let rules = if groups.iter().any(|g| g.agents.contains(&product)) {
+            specific
+        } else {
+            pick("*")
+        };
+        Self { rules }
     }
 
     /// `path` はパスとクエリ（例 "/news/1?x=2"）。
-    pub fn allows(&self, _path: &str) -> bool {
-        todo!()
+    pub fn allows(&self, path: &str) -> bool {
+        let path = normalize(path);
+        self.rules
+            .iter()
+            .filter(|r| matches(&r.pattern, &path))
+            // 最も長く一致した規則を採る。同じ長さなら allow を優先する。
+            .max_by_key(|r| (r.pattern.len(), r.allow))
+            .is_none_or(|r| r.allow)
+    }
+}
+
+/// パーセントエンコードの 16 進数字を大文字に揃える（%e6 と %E6 を同じとみなす）。
+fn normalize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '%' {
+            for h in chars.by_ref().take(2) {
+                out.push(h.to_ascii_uppercase());
+            }
+        }
+    }
+    out
+}
+
+/// `*` は任意の文字列、末尾の `$` はパスの終わりに一致する。それ以外は前方一致。
+fn matches(pattern: &str, path: &str) -> bool {
+    let (pattern, anchored) = match pattern.strip_suffix('$') {
+        Some(p) => (p, true),
+        None => (pattern, false),
+    };
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let Some(rest) = path.strip_prefix(parts[0]) else {
+        return false;
+    };
+    let mut rest = rest;
+    let Some((last, middle)) = parts[1..].split_last() else {
+        return !anchored || rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    if anchored {
+        rest.ends_with(last)
+    } else {
+        rest.contains(last)
     }
 }
 

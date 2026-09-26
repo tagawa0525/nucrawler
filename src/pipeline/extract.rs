@@ -113,7 +113,7 @@ impl PageFailure {
             Self::Http(HttpError::Status { status, .. }) => {
                 matches!(status.as_u16(), 401 | 403 | 404 | 410)
             }
-            // セレクタの誤りは設定を直せば解決するので、断念せず再試行に回す。
+            // robots.txt の障害、セレクタの誤り（設定を直せば解決する）などは再試行に回す。
             Self::Http(_) | Self::Extract(_) | Self::NoText => false,
         }
     }
@@ -130,7 +130,8 @@ async fn extract_one(
     })?;
     let page = fetcher.get_page(&parsed).await?;
     let content_type = page.content_type.as_deref().unwrap_or_default();
-    if content_type.to_ascii_lowercase().contains("pdf") {
+    // Content-Type が当てにならないサーバもあるので、中身の署名でも判定する。
+    if content_type.to_ascii_lowercase().contains("pdf") || page.body.starts_with(b"%PDF-") {
         return Err(PageFailure::Pdf {
             content_type: content_type.to_string(),
         });

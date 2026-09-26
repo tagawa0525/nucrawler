@@ -57,7 +57,8 @@ pub struct Fetcher {
     product: String,
     /// オリジンごとの robots.txt の規則。マップのロックは表の出し入れの間だけ持ち、
     /// 取得はオリジンごとの OnceCell で一度だけ行う（遅いオリジンが他を止めない）。
-    robots: Mutex<HashMap<String, Arc<OnceCell<Rules>>>>,
+    /// `None` は robots.txt を取得できなかった（5xx や通信エラー）ことを表す。
+    robots: Mutex<HashMap<String, Arc<OnceCell<Option<Rules>>>>>,
     /// ホストごとの、次にアクセスしてよい時刻
     next_allowed: Mutex<HashMap<String, Instant>>,
 }
@@ -113,10 +114,8 @@ impl Fetcher {
     async fn fetch(&self, url: &Url, obey_robots: bool) -> Result<Fetched, HttpError> {
         let mut current = url.clone();
         for _ in 0..=MAX_REDIRECTS {
-            if obey_robots && !self.robots_allow(&current).await {
-                return Err(HttpError::DisallowedByRobots {
-                    url: current.to_string(),
-                });
+            if obey_robots {
+                self.check_robots(&current).await?;
             }
             self.wait_for_turn(&current).await;
             let request_error = |source| HttpError::Request {
@@ -191,7 +190,9 @@ impl Fetcher {
         Ok(body)
     }
 
-    async fn robots_allow(&self, url: &Url) -> bool {
+    /// 明示的に禁止されていれば `DisallowedByRobots`、robots.txt を取得できなければ
+    /// `RobotsUnavailable`（RFC 9309 に従い取得はしないが、後で再試行できるよう区別する）。
+    async fn check_robots(&self, url: &Url) -> Result<(), HttpError> {
         let origin = url.origin().ascii_serialization();
         let cell = self
             .robots
@@ -200,29 +201,42 @@ impl Fetcher {
             .entry(origin.clone())
             .or_default()
             .clone();
-        let rules = cell.get_or_init(|| self.fetch_robots(&origin)).await;
+        let Some(rules) = cell.get_or_init(|| self.fetch_robots(&origin)).await else {
+            return Err(HttpError::RobotsUnavailable {
+                url: url.to_string(),
+            });
+        };
         let path = match url.query() {
             Some(q) => format!("{}?{q}", url.path()),
             None => url.path().to_string(),
         };
-        rules.allows(&path)
+        if rules.allows(&path) {
+            Ok(())
+        } else {
+            Err(HttpError::DisallowedByRobots {
+                url: url.to_string(),
+            })
+        }
     }
 
-    /// RFC 9309：4xx なら全許可、5xx や通信エラーなら全拒否。
-    async fn fetch_robots(&self, origin: &str) -> Rules {
-        let Ok(url) = Url::parse(&format!("{origin}/robots.txt")) else {
-            return Rules::disallow_all();
-        };
+    /// RFC 9309：4xx なら全許可。5xx や通信エラーなら取得できなかった（`None`）とする。
+    async fn fetch_robots(&self, origin: &str) -> Option<Rules> {
+        let url = Url::parse(&format!("{origin}/robots.txt")).ok()?;
         match Box::pin(self.fetch(&url, false)).await {
-            Ok(f) => Rules::parse(&String::from_utf8_lossy(&f.body), &self.product),
-            Err(HttpError::Status { status, .. }) if status.is_client_error() => Rules::allow_all(),
+            Ok(f) => Some(Rules::parse(
+                &String::from_utf8_lossy(&f.body),
+                &self.product,
+            )),
+            Err(HttpError::Status { status, .. }) if status.is_client_error() => {
+                Some(Rules::allow_all())
+            }
             Err(e) => {
                 tracing::warn!(
                     %origin,
-                    "robots.txt unavailable, disallowing: {}",
+                    "robots.txt unavailable: {}",
                     crate::errors::error_chain(&e)
                 );
-                Rules::disallow_all()
+                None
             }
         }
     }

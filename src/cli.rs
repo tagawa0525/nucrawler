@@ -62,7 +62,7 @@ commands:
   redo      指定モデルで要約・和訳をやり直す（redo digest|translate --model M ...）
   status    ステージごとの未処理件数などを表示
   sources   ソースの取得確認（sources check [ID]）
-  serve     Web UI / RSS / JSON API を起動
+  serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）

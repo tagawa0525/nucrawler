@@ -382,6 +382,65 @@ mod tests {
         );
     }
 
+    /// 利用上限は失敗ではなく一時停止なので、失敗とは書かず再開の見込みを示す。
+    #[test]
+    fn usage_limit_is_shown_as_paused_not_failed() {
+        let error = crate::llm::LlmError::RateLimited {
+            resets_at: Some(1_790_000_000),
+            rate_limit: None,
+        }
+        .to_string();
+        let html = layout(
+            "一覧",
+            &[Warning::LlmFailed {
+                error,
+                at: "2026-09-27T01:00:00.000Z".into(),
+            }],
+            "",
+        );
+        assert!(html.contains("利用上限"), "{html}");
+        assert!(!html.contains("失敗"), "{html}");
+    }
+
+    #[test]
+    fn auth_hint_ignores_case() {
+        let html = layout(
+            "一覧",
+            &[Warning::LlmFailed {
+                error: "llm process exited with exit status: 1: Authentication required".into(),
+                at: "2026-09-27T01:00:00.000Z".into(),
+            }],
+            "",
+        );
+        assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// 見出しが空だとリンクが押せなくなるので、原題、それも空なら URL を出す。
+    #[test]
+    fn blank_titles_fall_back() {
+        let mut blank_ja = item(1, "2026-09-26T00:00:00.000Z");
+        blank_ja.title_ja = Some("  ".into());
+        let mut blank_both = item(2, "2026-09-26T00:00:00.000Z");
+        blank_both.title_ja = None;
+        blank_both.title = String::new();
+        let html = list_page(&[blank_ja, blank_both.clone()], &[], false, &[]);
+        assert!(html.contains(">Title 1</a>"), "{html}");
+        assert!(
+            html.contains(&format!(">{}</a>", escape(&blank_both.url))),
+            "{html}"
+        );
+
+        let mut d = detail();
+        for v in &mut d.digests {
+            v.payload["title_ja"] = serde_json::json!("");
+        }
+        let html = detail_page(&d, DetailView::default(), &[]);
+        assert!(
+            html.contains(&format!("<h1>{}</h1>", escape(&d.item.title))),
+            "{html}"
+        );
+    }
+
     #[test]
     fn list_page_renders_cards_with_escaped_text() {
         let mut locked = item(2, "2026-09-26T00:00:00.000Z");

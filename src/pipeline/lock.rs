@@ -22,6 +22,23 @@ pub struct Lock {
 
 /// `dir/crawl.lock` の排他ロックを待たずに取る。既に取られていれば `Held`。
 pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
+    let (path, file) = open(dir)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Lock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
+        Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
+    }
+}
+
+/// `dir/crawl.lock` の排他ロックを、取れるまで待って取る（スレッドをブロックする）。
+pub fn acquire_waiting(dir: &Path) -> Result<Lock, LockError> {
+    let (path, file) = open(dir)?;
+    file.lock()
+        .map_err(|source| LockError::Io { path, source })?;
+    Ok(Lock { _file: file })
+}
+
+fn open(dir: &Path) -> Result<(PathBuf, File), LockError> {
     let path = dir.join("crawl.lock");
     let file = File::options()
         .create(true)
@@ -32,11 +49,7 @@ pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
             path: path.clone(),
             source,
         })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Lock { _file: file }),
-        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
-        Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
-    }
+    Ok((path, file))
 }
 
 #[cfg(test)]

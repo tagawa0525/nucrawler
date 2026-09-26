@@ -178,7 +178,14 @@ async fn crawl(
     };
     let (config, sources) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let _lock = lock::acquire(&data)?;
+    let _lock = match lock::acquire(&data) {
+        Err(LockError::Held { .. }) if args.wait_lock => {
+            tracing::info!("waiting for another crawl to finish");
+            // まだ他のタスクを始めていないので、ここでスレッドをブロックしてよい
+            lock::acquire_waiting(&data)?
+        }
+        lock => lock?,
+    };
     let db = Db::open(&data.join("nucrawler.db"))?;
     let fetcher = Fetcher::from_config(&config.http)?;
     let cancel = Cancel::default();

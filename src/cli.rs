@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
 /// そのサブコマンドの実装側で解釈する。
@@ -21,8 +21,40 @@ pub enum Command {
     Help,
 }
 
-pub fn parse(_args: impl IntoIterator<Item = String>) -> Result<Invocation> {
-    todo!()
+pub const USAGE: &str = "\
+usage: nucrawler <command> [args]
+
+commands:
+  crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
+  redo      指定モデルで要約・和訳をやり直す
+  status    ステージごとの未処理件数などを表示
+  sources   ソースの取得確認
+  serve     Web UI / RSS / JSON API を起動
+  mcp       MCP stdio サーバを起動
+  rescore   記事を再採点
+  profile   プロファイル関連の操作
+  help      このヘルプを表示
+";
+
+/// `args` はプログラム名を除いたコマンドライン引数。
+pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation> {
+    let mut args = args.into_iter();
+    let command = match args.next().as_deref() {
+        None | Some("help" | "--help" | "-h") => Command::Help,
+        Some("crawl") => Command::Crawl,
+        Some("redo") => Command::Redo,
+        Some("status") => Command::Status,
+        Some("sources") => Command::Sources,
+        Some("serve") => Command::Serve,
+        Some("mcp") => Command::Mcp,
+        Some("rescore") => Command::Rescore,
+        Some("profile") => Command::Profile,
+        Some(other) => bail!("unknown command: {other}\n\n{USAGE}"),
+    };
+    Ok(Invocation {
+        command,
+        args: args.collect(),
+    })
 }
 
 #[cfg(test)]

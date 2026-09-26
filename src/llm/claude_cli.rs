@@ -399,7 +399,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, LlmError::Exit { stderr, .. } if stderr.contains("Not logged in")),
+            matches!(&err, LlmError::Exit { status, stderr }
+                if status.ends_with(": 1") && stderr.contains("Not logged in")),
             "{err}"
         );
     }

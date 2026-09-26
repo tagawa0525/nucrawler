@@ -49,7 +49,11 @@ pub enum LlmError {
     #[error("unexpected llm output: {0}")]
     Protocol(String),
     #[error("usage limit reached (resets at {resets_at:?})")]
-    RateLimited { resets_at: Option<i64> },
+    RateLimited {
+        resets_at: Option<i64>,
+        /// 拒否されたときの使用率（次回の判定に使う）
+        rate_limit: Option<RateLimit>,
+    },
     #[error("llm reported an error ({subtype}): {message}")]
     Reported { subtype: String, message: String },
     #[error("llm returned no structured output")]

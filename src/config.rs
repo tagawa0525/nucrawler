@@ -314,6 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_positive_llm_settings() {
+        for (toml, needle) in [
+            ("[llm]\ndigest_batch_size = 0\n", "digest_batch_size"),
+            ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
+            ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
+        ] {
+            let err = parse_config(toml, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains(needle)),
+                "{toml}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn llm_defaults() {
         let d = LlmConfig::default();
         assert_eq!(d.command, "claude");

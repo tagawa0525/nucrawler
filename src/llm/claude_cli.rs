@@ -109,7 +109,10 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
     let result = result.ok_or_else(|| LlmError::Protocol("no result event".into()))?;
     if result["is_error"].as_bool().unwrap_or(false) {
         if let Some(resets_at) = rejected {
-            return Err(LlmError::RateLimited { resets_at });
+            return Err(LlmError::RateLimited {
+                resets_at,
+                rate_limit: None,
+            });
         }
         return Err(LlmError::Reported {
             subtype: result["subtype"].as_str().unwrap_or_default().to_string(),
@@ -197,14 +200,18 @@ mod tests {
             result_line(true, "error", "You've hit your session limit")
         );
         let err = parse_stream(&out).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                LlmError::RateLimited {
-                    resets_at: Some(1790457000)
-                }
-            ),
-            "{err}"
+        let LlmError::RateLimited {
+            resets_at,
+            rate_limit,
+        } = err
+        else {
+            panic!("{err}");
+        };
+        assert_eq!(resets_at, Some(1790457000));
+        // 拒否されたときの使用率も失わない
+        assert_eq!(
+            rate_limit.and_then(|r| r.five_hour).map(|w| w.utilization),
+            Some(1.0)
         );
     }
 

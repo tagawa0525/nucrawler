@@ -103,7 +103,7 @@ pub async fn digest_articles<L: Llm>(
         };
         let response = match result {
             Ok(response) => response,
-            Err(LlmError::RateLimited { resets_at }) => {
+            Err(LlmError::RateLimited { resets_at, .. }) => {
                 // 上限は記事の問題ではないので、失敗として記録しない。
                 summary.halted = Some(Halt::UsageLimit { resets_at });
                 break;
@@ -332,6 +332,13 @@ mod tests {
         articles(&db, 2);
         let llm = FakeLlm::new([Err(LlmError::RateLimited {
             resets_at: Some(1790457000),
+            rate_limit: Some(RateLimit {
+                five_hour: Some(Window {
+                    utilization: 1.0,
+                    resets_at: 1790457000,
+                }),
+                seven_day: None,
+            }),
         })]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
         assert_eq!(
@@ -344,6 +351,14 @@ mod tests {
         assert_eq!(
             db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
             0
+        );
+        // 拒否されたときの使用率も記録し、次回の判定に使えるようにする
+        assert_eq!(
+            db.latest_rate_limit()
+                .unwrap()
+                .and_then(|r| r.five_hour)
+                .map(|w| w.utilization),
+            Some(1.0)
         );
         assert_eq!(
             db.query_strings("SELECT ok || '|' || error FROM llm_calls")

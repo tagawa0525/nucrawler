@@ -427,7 +427,17 @@ impl Db {
 
     /// 最後に記録された使用率（無ければ `None`）。
     pub fn latest_rate_limit(&self) -> Result<Option<crate::llm::RateLimit>, DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT rate_limit FROM llm_calls WHERE rate_limit IS NOT NULL
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
     #[cfg(test)]

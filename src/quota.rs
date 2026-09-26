@@ -39,7 +39,19 @@ pub struct Slot {
 
 impl Default for QuotaConfig {
     fn default() -> Self {
-        todo!()
+        let slot = |start, end, max_five_hour| Slot {
+            start,
+            end,
+            max_five_hour,
+        };
+        Self {
+            timezone_offset_hours: 9,
+            slots: vec![slot(3, 8, 0.20), slot(10, 15, 0.85), slot(16, 21, 0.60)],
+            default_max_five_hour: 0.20,
+            weekly_max: 0.70,
+            pace_ahead_days: 1.0,
+            max_calls_per_run: 30,
+        }
     }
 }
 
@@ -106,19 +118,83 @@ pub struct Quota {
 impl Quota {
     /// `usage` は直前に分かっている使用率（DB の最新の llm_calls）。`max_calls` を指定すれば
     /// 設定の `max_calls_per_run` より優先する（`crawl --max-llm-calls`）。
-    pub fn new(_cfg: QuotaConfig, _usage: Option<RateLimit>, _max_calls: Option<u32>) -> Self {
-        todo!()
+    pub fn new(cfg: QuotaConfig, usage: Option<RateLimit>, max_calls: Option<u32>) -> Self {
+        let max_calls = max_calls.unwrap_or(cfg.max_calls_per_run);
+        Self {
+            cfg,
+            usage,
+            calls: 0,
+            max_calls,
+        }
     }
 
     /// 次の呼び出しをしてよいか。
-    pub fn permit(&self, _now: DateTime<Utc>) -> Result<(), Stop> {
-        todo!()
+    pub fn permit(&self, now: DateTime<Utc>) -> Result<(), Stop> {
+        if self.calls >= self.max_calls {
+            return Err(Stop::MaxCalls {
+                limit: self.max_calls,
+            });
+        }
+        let usage = self.usage.unwrap_or_default();
+        if let Some(w) = active(usage.five_hour, now) {
+            let limit = self.five_hour_limit(now);
+            if w.utilization >= limit {
+                return Err(Stop::FiveHour {
+                    used: w.utilization,
+                    limit,
+                    resets_at: w.resets_at,
+                });
+            }
+        }
+        if let Some(w) = active(usage.seven_day, now) {
+            let used = w.utilization;
+            if used >= self.cfg.weekly_max {
+                return Err(Stop::Weekly {
+                    used,
+                    limit: self.cfg.weekly_max,
+                });
+            }
+            let limit = self.pace_limit(w, now);
+            if used >= limit {
+                return Err(Stop::WeeklyPace { used, limit });
+            }
+        }
+        Ok(())
     }
 
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
-    pub fn record_call(&mut self, _usage: Option<RateLimit>) {
-        todo!()
+    pub fn record_call(&mut self, usage: Option<RateLimit>) {
+        self.calls += 1;
+        if usage.is_some() {
+            self.usage = usage;
+        }
     }
+
+    /// 現地時刻の時間帯に応じた 5 時間枠の上限。
+    fn five_hour_limit(&self, now: DateTime<Utc>) -> f64 {
+        let offset = chrono::FixedOffset::east_opt(self.cfg.timezone_offset_hours * 3600)
+            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("zero offset"));
+        let hour = now.with_timezone(&offset).hour();
+        self.cfg
+            .slots
+            .iter()
+            .find(|s| s.start <= hour && hour < s.end)
+            .map_or(self.cfg.default_max_five_hour, |s| s.max_five_hour)
+    }
+
+    /// 週の経過率に `pace_ahead_days` 日分を足した割合まで、絶対上限を配分する。
+    fn pace_limit(&self, week: Window, now: DateTime<Utc>) -> f64 {
+        const WEEK: f64 = 7.0 * 86400.0;
+        let started = week.resets_at as f64 - WEEK;
+        let elapsed = ((now.timestamp() as f64 - started) / WEEK).clamp(0.0, 1.0);
+        let ahead = self.cfg.pace_ahead_days / 7.0;
+        self.cfg.weekly_max * (elapsed + ahead).min(1.0)
+    }
+}
+
+/// リセット時刻を過ぎた枠は、使い切った値が残っていても 0 とみなす（`None`）。
+fn active(window: Option<Window>, now: DateTime<Utc>) -> Option<Window> {
+    window.filter(|w| w.resets_at > now.timestamp())
 }
 
 #[cfg(test)]
@@ -245,7 +321,7 @@ mod tests {
         let mut q = Quota::new(
             QuotaConfig::default(),
             Some(usage(0.1, 0.1, now, 5.0)),
-            Some(2),
+            Some(3),
         );
         q.record_call(None);
         assert!(q.permit(now).is_ok());

@@ -260,6 +260,27 @@ pub struct TranslateInput {
     pub contents: Vec<InputContent>,
 }
 
+/// `redo` で対象を絞る条件。どれも省略できる。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RedoFilter {
+    pub source_id: Option<String>,
+    /// この時刻以降に公開（無ければ取得）された記事
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// 利用者が閲覧できる最新の digest の、現在のプロファイルでの点数がこれ以上
+    pub min_score: Option<u8>,
+    pub ids: Vec<i64>,
+}
+
+/// `redo` の対象を選ぶキー：どの成果物を、どのバックエンド・モデル・プロンプト版で作り直すか。
+#[derive(Debug, Clone, Copy)]
+pub struct RedoKey<'a> {
+    pub user_id: i64,
+    pub profile_hash: Option<&'a str>,
+    pub backend: &'a str,
+    pub model: &'a str,
+    pub prompt_version: i64,
+}
+
 /// 入力に使う本文の部分の範囲。
 #[derive(Debug, Clone, Copy)]
 enum ContentSet {
@@ -1036,6 +1057,31 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// 条件に合い、公開の本文（概要を含む）がある記事のうち、このキーの digest がまだ無いものを
+    /// 新しい順に返す。同じ条件で再実行すれば続きから処理できる。
+    /// このモデルの digest の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn redo_digest(
+        &self,
+        _key: RedoKey,
+        _filter: &RedoFilter,
+        _now: chrono::DateTime<chrono::Utc>,
+        _limit: usize,
+    ) -> Result<Vec<DigestInput>, DbError> {
+        todo!()
+    }
+
+    /// 条件に合い、公開の本文（body/fulltext）がある英語の記事のうち、このキーの和訳がまだ無い
+    /// ものを新しい順に返す。このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn redo_translate(
+        &self,
+        _key: RedoKey,
+        _filter: &RedoFilter,
+        _now: chrono::DateTime<chrono::Utc>,
+        _limit: usize,
+    ) -> Result<Vec<TranslateInput>, DbError> {
+        todo!()
     }
 
     #[cfg(test)]
@@ -2671,6 +2717,174 @@ mod tests {
             .pending_translate(q, t("2026-09-10T00:00:00Z"), t("2026-09-27T00:00:00Z"), 10)
             .unwrap();
         assert_eq!(ids.len(), 1);
+    }
+
+    fn redo_key<'a>(db: &Db, model: &'a str) -> RedoKey<'a> {
+        RedoKey {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            backend: "claude-cli",
+            model,
+            prompt_version: 1,
+        }
+    }
+
+    fn redo_digest_ids(db: &Db, model: &str, filter: &RedoFilter) -> Vec<i64> {
+        db.redo_digest(redo_key(db, model), filter, t("2026-09-27T00:00:00Z"), 10)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn redo_digest_selects_articles_missing_this_model() {
+        let db = Db::open_in_memory().unwrap();
+        // scored_article は sonnet の digest と採点つき
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let b = scored_article(
+            &db,
+            "https://e.com/b",
+            Lang::En,
+            "2026-09-25T00:00:00.000Z",
+            40,
+        );
+        let other = db
+            .insert_article(&NewArticle {
+                source_id: "other",
+                ..article("https://e.com/c")
+            })
+            .unwrap()
+            .unwrap();
+        db.insert_content(other, ContentKind::Lead, ContentOrigin::Feed, "lead")
+            .unwrap();
+        let no_content = page_article(&db, "https://e.com/d", "2026-09-26T00:00:00.000Z");
+        let _ = no_content;
+
+        // sonnet の digest があるので、sonnet ではやり直さない
+        assert_eq!(
+            redo_digest_ids(&db, "sonnet", &RedoFilter::default()),
+            [other]
+        );
+        // opus は無いので対象（本文が無い記事は除く）
+        let all = redo_digest_ids(&db, "opus", &RedoFilter::default());
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&a) && all.contains(&b) && all.contains(&other));
+
+        let by_source = RedoFilter {
+            source_id: Some("other".into()),
+            ..RedoFilter::default()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &by_source), [other]);
+        let by_score = RedoFilter {
+            min_score: Some(80),
+            ..RedoFilter::default()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &by_score), [a]);
+        let by_since = RedoFilter {
+            since: Some(t("2026-09-25T12:00:00Z")),
+            ..RedoFilter::default()
+        };
+        assert!(!redo_digest_ids(&db, "opus", &by_since).contains(&b));
+        let by_ids = RedoFilter {
+            ids: vec![b],
+            ..RedoFilter::default()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &by_ids), [b]);
+
+        let inputs = db
+            .redo_digest(
+                redo_key(&db, "opus"),
+                &by_ids,
+                t("2026-09-27T00:00:00Z"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(inputs[0].contents.len(), 1);
+    }
+
+    #[test]
+    fn redo_digest_skips_articles_backing_off_for_this_model() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: "digest",
+                backend: "claude-cli",
+                model: "opus",
+            },
+            "x",
+            t("2026-09-27T00:00:00Z"),
+            false,
+        )
+        .unwrap();
+        assert!(redo_digest_ids(&db, "opus", &RedoFilter::default()).is_empty());
+    }
+
+    #[test]
+    fn redo_translate_selects_english_articles_missing_this_model() {
+        let db = Db::open_in_memory().unwrap();
+        let en = scored_article(
+            &db,
+            "https://e.com/en",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let _ja = scored_article(
+            &db,
+            "https://e.com/ja",
+            Lang::Ja,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [en], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        db.insert_translation(
+            &NewArtifact {
+                article_id: en,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[body],
+            },
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        let ids = |model| -> Vec<i64> {
+            db.redo_translate(
+                redo_key(&db, model),
+                &RedoFilter::default(),
+                t("2026-09-27T00:00:00Z"),
+                10,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+        };
+        assert!(ids("sonnet").is_empty());
+        assert_eq!(ids("opus"), [en]);
     }
 
     #[test]

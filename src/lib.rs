@@ -6,6 +6,7 @@ pub mod digest;
 pub mod errors;
 pub mod extract;
 pub mod http;
+pub mod jst;
 pub mod llm;
 pub mod pipeline;
 pub mod profile;

@@ -81,7 +81,6 @@ struct FepcItem {
 }
 
 fn parse_fepc_json(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceError> {
-    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
     let items: Vec<FepcItem> = serde_json::from_slice(bytes)?;
     let mut candidates = Vec::with_capacity(items.len());
     for it in items {
@@ -97,10 +96,7 @@ fn parse_fepc_json(bytes: &[u8], base: &Url) -> Result<Vec<Candidate>, SourceErr
                 source,
             }
         })?;
-        let published_at = date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|t| t.and_local_timezone(jst).single())
-            .map(|t| t.to_utc());
+        let published_at = crate::jst::midnight(date);
         candidates.push(Candidate {
             url: resolve(base, href)?,
             title: it.title,

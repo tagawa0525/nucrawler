@@ -27,7 +27,7 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
         let articles = ov.map_or(0, |o| o.articles);
         let success = ov
             .and_then(|o| o.last_success_at.as_deref())
-            .map_or_else(|| "never".to_string(), local_time);
+            .map_or_else(|| "never".to_string(), crate::jst::format_local);
         let _ = write!(
             out,
             "{id:width$}  {state:13}  {articles:>6} articles  last success {success}"
@@ -38,21 +38,12 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
             let at = o
                 .last_error_at
                 .as_deref()
-                .map_or_else(String::new, local_time);
+                .map_or_else(String::new, crate::jst::format_local);
             let _ = write!(out, "  last error {at}: {error}");
         }
         out.push('\n');
     }
     out
-}
-
-/// DB の UTC 時刻を日本時間の "YYYY-MM-DD HH:MM" にする。解釈できなければそのまま。
-fn local_time(utc: &str) -> String {
-    let jst = chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset");
-    chrono::DateTime::parse_from_rfc3339(utc).map_or_else(
-        |_| utc.to_string(),
-        |t| t.with_timezone(&jst).format("%Y-%m-%d %H:%M").to_string(),
-    )
 }
 
 #[cfg(test)]

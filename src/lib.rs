@@ -2,6 +2,7 @@ pub mod check;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod digest;
 pub mod errors;
 pub mod extract;
 pub mod http;

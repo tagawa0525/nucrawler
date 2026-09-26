@@ -54,6 +54,12 @@ pub struct LlmConfig {
     pub score_batch_size: usize,
     /// 要約が使い切らずに採点のために残す呼び出し回数（要約待ちが多くても推薦が止まらないように）
     pub score_reserved_calls: u32,
+    /// 全文和訳に使うモデル
+    pub translate_model: String,
+    /// この点数以上の英語記事は、依頼が無くても先回りで和訳する
+    pub translate_min_score: u8,
+    /// 和訳に入れる本文の最大文字数（記事全体）
+    pub translate_max_input_chars: usize,
 }
 
 impl LlmConfig {
@@ -84,6 +90,9 @@ impl Default for LlmConfig {
             score_model: "sonnet".into(),
             score_batch_size: 20,
             score_reserved_calls: 1,
+            translate_model: todo!(),
+            translate_min_score: todo!(),
+            translate_max_input_chars: todo!(),
         }
     }
 }
@@ -347,6 +356,11 @@ mod tests {
             ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
             ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
             ("[llm]\nscore_batch_size = 0\n", "score_batch_size"),
+            (
+                "[llm]\ntranslate_max_input_chars = 0\n",
+                "translate_max_input_chars",
+            ),
+            ("[llm]\ntranslate_min_score = 101\n", "translate_min_score"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -367,6 +381,9 @@ mod tests {
         assert_eq!(d.score_model, "sonnet");
         assert_eq!(d.score_batch_size, 20);
         assert_eq!(d.score_reserved_calls, 1);
+        assert_eq!(d.translate_model, "sonnet");
+        assert_eq!(d.translate_min_score, 80);
+        assert_eq!(d.translate_max_input_chars, 20000);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod llm_call;
 pub mod lock;
 pub mod score;
+pub mod translate;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,10 +44,17 @@ pub enum Stage {
     Extract,
     Digest,
     Score,
+    Translate,
 }
 
 impl Stage {
-    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract, Stage::Digest, Stage::Score];
+    pub const ALL: &[Stage] = &[
+        Stage::Fetch,
+        Stage::Extract,
+        Stage::Digest,
+        Stage::Score,
+        Stage::Translate,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -54,6 +62,7 @@ impl Stage {
             Stage::Extract => "extract",
             Stage::Digest => "digest",
             Stage::Score => "score",
+            Stage::Translate => "translate",
         }
     }
 

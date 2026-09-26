@@ -178,6 +178,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
+            Stage::Translate => todo!("translate stage"),
             Stage::Digest | Stage::Score if llm_blocked => {
                 tracing::warn!(
                     stage = stage.name(),

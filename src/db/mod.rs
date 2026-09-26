@@ -924,6 +924,17 @@ impl Db {
         .collect()
     }
 
+    /// 和訳の成果物を保存し、その記事への依頼を同じトランザクションで完了にする。
+    /// 別々に書くと、間で止まったときに依頼が完了しないまま残る（成果物があるので
+    /// 以後は和訳の対象にならず、依頼が永久に残る）。
+    pub fn insert_translation(
+        &self,
+        _a: &NewArtifact,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, DbError> {
+        todo!()
+    }
+
     /// 和訳を依頼する。既に依頼していれば何もしない。
     pub fn request_translation(
         &self,
@@ -2476,6 +2487,56 @@ mod tests {
         assert!(translate_ids(&db, false, now).is_empty());
         db.request_translation(owner, a, t(now)).unwrap();
         assert_eq!(translate_ids(&db, false, now), [a]);
+    }
+
+    #[test]
+    fn insert_translation_completes_requests_atomically() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.request_translation(owner, a, t(now)).unwrap();
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        let translation = |inputs| NewArtifact {
+            article_id: a,
+            kind: ArtifactKind::Translation,
+            backend: "claude-cli",
+            model: "sonnet",
+            prompt_version: 1,
+            payload: &payload,
+            inputs,
+        };
+        // 失敗したら（入力が空）依頼も完了にならない
+        assert!(db.insert_translation(&translation(&[]), t(now)).is_err());
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            1
+        );
+        db.insert_translation(&translation(&[body]), t(now))
+            .unwrap();
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NULL")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM artifacts WHERE kind = 'translation'")
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

@@ -371,6 +371,7 @@ mod tests {
                 "translate_max_input_chars",
             ),
             ("[llm]\ntranslate_min_score = 101\n", "translate_min_score"),
+            ("[llm]\ntranslate_min_score = 0\n", "translate_min_score"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(

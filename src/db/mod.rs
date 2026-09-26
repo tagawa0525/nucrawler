@@ -927,20 +927,31 @@ impl Db {
     /// 和訳を依頼する。既に依頼していれば何もしない。
     pub fn request_translation(
         &self,
-        _user_id: i64,
-        _article_id: i64,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        article_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "INSERT INTO translation_requests (user_id, article_id, requested_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (user_id, article_id) DO NOTHING",
+            rusqlite::params![user_id, article_id, timestamp(now)],
+        )?;
+        Ok(())
     }
 
     /// 和訳ができた記事への依頼を、すべての利用者について完了にする。
     pub fn complete_translation_requests(
         &self,
-        _article_id: i64,
-        _now: chrono::DateTime<chrono::Utc>,
+        article_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "UPDATE translation_requests SET done_at = ?2
+             WHERE article_id = ?1 AND done_at IS NULL",
+            rusqlite::params![article_id, timestamp(now)],
+        )?;
+        Ok(())
     }
 
     /// 和訳がまだ 1 つも無く、公開の本文（body/fulltext）がある英語の記事のうち、
@@ -949,12 +960,85 @@ impl Db {
     /// このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_translate(
         &self,
-        _q: TranslateQuery,
-        _cutoff: chrono::DateTime<chrono::Utc>,
-        _now: chrono::DateTime<chrono::Utc>,
-        _limit: usize,
+        q: TranslateQuery,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "WITH candidates AS (
+               SELECT a.id, a.title, coalesce(a.published_at, a.fetched_at) AS at,
+                      (SELECT tr.requested_at FROM translation_requests AS tr
+                       WHERE tr.article_id = a.id AND tr.user_id = ?1 AND tr.done_at IS NULL)
+                        AS requested_at,
+                      -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
+                      (SELECT max(s.score) FROM scores AS s
+                       JOIN artifacts AS r ON r.id = s.artifact_id
+                       WHERE r.article_id = a.id AND s.user_id = ?1 AND s.profile_hash = ?2)
+                        AS score
+               FROM articles AS a
+               WHERE a.lang = 'en'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifacts AS r
+                   WHERE r.article_id = a.id AND r.kind = 'translation')
+                 AND EXISTS (
+                   SELECT 1 FROM contents AS c
+                   WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                     AND c.access_membership_id IS NULL)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM stage_errors AS e
+                   WHERE e.article_id = a.id AND e.stage = 'translate'
+                     AND e.backend = ?3 AND e.model = ?4
+                     AND (e.attempts >= ?5 OR e.next_retry_at > ?6))
+             )
+             SELECT id, title FROM candidates
+             WHERE requested_at IS NOT NULL
+                OR (?7 = 0 AND score >= ?8 AND at >= ?9)
+             ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
+             LIMIT ?10",
+        )?;
+        let articles = stmt
+            .query_map(
+                rusqlite::params![
+                    q.user_id,
+                    q.profile_hash,
+                    q.backend,
+                    q.model,
+                    MAX_ATTEMPTS,
+                    timestamp(now),
+                    q.requests_only,
+                    q.min_score,
+                    timestamp(cutoff),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut contents = self.conn.prepare(
+            "SELECT id, kind, text FROM contents
+             WHERE article_id = ?1 AND kind IN ('body', 'fulltext')
+               AND access_membership_id IS NULL
+             ORDER BY CASE kind WHEN 'fulltext' THEN 0 ELSE 1 END, id",
+        )?;
+        articles
+            .into_iter()
+            .map(|(article_id, title)| {
+                let contents = contents
+                    .query_map([article_id], |r| {
+                        Ok(InputContent {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            text: r.get(2)?,
+                        })
+                    })?
+                    .collect::<Result<_, _>>()?;
+                Ok(TranslateInput {
+                    article_id,
+                    title,
+                    contents,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]

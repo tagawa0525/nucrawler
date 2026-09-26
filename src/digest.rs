@@ -36,6 +36,25 @@ struct Item {
     topics: Vec<String>,
 }
 
+/// `points_ja` と `topics` の件数の範囲（プロンプト・スキーマ・検証で共通）。
+const MIN_LIST: usize = 1;
+const MAX_LIST: usize = 5;
+
+impl Item {
+    /// serde の型では表せない制約（配列の件数）を確かめる。
+    fn check(&self) -> Result<(), String> {
+        for (name, list) in [("points_ja", &self.points_ja), ("topics", &self.topics)] {
+            if !(MIN_LIST..=MAX_LIST).contains(&list.len()) {
+                return Err(format!(
+                    "{name} must have {MIN_LIST}..={MAX_LIST} items, got {}",
+                    list.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 成果物として保存する内容（id は artifacts の列で持つので含めない）。
 #[derive(serde::Serialize)]
 struct Payload {
@@ -72,7 +91,7 @@ pub fn system_prompt() -> &'static str {
 - id: <article> の id をそのまま返す
 - title_ja: 日本語の見出し（原題の意味を保ち、簡潔に）
 - summary_ja: 3 文以内の要約
-- points_ja: 要点を 3〜5 個（各 1 文）
+- points_ja: 要点を 1〜5 個（各 1 文。短い記事なら少なくてよい）
 - implications_ja: 日本の軽水炉の規制・運転・事業への示唆。特に無ければ空文字
 - lwr_relevant: 軽水炉（軽水炉型 SMR を含む）、燃料・燃料サイクル・バックエンド、廃止措置、原子力の政策・市場に関係すれば true。高速炉・高温ガス炉・溶融塩炉・核融合・医療や農業などの非発電利用だけの記事なら false
 - topics: 日本語の短いタグを 1〜5 個（例：規制・審査、燃料、高経年化、安全解析、SMR、廃止措置、政策・市場）
@@ -96,7 +115,12 @@ pub fn system_prompt() -> &'static str {
 /// 出力の JSON Schema。
 pub fn schema() -> serde_json::Value {
     let string = serde_json::json!({"type": "string"});
-    let strings = serde_json::json!({"type": "array", "items": {"type": "string"}});
+    let strings = serde_json::json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": MIN_LIST,
+        "maxItems": MAX_LIST,
+    });
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -185,7 +209,10 @@ pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, Di
             continue;
         }
         // スキーマ（型、必須、余計な項目の禁止）に合わない項目は採らず、欠けたものとして扱う。
-        let checked = match serde_json::from_value::<Item>(item.clone()) {
+        let checked = match serde_json::from_value::<Item>(item.clone())
+            .map_err(|e| e.to_string())
+            .and_then(|i| i.check().map(|()| i))
+        {
             Ok(checked) => checked,
             Err(e) => {
                 tracing::warn!(id, "ignoring digest that violates the schema: {e}");

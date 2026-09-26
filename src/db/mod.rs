@@ -28,7 +28,10 @@ pub enum DbError {
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_membership_code_check.sql"),
+];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";

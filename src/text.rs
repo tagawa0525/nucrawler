@@ -12,7 +12,7 @@ pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
                 .and_then(charset_param)
                 .and_then(label_encoding)
         })
-        .or_else(|| meta_charset(&bytes[..bytes.len().min(1024)]).and_then(label_encoding))
+        .or_else(|| meta_charset(&bytes[..bytes.len().min(1024)]))
         .unwrap_or(encoding_rs::UTF_8);
     // decode は BOM があればそれに従い、BOM 自体は取り除く。
     let (text, _, _) = encoding.decode(bytes);
@@ -31,19 +31,21 @@ fn charset_param(content_type: &str) -> Option<String> {
 
 /// 先頭部分を HTML として解析し、`<meta charset>` か
 /// `<meta http-equiv="Content-Type" content="...; charset=...">` の宣言を読む。
+/// 解釈できないラベルの宣言は飛ばして、後ろの宣言を見る。
 /// コメントや script の中の文字列は要素ではないので拾わない。
 /// 文字コードが分かる前なので、ASCII 互換とみなして UTF-8（不正バイトは置換）で読む。
-fn meta_charset(head: &[u8]) -> Option<String> {
+fn meta_charset(head: &[u8]) -> Option<&'static encoding_rs::Encoding> {
     let doc = scraper::Html::parse_document(&String::from_utf8_lossy(head));
     let meta = scraper::Selector::parse("meta").expect("valid selector");
     doc.select(&meta).find_map(|el| {
         let attr = |name| el.value().attr(name);
-        attr("charset").map(String::from).or_else(|| {
+        let label = attr("charset").map(String::from).or_else(|| {
             attr("http-equiv")
                 .filter(|v| v.eq_ignore_ascii_case("content-type"))
                 .and(attr("content"))
                 .and_then(charset_param)
-        })
+        })?;
+        encoding_rs::Encoding::for_label(label.trim().as_bytes())
     })
 }
 

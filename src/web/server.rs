@@ -1,6 +1,262 @@
 //! Web UI の HTTP サーバー。画面の描画は `html`、データは `Db` に任せ、ここではルーティングと
 //! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。
 
+use std::sync::{Arc, Mutex, PoisonError};
+
+use axum::extract::{Form, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
+use chrono::{Duration, Utc};
+
+use crate::config::WebConfig;
+use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::web::html::{self, DetailView};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    #[error("failed to listen on {addr}")]
+    Bind {
+        addr: std::net::SocketAddr,
+        source: std::io::Error,
+    },
+    #[error("web server failed")]
+    Io(#[source] std::io::Error),
+}
+
+/// ハンドラで共有する状態。`Db` は同期 API なので、`spawn_blocking` の中で 1 つずつ使う。
+#[derive(Clone)]
+pub struct AppState {
+    db: Arc<Mutex<Db>>,
+    web: Arc<WebConfig>,
+}
+
+impl AppState {
+    pub fn new(db: Db, web: WebConfig) -> Self {
+        Self {
+            db: Arc::new(Mutex::new(db)),
+            web: Arc::new(web),
+        }
+    }
+}
+
+pub fn router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/", get(list))
+        .route("/articles/{id}", get(detail))
+        .route("/articles/{id}/feedback", post(feedback))
+        .route(
+            "/articles/{id}/translation-request",
+            post(translation_request),
+        )
+        .with_state(state)
+}
+
+/// `shutdown` が完了するまで待ち受ける。
+pub async fn run(
+    addr: std::net::SocketAddr,
+    state: AppState,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| ServeError::Bind { addr, source })?;
+    tracing::info!(%addr, "serving the web ui");
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(ServeError::Io)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error(transparent)]
+    Db(#[from] DbError),
+    #[error("a database task failed")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("not found")]
+    NotFound,
+    #[error("{0}")]
+    BadRequest(&'static str),
+    #[error("cross-site request")]
+    CrossSite,
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            AppError::Db(_) | AppError::Join(_) => {
+                tracing::error!("{}", crate::errors::error_chain(&self));
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::CrossSite => StatusCode::FORBIDDEN,
+        };
+        (status, self.to_string()).into_response()
+    }
+}
+
+/// DB の処理をブロッキング用のスレッドで行う。
+async fn with_db<T: Send + 'static>(
+    state: &AppState,
+    f: impl FnOnce(&Db) -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        // 前のハンドラが panic しても、書き込み途中のトランザクションは drop で巻き戻っている
+        let db = db.lock().unwrap_or_else(PoisonError::into_inner);
+        f(&db)
+    })
+    .await?
+}
+
+/// 利用者（今は所有者だけ）と、現在のプロファイルのハッシュ。
+fn viewer(db: &Db) -> Result<(i64, Option<String>), DbError> {
+    let user = db.owner_id()?;
+    let hash = db.load_profile(user)?.map(|(_, hash)| hash);
+    Ok((user, hash))
+}
+
+/// 警告は直近 24 時間のものだけ出す。
+fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
+    db.warnings(Utc::now() - Duration::hours(24))
+}
+
+#[derive(serde::Deserialize)]
+struct ListParams {
+    all: Option<String>,
+}
+
+async fn list(
+    State(state): State<AppState>,
+    Query(params): Query<ListParams>,
+) -> Result<Html<String>, AppError> {
+    let show_all = params.all.as_deref() == Some("1");
+    let web = state.web.clone();
+    let page = with_db(&state, move |db| {
+        let now = Utc::now();
+        let (user, hash) = viewer(db)?;
+        let boundary =
+            db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
+        let items = db.list_articles(ListQuery {
+            user_id: user,
+            profile_hash: hash.as_deref(),
+            min_score: web.min_score,
+            since: now - Duration::days(web.list_days.into()),
+            show_all,
+            limit: web.list_limit,
+        })?;
+        let (new, earlier) = html::split_sections(items, boundary.as_deref());
+        Ok(html::list_page(&new, &earlier, show_all, &warnings(db)?))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+#[derive(serde::Deserialize)]
+struct DetailParams {
+    view: Option<String>,
+    digest: Option<i64>,
+    translation: Option<i64>,
+}
+
+async fn detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<DetailParams>,
+) -> Result<Html<String>, AppError> {
+    let view = DetailView {
+        digest: params.digest,
+        show_translation: params.view.as_deref() == Some("translation"),
+        translation: params.translation,
+    };
+    let page = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let detail = db
+            .article_detail(user, hash.as_deref(), id)?
+            .ok_or(AppError::NotFound)?;
+        // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
+        // 採点に渡す直近の反応が偏る）
+        let opened = if view.show_translation {
+            (view.translation.is_none() && !detail.translations.is_empty())
+                .then_some(SignalKind::OpenTranslation)
+        } else {
+            view.digest.is_none().then_some(SignalKind::OpenDetail)
+        };
+        if let Some(kind) = opened {
+            db.record_event(user, id, kind, Utc::now())?;
+        }
+        Ok(html::detail_page(&detail, view, &warnings(db)?))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+#[derive(serde::Deserialize)]
+struct FeedbackForm {
+    kind: String,
+}
+
+async fn feedback(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FeedbackForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let kind = match form.kind.as_str() {
+        "up" => SignalKind::Up,
+        "down" => SignalKind::Down,
+        _ => return Err(AppError::BadRequest("kind must be up or down")),
+    };
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        ensure_article(db, user, id)?;
+        Ok(db.record_event(user, id, kind, Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+async fn translation_request(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        ensure_article(db, user, id)?;
+        Ok(db.request_translation(user, id, Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+fn ensure_article(db: &Db, user: i64, id: i64) -> Result<(), AppError> {
+    db.article_detail(user, None, id)?
+        .map(drop)
+        .ok_or(AppError::NotFound)
+}
+
+/// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で書き込まれないよう、
+/// ブラウザが付ける Origin がこのサーバー自身でなければ拒否する（Origin の無い curl などは通す）。
+fn check_same_origin(headers: &HeaderMap) -> Result<(), AppError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok());
+    let origin_host = origin.to_str().ok().and_then(|o| {
+        o.strip_prefix("http://")
+            .or_else(|| o.strip_prefix("https://"))
+    });
+    match (origin_host, host) {
+        (Some(o), Some(h)) if o == h => Ok(()),
+        _ => Err(AppError::CrossSite),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

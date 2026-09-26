@@ -221,13 +221,7 @@ fn option_value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Option<&'a Str
 
 /// "YYYY-MM-DD" を日本時間のその日の 0 時（UTC）にする。
 fn jst_midnight(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let jst = chrono::FixedOffset::east_opt(9 * 3600)?;
-    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .ok()?
-        .and_hms_opt(0, 0, 0)?
-        .and_local_timezone(jst)
-        .single()
-        .map(|t| t.to_utc())
+    crate::jst::midnight(chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?)
 }
 
 /// `profile` サブコマンドの引数。

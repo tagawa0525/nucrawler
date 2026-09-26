@@ -89,11 +89,6 @@ pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, Source
     Ok(Stats { total, matched })
 }
 
-/// 表示は日本時間で行う。
-fn jst() -> chrono::FixedOffset {
-    chrono::FixedOffset::east_opt(9 * 3600).expect("valid offset")
-}
-
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
 pub fn render(reports: &[Report], samples: usize) -> String {
     let width = reports.iter().map(|r| r.id.len()).max().unwrap_or(0);
@@ -111,7 +106,11 @@ pub fn render(reports: &[Report], samples: usize) -> String {
                 for c in stats.matched.iter().take(samples) {
                     let date = c.published_at.map_or_else(
                         || "----------".to_string(),
-                        |d| d.with_timezone(&jst()).format("%Y-%m-%d").to_string(),
+                        |d| {
+                            d.with_timezone(&crate::jst::offset())
+                                .format("%Y-%m-%d")
+                                .to_string()
+                        },
                     );
                     let _ = writeln!(out, "      {:width$}  {date}  {}", "", c.title);
                 }

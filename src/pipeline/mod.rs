@@ -62,7 +62,7 @@ impl Stage {
 }
 
 /// 要約が採点のために残す呼び出し回数。採点が計画に無ければ、残しても使われないので 0。
-pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig) -> u32 {
+pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig, _has_profile: bool) -> u32 {
     if stages.contains(&Stage::Score) {
         cfg.score_reserved_calls
     } else {
@@ -104,10 +104,21 @@ mod tests {
             score_reserved_calls: 2,
             ..crate::config::LlmConfig::default()
         };
-        assert_eq!(score_reserve(&plan(None, None), &cfg), 2);
-        assert_eq!(score_reserve(&plan(Some(Stage::Digest), None), &cfg), 0);
-        assert_eq!(score_reserve(&plan(None, Some(Stage::Digest)), &cfg), 0);
-        assert_eq!(score_reserve(&plan(None, Some(Stage::Score)), &cfg), 2);
+        assert_eq!(score_reserve(&plan(None, None), &cfg, true), 2);
+        assert_eq!(
+            score_reserve(&plan(Some(Stage::Digest), None), &cfg, true),
+            0
+        );
+        assert_eq!(
+            score_reserve(&plan(None, Some(Stage::Digest)), &cfg, true),
+            0
+        );
+        assert_eq!(
+            score_reserve(&plan(None, Some(Stage::Score)), &cfg, true),
+            2
+        );
+        // プロファイルが無ければ採点は何もしないので、残しても使われない
+        assert_eq!(score_reserve(&plan(None, None), &cfg, false), 0);
     }
 
     #[test]

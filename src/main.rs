@@ -187,7 +187,7 @@ async fn crawl(
             Stage::Digest => {
                 // 採点が計画に無ければ、採点のための予約はしない
                 let digest_cfg = LlmConfig {
-                    score_reserved_calls: pipeline::score_reserve(&stages, &config.llm),
+                    score_reserved_calls: pipeline::score_reserve(&stages, &config.llm, true),
                     ..config.llm.clone()
                 };
                 let summary = digest::digest_articles(

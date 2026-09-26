@@ -363,6 +363,28 @@ pub enum Warning {
     LlmFailed { error: String, at: String },
 }
 
+/// `query_items` の範囲：1 件（詳細）か、条件つきの一覧。
+enum ItemScope {
+    One(i64),
+    List {
+        since: chrono::DateTime<chrono::Utc>,
+        show_all: bool,
+        min_score: u8,
+        limit: usize,
+    },
+}
+
+/// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
+fn viewable(alias: &str) -> String {
+    format!(
+        "NOT EXISTS (
+           SELECT 1 FROM artifact_access AS aa
+           WHERE aa.artifact_id = {alias}.id
+             AND aa.membership_id NOT IN (
+               SELECT membership_id FROM user_memberships WHERE user_id = :user))"
+    )
+}
+
 /// 入力に使う本文の部分の範囲。
 #[derive(Debug, Clone, Copy)]
 enum ContentSet {
@@ -1231,30 +1253,258 @@ impl Db {
     /// 一覧を見た時刻を記録し、その前に見た時刻（初回は None）を返す。
     pub fn touch_last_seen(
         &self,
-        _user_id: i64,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<String>, DbError> {
-        todo!()
+        let tx = self.conn.unchecked_transaction()?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT last_seen_at FROM users WHERE id = ?1",
+            [user_id],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "UPDATE users SET last_seen_at = ?2 WHERE id = ?1",
+            rusqlite::params![user_id, timestamp(now)],
+        )?;
+        tx.commit()?;
+        Ok(previous)
     }
 
     /// 一覧。点数の高い順（未採点は後ろ）、同点なら新しい順。
-    pub fn list_articles(&self, _q: ListQuery) -> Result<Vec<ListItem>, DbError> {
-        todo!()
+    pub fn list_articles(&self, q: ListQuery) -> Result<Vec<ListItem>, DbError> {
+        self.query_items(
+            q.user_id,
+            q.profile_hash,
+            ItemScope::List {
+                since: q.since,
+                show_all: q.show_all,
+                min_score: q.min_score,
+                limit: q.limit,
+            },
+        )
     }
 
     /// 詳細画面の内容。記事が無ければ None。
     pub fn article_detail(
         &self,
-        _user_id: i64,
-        _profile_hash: Option<&str>,
-        _article_id: i64,
+        user_id: i64,
+        profile_hash: Option<&str>,
+        article_id: i64,
     ) -> Result<Option<ArticleDetail>, DbError> {
-        todo!()
+        let Some(item) = self
+            .query_items(user_id, profile_hash, ItemScope::One(article_id))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let has_body = !self
+            .public_contents(article_id, ContentSet::Body)?
+            .is_empty();
+        Ok(Some(ArticleDetail {
+            digests: self.versions(user_id, article_id, ArtifactKind::Digest)?,
+            translations: self.versions(user_id, article_id, ArtifactKind::Translation)?,
+            item,
+            has_body,
+        }))
+    }
+
+    /// 利用者が閲覧できる版を新しい順に。
+    fn versions(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: ArtifactKind,
+    ) -> Result<Vec<ArtifactVersion>, DbError> {
+        let sql = format!(
+            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload
+             FROM artifacts AS r
+             WHERE r.article_id = :article AND r.kind = :kind AND {}
+             ORDER BY r.created_at DESC, r.id DESC",
+            viewable("r")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":article": article_id,
+                ":kind": kind.as_str(),
+                ":user": user_id,
+            },
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (id, backend, model, prompt_version, created_at, payload) = row?;
+            Ok(ArtifactVersion {
+                id,
+                backend,
+                model,
+                prompt_version,
+                created_at,
+                payload: serde_json::from_str(&payload)?,
+            })
+        })
+        .collect()
+    }
+
+    /// 一覧・詳細に共通の行の組み立て。
+    fn query_items(
+        &self,
+        user_id: i64,
+        profile_hash: Option<&str>,
+        scope: ItemScope,
+    ) -> Result<Vec<ListItem>, DbError> {
+        let (id, since, show_all, min_score, limit) = match scope {
+            ItemScope::One(id) => (Some(id), None, true, 0, 1),
+            ItemScope::List {
+                since,
+                show_all,
+                min_score,
+                limit,
+            } => (None, Some(since), show_all, min_score, limit),
+        };
+        let sql = format!(
+            "WITH items AS (
+               SELECT a.id, a.source_id, a.url, a.title, a.lang,
+                      coalesce(a.published_at, a.fetched_at) AS at, a.fetched_at,
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable_r}
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+               FROM articles AS a
+               WHERE (:id IS NULL OR a.id = :id)
+                 AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
+             ),
+             rows AS (
+               SELECT i.*, d.title_ja, d.summary_ja,
+                      json_extract(d.payload, '$.lwr_relevant') AS relevant,
+                      (SELECT s.id FROM scores AS s
+                       WHERE s.user_id = :user AND s.profile_hash = :profile
+                         AND s.artifact_id = i.digest_id
+                       ORDER BY s.created_at DESC, s.id DESC LIMIT 1) AS score_id,
+                      EXISTS (
+                        SELECT 1 FROM events AS e
+                        WHERE e.user_id = :user AND e.article_id = i.id
+                          AND e.kind IN ('open_detail', 'open_translation')) AS read,
+                      (SELECT e.kind FROM events AS e
+                       WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
+                       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
+                      EXISTS (
+                        SELECT 1 FROM artifacts AS t
+                        WHERE t.article_id = i.id AND t.kind = 'translation' AND {viewable_t})
+                        AS has_translation,
+                      EXISTS (
+                        SELECT 1 FROM translation_requests AS tr
+                        WHERE tr.user_id = :user AND tr.article_id = i.id AND tr.done_at IS NULL)
+                        AS requested
+               FROM items AS i
+               LEFT JOIN artifacts AS d ON d.id = i.digest_id
+             )
+             SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
+                    rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
+                    s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
+                    rows.requested
+             FROM rows
+             LEFT JOIN scores AS s ON s.id = rows.score_id
+             -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
+             WHERE :all = 1
+                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min)
+             ORDER BY s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC
+             LIMIT :limit",
+            viewable_r = viewable("r"),
+            viewable_t = viewable("t"),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":id": id,
+                ":since": since.map(timestamp),
+                ":user": user_id,
+                ":profile": profile_hash,
+                ":all": show_all,
+                ":min": min_score,
+                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
+            },
+            |r| {
+                let feedback: Option<String> = r.get(13)?;
+                Ok(ListItem {
+                    article_id: r.get(0)?,
+                    source_id: r.get(1)?,
+                    url: r.get(2)?,
+                    title: r.get(3)?,
+                    lang: r.get(4)?,
+                    at: r.get(5)?,
+                    fetched_at: r.get(6)?,
+                    title_ja: r.get(7)?,
+                    summary_ja: r.get(8)?,
+                    lwr_relevant: r.get(9)?,
+                    score: r.get(10)?,
+                    reason: r.get(11)?,
+                    read: r.get(12)?,
+                    feedback: match feedback.as_deref() {
+                        Some("up") => Some(Feedback::Up),
+                        Some("down") => Some(Feedback::Down),
+                        _ => None,
+                    },
+                    has_translation: r.get(14)?,
+                    translation_requested: r.get(15)?,
+                    locked_by: Vec::new(),
+                })
+            },
+        )?;
+        let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+        let mut locks = self.conn.prepare_cached(
+            "SELECT m.name FROM article_access AS aa
+             JOIN memberships AS m ON m.id = aa.membership_id
+             WHERE aa.article_id = ?1
+               AND aa.membership_id NOT IN (
+                 SELECT membership_id FROM user_memberships WHERE user_id = ?2)
+             ORDER BY m.name",
+        )?;
+        for item in &mut items {
+            item.locked_by = locks
+                .query_map([item.article_id, user_id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+        }
+        Ok(items)
     }
 
     /// 取得に失敗し続けているソースと、`since` 以降の直近の LLM の失敗。
-    pub fn warnings(&self, _since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Warning>, DbError> {
-        todo!()
+    pub fn warnings(&self, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Warning>, DbError> {
+        use rusqlite::OptionalExtension;
+        // 取得に成功するとエラーは消えるので、残っているエラーは今も失敗しているもの
+        let mut stmt = self.conn.prepare(
+            "SELECT source_id, last_error, last_error_at FROM source_state
+             WHERE last_error IS NOT NULL ORDER BY source_id",
+        )?;
+        let mut warnings = stmt
+            .query_map([], |r| {
+                Ok(Warning::SourceFailing {
+                    source_id: r.get(0)?,
+                    error: r.get(1)?,
+                    at: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let latest: Option<(bool, Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT ok, error, at FROM llm_calls WHERE at >= ?1 ORDER BY id DESC LIMIT 1",
+                [timestamp(since)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((false, Some(error), at)) = latest {
+            warnings.push(Warning::LlmFailed { error, at });
+        }
+        Ok(warnings)
     }
 
     #[cfg(test)]

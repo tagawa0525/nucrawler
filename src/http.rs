@@ -8,6 +8,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use crate::config::HttpConfig;
+use crate::robots::Rules;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
@@ -47,6 +48,10 @@ pub struct Fetcher {
     client: reqwest::Client,
     per_host_delay: Duration,
     max_body_bytes: u64,
+    /// robots.txt のグループ選択に使う UA の製品名（例 "nucrawler"）
+    product: String,
+    /// オリジンごとの robots.txt の規則。取得中はロックを保持し、同じオリジンを二重に取らない。
+    robots: Mutex<HashMap<String, Rules>>,
     /// ホストごとの、次にアクセスしてよい時刻
     next_allowed: Mutex<HashMap<String, Instant>>,
 }
@@ -69,6 +74,12 @@ impl Fetcher {
             client,
             per_host_delay,
             max_body_bytes,
+            product: user_agent
+                .split(['/', ' '])
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            robots: Mutex::new(HashMap::new()),
             next_allowed: Mutex::new(HashMap::new()),
         })
     }
@@ -151,8 +162,41 @@ impl Fetcher {
     }
 
     /// 記事ページ用。取得前にそのオリジンの robots.txt を確かめ、禁止されていれば取得しない。
-    pub async fn get_page(&self, _url: &Url) -> Result<Fetched, HttpError> {
-        todo!()
+    pub async fn get_page(&self, url: &Url) -> Result<Fetched, HttpError> {
+        let origin = url.origin().ascii_serialization();
+        let allowed = {
+            let mut robots = self.robots.lock().await;
+            if !robots.contains_key(&origin) {
+                let rules = self.fetch_robots(&origin).await;
+                robots.insert(origin.clone(), rules);
+            }
+            let path = match url.query() {
+                Some(q) => format!("{}?{q}", url.path()),
+                None => url.path().to_string(),
+            };
+            robots[&origin].allows(&path)
+        };
+        if !allowed {
+            return Err(HttpError::DisallowedByRobots {
+                url: url.to_string(),
+            });
+        }
+        self.get(url).await
+    }
+
+    /// RFC 9309：4xx なら全許可、5xx や通信エラーなら全拒否。
+    async fn fetch_robots(&self, origin: &str) -> Rules {
+        let Ok(url) = Url::parse(&format!("{origin}/robots.txt")) else {
+            return Rules::disallow_all();
+        };
+        match self.get(&url).await {
+            Ok(f) => Rules::parse(&String::from_utf8_lossy(&f.body), &self.product),
+            Err(HttpError::Status { status, .. }) if status.is_client_error() => Rules::allow_all(),
+            Err(e) => {
+                tracing::warn!(%origin, "robots.txt unavailable, disallowing: {e}");
+                Rules::disallow_all()
+            }
+        }
     }
 
     /// 同じホストへのアクセスが `per_host_delay` 以上空くよう、順番を予約してから待つ。

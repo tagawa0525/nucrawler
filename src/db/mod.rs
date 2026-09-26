@@ -37,25 +37,47 @@ pub struct NewArticle<'a> {
 }
 
 impl Db {
-    pub fn open(_path: &Path) -> Result<Self, DbError> {
-        todo!()
+    pub fn open(path: &Path) -> Result<Self, DbError> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        Self::init(conn)
     }
 
     pub fn open_in_memory() -> Result<Self, DbError> {
-        todo!()
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(mut conn: Connection) -> Result<Self, DbError> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        migrate(&mut conn)?;
+        Ok(Self { conn })
     }
 
     pub fn schema_version(&self) -> Result<i64, DbError> {
-        todo!()
+        schema_version(&self.conn)
     }
 
     pub fn owner_id(&self) -> Result<i64, DbError> {
-        todo!()
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM users WHERE is_owner = 1", [], |r| r.get(0))?)
     }
 
     /// URL を正規化して登録する。既に同じ URL があれば `None`。
-    pub fn insert_article(&self, _a: &NewArticle) -> Result<Option<i64>, DbError> {
-        todo!()
+    pub fn insert_article(&self, a: &NewArticle) -> Result<Option<i64>, DbError> {
+        let url = normalize_url(a.url)?;
+        let lang = match a.lang {
+            Lang::En => "en",
+            Lang::Ja => "ja",
+        };
+        let inserted = self.conn.execute(
+            "INSERT INTO articles (source_id, url, title, lang, published_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (url) DO NOTHING",
+            rusqlite::params![a.source_id, url, a.title, lang, a.published_at],
+        )?;
+        Ok((inserted > 0).then(|| self.conn.last_insert_rowid()))
     }
 
     #[cfg(test)]
@@ -64,13 +86,56 @@ impl Db {
     }
 }
 
-fn migrate(_conn: &mut Connection) -> Result<(), DbError> {
-    todo!()
+fn schema_version(conn: &Connection) -> Result<i64, DbError> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+fn migrate(conn: &mut Connection) -> Result<(), DbError> {
+    let found = schema_version(conn)?;
+    let supported = MIGRATIONS.len() as i64;
+    if found > supported {
+        return Err(DbError::SchemaTooNew { found, supported });
+    }
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+    }
+    Ok(())
 }
 
 /// 重複判定用に URL を正規化する：fragment と追跡用のクエリ（utm_*、fbclid、gclid）を除く。
-pub fn normalize_url(_url: &str) -> Result<String, DbError> {
-    todo!()
+pub fn normalize_url(url: &str) -> Result<String, DbError> {
+    let mut u = url::Url::parse(url).map_err(|source| DbError::InvalidUrl {
+        url: url.to_string(),
+        source,
+    })?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(DbError::UnsupportedScheme {
+            url: url.to_string(),
+            scheme: u.scheme().to_string(),
+        });
+    }
+    u.set_fragment(None);
+    // 追跡用パラメータがあるときだけクエリを組み直し、それ以外の元の表記は保つ。
+    if u.query_pairs().any(|(k, _)| is_tracking_param(&k)) {
+        let kept: Vec<(String, String)> = u
+            .query_pairs()
+            .filter(|(k, _)| !is_tracking_param(k))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        if kept.is_empty() {
+            u.set_query(None);
+        } else {
+            u.query_pairs_mut().clear().extend_pairs(kept);
+        }
+    }
+    Ok(u.into())
+}
+
+fn is_tracking_param(key: &str) -> bool {
+    key.starts_with("utm_") || matches!(key, "fbclid" | "gclid")
 }
 
 #[cfg(test)]

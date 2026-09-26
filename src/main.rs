@@ -161,6 +161,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
+            Stage::Score => todo!("score stage"),
             Stage::Digest => {
                 let llm = ClaudeCli {
                     command: config.llm.command.clone().into(),

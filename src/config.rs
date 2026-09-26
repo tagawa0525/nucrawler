@@ -48,6 +48,10 @@ pub struct LlmConfig {
     pub digest_batch_size: usize,
     /// プロンプトに入れる本文の部分ごとの最大文字数
     pub max_input_chars: usize,
+    /// 採点に使うモデル
+    pub score_model: String,
+    /// 1 回の呼び出しで採点する記事数
+    pub score_batch_size: usize,
 }
 
 impl LlmConfig {
@@ -74,6 +78,8 @@ impl Default for LlmConfig {
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
             max_input_chars: 6000,
+            score_model: todo!(),
+            score_batch_size: todo!(),
         }
     }
 }
@@ -336,6 +342,7 @@ mod tests {
             ("[llm]\ndigest_batch_size = 0\n", "digest_batch_size"),
             ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
             ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
+            ("[llm]\nscore_batch_size = 0\n", "score_batch_size"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -353,6 +360,8 @@ mod tests {
         assert_eq!(d.digest_model, "sonnet");
         assert_eq!(d.digest_batch_size, 5);
         assert_eq!(d.max_input_chars, 6000);
+        assert_eq!(d.score_model, "sonnet");
+        assert_eq!(d.score_batch_size, 20);
     }
 
     #[test]

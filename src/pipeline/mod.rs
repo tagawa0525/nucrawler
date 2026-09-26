@@ -5,6 +5,7 @@ pub mod digest;
 pub mod extract;
 pub mod fetch;
 pub mod lock;
+pub mod score;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,16 +41,18 @@ pub enum Stage {
     Fetch,
     Extract,
     Digest,
+    Score,
 }
 
 impl Stage {
-    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract, Stage::Digest];
+    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract, Stage::Digest, Stage::Score];
 
     pub fn name(self) -> &'static str {
         match self {
             Stage::Fetch => "fetch",
             Stage::Extract => "extract",
             Stage::Digest => "digest",
+            Stage::Score => "score",
         }
     }
 

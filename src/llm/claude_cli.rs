@@ -210,6 +210,24 @@ mod tests {
         );
     }
 
+    /// 判定には最後の rate_limit_event を使う。
+    #[test]
+    fn later_allowed_event_clears_rejection() {
+        let event = |status: &str| {
+            serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+                "status": status, "resetsAt": 1790457000,
+                "unifiedWindows": {"five_hour": {"utilization": 0.9, "resetsAt": 1790457000}}}})
+        };
+        let out = format!(
+            "{}\n{}\n{}\n",
+            event("rejected"),
+            event("allowed"),
+            result_line(true, "error_during_execution", "boom")
+        );
+        let err = parse_stream(&out).unwrap_err();
+        assert!(matches!(err, LlmError::Reported { .. }), "{err}");
+    }
+
     #[test]
     fn missing_result_or_output_is_error() {
         let err = parse_stream("{\"type\":\"system\"}\n").unwrap_err();
@@ -313,6 +331,26 @@ mod tests {
             std::fs::read_to_string(cwd.join("stdin.txt")).unwrap(),
             "PROMPT 日本語"
         );
+    }
+
+    /// 結果行が成功していれば、終了コードが 0 以外でも結果を使う。
+    #[tokio::test]
+    async fn result_line_wins_over_nonzero_exit() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-success.jsonl");
+        let (script, dir) = fake_claude(
+            "cli-exit-with-result",
+            &format!("cat >/dev/null\ncat '{}'\nexit 1", fixture_path.display()),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        let resp = cli.call(request(&schema)).await.unwrap();
+        assert_eq!(resp.output["items"][0]["id"], 1);
+        assert!(resp.rate_limit.is_some());
     }
 
     #[tokio::test]

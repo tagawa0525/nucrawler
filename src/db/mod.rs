@@ -2441,6 +2441,38 @@ mod tests {
         assert!(translate_ids(&db, false, now).is_empty());
     }
 
+    /// 最新の digest が軽水炉と無関係なら先回りはしない。依頼されれば和訳する（明示的に頼んだので）。
+    #[test]
+    fn pending_translate_skips_non_lwr_unless_requested() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let unrelated = add_digest(&db, a, "opus", "非軽水炉", false, "2026-09-26T05:00:00Z");
+        db.insert_score(
+            ScoreKey {
+                user_id: owner,
+                profile_hash: "h1",
+                backend: "claude-cli",
+                model: "sonnet",
+            },
+            unrelated,
+            95,
+            None,
+            t("2026-09-26T06:00:00Z"),
+        )
+        .unwrap();
+        assert!(translate_ids(&db, false, now).is_empty());
+        db.request_translation(owner, a, t(now)).unwrap();
+        assert_eq!(translate_ids(&db, false, now), [a]);
+    }
+
     #[test]
     fn pending_translate_without_profile_only_serves_requests() {
         let db = Db::open_in_memory().unwrap();

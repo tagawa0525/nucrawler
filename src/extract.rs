@@ -13,11 +13,29 @@ pub enum ExtractError {
 /// `selector` を指定すれば、それに一致した要素のテキストを本文とする（複数あれば改行でつなぐ）。
 /// 指定しなければ readability で本文らしい部分を推定する。本文が空なら `None`。
 pub fn extract_text(
-    _html: &str,
-    _url: &str,
-    _selector: Option<&str>,
+    html: &str,
+    url: &str,
+    selector: Option<&str>,
 ) -> Result<Option<String>, ExtractError> {
-    todo!()
+    let text = match selector {
+        Some(selector) => {
+            let parsed =
+                scraper::Selector::parse(selector).map_err(|_| ExtractError::BadSelector {
+                    selector: selector.to_string(),
+                })?;
+            let doc = scraper::Html::parse_document(html);
+            doc.select(&parsed)
+                .map(|el| text::html_to_text(&el.html()))
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        None => {
+            let article = dom_smoothie::Readability::new(html, Some(url), None)?.parse()?;
+            text::html_to_text(&article.content)
+        }
+    };
+    Ok((!text.is_empty()).then_some(text))
 }
 
 #[cfg(test)]

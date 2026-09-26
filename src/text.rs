@@ -3,8 +3,42 @@
 /// HTML のバイト列を文字列にする。文字コードは Content-Type の charset、BOM、
 /// 先頭 1024 バイト内の `<meta charset>` の順に探し、見つからなければ UTF-8 とみなす。
 /// 不正なバイト列は置換文字にする。
-pub fn decode_html(_bytes: &[u8], _content_type: Option<&str>) -> String {
-    todo!()
+pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
+    let from_header = content_type.and_then(charset_param);
+    let encoding = match encoding_rs::Encoding::for_bom(bytes) {
+        Some((bom, _)) => bom,
+        None => from_header
+            .or_else(|| meta_charset(&bytes[..bytes.len().min(1024)]))
+            .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+            .unwrap_or(encoding_rs::UTF_8),
+    };
+    // decode は BOM を見て文字コードを選び直し、BOM 自体は取り除く。
+    let (text, _, _) = encoding.decode(bytes);
+    text.into_owned()
+}
+
+/// "text/html; charset=Shift_JIS" から "Shift_JIS" を取り出す。
+fn charset_param(content_type: &str) -> Option<String> {
+    content_type.split(';').find_map(|param| {
+        let (k, v) = param.split_once('=')?;
+        k.trim()
+            .eq_ignore_ascii_case("charset")
+            .then(|| v.trim().trim_matches(['"', '\'']).to_string())
+    })
+}
+
+/// `<meta charset="...">` と `<meta http-equiv="Content-Type" content="...; charset=...">` の両方に
+/// 当たるよう、ASCII として "charset=" の後ろを読む。
+fn meta_charset(head: &[u8]) -> Option<String> {
+    let lower = head.to_ascii_lowercase();
+    let pos = lower.windows(8).position(|w| w == b"charset=")? + 8;
+    let value: String = lower[pos..]
+        .iter()
+        .map(|&b| b as char)
+        .skip_while(|c| *c == '"' || *c == '\'')
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect();
+    (!value.is_empty()).then_some(value)
 }
 
 /// タグを除き、段落などのブロック要素は改行で区切る。script と style の中身は捨てる。

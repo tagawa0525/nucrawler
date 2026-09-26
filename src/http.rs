@@ -138,7 +138,11 @@ impl Fetcher {
                     status,
                 });
             }
-            let content_type = None;
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
             let body = self.read_body(&current, response).await?;
             return Ok(Fetched {
                 url: current,

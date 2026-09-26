@@ -58,7 +58,7 @@ commands:
   serve     Web UI / RSS / JSON API を起動
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
-  profile   プロファイル関連の操作
+  profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   help      このヘルプを表示
 ";
 
@@ -148,8 +148,14 @@ pub enum ProfileArgs {
     Export,
 }
 
-pub fn parse_profile_args(_args: &[String]) -> Result<ProfileArgs, ParseError> {
-    todo!()
+pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
+    match args {
+        [cmd, file] if cmd == "import" => Ok(ProfileArgs::Import {
+            file: PathBuf::from(file),
+        }),
+        [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
+        _ => Err(ParseError::ProfileUsage),
+    }
 }
 
 /// `sources` サブコマンドの引数。

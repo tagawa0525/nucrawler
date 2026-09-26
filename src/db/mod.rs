@@ -495,19 +495,51 @@ impl Db {
     /// ユーザーのプロファイルを保存する（既にあれば置き換える）。
     pub fn save_profile(
         &self,
-        _user_id: i64,
-        _profile: &crate::profile::Profile,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        profile: &crate::profile::Profile,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (user_id) DO UPDATE SET
+               interests = excluded.interests,
+               excludes = excluded.excludes,
+               hash = excluded.hash,
+               updated_at = excluded.updated_at",
+            rusqlite::params![
+                user_id,
+                serde_json::to_string(&profile.interests)?,
+                serde_json::to_string(&profile.exclude)?,
+                crate::profile::hash(profile),
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
     }
 
     /// ユーザーのプロファイルとそのハッシュ。
     pub fn load_profile(
         &self,
-        _user_id: i64,
+        user_id: i64,
     ) -> Result<Option<(crate::profile::Profile, String)>, DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        let row: Option<(String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT interests, excludes, hash FROM profiles WHERE user_id = ?1",
+                [user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(interests, excludes, hash)| {
+            let profile = crate::profile::Profile {
+                interests: serde_json::from_str(&interests)?,
+                exclude: serde_json::from_str(&excludes)?,
+            };
+            Ok((profile, hash))
+        })
+        .transpose()
     }
 
     /// 成果物と、その入力（artifact_inputs）を 1 つのトランザクションで登録する。

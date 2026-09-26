@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, SourcesArgs};
+use nucrawler::cli::{self, Command, ProfileArgs, SourcesArgs};
 use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
@@ -13,6 +13,7 @@ use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::{self, Cancel, Stage};
+use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
 use nucrawler::status;
 
@@ -38,6 +39,15 @@ enum Error {
     Digest(#[from] DigestStageError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
+    #[error(transparent)]
+    Profile(#[from] ProfileError),
+    #[error("failed to read {path}")]
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("no profile yet; run `nucrawler profile import FILE` first")]
+    NoProfile,
     #[error("failed to create data directory {path}")]
     DataDir {
         path: PathBuf,
@@ -91,6 +101,7 @@ async fn run() -> Result<(), Error> {
             crawl(inv.config_dir, inv.data_dir, &args).await
         }
         Command::Status => status(inv.config_dir, inv.data_dir),
+        Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
         },
@@ -241,6 +252,32 @@ fn spawn_signal_handler(cancel: Cancel) {
             cancel.request();
         }
     });
+}
+
+/// プロファイルはオーナー（このマシンの利用者）のものを扱う。
+fn profile(data: Option<PathBuf>, args: ProfileArgs) -> Result<(), Error> {
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let owner = db.owner_id()?;
+    match args {
+        ProfileArgs::Import { file } => {
+            let text = std::fs::read_to_string(&file).map_err(|source| Error::ReadFile {
+                path: file.clone(),
+                source,
+            })?;
+            let parsed = profile::parse(&text)?;
+            db.save_profile(owner, &parsed, chrono::Utc::now())?;
+            tracing::info!(
+                interests = parsed.interests.len(),
+                hash = %profile::hash(&parsed),
+                "profile imported"
+            );
+        }
+        ProfileArgs::Export => {
+            let (saved, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
+            print!("{}", profile::to_toml(&saved));
+        }
+    }
+    Ok(())
 }
 
 fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {

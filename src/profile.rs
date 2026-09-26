@@ -31,18 +31,45 @@ pub struct Interest {
 }
 
 /// TOML を読み、値を検証する（重みは 0〜1、topic は空でなく重複しない）。
-pub fn parse(_text: &str) -> Result<Profile, ProfileError> {
-    todo!()
+pub fn parse(text: &str) -> Result<Profile, ProfileError> {
+    let profile: Profile = toml::from_str(text)?;
+    let mut seen = std::collections::HashSet::new();
+    for i in &profile.interests {
+        if i.topic.trim().is_empty() {
+            return Err(ProfileError::Invalid(
+                "interest topic must not be empty".into(),
+            ));
+        }
+        if !seen.insert(i.topic.as_str()) {
+            return Err(ProfileError::Invalid(format!(
+                "duplicate interest topic {:?}",
+                i.topic
+            )));
+        }
+        if !(i.weight.is_finite() && (0.0..=1.0).contains(&i.weight)) {
+            return Err(ProfileError::Invalid(format!(
+                "weight of {:?} must be between 0 and 1, got {}",
+                i.topic, i.weight
+            )));
+        }
+    }
+    Ok(profile)
 }
 
-pub fn to_toml(_profile: &Profile) -> String {
-    todo!()
+pub fn to_toml(profile: &Profile) -> String {
+    toml::to_string(profile).expect("a profile is plain data")
 }
 
 /// 内容から決まるハッシュ（16 進 16 桁）。採点はこの値ごとに記録するので、内容が変われば
 /// 採点し直しの対象になる。Rust のバージョンで値が変わらないよう FNV-1a を使う。
-pub fn hash(_profile: &Profile) -> String {
-    todo!()
+pub fn hash(profile: &Profile) -> String {
+    let canonical = serde_json::to_string(profile).expect("a profile is plain data");
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical.bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 #[cfg(test)]

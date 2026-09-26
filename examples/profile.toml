@@ -1,6 +1,9 @@
 # 関心プロファイル。`nucrawler profile import examples/profile.toml` で DB に取り込む。
 # weight は 0〜1（大きいほど推薦で重視）。note は採点の際に LLM へ渡す補足。
 
+# 推薦から外したい話題（TOML の仕様上、[[interest]] より前に書く）
+exclude = ["核兵器", "核融合"]
+
 [[interest]]
 topic = "規制・審査"
 weight = 1.0
@@ -40,6 +43,3 @@ note = "福島第一、一般炉の廃止措置"
 topic = "政策・市場"
 weight = 0.4
 note = "エネルギー基本計画、電力市場、海外の新設動向"
-
-# 推薦から外したい話題
-exclude = ["核兵器", "核融合"]

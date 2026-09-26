@@ -545,7 +545,8 @@ impl Db {
         Ok(id)
     }
 
-    /// まだ digest が 1 つも無い記事を、新しい順に最大 `limit` 件、入力とともに返す。
+    /// まだ digest が 1 つも無い記事を、新しい順に最大 `limit` 件、公開の入力とともに返す
+    /// （会員限定の本文は、ログイン取得を実装するまで扱わない）。
     /// 本文（body/fulltext）がある記事に加え、抽出を断念して概要（lead/abstract）しか無い記事も含める。
     /// 抽出の再試行待ちの記事は、本文が取れるのを待つので含めない。
     /// `backend`/`model` の digest の失敗で再試行待ち・断念済みの記事も含めない。
@@ -565,11 +566,13 @@ impl Db {
                AND (
                  EXISTS (
                    SELECT 1 FROM contents AS c
-                   WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext'))
+                   WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                     AND c.access_membership_id IS NULL)
                  OR (
                    EXISTS (
                      SELECT 1 FROM contents AS c
-                     WHERE c.article_id = a.id AND c.kind IN ('lead', 'abstract'))
+                     WHERE c.article_id = a.id AND c.kind IN ('lead', 'abstract')
+                       AND c.access_membership_id IS NULL)
                    AND EXISTS (
                      SELECT 1 FROM stage_errors AS e
                      WHERE e.article_id = a.id AND e.stage = 'extract' AND e.attempts >= ?2)))

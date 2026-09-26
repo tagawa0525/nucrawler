@@ -21,6 +21,45 @@ pub struct Parsed {
     pub missing: Vec<i64>,
 }
 
+/// スキーマどおりの 1 件。`deny_unknown_fields` は `flatten` と併用できないので、
+/// 全項目を持たせてから、保存する内容（`Payload`）に詰め替える。
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Item {
+    #[allow(dead_code)]
+    id: i64,
+    title_ja: String,
+    summary_ja: String,
+    points_ja: Vec<String>,
+    implications_ja: String,
+    lwr_relevant: bool,
+    topics: Vec<String>,
+}
+
+/// 成果物として保存する内容（id は artifacts の列で持つので含めない）。
+#[derive(serde::Serialize)]
+struct Payload {
+    title_ja: String,
+    summary_ja: String,
+    points_ja: Vec<String>,
+    implications_ja: String,
+    lwr_relevant: bool,
+    topics: Vec<String>,
+}
+
+impl From<Item> for Payload {
+    fn from(i: Item) -> Self {
+        Self {
+            title_ja: i.title_ja,
+            summary_ja: i.summary_ja,
+            points_ja: i.points_ja,
+            implications_ja: i.implications_ja,
+            lwr_relevant: i.lwr_relevant,
+            topics: i.topics,
+        }
+    }
+}
+
 pub fn system_prompt() -> &'static str {
     r#"あなたは原子力（特に軽水炉）分野に詳しい技術記者です。
 与えられた記事を日本の原子力技術者向けに要約します。英語の記事は自然な日本語にし、日本語の記事は要約だけを行います。
@@ -120,20 +159,27 @@ pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, Di
         .ok_or_else(|| DigestError::Malformed("`items` is not an array".into()))?;
     let mut found: Vec<(i64, serde_json::Value)> = Vec::new();
     for item in items {
-        let mut item = item
-            .as_object()
-            .cloned()
-            .ok_or_else(|| DigestError::Malformed("an item is not an object".into()))?;
-        let id = item
-            .remove("id")
-            .and_then(|v| v.as_i64())
+        let id = item["id"]
+            .as_i64()
             .ok_or_else(|| DigestError::Malformed("an item has no integer `id`".into()))?;
         if !requested.contains(&id) {
             tracing::warn!(id, "ignoring digest for an article that was not requested");
             continue;
         }
+        // スキーマ（型、必須、余計な項目の禁止）に合わない項目は採らず、欠けたものとして扱う。
+        let checked = match serde_json::from_value::<Item>(item.clone()) {
+            Ok(checked) => checked,
+            Err(e) => {
+                tracing::warn!(id, "ignoring digest that violates the schema: {e}");
+                continue;
+            }
+        };
         if found.iter().all(|(seen, _)| *seen != id) {
-            found.push((id, serde_json::Value::Object(item)));
+            let payload = Payload::from(checked);
+            found.push((
+                id,
+                serde_json::to_value(payload).expect("plain data serializes"),
+            ));
         }
     }
     let missing = requested

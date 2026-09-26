@@ -374,6 +374,32 @@ mod tests {
         );
     }
 
+    /// stdin を読まずに終了されると、書き込みが Broken pipe になる。その場合も、終了コードと
+    /// stderr で原因を報告する（認証エラーで即終了した場合などに原因を失わないため）。
+    #[tokio::test]
+    async fn early_exit_without_reading_stdin_reports_stderr() {
+        let (script, dir) = fake_claude("cli-early-exit", "echo 'Not logged in' >&2\nexit 1");
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        // パイプのバッファより大きいので、書き込みの途中で子プロセスが終わる
+        let prompt = "x".repeat(1 << 20);
+        let err = cli
+            .call(LlmRequest {
+                prompt: &prompt,
+                ..request(&schema)
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, LlmError::Exit { stderr, .. } if stderr.contains("Not logged in")),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn slow_process_times_out() {
         let (script, dir) = fake_claude("cli-slow", "cat >/dev/null\nsleep 5");

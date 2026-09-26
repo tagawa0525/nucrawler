@@ -3580,6 +3580,32 @@ mod tests {
         assert_eq!(db.warnings(t("2026-09-26T00:00:00Z")).unwrap().len(), 1);
     }
 
+    /// 「最新の呼び出し」は記録の順ではなく、呼び出した時刻で決める。
+    #[test]
+    fn warnings_use_call_time_not_insertion_order() {
+        let db = Db::open_in_memory().unwrap();
+        let call = |ok: bool| LlmCall {
+            stage: "digest",
+            backend: "claude-cli",
+            model: "sonnet",
+            n_items: 1,
+            ok,
+            duration_ms: 1,
+            error: (!ok).then_some("Not logged in"),
+            rate_limit: None,
+        };
+        db.record_llm_call(&call(false), t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        // 古い成功が後から記録された
+        db.record_llm_call(&call(true), t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        assert!(
+            matches!(&warnings[..], [Warning::LlmFailed { .. }]),
+            "{warnings:?}"
+        );
+    }
+
     #[test]
     fn open_file_persists_schema() {
         let dir = std::env::temp_dir().join(format!("nucrawler-{}-db", std::process::id()));

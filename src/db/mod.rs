@@ -1345,6 +1345,39 @@ mod tests {
         assert_eq!(access_of(&db, id), vec![aesj]);
     }
 
+    /// input_scope は会員資格の code を "+" でつないだものなので、区切りや予約語を code に使わせない。
+    #[test]
+    fn membership_codes_cannot_collide_with_scope_encoding() {
+        let db = Db::open_in_memory().unwrap();
+        for bad in ["public", "a+b", "", "AESJ", "a b"] {
+            let err = db
+                .conn()
+                .execute(
+                    "INSERT INTO memberships (code, name) VALUES (?1, 'x')",
+                    [bad],
+                )
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("membership code"),
+                "{bad:?}: {err}"
+            );
+        }
+        db.conn()
+            .execute(
+                "INSERT INTO memberships (code, name) VALUES ('ans_2', 'ANS')",
+                [],
+            )
+            .unwrap();
+        let err = db
+            .conn()
+            .execute(
+                "UPDATE memberships SET code = 'public' WHERE code = 'ans_2'",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("membership code"), "{err}");
+    }
+
     #[test]
     fn insert_artifact_rejects_empty_inputs() {
         let db = Db::open_in_memory().unwrap();

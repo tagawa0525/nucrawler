@@ -346,6 +346,26 @@ mod tests {
         assert_eq!(parsed.items[0].1["title_ja"], "題");
     }
 
+    #[test]
+    fn schema_limits_list_lengths() {
+        let item = &schema()["properties"]["items"]["items"]["properties"];
+        for field in ["points_ja", "topics"] {
+            assert_eq!(item[field]["minItems"], 1, "{field}");
+            assert_eq!(item[field]["maxItems"], 5, "{field}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_lists_outside_the_limits() {
+        let mut no_points = item(1);
+        no_points["points_ja"] = serde_json::json!([]);
+        let mut many_topics = item(2);
+        many_topics["topics"] = serde_json::json!(["a", "b", "c", "d", "e", "f"]);
+        let output = serde_json::json!({"items": [no_points, many_topics, item(3)]});
+        let parsed = parse(&output, &[1, 2, 3]).unwrap();
+        assert_eq!(parsed.missing, [1, 2]);
+    }
+
     /// スキーマに合わない項目は採らず、欠けたものとして扱う（ほかの記事の結果は残す）。
     #[test]
     fn parse_treats_items_violating_schema_as_missing() {

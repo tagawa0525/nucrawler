@@ -25,6 +25,9 @@ pub enum DbError {
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
 
+/// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Db {
@@ -38,6 +41,53 @@ pub struct NewArticle<'a> {
     pub lang: Lang,
     /// RFC 3339
     pub published_at: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentKind {
+    Lead,
+    Body,
+    Abstract,
+    Fulltext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentOrigin {
+    Feed,
+    Page,
+    Pdf,
+    Upload,
+    Login,
+}
+
+impl ContentKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Body => "body",
+            Self::Abstract => "abstract",
+            Self::Fulltext => "fulltext",
+        }
+    }
+}
+
+impl ContentOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Feed => "feed",
+            Self::Page => "page",
+            Self::Pdf => "pdf",
+            Self::Upload => "upload",
+            Self::Login => "login",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SourceState {
+    pub last_success_at: Option<String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
 }
 
 impl Db {
@@ -77,12 +127,110 @@ impl Db {
             Lang::Ja => "ja",
         };
         let inserted = self.conn.execute(
-            "INSERT INTO articles (source_id, url, title, lang, published_at, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT (url) DO NOTHING",
+            &format!(
+                "INSERT INTO articles (source_id, url, title, lang, published_at, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, {NOW})
+                 ON CONFLICT (url) DO NOTHING"
+            ),
             rusqlite::params![a.source_id, url, a.title, lang, a.published_at],
         )?;
         Ok((inserted > 0).then(|| self.conn.last_insert_rowid()))
+    }
+
+    /// 公開の本文の部分を登録する。会員限定の部分はログイン取得の実装時に別の関数で扱う。
+    pub fn insert_content(
+        &self,
+        article_id: i64,
+        kind: ContentKind,
+        origin: ContentOrigin,
+        text: &str,
+    ) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(
+            &format!(
+                "INSERT INTO contents (article_id, kind, origin, text, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, {NOW}) RETURNING id"
+            ),
+            rusqlite::params![article_id, kind.as_str(), origin.as_str(), text],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 記事と、その公開の本文の部分を 1 つのトランザクションで登録する。既に同じ URL があれば
+    /// 何もせず `None`。途中で止まっても「記事だけあって本文が無い」状態を残さない。
+    pub fn insert_article_with_contents(
+        &self,
+        a: &NewArticle,
+        contents: &[(ContentKind, ContentOrigin, &str)],
+    ) -> Result<Option<i64>, DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let Some(id) = self.insert_article(a)? else {
+            return Ok(None);
+        };
+        for &(kind, origin, text) in contents {
+            self.insert_content(id, kind, origin, text)?;
+        }
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// 取得に成功した時刻を記録する。直前のエラーは消す。
+    pub fn record_source_success(&self, source_id: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO source_state (source_id, last_success_at) VALUES (?1, {NOW})
+                 ON CONFLICT (source_id) DO UPDATE SET
+                   last_success_at = excluded.last_success_at,
+                   last_error = NULL,
+                   last_error_at = NULL"
+            ),
+            [source_id],
+        )?;
+        Ok(())
+    }
+
+    /// 取得の失敗を記録する。最後に成功した時刻は残す。
+    pub fn record_source_failure(&self, source_id: &str, error: &str) -> Result<(), DbError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO source_state (source_id, last_error, last_error_at) VALUES (?1, ?2, {NOW})
+                 ON CONFLICT (source_id) DO UPDATE SET
+                   last_error = excluded.last_error,
+                   last_error_at = excluded.last_error_at"
+            ),
+            [source_id, error],
+        )?;
+        Ok(())
+    }
+
+    pub fn source_state(&self, source_id: &str) -> Result<Option<SourceState>, DbError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT last_success_at, last_error, last_error_at FROM source_state
+                 WHERE source_id = ?1",
+                [source_id],
+                |r| {
+                    Ok(SourceState {
+                        last_success_at: r.get(0)?,
+                        last_error: r.get(1)?,
+                        last_error_at: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_i64(&self, sql: &str) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_strings(&self, sql: &str) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     #[cfg(test)]
@@ -430,6 +578,47 @@ mod tests {
                 assert_eq!(version, MIGRATIONS.len() as i64);
             }
         }
+    }
+
+    #[test]
+    fn inserts_public_content() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        db.insert_content(a, ContentKind::Lead, ContentOrigin::Feed, "概要")
+            .unwrap();
+        let rows = db
+            .query_strings(
+                "SELECT kind || '|' || origin || '|' || coalesce(access_membership_id, 'public')
+                        || '|' || text || '|' || (fetched_at LIKE '____-__-__T__:__:__%Z')
+                 FROM contents",
+            )
+            .unwrap();
+        assert_eq!(rows, ["lead|feed|public|概要|1"]);
+    }
+
+    #[test]
+    fn records_source_success_and_failure() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.source_state("s").unwrap(), None);
+
+        db.record_source_failure("s", "HTTP 403").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert_eq!(st.last_error.as_deref(), Some("HTTP 403"));
+        assert!(st.last_error_at.is_some());
+        assert!(st.last_success_at.is_none());
+
+        db.record_source_success("s").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert!(st.last_success_at.is_some());
+        assert_eq!((st.last_error, st.last_error_at), (None, None));
+
+        db.record_source_failure("s", "timeout").unwrap();
+        let st = db.source_state("s").unwrap().unwrap();
+        assert!(st.last_success_at.is_some(), "last success is kept");
+        assert_eq!(st.last_error.as_deref(), Some("timeout"));
     }
 
     #[test]

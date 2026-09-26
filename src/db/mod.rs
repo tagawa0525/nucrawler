@@ -900,16 +900,22 @@ impl Db {
         Ok(id)
     }
 
-    /// 和訳を依頼する。既に依頼していれば何もしない。
+    /// 和訳を依頼する。既に依頼していれば何もしない。既に和訳があれば完了として登録する。
     pub fn request_translation(
         &self,
         user_id: i64,
         article_id: i64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        // 既に和訳があれば、最初から完了として登録する（判定と登録は 1 文で行い、
+        // 和訳の保存と入れ違いになっても依頼が開いたまま残らないようにする）
         self.conn.execute(
-            "INSERT INTO translation_requests (user_id, article_id, requested_at)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO translation_requests (user_id, article_id, requested_at, done_at)
+             SELECT ?1, ?2, ?3,
+                    CASE WHEN EXISTS (
+                      SELECT 1 FROM artifacts
+                      WHERE article_id = ?2 AND kind = 'translation') THEN ?3 END
+             WHERE true
              ON CONFLICT (user_id, article_id) DO NOTHING",
             rusqlite::params![user_id, article_id, timestamp(now)],
         )?;

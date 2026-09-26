@@ -3,11 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::Cancel;
+use super::{Cancel, Halt};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, Db, DbError, LlmCall, NewArtifact, StageKey};
 use crate::llm::{Llm, LlmError, LlmRequest};
-use crate::quota::{Quota, Stop};
+use crate::quota::Quota;
 use crate::{digest, errors};
 
 pub const STAGE: &str = "digest";
@@ -16,17 +16,6 @@ pub const STAGE: &str = "digest";
 pub enum DigestStageError {
     #[error("database error")]
     Db(#[from] DbError),
-}
-
-/// ステージを途中で止めた理由。
-#[derive(Debug, Clone, PartialEq)]
-pub enum Halt {
-    /// クォータの判定で止めた（正常。残りは次回）
-    Quota(Stop),
-    /// サブスクリプションの上限に達した（記事の失敗としては数えない）
-    UsageLimit { resets_at: Option<i64> },
-    /// 認証切れなど記事によらない失敗の可能性があるので、失敗を広げないよう止めた
-    LlmFailed(String),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -172,7 +161,7 @@ mod tests {
     use crate::db::{ContentKind, ContentOrigin, NewArticle};
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse, RateLimit, Window};
-    use crate::quota::QuotaConfig;
+    use crate::quota::{QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         // JST 11:00（10〜15 時の枠）

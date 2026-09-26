@@ -23,6 +23,17 @@ impl Cancel {
     }
 }
 
+/// ステージを途中で止めた理由。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Halt {
+    /// クォータの判定で止めた（正常。残りは次回）
+    Quota(crate::quota::Stop),
+    /// サブスクリプションの上限に達した（記事の失敗としては数えない）
+    UsageLimit { resets_at: Option<i64> },
+    /// 認証切れなど記事によらない失敗の可能性があるので、失敗を広げないよう止めた
+    LlmFailed(String),
+}
+
 /// パイプラインのステージ（実行順）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {

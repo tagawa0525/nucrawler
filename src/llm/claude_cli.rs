@@ -226,8 +226,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("claude");
-        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let probe = "[ \"$1\" = --nucrawler-probe ] && exit 0";
+        std::fs::write(&script, format!("#!/bin/sh\n{probe}\n{body}\n")).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 並行するテストが fork した直後の子プロセスは、exec するまで書き込み用の fd を
+        // 引き継いでいる。その間に実行すると ETXTBSY になるので、実行できるまで待つ。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::process::Command::new(&script)
+                .arg("--nucrawler-probe")
+                .status()
+            {
+                Ok(_) => break,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("cannot run {}: {e}", script.display()),
+            }
+        }
         (script, dir)
     }
 

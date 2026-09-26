@@ -197,8 +197,8 @@ pub struct ScoreKey<'a> {
 
 /// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
 /// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
-pub fn score_stage(_key: ScoreKey) -> String {
-    todo!()
+pub fn score_stage(key: ScoreKey) -> String {
+    format!("score:{}:{}", key.user_id, key.profile_hash)
 }
 
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
@@ -777,7 +777,7 @@ impl Db {
                    AND s.backend = ?4 AND s.model = ?5)
                AND NOT EXISTS (
                  SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = l.article_id AND e.stage = 'score'
+                 WHERE e.article_id = l.article_id AND e.stage = ?9
                    AND e.backend = ?4 AND e.model = ?5
                    AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
@@ -793,6 +793,7 @@ impl Db {
                 MAX_ATTEMPTS,
                 timestamp(now),
                 i64::try_from(limit).unwrap_or(i64::MAX),
+                score_stage(key),
             ],
             |r| {
                 Ok((
@@ -868,6 +869,13 @@ impl Db {
                SELECT e.id, e.created_at, e.kind,
                       (SELECT r.title_ja FROM artifacts AS r
                        WHERE r.article_id = e.article_id AND r.kind = 'digest'
+                         -- 利用者が閲覧できない（会員限定の）digest の見出しは使わない
+                         AND NOT EXISTS (
+                           SELECT 1 FROM artifact_access AS aa
+                           WHERE aa.artifact_id = r.id
+                             AND aa.membership_id NOT IN (
+                               SELECT membership_id FROM user_memberships
+                               WHERE user_id = ?1))
                        ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS title_ja
                FROM events AS e WHERE e.user_id = ?1)
              WHERE title_ja IS NOT NULL

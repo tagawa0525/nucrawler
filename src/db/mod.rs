@@ -3383,20 +3383,35 @@ mod tests {
             .collect()
     }
 
+    /// 一覧を開くたびに区切りが進むと、再読み込みや詳細からの戻りで「前回から」の記事が
+    /// 「それ以前」に移ってしまう。間隔の短い閲覧は同じ訪問とみなし、区切りを保つ。
     #[test]
-    fn touch_last_seen_returns_previous_visit() {
+    fn begin_visit_keeps_boundary_within_a_visit() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
+        let gap = chrono::Duration::minutes(30);
+        let visit = |at: &str| db.begin_visit(owner, t(at), gap).unwrap();
+        // 初回は区切りが無い（すべて新着）。同じ訪問のうちは無いまま
+        assert_eq!(visit("2026-09-27T00:00:00Z"), None);
+        assert_eq!(visit("2026-09-27T00:20:00Z"), None);
+        // 間が空いたら新しい訪問。区切りは前の訪問で最後に見た時刻
         assert_eq!(
-            db.touch_last_seen(owner, t("2026-09-27T00:00:00Z"))
-                .unwrap(),
-            None
+            visit("2026-09-27T12:00:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
+        );
+        // 同じ訪問の再読み込みでは区切りを保つ（最後に見た時刻は進む）
+        assert_eq!(
+            visit("2026-09-27T12:10:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
         );
         assert_eq!(
-            db.touch_last_seen(owner, t("2026-09-27T12:00:00Z"))
-                .unwrap()
-                .as_deref(),
-            Some("2026-09-27T00:00:00.000Z")
+            visit("2026-09-27T12:35:00Z").as_deref(),
+            Some("2026-09-27T00:20:00.000Z")
+        );
+        // 最後に見てから gap を超えたら次の訪問
+        assert_eq!(
+            visit("2026-09-27T13:10:00Z").as_deref(),
+            Some("2026-09-27T12:35:00.000Z")
         );
     }
 

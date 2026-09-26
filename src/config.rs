@@ -16,6 +16,8 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    #[error("{path}: {reason}")]
+    Invalid { path: PathBuf, reason: String },
     #[error("{path}: duplicate source id: {id}")]
     DuplicateSourceId { path: PathBuf, id: String },
     #[error("cannot determine config directory: neither XDG_CONFIG_HOME nor HOME is set")]
@@ -24,12 +26,13 @@ pub enum ConfigError {
     NoDataDir,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub http: HttpConfig,
     pub pipeline: PipelineConfig,
     pub llm: LlmConfig,
+    pub quota: crate::quota::QuotaConfig,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -160,7 +163,15 @@ pub struct Filter {
 }
 
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
-    parse_toml(text, path)
+    let config: Config = parse_toml(text, path)?;
+    config
+        .quota
+        .validate()
+        .map_err(|reason| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            reason,
+        })?;
+    Ok(config)
 }
 
 pub fn parse_sources(text: &str, path: &Path) -> Result<Sources, ConfigError> {
@@ -253,6 +264,44 @@ mod tests {
         let c = parse_config("[pipeline]\nbacklog_days = 3\n", p()).unwrap();
         assert_eq!(c.pipeline.backlog_days, 3);
         assert_eq!(c.pipeline.extract_max_per_run, 100);
+    }
+
+    #[test]
+    fn rejects_invalid_quota_values() {
+        for (toml, needle) in [
+            ("[quota]\nweekly_max = 2.0\n", "weekly_max"),
+            (
+                "[quota]\ndefault_max_five_hour = -0.1\n",
+                "default_max_five_hour",
+            ),
+            (
+                "[quota]\ndefault_max_five_hour = nan\n",
+                "default_max_five_hour",
+            ),
+            ("[quota]\npace_ahead_days = -1.0\n", "pace_ahead_days"),
+            (
+                "[quota]\ntimezone_offset_hours = 24\n",
+                "timezone_offset_hours",
+            ),
+            (
+                "[quota]\nslots = [{ start = 10, end = 10, max_five_hour = 0.5 }]\n",
+                "slot",
+            ),
+            (
+                "[quota]\nslots = [{ start = 20, end = 25, max_five_hour = 0.5 }]\n",
+                "slot",
+            ),
+            (
+                "[quota]\nslots = [{ start = 1, end = 2, max_five_hour = 1.5 }]\n",
+                "slot",
+            ),
+        ] {
+            let err = parse_config(toml, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains(needle)),
+                "{toml}: {err}"
+            );
+        }
     }
 
     #[test]

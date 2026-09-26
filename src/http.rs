@@ -230,6 +230,26 @@ mod tests {
         assert!(gap >= Duration::from_millis(280), "{gap:?}");
     }
 
+    /// 304 や 300 は転送ではないので、Location があってもたどらずステータスエラーにする。
+    #[tokio::test]
+    async fn non_redirect_3xx_is_status_error() {
+        for status in [300, 304] {
+            let route = Route {
+                location: Some("/ok".into()),
+                ..Route::status(status)
+            };
+            let server = Server::start([("/a", route), ("/ok", Route::ok("ok"))].into());
+            let err = fetcher(Duration::ZERO)
+                .get(&url(&server.url("/a")))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, HttpError::Status { status: s, .. } if s.as_u16() == status),
+                "{status}: {err}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn redirect_loop_is_error() {
         let server =

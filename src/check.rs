@@ -216,6 +216,32 @@ mod tests {
         assert!(fepc.matched[0].url.starts_with(&server.base));
     }
 
+    /// 転送された場合、相対リンクは実際にフィードを返した URL を基準に解決する。
+    #[tokio::test]
+    async fn resolves_links_against_final_redirected_url() {
+        let feed = br#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>t</title><link>https://e/</link><description>d</description>
+  <item><title>rel</title><link>article/1</link></item>
+</channel></rss>"#;
+        let server = Server::start(
+            [
+                ("/feed", Route::redirect("/feeds/rss")),
+                ("/feeds/rss", Route::ok(feed.to_vec())),
+            ]
+            .into(),
+        );
+        let sources = vec![src(
+            "moved",
+            SourceKind::Feed,
+            server.url("/feed"),
+            true,
+            Filter::default(),
+        )];
+        let reports = check(&fetcher(), &sources, None).await.unwrap();
+        let stats = reports[0].outcome.as_ref().unwrap();
+        assert_eq!(stats.matched[0].url, server.url("/feeds/article/1"));
+    }
+
     #[tokio::test]
     async fn only_checks_named_source_even_if_disabled() {
         let (_server, sources) = setup();

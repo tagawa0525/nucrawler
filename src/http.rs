@@ -90,7 +90,7 @@ impl Fetcher {
                 .await
                 .map_err(request_error)?;
             let status = response.status();
-            if status.is_redirection() {
+            if is_redirect(status) {
                 current = redirect_target(&current, &response)?;
                 continue;
             }
@@ -128,6 +128,11 @@ impl Fetcher {
         };
         tokio::time::sleep_until(start).await;
     }
+}
+
+/// 転送を意味するステータスだけ（304 Not Modified や 300 Multiple Choices は含めない）。
+fn is_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
 
 fn redirect_target(from: &Url, response: &reqwest::Response) -> Result<Url, HttpError> {

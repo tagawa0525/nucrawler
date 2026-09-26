@@ -1,13 +1,19 @@
+use std::path::PathBuf;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("unknown command: {0}\n\n{USAGE}")]
     UnknownCommand(String),
+    #[error("option {0} requires a value")]
+    MissingValue(&'static str),
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
 /// そのサブコマンドの実装側で解釈する。
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
+    /// `--config-dir DIR`（サブコマンドより前に置く共通オプション）
+    pub config_dir: Option<PathBuf>,
     pub command: Command,
     pub args: Vec<String>,
 }
@@ -56,6 +62,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
+        config_dir: None,
         command,
         args: args.collect(),
     })
@@ -75,6 +82,7 @@ mod tests {
         assert_eq!(
             inv,
             Invocation {
+                config_dir: None,
                 command: Command::Crawl,
                 args: args(&["--until", "digest"]),
             }
@@ -98,6 +106,35 @@ mod tests {
         ] {
             assert_eq!(parse(args(&[name])).unwrap().command, cmd, "{name}");
         }
+    }
+
+    #[test]
+    fn parses_global_config_dir_before_subcommand() {
+        let inv = parse(args(&[
+            "--config-dir",
+            "/etc/nc",
+            "sources",
+            "check",
+            "nrc",
+        ]))
+        .unwrap();
+        assert_eq!(
+            inv,
+            Invocation {
+                config_dir: Some(PathBuf::from("/etc/nc")),
+                command: Command::Sources,
+                args: args(&["check", "nrc"]),
+            }
+        );
+    }
+
+    #[test]
+    fn config_dir_without_value_is_error() {
+        let err = parse(args(&["--config-dir"])).unwrap_err();
+        assert!(
+            matches!(err, ParseError::MissingValue("--config-dir")),
+            "{err}"
+        );
     }
 
     #[test]

@@ -900,7 +900,8 @@ impl Db {
         Ok(id)
     }
 
-    /// 和訳を依頼する。既に依頼していれば何もしない。既に和訳があれば完了として登録する。
+    /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、
+    /// 和訳があるときだけ完了にし、そうでなければ何もしない。
     pub fn request_translation(
         &self,
         user_id: i64,
@@ -916,7 +917,9 @@ impl Db {
                       SELECT 1 FROM artifacts
                       WHERE article_id = ?2 AND kind = 'translation') THEN ?3 END
              WHERE true
-             ON CONFLICT (user_id, article_id) DO NOTHING",
+             ON CONFLICT (user_id, article_id) DO UPDATE SET done_at = excluded.done_at
+               -- 開いたまま残っていた依頼も、和訳があれば完了にする（無ければ開いたまま）
+               WHERE translation_requests.done_at IS NULL AND excluded.done_at IS NOT NULL",
             rusqlite::params![user_id, article_id, timestamp(now)],
         )?;
         Ok(())

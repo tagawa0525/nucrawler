@@ -530,3 +530,20 @@ async fn sources_check(dir: Option<PathBuf>, id: Option<&str>) -> Result<(), Err
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// timer から起動した実行が、実行中の別の crawl とぶつかったときは「一時的に実行できない」
+    /// （EX_TEMPFAIL）にし、systemd の unit で失敗扱いにしないようにする。
+    #[test]
+    fn lock_held_is_temporary_failure() {
+        let held = Error::Lock(LockError::Held {
+            path: PathBuf::from("/tmp/crawl.lock"),
+        });
+        assert_eq!(exit_code(&held), 75);
+        assert_eq!(exit_code(&Error::Interrupted), 130);
+        assert_eq!(exit_code(&Error::NoProfile), 1);
+    }
+}

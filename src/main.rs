@@ -1,15 +1,34 @@
 mod cli;
 
-use anyhow::{Result, bail};
+use std::process::ExitCode;
+
 use cli::Command;
 
-fn main() -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error(transparent)]
+    Parse(#[from] cli::ParseError),
+    #[error("{0:?} is not implemented yet")]
+    NotImplemented(Command),
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Error> {
     let inv = cli::parse(std::env::args().skip(1))?;
     match inv.command {
         Command::Help => {
             print!("{}", cli::USAGE);
             Ok(())
         }
-        cmd => bail!("{cmd:?} is not implemented yet"),
+        cmd => Err(Error::NotImplemented(cmd)),
     }
 }

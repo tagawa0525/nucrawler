@@ -1,4 +1,8 @@
-use anyhow::{Result, bail};
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("unknown command: {0}\n\n{USAGE}")]
+    UnknownCommand(String),
+}
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
 /// そのサブコマンドの実装側で解釈する。
@@ -37,7 +41,7 @@ commands:
 ";
 
 /// `args` はプログラム名を除いたコマンドライン引数。
-pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation> {
+pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, ParseError> {
     let mut args = args.into_iter();
     let command = match args.next().as_deref() {
         None | Some("help" | "--help" | "-h") => Command::Help,
@@ -49,7 +53,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation> {
         Some("mcp") => Command::Mcp,
         Some("rescore") => Command::Rescore,
         Some("profile") => Command::Profile,
-        Some(other) => bail!("unknown command: {other}\n\n{USAGE}"),
+        Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
         command,

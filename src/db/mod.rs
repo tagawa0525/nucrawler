@@ -262,6 +262,41 @@ mod tests {
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
     }
 
+    /// 記事を消せば、本文・成果物・出所の記録がまとめて消えること。
+    #[test]
+    fn deleting_article_cascades_through_artifact_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO contents (article_id, kind, text, origin, fetched_at)
+                 VALUES (?1, 'body', 'x', 'page', '2026-09-27T00:00:00Z')",
+                [a],
+            )
+            .unwrap();
+        let c = db.conn().last_insert_rowid();
+        let art = insert_artifact(&db, a);
+        db.conn()
+            .execute("INSERT INTO artifact_inputs VALUES (?1, ?2)", [art, c])
+            .unwrap();
+        db.conn()
+            .execute("DELETE FROM articles WHERE id = ?1", [a])
+            .unwrap();
+        let n: i64 = db
+            .conn()
+            .query_row(
+                "SELECT (SELECT count(*) FROM contents) + (SELECT count(*) FROM artifacts)
+                      + (SELECT count(*) FROM artifact_inputs)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
     #[test]
     fn open_file_persists_schema() {
         let dir = std::env::temp_dir().join(format!("nucrawler-{}-db", std::process::id()));

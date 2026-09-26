@@ -43,9 +43,8 @@ pub struct NewArticle<'a> {
 impl Db {
     pub fn open(path: &Path) -> Result<Self, DbError> {
         let conn = Connection::open(path)?;
-        // WAL への切り替え自体がロック待ちになり得るので、先に busy_timeout を設定する。
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        enable_wal(&conn)?;
         Self::init(conn)
     }
 
@@ -92,12 +91,33 @@ impl Db {
     }
 }
 
+/// WAL への切り替えは排他ロックが必要で、競合すると busy_timeout を待たずに
+/// SQLITE_BUSY を返す。WAL は DB ファイルに永続するので競合は新規作成直後だけだが、
+/// 同時に開かれても失敗しないよう BUSY_TIMEOUT まで再試行する。
+fn enable_wal(conn: &Connection) -> Result<(), DbError> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return Ok(result?),
+        }
+    }
+}
+
 fn schema_version(conn: &Connection) -> Result<i64, DbError> {
     Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
 }
 
+/// 同時に開いたプロセス同士で二重に適用しないよう、IMMEDIATE トランザクションで
+/// 書き込みロックを取ってから版を読み、未適用分をまとめて適用する。
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
-    let found = schema_version(conn)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let found = schema_version(&tx)?;
     let supported = MIGRATIONS.len() as i64;
     if found < 0 {
         return Err(DbError::InvalidSchemaVersion(found));
@@ -105,12 +125,11 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     if found > supported {
         return Err(DbError::SchemaTooNew { found, supported });
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(found as usize) {
-        let tx = conn.transaction()?;
+    for sql in &MIGRATIONS[found as usize..] {
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
-        tx.commit()?;
     }
+    tx.pragma_update(None, "user_version", supported)?;
+    tx.commit()?;
     Ok(())
 }
 

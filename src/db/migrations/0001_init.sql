@@ -61,7 +61,8 @@ CREATE TABLE contents (
     access_membership_id INTEGER REFERENCES memberships (id) ON DELETE RESTRICT,
     text                 TEXT NOT NULL,
     origin               TEXT NOT NULL CHECK (origin IN ('feed', 'page', 'pdf', 'upload', 'login')),
-    fetched_at           TEXT NOT NULL
+    fetched_at           TEXT NOT NULL,
+    UNIQUE (id, article_id)                      -- artifact_inputs の複合外部キー用
 );
 CREATE INDEX contents_by_article ON contents (article_id);
 
@@ -82,14 +83,19 @@ CREATE TABLE artifacts (
     created_at     TEXT NOT NULL,
     title_ja       TEXT GENERATED ALWAYS AS (json_extract(payload, '$.title_ja')) VIRTUAL,
     summary_ja     TEXT GENERATED ALWAYS AS (json_extract(payload, '$.summary_ja')) VIRTUAL,
-    UNIQUE (article_id, kind, backend, model, prompt_version, input_scope)
+    UNIQUE (article_id, kind, backend, model, prompt_version, input_scope),
+    UNIQUE (id, article_id)                      -- artifact_inputs の複合外部キー用
 );
 
 -- 成果物の出所。本文を消すと出所が黙って失われるので、先に成果物を消させる（RESTRICT）。
+-- 成果物と本文が同じ記事に属することを、article_id を含む複合外部キーで保証する。
 CREATE TABLE artifact_inputs (
-    artifact_id INTEGER NOT NULL REFERENCES artifacts (id) ON DELETE CASCADE,
-    content_id  INTEGER NOT NULL REFERENCES contents (id) ON DELETE RESTRICT,
-    PRIMARY KEY (artifact_id, content_id)
+    artifact_id INTEGER NOT NULL,
+    article_id  INTEGER NOT NULL,
+    content_id  INTEGER NOT NULL,
+    PRIMARY KEY (artifact_id, content_id),
+    FOREIGN KEY (artifact_id, article_id) REFERENCES artifacts (id, article_id) ON DELETE CASCADE,
+    FOREIGN KEY (content_id, article_id) REFERENCES contents (id, article_id) ON DELETE RESTRICT
 ) WITHOUT ROWID;
 
 -- 閲覧に必要な会員資格。入力に使った本文の資格の和集合として導出し、行が無ければ公開。

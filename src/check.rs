@@ -327,6 +327,38 @@ mod tests {
         assert!(out.contains("FAIL") && out.contains("bad"), "{out}");
     }
 
+    /// 各エラーの Display は自分の文脈だけを書き、原因は source() に任せる。
+    /// そうしないと error_chain で原因の文言が 2 回出る。
+    #[test]
+    fn error_chain_does_not_repeat_causes() {
+        let cause = url::ParseError::RelativeUrlWithoutBase.to_string();
+        let errors: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(SourceFailure::InvalidUrl {
+                url: "::".into(),
+                source: url::ParseError::RelativeUrlWithoutBase,
+            }),
+            Box::new(SourceError::InvalidLink {
+                href: "::".into(),
+                source: url::ParseError::RelativeUrlWithoutBase,
+            }),
+            Box::new(crate::db::DbError::InvalidUrl {
+                url: "::".into(),
+                source: url::ParseError::RelativeUrlWithoutBase,
+            }),
+            Box::new(crate::config::ConfigError::Read {
+                path: "x".into(),
+                source: std::io::Error::other(cause.clone()),
+            }),
+        ];
+        for e in errors {
+            let chain = error_chain(e.as_ref());
+            assert_eq!(chain.matches(&cause).count(), 1, "{chain}");
+        }
+        let json = SourceError::Json(serde_json::from_str::<u8>("\"a\"").unwrap_err());
+        let chain = error_chain(&json);
+        assert_eq!(chain.matches("invalid type").count(), 1, "{chain}");
+    }
+
     /// 通信エラーなどは原因のエラーまで表示しないと、何が起きたか分からない。
     #[test]
     fn renders_error_causes() {

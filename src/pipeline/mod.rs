@@ -37,6 +37,23 @@ pub enum Halt {
     LlmFailed(String),
 }
 
+/// LLM ステージが処理する対象。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    /// 通常の crawl：まだ成果物の無い記事。`requests_only` なら和訳は依頼だけ
+    Pending { requests_only: bool },
+    /// `nucrawler redo`：指定したモデル・プロンプト版の成果物がまだ無い記事を、条件で絞って作り直す
+    Redo(RedoSpec),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RedoSpec {
+    pub filter: crate::db::RedoFilter,
+    /// 点数の条件（min_score）に使う利用者とプロファイル
+    pub user_id: i64,
+    pub profile_hash: Option<String>,
+}
+
 /// パイプラインのステージ（実行順）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {

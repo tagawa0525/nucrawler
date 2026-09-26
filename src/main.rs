@@ -14,7 +14,7 @@ use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::score::{self, ScoreStageError};
 use nucrawler::pipeline::translate::{self, TranslateStageError};
-use nucrawler::pipeline::{self, Cancel, Halt, Stage};
+use nucrawler::pipeline::{self, Cancel, Halt, Stage, Target};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
 use nucrawler::status;
@@ -207,6 +207,9 @@ async fn crawl(
                     &mut quota,
                     &digest_cfg,
                     &config.pipeline,
+                    &Target::Pending {
+                        requests_only: false,
+                    },
                     chrono::Utc::now(),
                     &cancel,
                 )
@@ -247,7 +250,9 @@ async fn crawl(
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
-                    args.requests_only,
+                    &Target::Pending {
+                        requests_only: args.requests_only,
+                    },
                     chrono::Utc::now(),
                     &cancel,
                 )

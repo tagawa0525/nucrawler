@@ -13,6 +13,11 @@ pub enum ParseError {
     #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
     ProfileUsage,
     #[error(
+        "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
+         [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
+    )]
+    RedoUsage,
+    #[error(
         "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
@@ -147,6 +152,26 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         return Err(usage());
     }
     Ok(parsed)
+}
+
+/// `redo` で作り直す成果物。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedoKind {
+    Digest,
+    Translate,
+}
+
+/// `redo` サブコマンドの引数。
+#[derive(Debug, PartialEq)]
+pub struct RedoArgs {
+    pub kind: RedoKind,
+    pub model: String,
+    pub filter: crate::db::RedoFilter,
+    pub max_llm_calls: Option<u32>,
+}
+
+pub fn parse_redo_args(_args: &[String]) -> Result<RedoArgs, ParseError> {
+    todo!()
 }
 
 /// `profile` サブコマンドの引数。
@@ -354,6 +379,57 @@ mod tests {
                 id: Some("nrc-news".into())
             }
         );
+    }
+
+    #[test]
+    fn parses_redo_args() {
+        let parsed = parse_redo_args(&args(&[
+            "digest",
+            "--model",
+            "opus",
+            "--source",
+            "wnn",
+            "--since",
+            "2026-09-20",
+            "--min-score",
+            "70",
+            "--ids",
+            "3,5",
+            "--max-llm-calls",
+            "4",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.kind, RedoKind::Digest);
+        assert_eq!(parsed.model, "opus");
+        assert_eq!(parsed.filter.source_id.as_deref(), Some("wnn"));
+        // 日付は JST の 0 時（UTC では前日 15 時）
+        assert_eq!(
+            parsed.filter.since.map(|t| t.to_rfc3339()),
+            Some("2026-09-19T15:00:00+00:00".to_string())
+        );
+        assert_eq!(parsed.filter.min_score, Some(70));
+        assert_eq!(parsed.filter.ids, [3, 5]);
+        assert_eq!(parsed.max_llm_calls, Some(4));
+        let minimal = parse_redo_args(&args(&["translate", "--model", "opus"])).unwrap();
+        assert_eq!(minimal.kind, RedoKind::Translate);
+        assert_eq!(minimal.filter, crate::db::RedoFilter::default());
+    }
+
+    #[test]
+    fn rejects_bad_redo_args() {
+        for bad in [
+            &[][..],
+            &["score", "--model", "opus"][..],
+            &["digest"][..],
+            &["digest", "--model"][..],
+            &["digest", "--model", "opus", "--since", "2026/09/20"][..],
+            &["digest", "--model", "opus", "--min-score", "101"][..],
+            &["digest", "--model", "opus", "--ids", "a,b"][..],
+            &["digest", "--model", "opus", "--bogus"][..],
+        ] {
+            let err = parse_redo_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::RedoUsage), "{bad:?}: {err}");
+        }
     }
 
     #[test]

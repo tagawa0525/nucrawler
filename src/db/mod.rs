@@ -1496,7 +1496,8 @@ impl Db {
         let latest: Option<(bool, Option<String>, String)> = self
             .conn
             .query_row(
-                "SELECT ok, error, at FROM llm_calls WHERE at >= ?1 ORDER BY id DESC LIMIT 1",
+                "SELECT ok, error, at FROM llm_calls WHERE at >= ?1
+                 ORDER BY at DESC, id DESC LIMIT 1",
                 [timestamp(since)],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )

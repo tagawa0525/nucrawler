@@ -120,7 +120,8 @@ pub async fn translate_articles<L: Llm>(
             }
         };
         let inputs: Vec<i64> = input.contents.iter().map(|c| c.id).collect();
-        db.insert_artifact(
+        // 保存と依頼の完了は同じトランザクションで行う
+        db.insert_translation(
             &NewArtifact {
                 article_id: input.article_id,
                 kind: ArtifactKind::Translation,
@@ -133,7 +134,6 @@ pub async fn translate_articles<L: Llm>(
             now,
         )?;
         db.clear_stage_failure(key)?;
-        db.complete_translation_requests(input.article_id, now)?;
         summary.translated += 1;
     }
     Ok(summary)

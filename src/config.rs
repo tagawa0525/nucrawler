@@ -79,9 +79,9 @@ impl LlmConfig {
                 return Err(format!("llm.{name} must be at least 1"));
             }
         }
-        if self.translate_min_score > 100 {
+        if !(1..=100).contains(&self.translate_min_score) {
             return Err(format!(
-                "llm.translate_min_score must be 0..=100, got {}",
+                "llm.translate_min_score must be 1..=100, got {}",
                 self.translate_min_score
             ));
         }

@@ -86,8 +86,10 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
             AppError::Db(_) | AppError::Join(_) => {
+                // 詳細（SQL やスキーマ）はログにだけ残し、応答には出さない
                 tracing::error!("{}", crate::errors::error_chain(&self));
-                StatusCode::INTERNAL_SERVER_ERROR
+                let status = StatusCode::INTERNAL_SERVER_ERROR;
+                return (status, "internal server error").into_response();
             }
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,

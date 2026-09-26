@@ -65,7 +65,7 @@ contents(id, article_id, kind, access_membership_id NULL, text, origin, fetched_
 artifacts(id, article_id, kind, backend, model, prompt_version, input_scope, payload JSON, created_at)
   -- kind: digest / translation / judgment
   -- UNIQUE(article_id, kind, backend, model, prompt_version, input_scope)
-artifact_inputs(artifact_id, content_id)
+artifact_inputs(artifact_id, article_id, content_id)       -- (id, article_id) の複合外部キーで同じ記事に限定
 artifact_access(artifact_id, membership_id)             -- VIEW：入力本文の資格の和集合として導出。空なら公開
 
 scores(id, user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)

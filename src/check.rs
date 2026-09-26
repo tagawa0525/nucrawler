@@ -45,16 +45,76 @@ pub struct Stats {
 /// `only` を指定したときは、無効化されたソースでもそれだけを確認する。
 /// 指定しないときは有効なソースをすべて確認する。
 pub async fn check(
-    _fetcher: &Fetcher,
-    _sources: &[Source],
-    _only: Option<&str>,
+    fetcher: &Fetcher,
+    sources: &[Source],
+    only: Option<&str>,
 ) -> Result<Vec<Report>, CheckError> {
-    todo!()
+    let targets: Vec<&Source> = match only {
+        Some(id) => vec![
+            sources
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| CheckError::UnknownSource(id.to_string()))?,
+        ],
+        None => sources.iter().filter(|s| s.enabled).collect(),
+    };
+    let mut reports = Vec::with_capacity(targets.len());
+    for s in targets {
+        let outcome = check_one(fetcher, s).await;
+        if let Err(e) = &outcome {
+            tracing::warn!(source = %s.id, "{e}");
+        }
+        reports.push(Report {
+            id: s.id.clone(),
+            outcome,
+        });
+    }
+    Ok(reports)
+}
+
+async fn check_one(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure> {
+    let url = Url::parse(&s.url).map_err(|source| SourceFailure::InvalidUrl {
+        url: s.url.clone(),
+        source,
+    })?;
+    let bytes = fetcher.get(&url).await?;
+    let candidates = source::parse(s.kind, &bytes, &url)?;
+    let total = candidates.len();
+    let matched = candidates
+        .into_iter()
+        .filter(|c| source::matches(&s.filter, c))
+        .collect();
+    Ok(Stats { total, matched })
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
-pub fn render(_reports: &[Report], _samples: usize) -> String {
-    todo!()
+pub fn render(reports: &[Report], samples: usize) -> String {
+    let width = reports.iter().map(|r| r.id.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for r in reports {
+        match &r.outcome {
+            Ok(stats) => {
+                let _ = writeln!(
+                    out,
+                    "ok    {:width$}  {} items, {} matched",
+                    r.id,
+                    stats.total,
+                    stats.matched.len()
+                );
+                for c in stats.matched.iter().take(samples) {
+                    let date = c.published_at.map_or_else(
+                        || "----------".to_string(),
+                        |d| d.format("%Y-%m-%d").to_string(),
+                    );
+                    let _ = writeln!(out, "      {:width$}  {date}  {}", "", c.title);
+                }
+            }
+            Err(e) => {
+                let _ = writeln!(out, "FAIL  {:width$}  {e}", r.id);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

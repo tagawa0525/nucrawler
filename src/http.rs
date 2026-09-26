@@ -35,11 +35,20 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(
-        _user_agent: &str,
-        _timeout: Duration,
-        _per_host_delay: Duration,
+        user_agent: &str,
+        timeout: Duration,
+        per_host_delay: Duration,
     ) -> Result<Self, HttpError> {
-        todo!()
+        let client = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .timeout(timeout)
+            .build()
+            .map_err(HttpError::Build)?;
+        Ok(Self {
+            client,
+            per_host_delay,
+            next_allowed: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn from_config(c: &HttpConfig) -> Result<Self, HttpError> {
@@ -51,8 +60,45 @@ impl Fetcher {
     }
 
     /// 2xx 以外はエラーにする。
-    pub async fn get(&self, _url: &Url) -> Result<Vec<u8>, HttpError> {
-        todo!()
+    pub async fn get(&self, url: &Url) -> Result<Vec<u8>, HttpError> {
+        self.wait_for_turn(url).await;
+        let request_error = |source| HttpError::Request {
+            url: url.to_string(),
+            source,
+        };
+        let response = self
+            .client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(HttpError::Status {
+                url: url.to_string(),
+                status,
+            });
+        }
+        let body = response.bytes().await.map_err(request_error)?;
+        Ok(body.to_vec())
+    }
+
+    /// 同じホストへのアクセスが `per_host_delay` 以上空くよう、順番を予約してから待つ。
+    /// 予約はロック内で行うので、同時に呼ばれても間隔が保たれる。
+    async fn wait_for_turn(&self, url: &Url) {
+        let key = format!(
+            "{}:{}",
+            url.host_str().unwrap_or_default(),
+            url.port_or_known_default().unwrap_or_default()
+        );
+        let start = {
+            let mut next = self.next_allowed.lock().await;
+            let now = Instant::now();
+            let start = next.get(&key).map_or(now, |&t| t.max(now));
+            next.insert(key, start + self.per_host_delay);
+            start
+        };
+        tokio::time::sleep_until(start).await;
     }
 }
 

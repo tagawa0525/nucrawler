@@ -34,7 +34,6 @@ impl Route {
 
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub path: String,
     pub user_agent: Option<String>,
     pub at: Instant,
 }
@@ -101,11 +100,7 @@ fn handle(stream: TcpStream, routes: &HashMap<String, Route>, recorded: &Mutex<V
             user_agent = Some(v.trim().to_string());
         }
     }
-    recorded.lock().unwrap().push(Request {
-        path: path.clone(),
-        user_agent,
-        at,
-    });
+    recorded.lock().unwrap().push(Request { user_agent, at });
     let route = routes.get(&path).cloned().unwrap_or(Route::status(404));
     std::thread::sleep(route.delay);
     let mut stream = stream;

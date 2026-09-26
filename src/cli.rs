@@ -48,7 +48,15 @@ commands:
 
 /// `args` はプログラム名を除いたコマンドライン引数。
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, ParseError> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    let mut config_dir = None;
+    while args.peek().is_some_and(|a| a == "--config-dir") {
+        args.next();
+        let dir = args
+            .next()
+            .ok_or(ParseError::MissingValue("--config-dir"))?;
+        config_dir = Some(PathBuf::from(dir));
+    }
     let command = match args.next().as_deref() {
         None | Some("help" | "--help" | "-h") => Command::Help,
         Some("crawl") => Command::Crawl,
@@ -62,7 +70,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
-        config_dir: None,
+        config_dir,
         command,
         args: args.collect(),
     })

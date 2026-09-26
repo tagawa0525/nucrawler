@@ -75,14 +75,25 @@ async fn main() -> ExitCode {
     init_tracing();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e @ Error::Interrupted) => {
-            tracing::warn!("{e}");
-            ExitCode::from(130)
-        }
         Err(e) => {
-            tracing::error!("{}", errors::error_chain(&e));
-            ExitCode::FAILURE
+            let code = exit_code(&e);
+            if code == 1 {
+                tracing::error!("{}", errors::error_chain(&e));
+            } else {
+                tracing::warn!("{e}");
+            }
+            ExitCode::from(code)
         }
+    }
+}
+
+/// 失敗の終了コード。中断は 130、別の crawl が実行中なら EX_TEMPFAIL（75。systemd の unit では
+/// `SuccessExitStatus` で失敗扱いにしない）、それ以外は 1。
+fn exit_code(e: &Error) -> u8 {
+    match e {
+        Error::Interrupted => 130,
+        Error::Lock(LockError::Held { .. }) => 75,
+        _ => 1,
     }
 }
 

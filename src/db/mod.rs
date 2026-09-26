@@ -238,6 +238,28 @@ pub struct Signal {
     pub title_ja: String,
 }
 
+/// 和訳の対象を選ぶ条件。
+#[derive(Debug, Clone, Copy)]
+pub struct TranslateQuery<'a> {
+    pub user_id: i64,
+    /// 先回りの和訳に使う、現在のプロファイルのハッシュ（無ければ先回りはしない）
+    pub profile_hash: Option<&'a str>,
+    /// この点数以上なら、依頼が無くても先回りで和訳する
+    pub min_score: u8,
+    /// 依頼された記事だけを対象にする（15 分ごとの依頼処理）
+    pub requests_only: bool,
+    pub backend: &'a str,
+    pub model: &'a str,
+}
+
+/// 和訳する記事と、その公開の本文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslateInput {
+    pub article_id: i64,
+    pub title: String,
+    pub contents: Vec<InputContent>,
+}
+
 /// 抽出待ちの記事。
 #[derive(Debug, PartialEq, Eq)]
 pub struct PendingPage {
@@ -900,6 +922,39 @@ impl Db {
             Ok(Signal { kind, title_ja })
         })
         .collect()
+    }
+
+    /// 和訳を依頼する。既に依頼していれば何もしない。
+    pub fn request_translation(
+        &self,
+        _user_id: i64,
+        _article_id: i64,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// 和訳ができた記事への依頼を、すべての利用者について完了にする。
+    pub fn complete_translation_requests(
+        &self,
+        _article_id: i64,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    /// 和訳がまだ 1 つも無く、公開の本文（body/fulltext）がある英語の記事のうち、
+    /// 依頼されたもの（期間を問わない）と、`requests_only` でなければ現在のプロファイルで
+    /// `min_score` 以上に採点されたもの（`cutoff` 以降）を返す。依頼を先（古い順）、次に点数の高い順。
+    /// このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn pending_translate(
+        &self,
+        _q: TranslateQuery,
+        _cutoff: chrono::DateTime<chrono::Utc>,
+        _now: chrono::DateTime<chrono::Utc>,
+        _limit: usize,
+    ) -> Result<Vec<TranslateInput>, DbError> {
+        todo!()
     }
 
     #[cfg(test)]
@@ -2093,6 +2148,195 @@ mod tests {
             ]
         );
         assert_eq!(db.recent_signals(owner, 1).unwrap().len(), 1);
+    }
+
+    fn translate_query(db: &Db, requests_only: bool) -> TranslateQuery<'static> {
+        TranslateQuery {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            min_score: 80,
+            requests_only,
+            backend: "claude-cli",
+            model: "sonnet",
+        }
+    }
+
+    fn translate_ids(db: &Db, requests_only: bool, now: &str) -> Vec<i64> {
+        db.pending_translate(
+            translate_query(db, requests_only),
+            t("2026-09-10T00:00:00Z"),
+            t(now),
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect()
+    }
+
+    /// 英語の記事に本文と digest と採点を付ける。
+    fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, score: u8) -> i64 {
+        let id = db
+            .insert_article(&NewArticle {
+                lang,
+                published_at: Some(published),
+                ..article(url)
+            })
+            .unwrap()
+            .unwrap();
+        let digest = add_digest(db, id, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        db.insert_score(
+            ScoreKey {
+                user_id: db.owner_id().unwrap(),
+                profile_hash: "h1",
+                backend: "claude-cli",
+                model: "sonnet",
+            },
+            digest,
+            score,
+            None,
+            t("2026-09-26T02:00:00Z"),
+        )
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn pending_translate_picks_requests_then_high_scores() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let high = scored_article(
+            &db,
+            "https://e.com/high",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let higher = scored_article(
+            &db,
+            "https://e.com/higher",
+            Lang::En,
+            "2026-09-25T00:00:00.000Z",
+            95,
+        );
+        let low = scored_article(
+            &db,
+            "https://e.com/low",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            50,
+        );
+        let _ja = scored_article(
+            &db,
+            "https://e.com/ja",
+            Lang::Ja,
+            "2026-09-26T00:00:00.000Z",
+            99,
+        );
+        // 期間外でも、依頼されていれば和訳する
+        let old = scored_article(
+            &db,
+            "https://e.com/old",
+            Lang::En,
+            "2026-08-01T00:00:00.000Z",
+            10,
+        );
+        db.request_translation(owner, old, t("2026-09-26T03:00:00Z"))
+            .unwrap();
+        db.request_translation(owner, low, t("2026-09-26T04:00:00Z"))
+            .unwrap();
+        db.request_translation(owner, low, t("2026-09-26T05:00:00Z"))
+            .unwrap();
+
+        assert_eq!(translate_ids(&db, false, now), [old, low, higher, high]);
+        assert_eq!(translate_ids(&db, true, now), [old, low]);
+
+        let inputs = db
+            .pending_translate(
+                translate_query(&db, true),
+                t("2026-09-10T00:00:00Z"),
+                t(now),
+                1,
+            )
+            .unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(
+            inputs[0]
+                .contents
+                .iter()
+                .map(|c| c.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["body"]
+        );
+    }
+
+    #[test]
+    fn translated_articles_and_completed_requests_drop_out() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.request_translation(owner, a, t(now)).unwrap();
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "haiku",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[body],
+            },
+            t(now),
+        )
+        .unwrap();
+        db.complete_translation_requests(a, t(now)).unwrap();
+        assert!(translate_ids(&db, false, now).is_empty());
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM translation_requests WHERE done_at IS NOT NULL")
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_translate_without_profile_only_serves_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let q = TranslateQuery {
+            profile_hash: None,
+            ..translate_query(&db, false)
+        };
+        let ids = db
+            .pending_translate(q, t("2026-09-10T00:00:00Z"), t("2026-09-27T00:00:00Z"), 10)
+            .unwrap();
+        assert!(ids.is_empty());
+        db.request_translation(q.user_id, a, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let ids = db
+            .pending_translate(q, t("2026-09-10T00:00:00Z"), t("2026-09-27T00:00:00Z"), 10)
+            .unwrap();
+        assert_eq!(ids.len(), 1);
     }
 
     #[test]

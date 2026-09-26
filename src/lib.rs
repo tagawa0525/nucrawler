@@ -15,6 +15,7 @@ pub mod scoring;
 pub mod source;
 pub mod status;
 pub mod text;
+pub mod translate;
 
 #[cfg(test)]
 mod testutil;

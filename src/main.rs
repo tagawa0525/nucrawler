@@ -7,6 +7,7 @@ use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
+use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::{self, Cancel, Stage};
@@ -28,6 +29,8 @@ enum Error {
     Lock(#[from] LockError),
     #[error(transparent)]
     Fetch(#[from] FetchError),
+    #[error(transparent)]
+    Extract(#[from] ExtractStageError),
     #[error("failed to create data directory {path}")]
     DataDir {
         path: PathBuf,
@@ -137,6 +140,23 @@ async fn crawl(
                     "fetch stage finished"
                 );
                 failed_sources += summary.failed_sources.len();
+            }
+            Stage::Extract => {
+                let summary = extract::extract_pages(
+                    &db,
+                    &fetcher,
+                    &sources.sources,
+                    &config.pipeline,
+                    chrono::Utc::now(),
+                    &cancel,
+                )
+                .await?;
+                tracing::info!(
+                    extracted = summary.extracted,
+                    failed = summary.failed,
+                    gave_up = summary.gave_up,
+                    "extract stage finished"
+                );
             }
         }
     }

@@ -1,6 +1,7 @@
 //! パイプラインの各ステージ。各ステージは未処理の作業を選んで 1 件ずつ処理し、
 //! 結果をすぐ DB に書く。途中で止まっても、次回は残りから再開する。
 
+pub mod extract;
 pub mod fetch;
 pub mod lock;
 
@@ -25,14 +26,16 @@ impl Cancel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Fetch,
+    Extract,
 }
 
 impl Stage {
-    pub const ALL: &[Stage] = &[Stage::Fetch];
+    pub const ALL: &[Stage] = &[Stage::Fetch, Stage::Extract];
 
     pub fn name(self) -> &'static str {
         match self {
             Stage::Fetch => "fetch",
+            Stage::Extract => "extract",
         }
     }
 
@@ -73,6 +76,11 @@ mod tests {
     fn plans_all_until_or_only() {
         assert_eq!(plan(None, None), Stage::ALL);
         assert_eq!(plan(Some(Stage::Fetch), None), [Stage::Fetch]);
+        assert_eq!(
+            plan(Some(Stage::Extract), None),
+            [Stage::Fetch, Stage::Extract]
+        );
+        assert_eq!(plan(None, Some(Stage::Extract)), [Stage::Extract]);
         assert_eq!(plan(None, Some(Stage::Fetch)), [Stage::Fetch]);
     }
 }

@@ -142,6 +142,7 @@ mod tests {
             category: Category::Regulator,
             enabled,
             filter,
+            body_selector: None,
         }
     }
 

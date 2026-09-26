@@ -28,6 +28,26 @@ pub enum ConfigError {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub http: HttpConfig,
+    pub pipeline: PipelineConfig,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PipelineConfig {
+    /// これより古い記事は、本文の抽出や LLM の処理の対象にしない（取り込み済みの過去記事を
+    /// 一度に処理しないため）。公開日時が無い記事は取得日時で判断する。
+    pub backlog_days: u32,
+    /// 1 回の実行で本文を抽出する記事数の上限
+    pub extract_max_per_run: usize,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            backlog_days: 14,
+            extract_max_per_run: 100,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -76,6 +96,9 @@ pub struct Source {
     pub enabled: bool,
     #[serde(default)]
     pub filter: Filter,
+    /// 記事ページの本文を示す CSS セレクタ。無ければ readability で推定する。
+    #[serde(default)]
+    pub body_selector: Option<String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -205,6 +228,34 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_defaults_and_overrides() {
+        let d = PipelineConfig::default();
+        assert_eq!((d.backlog_days, d.extract_max_per_run), (14, 100));
+        let c = parse_config("[pipeline]\nbacklog_days = 3\n", p()).unwrap();
+        assert_eq!(c.pipeline.backlog_days, 3);
+        assert_eq!(c.pipeline.extract_max_per_run, 100);
+    }
+
+    #[test]
+    fn parses_body_selector() {
+        let s = parse_sources(
+            r#"
+            [[source]]
+            id = "a"
+            name = "A"
+            kind = "feed"
+            url = "https://example.com/rss"
+            lang = "ja"
+            category = "utility"
+            body_selector = "div#contents"
+            "#,
+            p(),
+        )
+        .unwrap();
+        assert_eq!(s.sources[0].body_selector.as_deref(), Some("div#contents"));
+    }
+
+    #[test]
     fn partial_config_keeps_other_defaults() {
         let c = parse_config("[http]\nuser_agent = \"x\"\n", p()).unwrap();
         assert_eq!(c.http.user_agent, "x");
@@ -259,6 +310,7 @@ mod tests {
                     keywords: vec!["原子力".into()],
                     url_contains: vec![],
                 },
+                body_selector: None,
             }
         );
         assert_eq!(s.sources[1].kind, SourceKind::FepcJson);

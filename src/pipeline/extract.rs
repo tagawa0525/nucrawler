@@ -109,8 +109,9 @@ impl PageFailure {
         match self {
             Self::InvalidUrl { .. } | Self::Pdf { .. } => true,
             Self::Http(HttpError::DisallowedByRobots { .. }) => true,
+            // 401/403 は多くが bot 対策で、待っても変わらない（回避はしない方針）。
             Self::Http(HttpError::Status { status, .. }) => {
-                matches!(status.as_u16(), 404 | 410)
+                matches!(status.as_u16(), 401 | 403 | 404 | 410)
             }
             // セレクタの誤りは設定を直せば解決するので、断念せず再試行に回す。
             Self::Http(_) | Self::Extract(_) | Self::NoText => false,

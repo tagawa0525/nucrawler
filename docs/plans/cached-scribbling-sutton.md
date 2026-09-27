@@ -168,6 +168,11 @@ LLM の処理は、それぞれ 2 つのモジュールに分かれている。
   - `pub async fn redo<L: Llm>(env, kind: RedoKind, model: String, target: Target, config: &Config) -> Result<RunReport, RunError>`
   - 止まった理由を扱う `report_halt` を `cmd/mod.rs` からここへ移す
 
+**実装で変えた点（PR #79）**
+
+- `RunEnv` に `clock: &dyn Fn() -> DateTime<Utc>` を加えた。移す前はステージごとに `chrono::Utc::now()` を呼んでいた。この振る舞いを保ったまま、テストでは時刻を固定するため（記事の期限 `backlog_days` やクォータの時間帯が、テストを実行する日時に左右されないように）。バイナリは `&chrono::Utc::now` を渡す
+- `redo` は `target` ではなく `filter` と `glossary` を受け取り、`RedoSpec` を lib の中で組み立てる。translate にも渡す利用者の id を、バイナリと lib の両方で求めずに済むようにするため
+
 **変更（バイナリ側）**
 
 - `cmd/crawl.rs` と `cmd/redo.rs` には、上の 1（設定・ロック・DB・シグナル）を用意して `pipeline::run` を呼ぶことだけを残す

@@ -20,6 +20,17 @@ pub struct ClaudeCli {
     pub timeout: Duration,
 }
 
+impl ClaudeCli {
+    /// 設定のコマンドとタイムアウトで、`cwd` を作業ディレクトリにして呼ぶ。
+    pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf) -> Self {
+        Self {
+            command: c.command.clone().into(),
+            cwd,
+            timeout: Duration::from_secs(c.timeout_secs),
+        }
+    }
+}
+
 impl Llm for ClaudeCli {
     fn backend(&self) -> &'static str {
         "claude-cli"

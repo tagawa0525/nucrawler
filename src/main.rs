@@ -8,13 +8,8 @@ use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
 use nucrawler::mcp::{self, McpError};
-use nucrawler::pipeline::digest::DigestStageError;
-use nucrawler::pipeline::extract::ExtractStageError;
-use nucrawler::pipeline::fetch::FetchError;
 use nucrawler::pipeline::lock::LockError;
-use nucrawler::pipeline::score::ScoreStageError;
-use nucrawler::pipeline::tidy::TidyStageError;
-use nucrawler::pipeline::translate::TranslateStageError;
+use nucrawler::pipeline::run::RunError;
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::status;
 use nucrawler::topics::{self, TopicsError};
@@ -39,17 +34,7 @@ enum Error {
     #[error(transparent)]
     Lock(#[from] LockError),
     #[error(transparent)]
-    Fetch(#[from] FetchError),
-    #[error(transparent)]
-    Extract(#[from] ExtractStageError),
-    #[error(transparent)]
-    Digest(#[from] DigestStageError),
-    #[error(transparent)]
-    Score(#[from] ScoreStageError),
-    #[error(transparent)]
-    Translate(#[from] TranslateStageError),
-    #[error(transparent)]
-    Tidy(#[from] TidyStageError),
+    Run(#[from] RunError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
     #[error(transparent)]

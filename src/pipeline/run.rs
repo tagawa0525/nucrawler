@@ -139,6 +139,7 @@ pub async fn crawl<L: Llm>(
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
+                    score::ScoreTarget::Saved,
                     now,
                 )
                 .await?;

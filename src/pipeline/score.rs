@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use super::Halt;
 use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{DbError, ScoreKey, StageKey, score_stage};
+use crate::db::{DbError, ScoreKey, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
@@ -17,6 +17,13 @@ pub const STAGE: &str = "score";
 pub enum ScoreStageError {
     #[error("database error")]
     Db(#[from] DbError),
+}
+
+/// 採点の対象。
+#[derive(Debug, Clone, Copy)]
+pub enum ScoreTarget {
+    /// crawl の採点：保存済みのプロファイルで、`backlog_days` の範囲のまだ採点していない記事
+    Saved,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -40,9 +47,11 @@ pub async fn score_articles<L: Llm>(
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
+    target: ScoreTarget,
     now: DateTime<Utc>,
 ) -> Result<ScoreSummary, ScoreStageError> {
     let mut summary = ScoreSummary::default();
+    let ScoreTarget::Saved = target;
     let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
         tracing::warn!("no profile yet; run `nucrawler profile import FILE` to enable scoring");
         summary.no_profile = true;
@@ -64,7 +73,8 @@ pub async fn score_articles<L: Llm>(
         backend,
         model,
     };
-    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+    let scope =
+        ScoreScope::Since(now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days)));
     let system = prompt::score::system_prompt(&profile);
     let schema = prompt::score::schema();
     loop {
@@ -77,7 +87,7 @@ pub async fn score_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_score(key, cutoff, now, llm_cfg.score_batch_size)?;
+        let batch = db.pending_score(key, scope, now, llm_cfg.score_batch_size)?;
         if batch.is_empty() {
             break;
         }
@@ -246,6 +256,7 @@ mod tests {
             &cfg(batch),
             &PipelineConfig::default(),
             owner,
+            ScoreTarget::Saved,
             now(),
         )
         .await

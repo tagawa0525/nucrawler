@@ -22,6 +22,13 @@ pub fn score_stage(key: ScoreKey) -> String {
     )
 }
 
+/// 採点を待つ記事の範囲。
+#[derive(Debug, Clone, Copy)]
+pub enum ScoreScope {
+    /// この時刻以降に公開（公開日時が無ければ取得）された記事
+    Since(chrono::DateTime<chrono::Utc>),
+}
+
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreInput {
@@ -34,15 +41,16 @@ pub struct ScoreInput {
 
 impl Db {
     /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
-    /// `cutoff` 以降の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
+    /// `scope` の範囲の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
     /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_score(
         &self,
         key: ScoreKey,
-        cutoff: chrono::DateTime<chrono::Utc>,
+        scope: ScoreScope,
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
+        let ScoreScope::Since(cutoff) = scope;
         let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
                -- 利用者が持っていない会員資格を必要とする digest は見せない
@@ -157,11 +165,16 @@ mod tests {
     use crate::db::test_support::*;
 
     fn score_ids(db: &Db, key: ScoreKey, now: &str) -> Vec<i64> {
-        db.pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
-            .unwrap()
-            .into_iter()
-            .map(|s| s.article_id)
-            .collect()
+        db.pending_score(
+            key,
+            ScoreScope::Since(t("2026-09-10T00:00:00Z")),
+            t(now),
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|s| s.article_id)
+        .collect()
     }
 
     #[test]
@@ -185,7 +198,12 @@ mod tests {
         add_digest(&db, old, "sonnet", "期間外", true, "2026-09-26T02:00:00Z");
 
         let pending = db
-            .pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .pending_score(
+                key,
+                ScoreScope::Since(t("2026-09-10T00:00:00Z")),
+                t(now),
+                10,
+            )
             .unwrap();
         assert_eq!(
             pending,

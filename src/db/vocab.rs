@@ -715,7 +715,7 @@ mod tests {
         let inputs = db
             .pending_score(
                 score_key(&db),
-                t("2026-09-10T00:00:00Z"),
+                ScoreScope::Since(t("2026-09-10T00:00:00Z")),
                 t("2026-09-28T00:00:00Z"),
                 10,
             )

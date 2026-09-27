@@ -11,6 +11,14 @@ pub struct Term {
     pub note: Option<String>,
 }
 
+/// 画面で扱う訳語集の 1 項目。`changed_at` は訳語か原語を最後に変えた時刻（初期値のままなら None）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub id: i64,
+    pub term: Term,
+    pub changed_at: Option<String>,
+}
+
 /// 原語のどれかが `text` に出てくる語だけを残す。
 pub fn relevant(terms: Vec<Term>, text: &str) -> Vec<Term> {
     let text = normalize_spaces(text);

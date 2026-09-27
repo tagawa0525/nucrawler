@@ -113,7 +113,10 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
 ## Web UI
 
 - 一覧の上部は絵文字のボタンだけを並べる。🔍 は検索、👍 は 👍 した記事（`/search?liked=1`）、🔖 はブックマークへ。
-  切り替え（⭐・👁）は ON が緑、OFF が赤
+  切り替え（⭐・👁）は ON が緑、OFF が赤。管理の画面へは右端の ⚙️（`/settings`）から入る
+- 訳語集（`/glossary`）では、訳語ごとに畳んだ項目を開いて訳語・略語・原語（1 行に 1 つ）・メモを直せる。
+  訳語・略語・原語がほかの訳語と重なると、どの訳語と重なったかを返して保存しない。
+  訳語か原語を変えた時刻を残す（初期値の語は持たない）
 - 記事のカードでは、ソース・日付の横に 👍 した記事は 👍、ブックマークした記事は 🔖 が付く
 - 一覧は「前回の訪問の後に届いた記事」と「それより前の未読」に分かれ、点数の高い順に並ぶ。
   👎・見ない・閾値（`web.min_score`）未満・未採点・軽水炉と無関係の記事は⭐（おすすめだけ表示）を OFF にしたとき（`?all=1`）だけ出る。
@@ -193,7 +196,7 @@ claude mcp add --scope user nucrawler -- nucrawler mcp
 - `sources.toml`：巡回するソース。[examples/sources.toml](examples/sources.toml)
 - 関心プロファイル：[examples/profile.toml](examples/profile.toml)（`profile import` で DB に取り込む）
 - トピックの語彙：DB に初期値が入る（`topics export` / `topics import` で編集する）
-- 訳語集：DB に初期値が入る（`glossary_terms` と `glossary_sources`）
+- 訳語集：DB に初期値が入る（Web UI の ⚙️ → 訳語集で編集する）
 
 home-manager のモジュールを使うときは `services.nucrawler.settings` と `sourcesFile` から生成される。
 

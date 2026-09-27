@@ -358,6 +358,8 @@ const SWIPE_SCRIPT: &str = r#"<script>
   }).then((res) => res.ok || res.type === "opaqueredirect");
   const toast = document.createElement("div");
   toast.className = "toast";
+  // 振り分けの結果をスクリーンリーダーにも伝える
+  toast.setAttribute("role", "status");
   toast.hidden = true;
   document.body.append(toast);
   let timer, undoLast = null;

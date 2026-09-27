@@ -140,7 +140,9 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &
     } else {
         "<a href=\"/?all=1\">すべて表示（👎・低い点・未採点を含む）</a>"
     };
-    body.push_str(&format!("<p class=\"meta\">{toggle}</p>"));
+    body.push_str(&format!(
+        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・{toggle}</p>"
+    ));
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
@@ -156,13 +158,115 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &
 /// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。
 /// トピックの選択肢は要約に付いている語だけを、軸ごとに付いている数の多い順に並べる。
 pub fn search_page(
-    _params: &Params,
-    _results: Option<&[ListItem]>,
-    _vocabulary: &[TopicUsage],
-    _error: Option<&str>,
+    params: &Params,
+    results: Option<&[ListItem]>,
+    vocabulary: &[TopicUsage],
+    error: Option<&str>,
     page: &Page,
 ) -> String {
-    layout("検索", page, "")
+    let mut body = String::from("<h1>検索</h1><p class=\"meta\"><a href=\"/\">一覧へ</a></p>");
+    if let Some(error) = error {
+        body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
+    }
+    body.push_str(&search_form(params, vocabulary, page));
+    if let Some(items) = results {
+        if items.is_empty() {
+            body.push_str("<p class=\"meta\">該当する記事はありません</p>");
+        } else {
+            body.push_str(&format!("<h2>{} 件</h2>", items.len()));
+            body.extend(items.iter().map(|i| card(i, page)));
+        }
+    }
+    layout("検索", page, &body)
+}
+
+fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
+    let text = |name: &str, value: &str, extra: &str| {
+        format!("<input name=\"{name}\" value=\"{}\"{extra}>", escape(value))
+    };
+    let checkbox = |name: &str, value: &str, checked: bool, label: &str| {
+        format!(
+            "<label><input type=\"checkbox\" name=\"{name}\" value=\"{}\"{}> {}</label> ",
+            escape(value),
+            if checked { " checked" } else { "" },
+            escape(label)
+        )
+    };
+    let select = |name: &str, current: &str, options: &[(&str, &str)]| {
+        let options: String = options
+            .iter()
+            .map(|(value, label)| {
+                let selected = if *value == current { " selected" } else { "" };
+                format!("<option value=\"{value}\"{selected}>{label}</option>")
+            })
+            .collect();
+        format!("<select name=\"{name}\">{options}</select>")
+    };
+    // 要約に付いている語だけを、軸ごとに付いている数の多い順に（選んだ語は数によらず出す）
+    let mut topics = String::new();
+    for facet in crate::topics::Facet::ALL {
+        let mut words: Vec<&TopicUsage> = vocabulary
+            .iter()
+            .filter(|u| u.facet == facet && (u.uses > 0 || p.topics.contains(&u.name)))
+            .collect();
+        words.sort_by_key(|u| std::cmp::Reverse(u.uses));
+        if words.is_empty() {
+            continue;
+        }
+        topics.push_str(&format!("<div class=\"meta\">{}</div>", facet.as_str()));
+        for u in words {
+            let label = format!("{} ({})", u.name, u.uses);
+            topics.push_str(&checkbox(
+                "topic",
+                &u.name,
+                p.topics.contains(&u.name),
+                &label,
+            ));
+        }
+    }
+    let sources: String = page
+        .labels
+        .iter()
+        .map(|(id, label)| checkbox("source", id, p.sources.contains(id), label))
+        .collect();
+    let open = |any: bool| if any { " open" } else { "" };
+    format!(
+        "<form method=\"get\" action=\"/search\">\
+         <p>{q}</p>\
+         <p>期間 {since} 〜 {until}</p>\
+         <details{topics_open}><summary>トピック</summary>{topics}</details>\
+         <details{sources_open}><summary>ソース</summary>{sources}</details>\
+         <p>言語 {lang} 並び {sort}</p>\
+         <p>{translated}{liked}{unread}最低点 {min_score}</p>\
+         <p><button type=\"submit\">検索</button></p></form>",
+        q = text(
+            "q",
+            &p.q,
+            " type=\"search\" placeholder=\"語（空白で区切るとすべてを含む）\""
+        ),
+        since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
+        until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
+        topics_open = open(!p.topics.is_empty()),
+        sources_open = open(!p.sources.is_empty()),
+        lang = select(
+            "lang",
+            &p.lang,
+            &[("", "すべて"), ("en", "英語"), ("ja", "日本語")]
+        ),
+        sort = select(
+            "sort",
+            &p.sort,
+            &[("newest", "新しい順"), ("score", "点数順")]
+        ),
+        translated = checkbox("translated", "1", p.translated, "和訳あり"),
+        liked = checkbox("liked", "1", p.liked, "👍"),
+        unread = checkbox("unread", "1", p.unread, "未読"),
+        min_score = text(
+            "min_score",
+            &p.min_score,
+            " type=\"number\" min=\"0\" max=\"100\" size=\"3\""
+        ),
+    )
 }
 
 fn card(i: &ListItem, page: &Page) -> String {

@@ -38,22 +38,87 @@ pub struct Params {
 
 impl Params {
     /// クエリ文字列（`?` を除く）から読む。知らないキーは無視する。真偽は `1` のときだけ真。
-    pub fn from_query(_raw: &str) -> Self {
-        Self::default()
+    pub fn from_query(raw: &str) -> Self {
+        let mut p = Self::default();
+        for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+            let value = value.into_owned();
+            match key.as_ref() {
+                "q" => p.q = value,
+                "since" => p.since = value,
+                "until" => p.until = value,
+                "topic" if !value.trim().is_empty() => p.topics.push(value),
+                "source" if !value.trim().is_empty() => p.sources.push(value),
+                "lang" => p.lang = value,
+                "translated" => p.translated = value == "1",
+                "liked" => p.liked = value == "1",
+                "unread" => p.unread = value == "1",
+                "min_score" => p.min_score = value,
+                "sort" => p.sort = value,
+                _ => {}
+            }
+        }
+        p
     }
 
-    /// 条件が 1 つも無い（検索画面では結果を出さず、フォームだけを出す）。
+    /// 条件が 1 つも無い（検索画面では結果を出さず、フォームだけを出す）。並びは条件に数えない。
     pub fn is_empty(&self) -> bool {
-        false
+        [
+            &self.q,
+            &self.since,
+            &self.until,
+            &self.lang,
+            &self.min_score,
+        ]
+        .iter()
+        .all(|v| v.trim().is_empty())
+            && self.topics.is_empty()
+            && self.sources.is_empty()
+            && !(self.translated || self.liked || self.unread)
     }
 
+    /// 検索の条件にする。一覧で隠す記事も含める。
     pub fn to_query<'a>(
         &self,
-        _user_id: i64,
-        _profile_hash: Option<&'a str>,
-        _limit: usize,
+        user_id: i64,
+        profile_hash: Option<&'a str>,
+        limit: usize,
     ) -> Result<SearchQuery<'a>, SearchError> {
-        Ok(SearchQuery::default())
+        let lang = match given(&self.lang) {
+            None => None,
+            Some("en") => Some(Lang::En),
+            Some("ja") => Some(Lang::Ja),
+            Some(other) => return Err(SearchError::InvalidLang(other.to_string())),
+        };
+        let min_score = given(&self.min_score)
+            .map(|v| {
+                v.parse::<u8>()
+                    .ok()
+                    .filter(|score| *score <= 100)
+                    .ok_or_else(|| SearchError::InvalidScore(v.to_string()))
+            })
+            .transpose()?;
+        let order = match given(&self.sort) {
+            None | Some("newest") => SearchOrder::Newest,
+            Some("score") => SearchOrder::Score,
+            Some(other) => return Err(SearchError::InvalidSort(other.to_string())),
+        };
+        Ok(SearchQuery {
+            user_id,
+            profile_hash,
+            terms: parse_terms(&self.q),
+            since: given(&self.since).map(since).transpose()?,
+            until: given(&self.until).map(until).transpose()?,
+            topics: self.topics.clone(),
+            sources: self.sources.clone(),
+            lang,
+            translated: self.translated,
+            liked: self.liked,
+            unread: self.unread,
+            min_score,
+            hide_below: None,
+            order,
+            limit,
+        })
     }
 }
 
@@ -75,6 +140,11 @@ pub fn since(value: &str) -> Result<DateTime<Utc>, SearchError> {
 pub fn until(value: &str) -> Result<DateTime<Utc>, SearchError> {
     let (_, end) = period("until", value)?;
     Ok(end)
+}
+
+/// 入力された値（前後の空白を除く）。空なら指定しなかったもの。
+fn given(value: &str) -> Option<&str> {
+    Some(value.trim()).filter(|v| !v.is_empty())
 }
 
 /// 年月日ならその日、年月ならその月の、日本時間での始まりと終わり（終わりは含まない）。

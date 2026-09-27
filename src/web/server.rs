@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -11,6 +11,7 @@ use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
 use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
 
@@ -50,6 +51,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/feed.xml", get(feed))
         .route("/api/articles", get(api_list))
         .route("/api/articles/{id}", get(api_detail))
+        .route("/search", get(search))
+        .route("/api/search", get(api_search))
         .route("/articles/{id}/feedback", post(feedback))
         .route(
             "/articles/{id}/translation-request",
@@ -88,6 +91,8 @@ enum AppError {
     BadRequest(&'static str),
     #[error("cross-site request")]
     CrossSite,
+    #[error(transparent)]
+    InvalidSearch(#[from] crate::search::SearchError),
 }
 
 impl IntoResponse for AppError {
@@ -100,7 +105,7 @@ impl IntoResponse for AppError {
                 return (status, "internal server error").into_response();
             }
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::BadRequest(_) | AppError::InvalidSearch(_) => StatusCode::BAD_REQUEST,
             AppError::CrossSite => StatusCode::FORBIDDEN,
         };
         (status, self.to_string()).into_response()
@@ -227,6 +232,66 @@ async fn api_list(
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
         let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
+        Ok(serde_json::to_string(&api::ArticleList::new(
+            &items, &labels,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
+}
+
+/// 検索画面。一覧で隠す記事も語や条件で探せる。閲覧ではないので、訪問も開いたことも記録しない。
+/// 条件の誤りは、条件を残したフォームとともに 400 で返す。
+async fn search(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let params = Params::from_query(raw.as_deref().unwrap_or(""));
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let (status, page) = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let vocabulary = db.topic_usage()?;
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        if params.is_empty() {
+            let html = html::search_page(&params, None, &vocabulary, None, &page);
+            return Ok((StatusCode::OK, html));
+        }
+        Ok(
+            match params.to_query(user, hash.as_deref(), web.list_limit) {
+                Ok(q) => {
+                    let items = db.search_articles(&q)?;
+                    let html = html::search_page(&params, Some(&items), &vocabulary, None, &page);
+                    (StatusCode::OK, html)
+                }
+                Err(e) => {
+                    let html =
+                        html::search_page(&params, None, &vocabulary, Some(&e.to_string()), &page);
+                    (StatusCode::BAD_REQUEST, html)
+                }
+            },
+        )
+    })
+    .await?;
+    Ok((status, Html(page)).into_response())
+}
+
+/// 検索画面と同じ条件の検索。閲覧ではないので、訪問も開いたことも記録しない。
+async fn api_search(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let params = Params::from_query(raw.as_deref().unwrap_or(""));
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let body = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let q = params.to_query(user, hash.as_deref(), web.list_limit)?;
+        let items = db.search_articles(&q)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,
         ))?)

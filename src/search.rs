@@ -142,6 +142,11 @@ pub fn until(value: &str) -> Result<DateTime<Utc>, SearchError> {
     Ok(end)
 }
 
+/// CLI の結果の 1 行：公開日時（日本時間）、点数（未採点は -）、見出し、URL。
+pub fn result_line(_item: &crate::db::ListItem) -> String {
+    String::new()
+}
+
 /// 入力された値（前後の空白を除く）。空なら指定しなかったもの。
 fn given(value: &str) -> Option<&str> {
     Some(value.trim()).filter(|v| !v.is_empty())
@@ -281,6 +286,39 @@ mod tests {
                 ..Params::default()
             }),
             SearchError::InvalidSort("old".into())
+        );
+    }
+
+    #[test]
+    fn formats_result_lines() {
+        let mut item = crate::db::ListItem {
+            article_id: 1,
+            source_id: "wnn".into(),
+            url: "https://e.com/1".into(),
+            title: "Original".into(),
+            lang: "en".into(),
+            at: "2026-09-26T00:00:00.000Z".into(),
+            fetched_at: "2026-09-26T00:00:00.000Z".into(),
+            title_ja: Some("見出し".into()),
+            summary_ja: None,
+            lwr_relevant: Some(true),
+            score: Some(80),
+            reason: None,
+            read: false,
+            feedback: None,
+            has_translation: false,
+            translation_requested: false,
+            locked_by: vec![],
+        };
+        assert_eq!(
+            result_line(&item),
+            "2026-09-26 09:00   80  見出し  https://e.com/1"
+        );
+        item.score = None;
+        item.title_ja = None;
+        assert_eq!(
+            result_line(&item),
+            "2026-09-26 09:00    -  Original  https://e.com/1"
         );
     }
 

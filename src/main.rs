@@ -142,6 +142,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
+        Command::Search => unimplemented!("search"),
         Command::Serve => {
             serve(
                 inv.config_dir,

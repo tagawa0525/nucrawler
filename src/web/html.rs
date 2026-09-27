@@ -3,7 +3,8 @@
 //! だけ使い、無くても読める。
 
 use crate::db::{
-    ArticleDetail, ListItem, Report, ReportFilter, ReportKind, ReportStatus, TopicUsage, Warning,
+    ArticleDetail, Comment, ListItem, Report, ReportFilter, ReportKind, ReportStatus, TopicUsage,
+    Visibility, Warning,
 };
 use crate::search::Params;
 
@@ -894,6 +895,13 @@ pub(crate) fn display_title<'a>(title_ja: Option<&'a str>, i: &'a ListItem) -> &
         .unwrap_or(&i.url)
 }
 
+/// 詳細に並べる、記事への書き込み（指摘とコメント）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Notes<'a> {
+    pub reports: &'a [Report],
+    pub comments: &'a [Comment],
+}
+
 /// 詳細画面の表示の選択。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DetailView {
@@ -906,7 +914,7 @@ pub struct DetailView {
     pub reported: bool,
 }
 
-pub fn detail_page(d: &ArticleDetail, reports: &[Report], view: DetailView, page: &Page) -> String {
+pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Page) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -978,7 +986,7 @@ pub fn detail_page(d: &ArticleDetail, reports: &[Report], view: DetailView, page
     }
     body.push_str(&translation_section(d, view));
     let has_japanese = !d.digests.is_empty() || !d.translations.is_empty();
-    body.push_str(&report_section(id, reports, has_japanese, view));
+    body.push_str(&report_section(id, notes.reports, has_japanese, view));
     layout(&title, page, &body)
 }
 
@@ -1572,7 +1580,7 @@ mod tests {
 
         let mut d = detail();
         d.item.source_id = "kyuden".into();
-        let html = detail_page(&d, &[], DetailView::default(), &page);
+        let html = detail_page(&d, &Notes::default(), DetailView::default(), &page);
         assert!(!html.contains("kyuden"), "{html}");
     }
 
@@ -1600,7 +1608,12 @@ mod tests {
         for v in &mut d.digests {
             v.payload["title_ja"] = serde_json::json!("");
         }
-        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains(&format!("<h1>{}</h1>", escape(&d.item.title))),
             "{html}"
@@ -1674,7 +1687,12 @@ mod tests {
 
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {
-        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains("新版") && !html.contains("<h1>旧版"),
             "{html}"
@@ -1706,7 +1724,12 @@ mod tests {
     fn detail_page_offers_to_remove_the_bookmark() {
         let mut d = detail();
         d.item.bookmarked = true;
-        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains(r#"<button name="kind" value="unbookmark" class="on">🔖</button>"#),
             "{html}"
@@ -1719,7 +1742,7 @@ mod tests {
             digest: Some(10),
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), &[], view, &Page::default());
+        let html = detail_page(&detail(), &Notes::default(), view, &Page::default());
         assert!(html.contains("旧版"));
     }
 
@@ -1735,7 +1758,12 @@ mod tests {
             created_at: "2026-09-26T00:00:00.000Z".into(),
             payload: serde_json::json!({"body_ja": "第一段落。\n\n第二段落<script>"}),
         }];
-        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains(r#"href="/articles/7?view=translation""#),
             "{html}"
@@ -1745,7 +1773,7 @@ mod tests {
             show_translation: true,
             ..DetailView::default()
         };
-        let html = detail_page(&d, &[], view, &Page::default());
+        let html = detail_page(&d, &Notes::default(), view, &Page::default());
         assert!(html.contains("<p>第一段落。</p>"), "{html}");
         assert!(html.contains("第二段落&lt;script&gt;"));
         assert!(!html.contains(r#"translation-request"#));
@@ -1755,7 +1783,12 @@ mod tests {
     fn detail_page_shows_waiting_when_requested() {
         let mut d = detail();
         d.item.translation_requested = true;
-        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
     }
@@ -1763,7 +1796,12 @@ mod tests {
     /// 訳語の指摘は畳んでおき、開いたときだけフォームを出す。和訳を読んでいれば和訳に戻る。
     #[test]
     fn detail_page_offers_a_folded_term_report() {
-        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains(
                 r#"<details class="report" id="term-report"><summary>訳語の指摘</summary><form method="post" action="/articles/7/report"><input type="hidden" name="kind" value="term">"#
@@ -1785,7 +1823,7 @@ mod tests {
             reported: true,
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), &[], view, &Page::default());
+        let html = detail_page(&detail(), &Notes::default(), view, &Page::default());
         assert_eq!(
             html.matches(r#"<input type="hidden" name="view" value="translation">"#)
                 .count(),
@@ -1798,7 +1836,12 @@ mod tests {
     /// 訳語以外の指摘は種類を選んで内容を書く。これも畳んでおく。
     #[test]
     fn detail_page_offers_a_folded_report_of_other_kinds() {
-        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(
             html.contains(
                 r#"<details class="report" id="other-report"><summary>その他の指摘</summary><form method="post" action="/articles/7/report">"#
@@ -1822,7 +1865,12 @@ mod tests {
     fn detail_page_without_japanese_has_no_term_report() {
         let mut d = detail();
         d.digests.clear();
-        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
         assert!(!html.contains("term-report"), "{html}");
         // 本文の取得漏れなどは、要約が無くても指摘できる
         assert!(html.contains(r#"id="other-report""#), "{html}");
@@ -1992,7 +2040,10 @@ mod tests {
     fn detail_page_lists_past_reports_with_their_status() {
         let html = detail_page(
             &detail(),
-            &[term_report(1, ReportStatus::Rejected)],
+            &Notes {
+                reports: &[term_report(1, ReportStatus::Rejected)],
+                ..Notes::default()
+            },
             DetailView::default(),
             &Page::default(),
         );
@@ -2002,7 +2053,10 @@ mod tests {
         );
         let html = detail_page(
             &detail(),
-            &[other_report(2, ReportKind::Body)],
+            &Notes {
+                reports: &[other_report(2, ReportKind::Body)],
+                ..Notes::default()
+            },
             DetailView::default(),
             &Page::default(),
         );
@@ -2077,5 +2131,85 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    fn comment(id: i64, body: &str, visibility: Visibility, mine: bool) -> Comment {
+        Comment {
+            id,
+            body: body.into(),
+            visibility,
+            mine,
+            created_at: "2026-09-27T00:00:00.000Z".into(),
+            updated_at: "2026-09-27T00:00:00.000Z".into(),
+        }
+    }
+
+    /// コメントを書く欄は畳んでおき、指摘の欄より前に置く。既定は非公開（チェックを外したまま）。
+    #[test]
+    fn detail_page_offers_a_folded_comment_form() {
+        let view = DetailView {
+            show_translation: true,
+            ..DetailView::default()
+        };
+        let html = detail_page(&detail(), &Notes::default(), view, &Page::default());
+        assert!(
+            html.contains(
+                r#"<details class="comment-add"><summary>コメントを書く</summary><form method="post" action="/articles/7/comments"><input type="hidden" name="view" value="translation">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<textarea class="wide" name="body" rows="3" required></textarea>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<label><input type="checkbox" name="public" value="1"> 公開する</label>"#
+            ),
+            "{html}"
+        );
+        let comments = html.find(r#"id="comments""#).unwrap();
+        let reports = html.find(r#"id="reports""#).unwrap();
+        assert!(comments < reports, "{html}");
+    }
+
+    /// コメントは改行を保って出し、公開・非公開を示す。直せるのは自分のコメントだけ。
+    #[test]
+    fn detail_page_lists_comments_and_lets_authors_edit_them() {
+        let mut mine = comment(1, "一行目\n<二行目>", Visibility::Private, true);
+        mine.updated_at = "2026-09-27T01:00:00.000Z".into();
+        let theirs = comment(2, "共有します", Visibility::Public, false);
+        let notes = Notes {
+            comments: &[mine, theirs],
+            ..Notes::default()
+        };
+        let html = detail_page(&detail(), &notes, DetailView::default(), &Page::default());
+        assert!(html.contains("<p>一行目<br>&lt;二行目&gt;</p>"), "{html}");
+        assert!(
+            html.contains(
+                r#"<p class="meta">🔒 非公開 ・2026-09-27 09:00（更新 2026-09-27 10:00）</p>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p class="meta">公開 ・2026-09-27 09:00</p>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/comments/1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"required>一行目
+&lt;二行目&gt;</textarea><label><input type="checkbox" name="public" value="1"> 公開する</label>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/comments/1/delete""#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"action="/comments/2"#), "{html}");
     }
 }

@@ -385,7 +385,11 @@ async fn detail(
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::detail_page(&detail, &reports, view, &page))
+        let notes = html::Notes {
+            reports: &reports,
+            comments: &[],
+        };
+        Ok(html::detail_page(&detail, &notes, view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -1764,6 +1768,100 @@ mod tests {
             server.count("SELECT count(*) FROM reports WHERE status = 'pending'"),
             1
         );
+    }
+
+    /// コメントは書いて、直して、消せる。公開はチェックしたときだけで、読んでいた画面に戻る。
+    #[tokio::test]
+    async fn comments_are_written_edited_and_deleted() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let res = server
+            .post(
+                &format!("/articles/{id}/comments"),
+                "body=+%E3%83%A1%E3%83%A2+&public=1&view=translation",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation#comments")
+        );
+        assert_eq!(
+            server.strings("SELECT body || '|' || visibility FROM comments"),
+            ["メモ|public"]
+        );
+        let (_, html) = server.get(&format!("/articles/{id}")).await;
+        assert!(html.contains("<p>メモ</p>"), "{html}");
+
+        let comment = server.count("SELECT id FROM comments");
+        let res = server
+            .post(&format!("/comments/{comment}"), "body=%E6%94%B9")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}#comments")
+        );
+        assert_eq!(
+            server.strings("SELECT body || '|' || visibility FROM comments"),
+            ["改|private"]
+        );
+        let res = server
+            .post(&format!("/comments/{comment}/delete"), "view=translation")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation#comments")
+        );
+        assert_eq!(server.count("SELECT count(*) FROM comments"), 0);
+    }
+
+    #[tokio::test]
+    async fn comments_reject_invalid_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        db.conn()
+            .execute_batch(&format!(
+                "INSERT INTO users (id, login, display_name) VALUES (99, 'other', 'other');
+                 INSERT INTO comments (id, user_id, article_id, body, visibility, created_at, updated_at)
+                   VALUES (5, 99, {id}, 'x', 'public', '2026-09-27T00:00:00.000Z', '2026-09-27T00:00:00.000Z');"
+            ))
+            .unwrap();
+        let server = Server::start(db).await;
+        let add = format!("/articles/{id}/comments");
+        assert_eq!(server.post(&add, "body=+").await.status().as_u16(), 400);
+        assert_eq!(server.post(&add, "public=1").await.status().as_u16(), 400);
+        assert_eq!(
+            server
+                .post("/articles/999/comments", "body=x")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        // 他人のコメントは直せず消せない
+        assert_eq!(
+            server.post("/comments/5", "body=y").await.status().as_u16(),
+            404
+        );
+        assert_eq!(
+            server
+                .post("/comments/5/delete", "")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        let res = server
+            .form(&add, "body=x")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(server.strings("SELECT body FROM comments"), ["x"]);
     }
 
     /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。

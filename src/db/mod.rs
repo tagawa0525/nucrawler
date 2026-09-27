@@ -176,6 +176,39 @@ pub struct ReportFilter {
     pub article_id: Option<i64>,
 }
 
+/// コメントの公開範囲。公開はほかの利用者にも見せ、非公開は書いた本人だけが見る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Public,
+    Private,
+}
+
+impl Visibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Visibility::Public, Visibility::Private]
+            .into_iter()
+            .find(|x| x.as_str() == s)
+    }
+}
+
+/// 記事へのコメント。`mine` は閲覧者が書いたもの（直せる）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub id: i64,
+    pub body: String,
+    pub visibility: Visibility,
+    pub mine: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[
@@ -1680,6 +1713,40 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// 記事へのコメント（古い順）。利用者 `user_id` が書いたものと、ほかの利用者の公開のもの。
+    pub fn comments(&self, _user_id: i64, _article_id: i64) -> Result<Vec<Comment>, DbError> {
+        todo!()
+    }
+
+    /// コメントを書いて id を返す。
+    pub fn add_comment(
+        &self,
+        _user_id: i64,
+        _article_id: i64,
+        _body: &str,
+        _visibility: Visibility,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, DbError> {
+        todo!()
+    }
+
+    /// 自分のコメントを直し、その記事の id を返す。無いか他人のものなら None。
+    pub fn update_comment(
+        &self,
+        _user_id: i64,
+        _id: i64,
+        _body: &str,
+        _visibility: Visibility,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<i64>, DbError> {
+        todo!()
+    }
+
+    /// 自分のコメントを消し、その記事の id を返す。無いか他人のものなら None。
+    pub fn delete_comment(&self, _user_id: i64, _id: i64) -> Result<Option<i64>, DbError> {
+        todo!()
     }
 
     /// 指摘を受付箱に入れる。
@@ -5588,6 +5655,90 @@ mod tests {
         assert_eq!(same, first);
         let changed = resolve(ReportStatus::Rejected, "c", "2026-09-27T03:00:00Z");
         assert_eq!(changed.as_deref(), Some("2026-09-27T03:00:00.000Z"));
+    }
+
+    fn other_user(db: &Db) -> i64 {
+        db.conn()
+            .execute(
+                "INSERT INTO users (login, display_name) VALUES ('other', 'other')",
+                [],
+            )
+            .unwrap();
+        db.conn().last_insert_rowid()
+    }
+
+    /// コメントは古い順に並び、自分のものと他人の公開のものだけが見える。
+    #[test]
+    fn comments_show_own_and_public_ones() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let other = other_user(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let at = |h: u32| t(&format!("2026-09-27T0{h}:00:00Z"));
+        db.add_comment(owner, a, "自分のメモ", Visibility::Private, at(0))
+            .unwrap();
+        db.add_comment(other, a, "他人の公開", Visibility::Public, at(1))
+            .unwrap();
+        db.add_comment(other, a, "他人の非公開", Visibility::Private, at(2))
+            .unwrap();
+        let seen: Vec<(String, bool)> = db
+            .comments(owner, a)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.body, c.mine))
+            .collect();
+        assert_eq!(
+            seen,
+            [("自分のメモ".into(), true), ("他人の公開".into(), false)]
+        );
+        let mine = &db.comments(owner, a).unwrap()[0];
+        assert_eq!(mine.visibility, Visibility::Private);
+        assert_eq!(mine.created_at, "2026-09-27T00:00:00.000Z");
+        assert_eq!(mine.updated_at, mine.created_at);
+    }
+
+    /// 直せるのも消せるのも自分のコメントだけ。
+    #[test]
+    fn comments_are_updated_and_deleted_only_by_their_author() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let other = other_user(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let id = db
+            .add_comment(
+                owner,
+                a,
+                "下書き",
+                Visibility::Private,
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        let later = t("2026-09-27T01:00:00Z");
+        assert_eq!(
+            db.update_comment(other, id, "乗っ取り", Visibility::Public, later)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            db.update_comment(owner, id, "清書", Visibility::Public, later)
+                .unwrap(),
+            Some(a)
+        );
+        let c = &db.comments(other, a).unwrap()[0];
+        assert_eq!(
+            (c.body.as_str(), c.visibility, c.mine),
+            ("清書", Visibility::Public, false)
+        );
+        assert_eq!(c.updated_at, "2026-09-27T01:00:00.000Z");
+        assert_eq!(db.delete_comment(other, id).unwrap(), None);
+        assert_eq!(db.delete_comment(owner, id).unwrap(), Some(a));
+        assert!(db.comments(owner, a).unwrap().is_empty());
     }
 
     /// 同じ原語（大文字小文字の違いを含む）を別の訳語に結び付けられない。

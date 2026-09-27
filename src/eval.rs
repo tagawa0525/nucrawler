@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::db::{EvalKey, Label, LabeledScore, SignalKind};
+use crate::db::{EvalKey, ExploreStats, Label, LabeledScore, SignalKind};
 
 /// 正例・負例のどちらかがこれより少なければ、指標は参考値と注記する
 const FEW_LABELS: usize = 5;
@@ -99,6 +99,11 @@ pub fn render(
         render_key(&mut out, key, role, labels, scores);
     }
     out
+}
+
+/// 確認枠の反応の内訳。反応した記事のうち関心の割合を、閾値未満での見逃し率の見積もりとして示す。
+pub fn render_explore(stats: ExploreStats) -> String {
+    todo!("{stats:?}")
 }
 
 /// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
@@ -334,6 +339,30 @@ mod tests {
         assert!(out.contains("no profile"), "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
         assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+    }
+
+    #[test]
+    fn renders_the_explore_miss_rate() {
+        let out = render_explore(ExploreStats {
+            picked: 12,
+            positive: 1,
+            negative: 4,
+        });
+        assert_eq!(
+            out,
+            "\nexplore: 12 picked below the threshold, 5 with reactions (1 positive, 4 negative)\n\
+             \x20 about 20% of the reacted picks were of interest (misses below the threshold)\n"
+        );
+        let none = render_explore(ExploreStats {
+            picked: 3,
+            positive: 0,
+            negative: 0,
+        });
+        assert_eq!(
+            none,
+            "\nexplore: 3 picked below the threshold, 0 with reactions (0 positive, 0 negative)\n"
+        );
+        assert_eq!(render_explore(ExploreStats::default()), "");
     }
 
     #[test]

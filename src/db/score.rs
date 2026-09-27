@@ -298,6 +298,34 @@ mod tests {
         assert_eq!(score_ids(&db, other_profile, now), [a]);
     }
 
+    /// 古い版のプロンプトで断念した記事も、版を上げれば採点し直す（プロンプトが変われば成功しうる）。
+    #[test]
+    fn score_failures_are_scoped_to_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let now = "2026-09-27T00:00:00Z";
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: &score_stage(key),
+                backend: key.backend,
+                model: key.model,
+            },
+            "bad output",
+            t(now),
+            true,
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let next = ScoreKey {
+            prompt_version: key.prompt_version + 1,
+            ..key
+        };
+        assert_eq!(score_ids(&db, next, now), [a]);
+    }
+
     #[test]
     fn score_is_limited_to_0_through_100() {
         let db = Db::open_in_memory().unwrap();

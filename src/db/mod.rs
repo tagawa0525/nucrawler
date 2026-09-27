@@ -5451,7 +5451,7 @@ mod tests {
             "2026-09-26T00:00:00.000Z",
             90,
         );
-        let bookmarked = |db: &Db| db.list_articles(list_query(db, false)).unwrap()[0].bookmarked;
+        let bookmarked = |db: &Db| db.search_articles(&search_query(db)).unwrap()[0].bookmarked;
         assert!(!bookmarked(&db));
 
         db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
@@ -5477,6 +5477,45 @@ mod tests {
                 title_ja: "題".into()
             }]
         );
+    }
+
+    /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。
+    /// 件数の上限は除いた後にかける（ブックマークが上位を占めても一覧が減らない）。
+    #[test]
+    fn list_leaves_out_bookmarked_articles_before_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let top = scored_article(
+            &db,
+            "https://e.com/top",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        let next = scored_article(
+            &db,
+            "https://e.com/next",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.record_event(owner, top, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        for show_all in [false, true] {
+            let ids: Vec<i64> = db
+                .list_articles(ListQuery {
+                    limit: 1,
+                    ..list_query(&db, show_all)
+                })
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect();
+            assert_eq!(ids, [next], "show_all = {show_all}");
+        }
+        // 外せば一覧に戻る
+        db.unbookmark(owner, top).unwrap();
+        assert_eq!(list_ids(&db, false), [top, next]);
     }
 
     /// 「見ない」にした記事は 👎 と同じく一覧の既定から隠れ、弱い不要として採点に渡る。
@@ -5590,6 +5629,20 @@ mod tests {
             db.query_strings("SELECT id || kind || created_at FROM events")
                 .unwrap(),
             ["7up2026-09-27T00:00:00.000Z"]
+        );
+        // 作り直した events の索引と、bookmarks の外部キーの子側の索引
+        assert_eq!(
+            db.query_strings(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name IN ('events', 'bookmarks') AND sql IS NOT NULL
+                 ORDER BY name"
+            )
+            .unwrap(),
+            [
+                "bookmarks_by_article",
+                "events_by_article",
+                "events_by_user"
+            ]
         );
         db.record_event(1, 1, SignalKind::Dismiss, t("2026-09-27T01:00:00Z"))
             .unwrap();

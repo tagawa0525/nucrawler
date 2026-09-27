@@ -899,27 +899,6 @@ mod tests {
         assert!(earlier.is_empty());
     }
 
-    /// ブックマークした記事は振り分け済みなので、どちらの欄にも出さない。
-    #[test]
-    fn splits_without_bookmarked_articles() {
-        let mut new = item(1, "2026-09-27T05:00:00.000Z");
-        new.bookmarked = true;
-        let mut earlier = item(2, "2026-09-26T00:00:00.000Z");
-        earlier.bookmarked = true;
-        let items = vec![new, earlier, item(3, "2026-09-26T00:00:00.000Z")];
-        let boundary = Some("2026-09-27T00:00:00.000Z");
-        for include_read in [false, true] {
-            let (new, earlier) = split_sections(items.clone(), boundary, include_read);
-            assert!(new.is_empty());
-            assert_eq!(
-                earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
-                [3]
-            );
-        }
-        let (new, _) = split_sections(items, None, false);
-        assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [3]);
-    }
-
     #[test]
     fn layout_is_mobile_friendly_and_shows_warnings() {
         let html = layout(

@@ -118,6 +118,15 @@ category = "utility"
 filter = { keywords = ["原子力", "志賀"] }
 
 [[source]]
+id = "chuden"
+name = "中部電力"
+kind = "feed"
+url = "https://www.chuden.co.jp/rss/press.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "浜岡"] }
+
+[[source]]
 id = "energia"
 name = "中国電力"
 kind = "feed"

@@ -147,10 +147,14 @@ pub fn result_line(item: &crate::db::ListItem) -> String {
     let score = item
         .score
         .map_or_else(|| "-".to_string(), |s| s.to_string());
+    // 取得した題名には改行が混ざりうるので、空白をまとめて 1 行にする
+    let title = crate::web::html::display_title(item.title_ja.as_deref(), item)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "{}  {score:>3}  {}  {}",
+        "{}  {score:>3}  {title}  {}",
         crate::jst::format_local(&item.at),
-        crate::web::html::display_title(item.title_ja.as_deref(), item),
         item.url
     )
 }

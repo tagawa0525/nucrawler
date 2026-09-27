@@ -80,6 +80,9 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
 .toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
+.report { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
+.report label { display: block; margin: 0.4rem 0; }
+.report button { margin-top: 0.3rem; font-size: 1rem; padding: 0.3rem 0.9rem; }
 ";
 
 /// ソースの ID から画面に出す名前へ（`Source::display_name`）。
@@ -672,7 +675,36 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
         body.push_str("</p>");
     }
     body.push_str(&translation_section(d, view));
+    if !d.digests.is_empty() || !d.translations.is_empty() {
+        body.push_str(&term_report_form(id, view));
+    }
     layout(&title, page, &body)
+}
+
+/// 訳語の指摘。畳んでおき、開いたときだけフォームを出す（読む画面の密度を上げない）。
+fn term_report_form(id: i64, view: DetailView) -> String {
+    let field = |name: &str, label: &str, extra: &str| {
+        format!("<label>{label}<input class=\"wide\" name=\"{name}\"{extra}></label>")
+    };
+    format!(
+        "{}<details class=\"report\" id=\"term-report\"><summary>訳語の指摘</summary>\
+         <form method=\"post\" action=\"/articles/{id}/term-report\">{}{}{}{}\
+         <label>メモ（任意）<textarea class=\"wide\" name=\"note\" rows=\"2\"></textarea></label>\
+         <button>送る</button></form></details>",
+        if view.reported {
+            "<p class=\"meta\">訳語の指摘を受け付けました</p>"
+        } else {
+            ""
+        },
+        if view.show_translation {
+            "<input type=\"hidden\" name=\"view\" value=\"translation\">"
+        } else {
+            ""
+        },
+        field("found", "気になった訳", " required"),
+        field("wanted", "希望する訳（任意）", ""),
+        field("source", "原語（任意）", ""),
+    )
 }
 
 /// 👍/👎 とブックマーク。ブックマーク済みなら、同じボタンで外す。

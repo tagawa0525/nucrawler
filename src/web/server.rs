@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::db::{Db, DbError, ListQuery, NewTermReport, SignalKind};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/articles/{id}/translation-request",
             post(translation_request),
         )
+        .route("/articles/{id}/term-report", post(term_report))
         .with_state(state)
 }
 
@@ -330,6 +331,7 @@ struct DetailParams {
     view: Option<String>,
     digest: Option<i64>,
     translation: Option<i64>,
+    reported: Option<String>,
 }
 
 async fn detail(
@@ -341,7 +343,7 @@ async fn detail(
         digest: params.digest,
         show_translation: params.view.as_deref() == Some("translation"),
         translation: params.translation,
-        reported: false,
+        reported: params.reported.is_some(),
     };
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -449,6 +451,56 @@ async fn translation_request(
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+#[derive(serde::Deserialize)]
+struct TermReportForm {
+    found: String,
+    #[serde(default)]
+    wanted: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    note: String,
+    /// 和訳を読んでいたなら `translation`（戻る先）
+    view: Option<String>,
+}
+
+/// 訳語の指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。
+async fn term_report(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<TermReportForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let filled = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
+    let found = filled(&form.found).ok_or(AppError::BadRequest("found must not be empty"))?;
+    let (wanted, source, note) = (
+        filled(&form.wanted),
+        filled(&form.source),
+        filled(&form.note),
+    );
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        let report = NewTermReport {
+            found: &found,
+            wanted: wanted.as_deref(),
+            source: source.as_deref(),
+            note: note.as_deref(),
+        };
+        Ok(db.report_term(user, id, &report, Utc::now())?)
+    })
+    .await?;
+    let view = if form.view.as_deref() == Some("translation") {
+        "view=translation&"
+    } else {
+        ""
+    };
+    Ok(Redirect::to(&format!(
+        "/articles/{id}?{view}reported=1#term-report"
+    )))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {

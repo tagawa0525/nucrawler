@@ -1,5 +1,6 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。
-//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）にだけ使い、無くても読める。
+//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
+//! だけ使い、無くても読める。
 
 use crate::db::{ArticleDetail, ListItem, TopicUsage, Warning};
 use crate::search::Params;
@@ -63,6 +64,9 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
 .wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
+.cal { position: relative; display: inline-block; margin: 0 0.3rem; cursor: pointer; }
+.cal input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
+.cal:focus-within { outline: 2px solid #0b57a4; outline-offset: 2px; }
 .actions form { display: inline; }
 .actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
   border: 1px solid #bbb; background: #fff; }
@@ -252,6 +256,7 @@ pub fn search_page(
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
     }
     body.push_str(&search_form(params, vocabulary, page));
+    body.push_str(CALENDAR_SCRIPT);
     if let Some(items) = results {
         if items.is_empty() {
             body.push_str("<p class=\"meta\">該当する記事はありません</p>");
@@ -328,7 +333,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
     format!(
         "<form method=\"get\" action=\"/search\">\
          <p>{q}</p>\
-         <p>期間 {since} 〜 {until}</p>\
+         <p>期間 {since}{since_cal} 〜 {until}{until_cal}</p>\
          <details{topics_open}><summary>トピック</summary>{topics}</details>\
          <details{sources_open}><summary>ソース</summary>{sources}</details>\
          <p>言語 {lang} 並び {sort}</p>\
@@ -341,6 +346,8 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         ),
         since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
         until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
+        since_cal = calendar("since", "開始日"),
+        until_cal = calendar("until", "終了日"),
         topics_open = open(!p.topics.is_empty()),
         sources_open = open(!p.sources.is_empty()),
         lang = select(
@@ -364,6 +371,37 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         ),
     )
 }
+
+/// 期間の欄の横の 📅。日付の入力を透明にして絵文字に重ね、押すとカレンダーが開く
+/// （`CALENDAR_SCRIPT`）。名前を持たないので送られず、選んだ日付は `name` の欄へ入る。
+/// キーボードでも操作できるよう、日付の入力はフォーカスでき、読み上げの名前を持つ。
+fn calendar(name: &str, label: &str) -> String {
+    format!(
+        "<label class=\"cal\" title=\"カレンダー\">📅<input type=\"date\" data-for=\"{name}\" \
+         aria-label=\"{label}をカレンダーで選ぶ\"></label>"
+    )
+}
+
+/// 📅 のカレンダーで選んだ日付を、隣の期間の欄に入れる。欄は月だけの指定もできるよう文字の
+/// 入力のまま残す。欄が日付ならその日から、そうでなければ（月だけや空なら）今日から開く。
+const CALENDAR_SCRIPT: &str = r#"<script>
+document.querySelectorAll("input[data-for]").forEach((cal) => {
+  const text = cal.form.elements[cal.dataset.for];
+  // 前に選んだ日付が残らないよう、開く前に毎回欄から合わせる
+  const sync = () => {
+    cal.value = /^\d{4}-\d{2}-\d{2}$/.test(text.value) ? text.value : "";
+  };
+  cal.addEventListener("focus", sync);
+  cal.addEventListener("click", () => {
+    sync();
+    // タップで開くブラウザもあるが、PC の Chrome などは欄を押しただけでは開かない
+    if (cal.showPicker) cal.showPicker();
+  });
+  cal.addEventListener("change", () => {
+    if (cal.value) text.value = cal.value;
+  });
+});
+</script>"#;
 
 /// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
@@ -829,6 +867,28 @@ mod tests {
         assert!(html.contains(".wide { width: 100%;"), "{html}");
     }
 
+    /// 期間は文字でも 📅 のカレンダーでも入れられる。カレンダーは名前を持たず送られない。
+    #[test]
+    fn search_page_offers_a_calendar_for_the_period() {
+        let params = Params {
+            since: "2026-09".into(),
+            ..Params::default()
+        };
+        let html = search_page(&params, None, &[], None, &Page::default());
+        // 月だけの指定もできるよう、文字の欄は残す
+        assert!(html.contains(r#"name="since" value="2026-09""#), "{html}");
+        // キーボードでも操作できるよう、日付の入力はフォーカスでき、名前を持つ
+        for (name, label) in [("since", "開始日"), ("until", "終了日")] {
+            let cal = format!(
+                r#"<label class="cal" title="カレンダー">📅<input type="date" data-for="{name}" aria-label="{label}をカレンダーで選ぶ"></label>"#
+            );
+            let text = html.find(&format!(r#"name="{name}""#)).expect(&html);
+            let at = html.find(&cal).expect(&html);
+            assert!(text < at, "the calendar follows the text field: {html}");
+        }
+        assert!(html.contains("showPicker"), "{html}");
+    }
+
     /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。
     #[test]
     fn search_page_keeps_topics_outside_the_vocabulary() {
@@ -911,7 +971,7 @@ mod tests {
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
-            !html.contains(r#"data-id=""#) && !html.contains("<script>"),
+            !html.contains(r#"data-id=""#) && !html.contains(SWIPE_SCRIPT),
             "{html}"
         );
     }

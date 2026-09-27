@@ -161,6 +161,17 @@ pub(super) fn list_ids(db: &Db, show_all: bool) -> Vec<i64> {
         .collect()
 }
 
+pub(super) fn search_ids(db: &Db, terms: &[&str]) -> Vec<i64> {
+    db.search_articles(&SearchQuery {
+        terms: terms.iter().map(|t| t.to_string()).collect(),
+        ..search_query(db)
+    })
+    .unwrap()
+    .into_iter()
+    .map(|i| i.article_id)
+    .collect()
+}
+
 pub(super) fn search_query(db: &Db) -> SearchQuery<'static> {
     SearchQuery {
         user_id: db.owner_id().unwrap(),

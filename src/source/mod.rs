@@ -6,6 +6,8 @@ use url::Url;
 
 use crate::config::{Filter, SourceKind};
 
+pub mod html_list;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("failed to parse feed")]
@@ -22,6 +24,12 @@ pub enum SourceError {
         href: String,
         source: url::ParseError,
     },
+    #[error("invalid css selector {selector:?}: {reason}")]
+    InvalidSelector { selector: String, reason: String },
+    #[error("no link matches {selector:?}")]
+    NoFollowLink { selector: String },
+    #[error("html_list needs [source.list]; parse it with html_list::parse")]
+    NeedsListSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +48,7 @@ pub fn parse(kind: SourceKind, bytes: &[u8], base: &Url) -> Result<Vec<Candidate
     match kind {
         SourceKind::Feed => parse_feed(bytes, base),
         SourceKind::FepcJson => parse_fepc_json(bytes, base),
+        SourceKind::HtmlList => Err(SourceError::NeedsListSettings),
     }
 }
 

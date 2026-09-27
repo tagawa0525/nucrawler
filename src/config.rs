@@ -225,6 +225,9 @@ pub struct Source {
     /// 記事ページの本文を示す CSS セレクタ。無ければ readability で推定する。
     #[serde(default)]
     pub body_selector: Option<String>,
+    /// `html_list` の一覧ページの読み方
+    #[serde(default)]
+    pub list: Option<HtmlList>,
 }
 
 impl Source {
@@ -245,6 +248,36 @@ pub enum SourceKind {
     Feed,
     /// 電事連のニュース一覧 JSON
     FepcJson,
+    /// RSS の無いサイトのニュース一覧ページ（読み方は `[source.list]`）
+    HtmlList,
+}
+
+/// `html_list` の一覧ページの読み方。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlList {
+    /// 記事へのリンク（a 要素）の CSS セレクタ
+    pub link: String,
+    /// リンク先のファイル名に含まれる日付の形式。無ければ取得日時で扱う
+    #[serde(default)]
+    pub date_in_url: Option<UrlDate>,
+    /// 見出しから除く要素の CSS セレクタ（会社名のラベルなど）
+    #[serde(default)]
+    pub title_skip: Option<String>,
+    /// 一覧を読む前に、このセレクタに一致する最初のリンクをたどる
+    /// （年度ごとに URL が変わる一覧を、入口のページから探すときに使う）
+    #[serde(default)]
+    pub follow: Option<String>,
+}
+
+/// URL のファイル名に含まれる日付の形式（最初に現れる、その桁数の数字の並び）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UrlDate {
+    /// 例 20260925_1j.pdf
+    Yyyymmdd,
+    /// 例 260925j0101.pdf（2000 年代とみなす）
+    Yymmdd,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Deserialize)]
@@ -297,8 +330,36 @@ pub fn parse_sources(text: &str, path: &Path) -> Result<Sources, ConfigError> {
                 id: s.id.clone(),
             });
         }
+        validate_list(s).map_err(|reason| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            reason: format!("source {}: {reason}", s.id),
+        })?;
     }
     Ok(sources)
+}
+
+/// `html_list` には読み方があり、セレクタが解釈できること。ほかの種類には書かないこと。
+fn validate_list(s: &Source) -> Result<(), String> {
+    let check = |name: &str, selector: &str| {
+        scraper::Selector::parse(selector)
+            .map(drop)
+            .map_err(|e| format!("invalid list.{name} {selector:?}: {e}"))
+    };
+    match (s.kind, &s.list) {
+        (SourceKind::HtmlList, None) => Err("html_list needs [source.list]".into()),
+        (SourceKind::HtmlList, Some(list)) => {
+            check("link", &list.link)?;
+            if let Some(skip) = &list.title_skip {
+                check("title_skip", skip)?;
+            }
+            if let Some(follow) = &list.follow {
+                check("follow", follow)?;
+            }
+            Ok(())
+        }
+        (_, Some(_)) => Err("[source.list] is only for html_list".into()),
+        (_, None) => Ok(()),
+    }
 }
 
 fn parse_toml<T: serde::de::DeserializeOwned>(text: &str, path: &Path) -> Result<T, ConfigError> {
@@ -531,6 +592,7 @@ mod tests {
                     url_contains: vec![],
                 },
                 body_selector: None,
+                list: None,
             }
         );
         assert_eq!(s.sources[1].kind, SourceKind::FepcJson);
@@ -624,6 +686,48 @@ mod tests {
         .unwrap();
         assert_eq!(s.sources[0].display_name(), "九電");
         assert_eq!(s.sources[1].display_name(), "World Nuclear News");
+    }
+
+    fn source_toml(kind: &str, extra: &str) -> String {
+        format!(
+            "[[source]]\nid = \"a\"\nname = \"A\"\nkind = \"{kind}\"\n\
+             url = \"https://e.example/\"\nlang = \"ja\"\ncategory = \"utility\"\n{extra}"
+        )
+    }
+
+    #[test]
+    fn html_list_needs_valid_list_settings() {
+        let ok = parse_sources(
+            &source_toml(
+                "html_list",
+                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\" }\n",
+            ),
+            p(),
+        )
+        .unwrap();
+        let list = ok.sources[0].list.as_ref().unwrap();
+        assert_eq!(list.date_in_url, Some(UrlDate::Yymmdd));
+        for (text, reason) in [
+            (source_toml("html_list", ""), "[source.list]"),
+            (
+                source_toml("feed", "list = { link = \"a\" }\n"),
+                "only for html_list",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"dd >\" }\n"),
+                "list.link",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"a\", follow = \"[\" }\n"),
+                "list.follow",
+            ),
+        ] {
+            let err = parse_sources(&text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason: r, .. } if r.contains(reason)),
+                "{text}: {err}"
+            );
+        }
     }
 
     #[test]

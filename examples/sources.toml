@@ -1,12 +1,17 @@
 # 巡回するソースの一覧。$XDG_CONFIG_HOME/nucrawler/sources.toml に置く。
 #
-# kind:     feed（RSS/Atom/RDF）| fepc_json（電事連のニュース JSON）
+# kind:     feed（RSS/Atom/RDF）| fepc_json（電事連のニュース JSON）| html_list（ニュース一覧ページ）
 # lang:     en（要約と和訳）| ja（要約のみ）
 # category: regulator | industry | research | utility | vendor | paper
 # label:    画面に出す短い名前。省略時は name
 # enabled:  省略時 true
 # filter:   原子力関連に絞り込む。keywords（タイトル・概要に含む）か url_contains（URL に含む）の
 #           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
+# list:     html_list の一覧ページの読み方
+#           link        記事へのリンク（a 要素）の CSS セレクタ
+#           date_in_url リンク先のファイル名の日付（yyyymmdd | yymmdd）。省略時は取得日時
+#           title_skip  見出しから除く要素の CSS セレクタ（会社名のラベルなど）
+#           follow      一覧の前にたどるリンクの CSS セレクタ（年度ごとに URL が変わる一覧など）
 
 # --- 規制当局 ---
 
@@ -163,6 +168,41 @@ url = "https://www.jpower.co.jp/rss/news.xml"
 lang = "ja"
 category = "utility"
 filter = { keywords = ["原子力", "大間"] }
+
+# RSS が無いので一覧ページを読む。リリースの本文は主に PDF
+[[source]]
+id = "kepco"
+name = "関西電力"
+label = "関電"
+kind = "html_list"
+url = "https://www.kepco.co.jp/corporate/pr/"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "原子炉", "美浜", "高浜", "大飯", "使用済燃料"] }
+list = { link = ".prlist_cont dd a", date_in_url = "yyyymmdd" }
+
+# グループ各社（パワーグリッド、リニューアブルパワーなど）のリリースも同じ一覧に載る
+[[source]]
+id = "tepco"
+name = "東京電力"
+label = "東電"
+kind = "html_list"
+url = "https://www.tepco.co.jp/press/release/index-j.html"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "原子炉", "柏崎", "福島第一", "福島第二", "東通", "処理水", "廃炉", "使用済燃料"] }
+list = { link = ".news-element-wrapper dd > a", date_in_url = "yymmdd", title_skip = ".doc-add-icon" }
+
+# プレスリリースの一覧は年度ごとの URL なので、お知らせのページから最新の年度をたどる
+[[source]]
+id = "japc"
+name = "日本原子力発電"
+label = "原電"
+kind = "html_list"
+url = "https://www.japc.co.jp/news/index.html"
+lang = "ja"
+category = "utility"
+list = { link = "#main_cont dd > a", date_in_url = "yyyymmdd", follow = "#main_cont h3 > a" }
 
 # --- ベンダー ---
 

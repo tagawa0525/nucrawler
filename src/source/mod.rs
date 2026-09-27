@@ -6,6 +6,8 @@ use url::Url;
 
 use crate::config::{Filter, SourceKind};
 
+pub mod html_list;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("failed to parse feed")]

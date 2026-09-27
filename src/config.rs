@@ -626,6 +626,48 @@ mod tests {
         assert_eq!(s.sources[1].display_name(), "World Nuclear News");
     }
 
+    fn source_toml(kind: &str, extra: &str) -> String {
+        format!(
+            "[[source]]\nid = \"a\"\nname = \"A\"\nkind = \"{kind}\"\n\
+             url = \"https://e.example/\"\nlang = \"ja\"\ncategory = \"utility\"\n{extra}"
+        )
+    }
+
+    #[test]
+    fn html_list_needs_valid_list_settings() {
+        let ok = parse_sources(
+            &source_toml(
+                "html_list",
+                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\" }\n",
+            ),
+            p(),
+        )
+        .unwrap();
+        let list = ok.sources[0].list.as_ref().unwrap();
+        assert_eq!(list.date_in_url, Some(UrlDate::Yymmdd));
+        for (text, reason) in [
+            (source_toml("html_list", ""), "[source.list]"),
+            (
+                source_toml("feed", "list = { link = \"a\" }\n"),
+                "only for html_list",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"dd >\" }\n"),
+                "list.link",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"a\", follow = \"[\" }\n"),
+                "list.follow",
+            ),
+        ] {
+            let err = parse_sources(&text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason: r, .. } if r.contains(reason)),
+                "{text}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn examples_are_valid() {
         parse_config(include_str!("../examples/config.toml"), p()).unwrap();

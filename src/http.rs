@@ -184,7 +184,8 @@ impl Fetcher {
                 source,
             })?
         {
-            if (body.len() + chunk.len()) as u64 > self.max_body_bytes {
+            let len = body.len().saturating_add(chunk.len());
+            if u64::try_from(len).map_or(true, |len| len > self.max_body_bytes) {
                 return Err(too_large());
             }
             body.extend_from_slice(&chunk);

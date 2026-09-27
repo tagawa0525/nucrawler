@@ -3,12 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, Outcome, call_recorded};
-use super::{Cancel, Halt, Target};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey};
+use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
-use crate::quota::Quota;
 use crate::{digest, errors};
 
 pub const STAGE: &str = "digest";
@@ -29,16 +28,17 @@ pub struct DigestSummary {
     pub cancelled: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn digest_articles<L: Llm>(
-    db: &Db,
-    llm: &L,
-    quota: &mut Quota,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     target: &Target,
     now: DateTime<Utc>,
-    cancel: &Cancel,
 ) -> Result<DigestSummary, DigestStageError> {
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
@@ -168,10 +168,11 @@ pub async fn digest_articles<L: Llm>(
 mod tests {
     use super::*;
     use crate::config::Lang;
-    use crate::db::{ContentKind, ContentOrigin, NewArticle};
+    use crate::db::{ContentKind, ContentOrigin, Db, NewArticle};
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse, RateLimit, Window};
-    use crate::quota::{QuotaConfig, Stop};
+    use crate::pipeline::Cancel;
+    use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         // JST 11:00（10〜15 時の枠）
@@ -239,16 +240,18 @@ mod tests {
 
     async fn run(db: &Db, llm: &FakeLlm, quota: &mut Quota, batch: usize) -> DigestSummary {
         digest_articles(
-            db,
-            llm,
-            quota,
+            LlmStage {
+                db,
+                llm,
+                quota,
+                cancel: &Cancel::default(),
+            },
             &llm_cfg(batch),
             &PipelineConfig::default(),
             &Target::Pending {
                 requests_only: false,
             },
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap()
@@ -387,16 +390,18 @@ mod tests {
             ..llm_cfg(1)
         };
         let summary = digest_articles(
-            &db,
-            &llm,
-            &mut q,
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut q,
+                cancel: &Cancel::default(),
+            },
             &cfg,
             &PipelineConfig::default(),
             &Target::Pending {
                 requests_only: false,
             },
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap();
@@ -506,14 +511,16 @@ mod tests {
         };
         let llm = FakeLlm::new([ok(&ids[1..], 0.1)]);
         let summary = digest_articles(
-            &db,
-            &llm,
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
             &opus,
             &PipelineConfig::default(),
             &target,
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap();
@@ -528,14 +535,16 @@ mod tests {
             ["sonnet", "opus"]
         );
         let again = digest_articles(
-            &db,
-            &FakeLlm::new([]),
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &FakeLlm::new([]),
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
             &opus,
             &PipelineConfig::default(),
             &target,
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap();
@@ -596,16 +605,18 @@ mod tests {
         let summary = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             digest_articles(
-                &db,
-                &Hanging,
-                &mut quota(10),
+                LlmStage {
+                    db: &db,
+                    llm: &Hanging,
+                    quota: &mut quota(10),
+                    cancel: &cancel,
+                },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
                 &Target::Pending {
                     requests_only: false,
                 },
                 now(),
-                &cancel,
             ),
         )
         .await
@@ -622,16 +633,18 @@ mod tests {
         articles(&db, 2);
         let cancel = Cancel::default();
         let summary = digest_articles(
-            &db,
-            &KilledWithCancel(cancel.clone()),
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &KilledWithCancel(cancel.clone()),
+                quota: &mut quota(10),
+                cancel: &cancel,
+            },
             &llm_cfg(5),
             &PipelineConfig::default(),
             &Target::Pending {
                 requests_only: false,
             },
             now(),
-            &cancel,
         )
         .await
         .unwrap();
@@ -662,16 +675,18 @@ mod tests {
             articles(&db, 2);
             let cancel = Cancel::default();
             let summary = digest_articles(
-                &db,
-                &AnswerWithCancel(cancel.clone()),
-                &mut quota(10),
+                LlmStage {
+                    db: &db,
+                    llm: &AnswerWithCancel(cancel.clone()),
+                    quota: &mut quota(10),
+                    cancel: &cancel,
+                },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
                 &Target::Pending {
                     requests_only: false,
                 },
                 now(),
-                &cancel,
             )
             .await
             .unwrap();
@@ -687,16 +702,18 @@ mod tests {
         let cancel = Cancel::default();
         cancel.request();
         let summary = digest_articles(
-            &db,
-            &FakeLlm::new([]),
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &FakeLlm::new([]),
+                quota: &mut quota(10),
+                cancel: &cancel,
+            },
             &llm_cfg(5),
             &PipelineConfig::default(),
             &Target::Pending {
                 requests_only: false,
             },
             now(),
-            &cancel,
         )
         .await
         .unwrap();

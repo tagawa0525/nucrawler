@@ -7,7 +7,7 @@
 //!
 //! 使用率は直前の呼び出しで得た値（`rate_limit_event`）を使う。リセット時刻を過ぎた枠は 0 とみなす。
 
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, TimeDelta, Timelike, Utc};
 use serde::Deserialize;
 
 use crate::llm::{RateLimit, Window};
@@ -247,9 +247,14 @@ impl Quota {
 
     /// 週の経過率に `pace_ahead_days` 日分を足した割合まで、絶対上限を配分する。
     fn pace_limit(&self, week: Window, now: DateTime<Utc>) -> f64 {
-        const WEEK: f64 = 7.0 * 86400.0;
-        let started = week.resets_at as f64 - WEEK;
-        let elapsed = ((now.timestamp() as f64 - started) / WEEK).clamp(0.0, 1.0);
+        const WEEK: TimeDelta = TimeDelta::weeks(1);
+        // 表せないほど遠いリセット時刻は、週の始まりとみなして最も控えめに配分する
+        let elapsed = DateTime::from_timestamp(week.resets_at, 0)
+            .and_then(|resets_at| resets_at.checked_sub_signed(WEEK))
+            .map_or(0.0, |started| {
+                (now - started).as_seconds_f64() / WEEK.as_seconds_f64()
+            })
+            .clamp(0.0, 1.0);
         let ahead = self.cfg.pace_ahead_days / 7.0;
         self.cfg.weekly_max * (elapsed + ahead).min(1.0)
     }

@@ -3,12 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, Outcome, call_recorded};
-use super::{Cancel, Halt};
+use super::Halt;
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{Db, DbError, ScoreKey, StageKey, score_stage};
+use crate::db::{DbError, ScoreKey, StageKey, score_stage};
 use crate::llm::{Llm, LlmRequest};
-use crate::quota::Quota;
 use crate::{errors, scoring};
 
 pub const STAGE: &str = "score";
@@ -33,16 +32,17 @@ pub struct ScoreSummary {
     pub no_profile: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn score_articles<L: Llm>(
-    db: &Db,
-    llm: &L,
-    quota: &mut Quota,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
     now: DateTime<Utc>,
-    cancel: &Cancel,
 ) -> Result<ScoreSummary, ScoreStageError> {
     let mut summary = ScoreSummary::default();
     let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
@@ -158,11 +158,12 @@ mod tests {
     use super::*;
     use crate::config::Lang;
     use crate::db::{
-        ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact, SignalKind,
+        ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, SignalKind,
     };
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
-    use crate::quota::{QuotaConfig, Stop};
+    use crate::pipeline::Cancel;
+    use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-09-28T02:00:00Z")
@@ -243,14 +244,16 @@ mod tests {
         batch: usize,
     ) -> ScoreSummary {
         score_articles(
-            db,
-            llm,
-            quota,
+            LlmStage {
+                db,
+                llm,
+                quota,
+                cancel: &Cancel::default(),
+            },
             &cfg(batch),
             &PipelineConfig::default(),
             owner,
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap()

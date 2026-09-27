@@ -12,6 +12,7 @@ use nucrawler::mcp::{self, McpError};
 use nucrawler::pipeline::digest::{self, DigestStageError};
 use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
+use nucrawler::pipeline::llm_call::LlmStage;
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::score::{self, ScoreStageError};
 use nucrawler::pipeline::translate::{self, TranslateStageError};
@@ -247,16 +248,18 @@ async fn crawl(
                     ..config.llm.clone()
                 };
                 let summary = digest::digest_articles(
-                    &db,
-                    &llm,
-                    &mut quota,
+                    LlmStage {
+                        db: &db,
+                        llm: &llm,
+                        quota: &mut quota,
+                        cancel: &cancel,
+                    },
                     &digest_cfg,
                     &config.pipeline,
                     &Target::Pending {
                         requests_only: false,
                     },
                     chrono::Utc::now(),
-                    &cancel,
                 )
                 .await?;
                 tracing::info!(
@@ -269,14 +272,16 @@ async fn crawl(
             }
             Stage::Score => {
                 let summary = score::score_articles(
-                    &db,
-                    &llm,
-                    &mut quota,
+                    LlmStage {
+                        db: &db,
+                        llm: &llm,
+                        quota: &mut quota,
+                        cancel: &cancel,
+                    },
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
                     chrono::Utc::now(),
-                    &cancel,
                 )
                 .await?;
                 tracing::info!(
@@ -289,9 +294,12 @@ async fn crawl(
             }
             Stage::Translate => {
                 let summary = translate::translate_articles(
-                    &db,
-                    &llm,
-                    &mut quota,
+                    LlmStage {
+                        db: &db,
+                        llm: &llm,
+                        quota: &mut quota,
+                        cancel: &cancel,
+                    },
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
@@ -299,7 +307,6 @@ async fn crawl(
                         requests_only: args.requests_only,
                     },
                     chrono::Utc::now(),
-                    &cancel,
                 )
                 .await?;
                 tracing::info!(
@@ -377,14 +384,16 @@ async fn redo(config: Option<PathBuf>, data: Option<PathBuf>, args: RedoArgs) ->
                 ..config.llm.clone()
             };
             let summary = digest::digest_articles(
-                &db,
-                &llm,
-                &mut quota,
+                LlmStage {
+                    db: &db,
+                    llm: &llm,
+                    quota: &mut quota,
+                    cancel: &cancel,
+                },
                 &cfg,
                 &config.pipeline,
                 &target,
                 chrono::Utc::now(),
-                &cancel,
             )
             .await?;
             tracing::info!(
@@ -401,15 +410,17 @@ async fn redo(config: Option<PathBuf>, data: Option<PathBuf>, args: RedoArgs) ->
                 ..config.llm.clone()
             };
             let summary = translate::translate_articles(
-                &db,
-                &llm,
-                &mut quota,
+                LlmStage {
+                    db: &db,
+                    llm: &llm,
+                    quota: &mut quota,
+                    cancel: &cancel,
+                },
                 &cfg,
                 &config.pipeline,
                 owner,
                 &target,
                 chrono::Utc::now(),
-                &cancel,
             )
             .await?;
             tracing::info!(

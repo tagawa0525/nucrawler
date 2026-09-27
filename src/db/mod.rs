@@ -231,6 +231,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0014_report_status.sql"),
     include_str!("migrations/0015_report_kinds.sql"),
     include_str!("migrations/0016_comments.sql"),
+    include_str!("migrations/0017_artifact_glossary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -2629,8 +2630,18 @@ fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     migrate_with(conn, MIGRATIONS)
 }
 
-/// `migrations` のうち未適用のものを 1 つのトランザクションで適用する。
+/// `migrations` のうち未適用のものを 1 つのトランザクションで適用する。テーブルを作り直すときに
+/// 参照している側の行が連鎖して消えないよう、適用の間は外部キーを止め、最後に違反が無いことを
+/// 確かめてから確定する（SQLite の推奨する手順）。外部キーは失敗しても有効に戻す。
 fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
+    // トランザクションの中では切り替えられないので、その外で止める
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let applied = apply_migrations(conn, migrations);
+    conn.pragma_update(None, "foreign_keys", true)?;
+    applied
+}
+
+fn apply_migrations(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let found = schema_version(&tx)?;
     let applied = usize::try_from(found).map_err(|_| DbError::InvalidSchemaVersion(found))?;
@@ -2642,6 +2653,13 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbErro
     for sql in pending {
         tx.execute_batch(sql)?;
         version += 1;
+    }
+    let violations: i64 =
+        tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?;
+    if violations > 0 {
+        return Err(DbError::ForeignKeyViolation(violations));
     }
     tx.pragma_update(None, "user_version", version)?;
     tx.commit()?;

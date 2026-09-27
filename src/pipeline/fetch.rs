@@ -1,10 +1,12 @@
 //! 取得ステージ：有効なソースを取得・解析・絞り込みし、新しい記事を登録する。
 //! フィードに概要や本文があれば、テキストにして本文の部分（contents）として保存する。
 
+use chrono::{DateTime, Utc};
+
 use super::Cancel;
 use crate::check;
 use crate::config::Source;
-use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, NewArticle};
+use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, FetchCounts, NewArticle};
 use crate::errors;
 use crate::http::Fetcher;
 use crate::source::Candidate;
@@ -26,12 +28,14 @@ pub struct FetchSummary {
     pub cancelled: bool,
 }
 
-/// ソース単位の失敗は `source_state` に記録して次のソースへ進む。DB のエラーは即座に返す。
+/// ソース単位の失敗は `source_state` に記録して次のソースへ進む。成功した回は、その件数と一緒に
+/// `now` の時刻で記録する。DB のエラーは即座に返す。
 pub async fn fetch_sources(
     db: &Db,
     fetcher: &Fetcher,
     sources: &[Source],
     cancel: &Cancel,
+    now: DateTime<Utc>,
 ) -> Result<FetchSummary, FetchError> {
     let mut summary = FetchSummary::default();
     for s in sources.iter().filter(|s| s.enabled) {
@@ -41,9 +45,22 @@ pub async fn fetch_sources(
         }
         match check::fetch_source(fetcher, s).await {
             Ok(stats) => {
-                let new = store(db, s, &stats.matched)?;
-                db.record_source_success(&s.id)?;
-                tracing::info!(source = %s.id, total = stats.total, new, "fetched");
+                let Stored { new, duplicate } = store(db, s, &stats.matched)?;
+                let counts = FetchCounts {
+                    total: stats.total,
+                    matched: stats.matched.len(),
+                    new,
+                    duplicate,
+                };
+                db.record_source_success(&s.id, &counts, now)?;
+                tracing::info!(
+                    source = %s.id,
+                    total = stats.total,
+                    matched = counts.matched,
+                    new,
+                    duplicate,
+                    "fetched"
+                );
                 summary.new_articles += new;
             }
             Err(e) => {
@@ -57,9 +74,16 @@ pub async fn fetch_sources(
     Ok(summary)
 }
 
-/// 新しい記事を登録し、その数を返す。URL が不正な候補は記録せずに飛ばす。
-fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError> {
+/// `store` で登録した件数と、登録済みだった件数。
+struct Stored {
+    new: usize,
+    duplicate: usize,
+}
+
+/// 候補を登録する。URL が不正な候補は記録せずに飛ばす。
+fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<Stored, DbError> {
     let mut new = 0;
+    let mut duplicate = 0;
     for c in candidates {
         let published_at = c.published_at.map(db::timestamp);
         let lead = c.summary.as_deref().map(text::html_to_text);
@@ -81,14 +105,14 @@ fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError
         };
         match db.insert_article_with_contents(&article, &contents) {
             Ok(Some(_)) => new += 1,
-            Ok(None) => {}
+            Ok(None) => duplicate += 1,
             Err(e @ (DbError::InvalidUrl { .. } | DbError::UnsupportedScheme { .. })) => {
                 tracing::warn!(source = %s.id, "skipping candidate: {}", errors::error_chain(&e));
             }
             Err(e) => return Err(e),
         }
     }
-    Ok(new)
+    Ok(Stored { new, duplicate })
 }
 
 #[cfg(test)]
@@ -146,6 +170,10 @@ mod tests {
         (server, sources)
     }
 
+    fn at() -> DateTime<Utc> {
+        "2026-09-27T00:00:00Z".parse().unwrap()
+    }
+
     fn count(db: &Db, sql: &str) -> i64 {
         db.query_i64(sql).unwrap()
     }
@@ -154,7 +182,7 @@ mod tests {
     async fn stores_new_matching_articles_and_records_failures() {
         let (_server, sources) = setup();
         let db = Db::open_in_memory().unwrap();
-        let summary = fetch_sources(&db, &fetcher(), &sources, &Cancel::default())
+        let summary = fetch_sources(&db, &fetcher(), &sources, &Cancel::default(), at())
             .await
             .unwrap();
         // reg は絞り込みで 1 件、utility は 2 件。blocked は失敗し、off は無効
@@ -188,21 +216,37 @@ mod tests {
     async fn rerun_adds_nothing_new() {
         let (_server, sources) = setup();
         let db = Db::open_in_memory().unwrap();
-        fetch_sources(&db, &fetcher(), &sources, &Cancel::default())
+        fetch_sources(&db, &fetcher(), &sources, &Cancel::default(), at())
             .await
             .unwrap();
-        let again = fetch_sources(&db, &fetcher(), &sources, &Cancel::default())
+        let again = fetch_sources(&db, &fetcher(), &sources, &Cancel::default(), at())
             .await
             .unwrap();
         assert_eq!(again.new_articles, 0);
         assert_eq!(count(&db, "SELECT count(*) FROM articles"), 3);
+        // 成功したソースは回ごとに件数を残す（reg はリンクのある 2 件中 1 件が絞り込みに一致）。
+        // 失敗した回は残さない
+        assert_eq!(
+            db.query_strings(
+                "SELECT source_id || ':' || total || '/' || matched || ' new ' || new
+                        || ' dup ' || duplicate
+                 FROM fetch_runs ORDER BY id"
+            )
+            .unwrap(),
+            [
+                "reg:2/1 new 1 dup 0",
+                "utility:2/2 new 2 dup 0",
+                "reg:2/1 new 0 dup 1",
+                "utility:2/2 new 0 dup 2",
+            ]
+        );
     }
 
     #[tokio::test]
     async fn stores_feed_summary_and_content_as_text() {
         let (_server, sources) = setup();
         let db = Db::open_in_memory().unwrap();
-        fetch_sources(&db, &fetcher(), &sources[..1], &Cancel::default())
+        fetch_sources(&db, &fetcher(), &sources[..1], &Cancel::default(), at())
             .await
             .unwrap();
         let rows = db
@@ -227,7 +271,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let cancel = Cancel::default();
         cancel.request();
-        let summary = fetch_sources(&db, &fetcher(), &sources, &cancel)
+        let summary = fetch_sources(&db, &fetcher(), &sources, &cancel, at())
             .await
             .unwrap();
         assert!(summary.cancelled);

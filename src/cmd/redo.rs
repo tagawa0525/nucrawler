@@ -31,11 +31,7 @@ pub(crate) async fn redo(
     let db = Db::open(&data.join("nucrawler.db"))?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    let llm = ClaudeCli {
-        command: config.llm.command.clone().into(),
-        cwd: data.join("llm-cwd"),
-        timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
-    };
+    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"));
     let mut quota = Quota::new(
         config.quota.clone(),
         db.latest_rate_limit()?,

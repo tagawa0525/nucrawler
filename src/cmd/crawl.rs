@@ -49,11 +49,7 @@ pub(crate) async fn crawl(
     // 認証切れなど、利用者が対処すべき LLM の失敗（最後にエラーとして報告する）
     let mut llm_failure = None;
     // LLM のステージで共有する。呼び出し回数や時間帯の上限は、この実行全体に効く。
-    let llm = ClaudeCli {
-        command: config.llm.command.clone().into(),
-        cwd: data.join("llm-cwd"),
-        timeout: std::time::Duration::from_secs(config.llm.timeout_secs),
-    };
+    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"));
     let mut quota = Quota::new(
         config.quota.clone(),
         db.latest_rate_limit()?,

@@ -2,6 +2,29 @@
 
 use super::*;
 
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
+/// `include_read` なら後者に既読の記事も残す。
+/// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
+pub fn split_sections(
+    items: Vec<ListItem>,
+    boundary: Option<&str>,
+    include_read: bool,
+) -> (Vec<ListItem>, Vec<ListItem>) {
+    let Some(boundary) = boundary else {
+        return (items, Vec::new());
+    };
+    let (new, earlier): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|i| i.fetched_at.as_str() > boundary);
+    (
+        new,
+        earlier
+            .into_iter()
+            .filter(|i| include_read || !i.read)
+            .collect(),
+    )
+}
+
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
 #[derive(Clone, Copy, Default)]
 pub struct ListView {
@@ -126,6 +149,35 @@ mod tests {
     use super::*;
     use crate::db::Feedback;
     use crate::web::html::test_support::*;
+
+    #[test]
+    fn splits_new_and_earlier_unread() {
+        let mut read = item(3, "2026-09-26T00:00:00.000Z");
+        read.read = true;
+        let items = vec![
+            item(1, "2026-09-27T05:00:00.000Z"),
+            item(2, "2026-09-26T00:00:00.000Z"),
+            read,
+        ];
+        let boundary = Some("2026-09-27T00:00:00.000Z");
+        let (new, earlier) = split_sections(items.clone(), boundary, false);
+        assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
+        // 前回より前の記事は、未読のものだけを残す
+        assert_eq!(
+            earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
+            [2]
+        );
+        // 既読も出すなら、前回より前の記事をすべて残す
+        let (new, earlier) = split_sections(items.clone(), boundary, true);
+        assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        let (new, earlier) = split_sections(items, None, false);
+        assert_eq!(new.len(), 3);
+        assert!(earlier.is_empty());
+    }
 
     #[test]
     fn list_page_links_to_search() {

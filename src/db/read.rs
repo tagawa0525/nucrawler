@@ -19,6 +19,10 @@ pub struct ListItem {
     /// 現在のプロファイルでの点数（最新の digest に付いたもの）
     pub score: Option<u8>,
     pub reason: Option<String>,
+    /// その点数が当たった関心分野（プロファイルの interest の topic）
+    pub matched: Vec<String>,
+    /// その点数が当たった推薦しない話題（プロファイルの exclude）
+    pub excluded: Vec<String>,
     /// 詳細か和訳を開いたことがある
     pub read: bool,
     pub feedback: Option<Feedback>,
@@ -584,6 +588,8 @@ impl Db {
                 lwr_relevant: r.get(9)?,
                 score: r.get(10)?,
                 reason: r.get(11)?,
+                matched: Vec::new(),
+                excluded: Vec::new(),
                 read: r.get(12)?,
                 feedback: match feedback.as_deref() {
                     Some("up") => Some(Feedback::Up),
@@ -1297,6 +1303,37 @@ mod tests {
         let item = &db.list_articles(list_query(&db, true)).unwrap()[0];
         assert_eq!(item.score, Some(40));
         assert!(list_ids(&db, false).is_empty());
+    }
+
+    /// 点数が当たったプロファイルの語を、一覧の項目に付ける。
+    #[test]
+    fn list_carries_the_terms_the_score_matched() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let d = add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        db.insert_score_with_matches(
+            score_key(&db),
+            d,
+            90,
+            Some("理由"),
+            ScoreMatches {
+                interests: &["燃料".into(), "規制・審査".into()],
+                excludes: &["核融合".into()],
+            },
+            t("2026-09-26T02:00:00Z"),
+        )
+        .unwrap();
+        let item = &db.list_articles(list_query(&db, true)).unwrap()[0];
+        let mut matched = item.matched.clone();
+        matched.sort();
+        assert_eq!(matched, ["燃料", "規制・審査"]);
+        assert_eq!(item.excluded, ["核融合"]);
+        // 未採点なら空
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, b, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let unscored = items.iter().find(|i| i.article_id == b).unwrap();
+        assert!(unscored.matched.is_empty() && unscored.excluded.is_empty());
     }
 
     /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。

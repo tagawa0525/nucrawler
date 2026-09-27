@@ -105,6 +105,8 @@ mod tests {
             lwr_relevant: Some(true),
             score: Some(80),
             reason: None,
+            matched: Vec::new(),
+            excluded: Vec::new(),
             read: false,
             feedback: None,
             has_translation: false,

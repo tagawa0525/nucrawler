@@ -39,6 +39,10 @@ pub struct Article<'a> {
     pub lwr_relevant: Option<bool>,
     pub score: Option<u8>,
     pub reason: Option<&'a str>,
+    /// 点数が当たった関心分野（プロファイルの語）
+    pub matched: &'a [String],
+    /// 点数が当たった推薦しない話題（プロファイルの語）
+    pub excluded: &'a [String],
     pub read: bool,
     /// 最新の 👍/👎（"up" / "down"）
     pub feedback: Option<&'static str>,
@@ -64,6 +68,8 @@ impl<'a> Article<'a> {
             lwr_relevant: i.lwr_relevant,
             score: i.score,
             reason: i.reason.as_deref(),
+            matched: &[],
+            excluded: &[],
             read: i.read,
             feedback: i.feedback.map(|f| match f {
                 Feedback::Up => "up",
@@ -140,5 +146,39 @@ impl<'a> Translation<'a> {
             created_at: &v.created_at,
             body_ja: &v.payload["body_ja"],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn article_carries_the_terms_the_score_matched() {
+        let item = ListItem {
+            article_id: 1,
+            source_id: "wnn".into(),
+            url: "https://e.com/1".into(),
+            title: "t".into(),
+            lang: "en".into(),
+            at: "2026-09-26T00:00:00.000Z".into(),
+            fetched_at: "2026-09-26T00:00:00.000Z".into(),
+            title_ja: None,
+            summary_ja: None,
+            lwr_relevant: Some(true),
+            score: Some(80),
+            reason: Some("理由".into()),
+            matched: vec!["燃料".into()],
+            excluded: vec!["核融合".into()],
+            read: false,
+            feedback: None,
+            bookmarked: false,
+            has_translation: false,
+            translation_requested: false,
+            locked_by: vec![],
+        };
+        let json = serde_json::to_value(Article::new(&item, &SourceLabels::default())).unwrap();
+        assert_eq!(json["matched"], serde_json::json!(["燃料"]));
+        assert_eq!(json["excluded"], serde_json::json!(["核融合"]));
     }
 }

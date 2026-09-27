@@ -336,6 +336,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detail_page_shows_the_terms_the_score_matched() {
+        let mut d = detail();
+        d.item.matched = vec!["燃料".into()];
+        d.item.excluded = vec!["核融合".into()];
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(
+                "<span class=\"match\">燃料</span><span class=\"match excluded\">除外 核融合</span>"
+            ),
+            "{html}"
+        );
+    }
+
     /// ブックマーク済みなら、同じボタンで外す。
     #[test]
     fn detail_page_offers_to_remove_the_bookmark() {

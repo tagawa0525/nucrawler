@@ -328,6 +328,31 @@ mod tests {
     }
 
     /// カードのソース・日付の横に、いいねとブックマークの印を出す。
+    /// 点数が当たったプロファイルの語を、点数の意味として一緒に出す。
+    #[test]
+    fn card_shows_the_terms_the_score_matched() {
+        let mut i = item(1, "2026-09-27T05:00:00.000Z");
+        i.matched = vec!["燃料".into(), "規制<審査>".into()];
+        i.excluded = vec!["核融合".into()];
+        let html = card(&i, false, &Page::default());
+        assert!(
+            html.contains(
+                "<span class=\"match\">燃料</span><span class=\"match\">規制&lt;審査&gt;</span>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"match excluded\">除外 核融合</span>"),
+            "{html}"
+        );
+        let plain = card(
+            &item(2, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(!plain.contains("class=\"match"), "{plain}");
+    }
+
     #[test]
     fn card_marks_liked_and_bookmarked_articles() {
         let mut marked = item(1, "2026-09-27T05:00:00.000Z");

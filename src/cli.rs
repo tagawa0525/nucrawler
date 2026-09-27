@@ -31,6 +31,8 @@ pub enum ParseError {
     CrawlUsage { stages: String },
     #[error("usage: nucrawler serve [--addr IP:PORT]")]
     ServeUsage,
+    #[error("usage: nucrawler eval [--all]")]
+    EvalUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -57,6 +59,7 @@ pub enum Command {
     Profile,
     Topics,
     Search,
+    Eval,
     Help,
 }
 
@@ -78,6 +81,7 @@ commands:
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
+  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all]）
   help      このヘルプを表示
 ";
 
@@ -108,6 +112,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("profile") => Command::Profile,
         Some("topics") => Command::Topics,
         Some("search") => Command::Search,
+        Some("eval") => Command::Eval,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -277,6 +282,21 @@ pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, ParseError> {
     Ok(ServeArgs { addr })
 }
 
+/// `eval` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct EvalArgs {
+    /// 現行のキーだけでなく、過去のプロファイル・プロンプトの版の採点も並べる
+    pub all: bool,
+}
+
+pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
+    match args {
+        [] => Ok(EvalArgs { all: false }),
+        [flag] if flag == "--all" => Ok(EvalArgs { all: true }),
+        _ => Err(ParseError::EvalUsage),
+    }
+}
+
 /// `profile` サブコマンドの引数。
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProfileArgs {
@@ -387,6 +407,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_eval_args() {
+        assert_eq!(parse_eval_args(&[]).unwrap(), EvalArgs { all: false });
+        assert_eq!(
+            parse_eval_args(&args(&["--all"])).unwrap(),
+            EvalArgs { all: true }
+        );
+        assert!(matches!(
+            parse_eval_args(&args(&["--bogus"])),
+            Err(ParseError::EvalUsage)
+        ));
+    }
+
+    #[test]
     fn parses_subcommand_and_keeps_rest() {
         let inv = parse(args(&["crawl", "--until", "digest"])).unwrap();
         assert_eq!(
@@ -413,6 +446,7 @@ mod tests {
             ("profile", Command::Profile),
             ("topics", Command::Topics),
             ("search", Command::Search),
+            ("eval", Command::Eval),
             ("help", Command::Help),
             ("--help", Command::Help),
             ("-h", Command::Help),

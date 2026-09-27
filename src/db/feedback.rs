@@ -27,6 +27,19 @@ impl SignalKind {
             Self::Dismiss => "dismiss",
         }
     }
+
+    /// DB の `events.kind` の値を読む。
+    pub(super) fn parse(s: &str) -> Result<Self, DbError> {
+        Ok(match s {
+            "open_detail" => Self::OpenDetail,
+            "open_translation" => Self::OpenTranslation,
+            "up" => Self::Up,
+            "down" => Self::Down,
+            "bookmark" => Self::Bookmark,
+            "dismiss" => Self::Dismiss,
+            other => return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}"))),
+        })
+    }
 }
 
 /// 採点の参考にする直近の行動と、その記事の見出し。
@@ -121,18 +134,10 @@ impl Db {
         )?;
         rows.map(|row| {
             let (kind, title_ja) = row?;
-            let kind = match kind.as_str() {
-                "open_detail" => SignalKind::OpenDetail,
-                "open_translation" => SignalKind::OpenTranslation,
-                "up" => SignalKind::Up,
-                "down" => SignalKind::Down,
-                "bookmark" => SignalKind::Bookmark,
-                "dismiss" => SignalKind::Dismiss,
-                other => {
-                    return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}")));
-                }
-            };
-            Ok(Signal { kind, title_ja })
+            Ok(Signal {
+                kind: SignalKind::parse(&kind)?,
+                title_ja,
+            })
         })
         .collect()
     }

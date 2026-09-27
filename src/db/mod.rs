@@ -6,6 +6,7 @@ use crate::config::Lang;
 
 mod articles;
 mod artifacts;
+mod eval;
 mod feedback;
 mod notes;
 mod read;
@@ -21,6 +22,7 @@ mod warnings;
 
 pub use articles::*;
 pub use artifacts::*;
+pub use eval::*;
 pub use feedback::*;
 pub use notes::*;
 pub use read::*;

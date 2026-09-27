@@ -608,6 +608,9 @@ mod tests {
             with(serde_json::json!(["燃料"]), new(" ")),
             with(serde_json::json!(["燃料"]), new(&"長".repeat(21))),
             with(serde_json::json!(["燃料"]), new("行\n替え")),
+            with(serde_json::json!(["燃料"]), new("行\u{2028}区切り")),
+            with(serde_json::json!(["燃料"]), new("段落\u{2029}区切り")),
+            with(serde_json::json!(["燃料"]), new("タブ\t入り")),
             with(
                 serde_json::json!(["燃料"]),
                 serde_json::json!([{"name": "a", "facet": "話題"}]),

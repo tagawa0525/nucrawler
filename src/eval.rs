@@ -301,6 +301,23 @@ mod tests {
         assert!(!out.contains("cccccccc"), "{out}");
     }
 
+    /// 候補だけ採点済みでも、現行のキーの採点が無いことを示す（比べる相手が黙って消えないように）。
+    #[test]
+    fn says_when_only_the_candidate_has_scores() {
+        let labels = [label(1, SignalKind::Up)];
+        let candidate = key("bbbbbbbbbbbb", 2);
+        let scores = [scored(&candidate, 1, 90, "2026-09-26T00:00:00.000Z")];
+        let out = render(
+            &labels,
+            &scores,
+            Some(("aaaaaaaaaaaa", 2)),
+            Some("bbbbbbbbbbbb"),
+            false,
+        );
+        assert!(out.contains("no scores for the current profile"), "{out}");
+        assert!(out.contains("(candidate)"), "{out}");
+    }
+
     #[test]
     fn says_when_the_current_key_has_no_scores() {
         let labels = [label(1, SignalKind::Up)];

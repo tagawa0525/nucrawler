@@ -50,6 +50,59 @@ pub struct NewTermReport<'a> {
     pub note: Option<&'a str>,
 }
 
+/// 訳語の指摘の対応状況。受付中から変えた時刻を対応日時にする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportStatus {
+    /// まだ対応していない
+    Pending,
+    /// 訳語集に反映した
+    Added,
+    /// 訳語集にあったのに、その訳が使われていなかった
+    Existing,
+    /// 今の訳のままでよい
+    Rejected,
+}
+
+impl ReportStatus {
+    pub const ALL: [ReportStatus; 4] = [
+        ReportStatus::Pending,
+        ReportStatus::Added,
+        ReportStatus::Existing,
+        ReportStatus::Rejected,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportStatus::Pending => "pending",
+            ReportStatus::Added => "added",
+            ReportStatus::Existing => "existing",
+            ReportStatus::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|x| x.as_str() == s)
+    }
+}
+
+/// 受付箱の 1 件。`term` は結び付けた訳語（id と訳）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermReport {
+    pub id: i64,
+    pub article_id: i64,
+    /// 最新の要約の見出し（無ければ原題）
+    pub article_title: String,
+    pub found: String,
+    pub wanted: Option<String>,
+    pub source: Option<String>,
+    pub note: Option<String>,
+    pub status: ReportStatus,
+    pub term: Option<(i64, String)>,
+    pub reply: Option<String>,
+    pub reported_at: String,
+    pub resolved_at: Option<String>,
+}
+
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[
@@ -1577,6 +1630,32 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    /// 受付箱（新しい順）。`status` と `article_id` で絞る。
+    pub fn term_reports(
+        &self,
+        _status: Option<ReportStatus>,
+        _article_id: Option<i64>,
+    ) -> Result<Vec<TermReport>, DbError> {
+        todo!()
+    }
+
+    /// 対応状況ごとの件数（`ReportStatus::ALL` の順。0 件も含む）。
+    pub fn term_report_counts(&self) -> Result<Vec<(ReportStatus, i64)>, DbError> {
+        todo!()
+    }
+
+    /// 指摘の対応状況を変える。無ければ false。受付中に戻せば対応日時を消す。
+    pub fn resolve_term_report(
+        &self,
+        _id: i64,
+        _status: ReportStatus,
+        _term_id: Option<i64>,
+        _reply: Option<&str>,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        todo!()
     }
 
     /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、
@@ -5026,6 +5105,123 @@ mod tests {
             ))
             .unwrap(),
             0
+        );
+    }
+
+    fn report(db: &Db, article_id: i64, found: &str, at: &str) {
+        let owner = db.owner_id().unwrap();
+        let report = NewTermReport {
+            found,
+            wanted: Some("燃料取替停止"),
+            source: None,
+            note: None,
+        };
+        db.report_term(owner, article_id, &report, t(at)).unwrap();
+    }
+
+    /// 指摘は受付中で入り、新しい順に並ぶ。見出しは要約が無ければ原題。
+    #[test]
+    fn term_reports_start_pending_and_are_listed_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_article(&article("https://e.com/b"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        report(&db, b, "燃料補給停止", "2026-09-27T01:00:00Z");
+        let reports = db.term_reports(None, None).unwrap();
+        let found: Vec<&str> = reports.iter().map(|r| r.found.as_str()).collect();
+        assert_eq!(found, ["燃料補給停止", "給油停止"]);
+        let r = &reports[1];
+        assert_eq!(r.article_id, a);
+        assert_eq!(r.article_title, "t");
+        assert_eq!(r.wanted.as_deref(), Some("燃料取替停止"));
+        assert_eq!(r.status, ReportStatus::Pending);
+        assert_eq!(r.reported_at, "2026-09-27T00:00:00.000Z");
+        assert_eq!(
+            (r.resolved_at.as_deref(), &r.term, &r.reply),
+            (None, &None, &None)
+        );
+        assert_eq!(db.term_reports(None, Some(a)).unwrap().len(), 1);
+        assert_eq!(
+            db.term_report_counts().unwrap(),
+            [
+                (ReportStatus::Pending, 2),
+                (ReportStatus::Added, 0),
+                (ReportStatus::Existing, 0),
+                (ReportStatus::Rejected, 0),
+            ]
+        );
+    }
+
+    /// 対応すると状況・訳語・ひとことと対応日時を残し、受付中に戻すと対応日時を消す。
+    /// 結び付けた訳語を消しても指摘は残る。
+    #[test]
+    fn term_reports_are_resolved_and_can_be_reopened() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let id = db.term_reports(None, None).unwrap()[0].id;
+        let term = db
+            .add_glossary_term(
+                &glossary_term(&["refuelling outage"], "燃料取替停止（英綴り）", None),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        assert!(
+            db.resolve_term_report(
+                id,
+                ReportStatus::Added,
+                Some(term),
+                Some("英綴りを追加"),
+                t("2026-09-27T02:00:00Z")
+            )
+            .unwrap()
+        );
+        let r = &db.term_reports(Some(ReportStatus::Added), None).unwrap()[0];
+        assert_eq!(r.term, Some((term, "燃料取替停止（英綴り）".to_string())));
+        assert_eq!(r.reply.as_deref(), Some("英綴りを追加"));
+        assert_eq!(r.resolved_at.as_deref(), Some("2026-09-27T02:00:00.000Z"));
+        assert!(
+            db.term_reports(Some(ReportStatus::Pending), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.delete_glossary_term(term).unwrap();
+        assert_eq!(db.term_reports(None, None).unwrap()[0].term, None);
+
+        assert!(
+            db.resolve_term_report(
+                id,
+                ReportStatus::Pending,
+                None,
+                None,
+                t("2026-09-27T03:00:00Z")
+            )
+            .unwrap()
+        );
+        let r = &db.term_reports(None, None).unwrap()[0];
+        assert_eq!(
+            (r.status, r.resolved_at.as_deref()),
+            (ReportStatus::Pending, None)
+        );
+        assert!(
+            !db.resolve_term_report(
+                9999,
+                ReportStatus::Rejected,
+                None,
+                None,
+                t("2026-09-27T03:00:00Z")
+            )
+            .unwrap()
         );
     }
 

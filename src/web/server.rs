@@ -374,7 +374,7 @@ async fn detail(
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::detail_page(&detail, view, &page))
+        Ok(html::detail_page(&detail, &[], view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -521,7 +521,7 @@ async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppErro
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::settings_page(terms, &page))
+        Ok(html::settings_page(terms, 0, &page))
     })
     .await?;
     Ok(Html(page))
@@ -1419,6 +1419,106 @@ mod tests {
         assert_eq!(
             server.count("SELECT count(*) FROM glossary_sources"),
             before
+        );
+    }
+
+    /// 受付箱は既定で受付中だけを出し、対応すると受付中から外れて記事の詳細に状況が出る。
+    #[tokio::test]
+    async fn reports_are_listed_and_resolved() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        server
+            .post(
+                &format!("/articles/{id}/term-report"),
+                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+            )
+            .await;
+        let report = server.count("SELECT id FROM term_reports");
+        let (_, html) = server.get("/settings").await;
+        assert!(html.contains("受付中 1 件"), "{html}");
+        let (status, html) = server.get("/reports").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("給油停止") && html.contains("見出しA"),
+            "{html}"
+        );
+
+        let res = server
+            .post(
+                &format!("/reports/{report}"),
+                "status=added&term_id=1&reply=&back=pending",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"].to_str().unwrap(), "/reports");
+        assert_eq!(
+            server.count(
+                "SELECT count(*) FROM term_reports
+                 WHERE status = 'added' AND term_id = 1 AND reply IS NULL AND resolved_at IS NOT NULL"
+            ),
+            1
+        );
+        let (_, html) = server.get("/reports").await;
+        assert!(!html.contains("給油停止"), "{html}");
+        let (_, html) = server.get("/reports?status=all").await;
+        assert!(html.contains("給油停止"), "{html}");
+        let (_, html) = server.get(&format!("/articles/{id}")).await;
+        assert!(html.contains("給油停止（追加済）"), "{html}");
+
+        let res = server
+            .post(
+                &format!("/reports/{report}"),
+                "status=rejected&term_id=&back=all",
+            )
+            .await;
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            "/reports?status=all"
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_reject_invalid_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{id}/term-report"), "found=x")
+            .await;
+        let path = format!("/reports/{}", server.count("SELECT id FROM term_reports"));
+        assert_eq!(server.get("/reports?status=bogus").await.0, 400);
+        assert_eq!(
+            server.post(&path, "status=bogus").await.status().as_u16(),
+            400
+        );
+        assert_eq!(server.post(&path, "term_id=1").await.status().as_u16(), 400);
+        assert_eq!(
+            server
+                .post(&path, "status=added&term_id=x")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server
+                .post("/reports/999", "status=added")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        let res = server
+            .form(&path, "status=added")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(
+            server.count("SELECT count(*) FROM term_reports WHERE status = 'pending'"),
+            1
         );
     }
 

@@ -239,13 +239,24 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 }
 
 /// 管理の画面への入口（一覧の ⚙ から入る）。
-pub fn settings_page(glossary_terms: usize, page: &Page) -> String {
+pub fn settings_page(glossary_terms: usize, _pending_reports: i64, page: &Page) -> String {
     let body = format!(
         "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>設定</h1>\
          <ul class=\"menu\"><li><a href=\"/glossary\">訳語集</a> \
          <span class=\"meta\">{glossary_terms} 語</span></li></ul>"
     );
     layout("設定", page, &body)
+}
+
+/// 受付箱。`filter` が None ならすべて。対応のフォームは開いたときだけ出す。
+pub fn reports_page(
+    _reports: &[crate::db::TermReport],
+    _counts: &[(crate::db::ReportStatus, i64)],
+    _filter: Option<crate::db::ReportStatus>,
+    _terms: &[crate::glossary::Entry],
+    _page: &Page,
+) -> String {
+    todo!()
 }
 
 /// 訳語集。訳語ごとに畳み、開いたときだけ編集のフォームを出す（一覧の密度を上げない）。
@@ -681,7 +692,12 @@ pub struct DetailView {
     pub reported: bool,
 }
 
-pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
+pub fn detail_page(
+    d: &ArticleDetail,
+    _reports: &[crate::db::TermReport],
+    view: DetailView,
+    page: &Page,
+) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -856,6 +872,7 @@ fn translation_section(d: &ArticleDetail, view: DetailView) -> String {
 mod tests {
     use super::*;
     use crate::db::{ArtifactVersion, Feedback};
+    use crate::db::{ReportStatus, TermReport};
 
     fn item(id: i64, fetched_at: &str) -> ListItem {
         ListItem {
@@ -1300,7 +1317,7 @@ mod tests {
 
         let mut d = detail();
         d.item.source_id = "kyuden".into();
-        let html = detail_page(&d, DetailView::default(), &page);
+        let html = detail_page(&d, &[], DetailView::default(), &page);
         assert!(!html.contains("kyuden"), "{html}");
     }
 
@@ -1328,7 +1345,7 @@ mod tests {
         for v in &mut d.digests {
             v.payload["title_ja"] = serde_json::json!("");
         }
-        let html = detail_page(&d, DetailView::default(), &Page::default());
+        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(&format!("<h1>{}</h1>", escape(&d.item.title))),
             "{html}"
@@ -1402,7 +1419,7 @@ mod tests {
 
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {
-        let html = detail_page(&detail(), DetailView::default(), &Page::default());
+        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
         assert!(
             html.contains("新版") && !html.contains("<h1>旧版"),
             "{html}"
@@ -1434,7 +1451,7 @@ mod tests {
     fn detail_page_offers_to_remove_the_bookmark() {
         let mut d = detail();
         d.item.bookmarked = true;
-        let html = detail_page(&d, DetailView::default(), &Page::default());
+        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(r#"<button name="kind" value="unbookmark" class="on">🔖</button>"#),
             "{html}"
@@ -1447,7 +1464,7 @@ mod tests {
             digest: Some(10),
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), view, &Page::default());
+        let html = detail_page(&detail(), &[], view, &Page::default());
         assert!(html.contains("旧版"));
     }
 
@@ -1463,7 +1480,7 @@ mod tests {
             created_at: "2026-09-26T00:00:00.000Z".into(),
             payload: serde_json::json!({"body_ja": "第一段落。\n\n第二段落<script>"}),
         }];
-        let html = detail_page(&d, DetailView::default(), &Page::default());
+        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(r#"href="/articles/7?view=translation""#),
             "{html}"
@@ -1473,7 +1490,7 @@ mod tests {
             show_translation: true,
             ..DetailView::default()
         };
-        let html = detail_page(&d, view, &Page::default());
+        let html = detail_page(&d, &[], view, &Page::default());
         assert!(html.contains("<p>第一段落。</p>"), "{html}");
         assert!(html.contains("第二段落&lt;script&gt;"));
         assert!(!html.contains(r#"translation-request"#));
@@ -1483,7 +1500,7 @@ mod tests {
     fn detail_page_shows_waiting_when_requested() {
         let mut d = detail();
         d.item.translation_requested = true;
-        let html = detail_page(&d, DetailView::default(), &Page::default());
+        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
     }
@@ -1491,7 +1508,7 @@ mod tests {
     /// 訳語の指摘は畳んでおき、開いたときだけフォームを出す。和訳を読んでいれば和訳に戻る。
     #[test]
     fn detail_page_offers_a_folded_term_report() {
-        let html = detail_page(&detail(), DetailView::default(), &Page::default());
+        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(
                 r#"<details class="report" id="term-report"><summary>訳語の指摘</summary>"#
@@ -1517,7 +1534,7 @@ mod tests {
             reported: true,
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), view, &Page::default());
+        let html = detail_page(&detail(), &[], view, &Page::default());
         assert!(
             html.contains(r#"<input type="hidden" name="view" value="translation">"#),
             "{html}"
@@ -1530,16 +1547,122 @@ mod tests {
     fn detail_page_without_japanese_has_no_term_report() {
         let mut d = detail();
         d.digests.clear();
-        let html = detail_page(&d, DetailView::default(), &Page::default());
+        let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(!html.contains("term-report"), "{html}");
     }
 
     #[test]
     fn settings_page_leads_to_the_glossary() {
-        let html = settings_page(15, &Page::default());
+        let html = settings_page(15, 3, &Page::default());
         assert!(html.contains(r#"href="/""#), "back to the list: {html}");
         assert!(html.contains(r#"<a href="/glossary">訳語集</a>"#), "{html}");
         assert!(html.contains("15 語"), "{html}");
+        assert!(html.contains(r#"<a href="/reports">受付箱</a>"#), "{html}");
+        assert!(html.contains("受付中 3 件"), "{html}");
+    }
+
+    fn term_report(id: i64, status: ReportStatus) -> TermReport {
+        TermReport {
+            id,
+            article_id: 7,
+            article_title: "見出し<A>".into(),
+            found: "給油停止".into(),
+            wanted: Some("燃料取替停止".into()),
+            source: Some("refueling outage".into()),
+            note: None,
+            status,
+            term: None,
+            reply: None,
+            reported_at: "2026-09-27T00:00:00.000Z".into(),
+            resolved_at: None,
+        }
+    }
+
+    /// 受付箱は状況ごとの件数で絞り、指摘・記事・受付日時を出す。対応は畳んでおく。
+    #[test]
+    fn reports_page_lists_reports_with_filters_and_folded_forms() {
+        let mut added = term_report(2, ReportStatus::Added);
+        added.term = Some((1, "燃料取替停止（定期検査）".into()));
+        added.reply = Some("原語を追加".into());
+        added.resolved_at = Some("2026-09-27T03:00:00.000Z".into());
+        let counts = [
+            (ReportStatus::Pending, 1),
+            (ReportStatus::Added, 1),
+            (ReportStatus::Existing, 0),
+            (ReportStatus::Rejected, 0),
+        ];
+        let terms = [entry(
+            1,
+            &["refueling outage"],
+            "燃料取替停止（定期検査）",
+            None,
+        )];
+        let html = reports_page(
+            &[term_report(1, ReportStatus::Pending), added],
+            &counts,
+            None,
+            &terms,
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"href="/settings""#),
+            "back to settings: {html}"
+        );
+        for link in [
+            r#"<a href="/reports">受付中 1</a>"#,
+            r#"<a href="/reports?status=added">追加済 1</a>"#,
+            r#"<a href="/reports?status=existing">登録済 0</a>"#,
+            r#"<a href="/reports?status=rejected">却下 0</a>"#,
+            r#"<a class="on" href="/reports?status=all">すべて</a>"#,
+        ] {
+            assert!(html.contains(link), "{link}: {html}");
+        }
+        assert!(html.contains("<b>給油停止</b> → 燃料取替停止"), "{html}");
+        assert!(html.contains("原語 refueling outage"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/articles/7">見出し&lt;A&gt;</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("受付 2026-09-27 09:00"), "{html}");
+        assert!(html.contains("追加済 2026-09-27 12:00"), "{html}");
+        assert!(
+            html.contains(r#"<a href="/glossary#term-1">燃料取替停止（定期検査）</a>"#),
+            "{html}"
+        );
+        assert!(html.contains("原語を追加"), "{html}");
+        assert!(
+            html.contains(
+                r#"<details><summary>対応</summary><form method="post" action="/reports/1">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="back" value="all">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="added" selected>追加済</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="1" selected>燃料取替停止（定期検査）</option>"#),
+            "{html}"
+        );
+    }
+
+    /// 詳細では、その記事への指摘と対応状況を小さく並べる。
+    #[test]
+    fn detail_page_lists_past_reports_with_their_status() {
+        let html = detail_page(
+            &detail(),
+            &[term_report(1, ReportStatus::Rejected)],
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<p class="meta">給油停止 → 燃料取替停止（却下）</p>"#),
+            "{html}"
+        );
     }
 
     fn entry(

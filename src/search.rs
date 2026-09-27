@@ -354,17 +354,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_days_and_months_in_jst() {
+    fn reads_days_months_and_years_in_jst() {
         assert_eq!(since("2026-09-20").unwrap(), utc("2026-09-19T15:00:00Z"));
         assert_eq!(until("2026-09-20").unwrap(), utc("2026-09-20T15:00:00Z"));
         assert_eq!(since("2026-09").unwrap(), utc("2026-08-31T15:00:00Z"));
         assert_eq!(until("2026-09").unwrap(), utc("2026-09-30T15:00:00Z"));
         assert_eq!(until("2026-12").unwrap(), utc("2026-12-31T15:00:00Z"));
+        assert_eq!(since("2026").unwrap(), utc("2025-12-31T15:00:00Z"));
+        assert_eq!(until("2026").unwrap(), utc("2026-12-31T15:00:00Z"));
     }
 
     #[test]
     fn rejects_malformed_dates() {
-        for bad in ["2026/09/01", "2026-13", "2026-02-30", "", "2026"] {
+        for bad in [
+            "2026/09/01",
+            "2026-13",
+            "2026-02-30",
+            "",
+            "26",
+            "20260",
+            "+2026",
+        ] {
             assert_eq!(
                 since(bad),
                 Err(SearchError::InvalidDate {

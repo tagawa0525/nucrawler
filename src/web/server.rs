@@ -160,6 +160,8 @@ fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
 #[derive(serde::Deserialize)]
 struct ListParams {
     all: Option<String>,
+    /// Web の一覧だけが使う（過去の欄に既読も出す）
+    read: Option<String>,
 }
 
 async fn list(
@@ -167,6 +169,7 @@ async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Html<String>, AppError> {
     let show_all = params.all.as_deref() == Some("1");
+    let show_read = params.read.as_deref() == Some("1");
     let web = state.web.clone();
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -175,7 +178,7 @@ async fn list(
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
-        let (new, earlier) = html::split_sections(items, boundary.as_deref(), false);
+        let (new, earlier) = html::split_sections(items, boundary.as_deref(), show_read);
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
@@ -183,7 +186,7 @@ async fn list(
         };
         let view = html::ListView {
             all: show_all,
-            read: false,
+            read: show_read,
         };
         Ok(html::list_page(&new, &earlier, view, &page))
     })

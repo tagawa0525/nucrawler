@@ -20,11 +20,12 @@ pub fn escape(s: &str) -> String {
 }
 
 /// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
+/// `include_read` なら後者に既読の記事も残す。
 /// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
     boundary: Option<&str>,
-    _include_read: bool,
+    include_read: bool,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
     let Some(boundary) = boundary else {
         return (items, Vec::new());
@@ -32,7 +33,13 @@ pub fn split_sections(
     let (new, earlier): (Vec<_>, Vec<_>) = items
         .into_iter()
         .partition(|i| i.fetched_at.as_str() > boundary);
-    (new, earlier.into_iter().filter(|i| !i.read).collect())
+    (
+        new,
+        earlier
+            .into_iter()
+            .filter(|i| include_read || !i.read)
+            .collect(),
+    )
 }
 
 const STYLE: &str = "
@@ -143,16 +150,45 @@ pub struct ListView {
     pub read: bool,
 }
 
+impl ListView {
+    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
+    fn href(self) -> String {
+        let query: Vec<_> = [(self.all, "all=1"), (self.read, "read=1")]
+            .into_iter()
+            .filter_map(|(on, q)| on.then_some(q))
+            .collect();
+        if query.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/?{}", query.join("&amp;"))
+        }
+    }
+}
+
 pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
-    let show_all = view.all;
     let mut body = String::from("<h1>nucrawler</h1>");
-    let toggle = if show_all {
-        "<a href=\"/\">おすすめだけ表示</a>"
+    let all_toggle = ListView {
+        all: !view.all,
+        ..view
+    };
+    let all_label = if view.all {
+        "おすすめだけ表示"
     } else {
-        "<a href=\"/?all=1\">すべて表示（👎・低い点・未採点を含む）</a>"
+        "すべて表示（👎・低い点・未採点を含む）"
+    };
+    let read_toggle = ListView {
+        read: !view.read,
+        ..view
+    };
+    let read_label = if view.read {
+        "過去の既読を隠す"
+    } else {
+        "過去の既読も表示"
     };
     body.push_str(&format!(
-        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・{toggle}</p>"
+        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>",
+        all_toggle.href(),
+        read_toggle.href(),
     ));
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
@@ -160,7 +196,11 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     }
     body.extend(new.iter().map(|i| card(i, page)));
     if !earlier.is_empty() {
-        body.push_str("<h2>過去の未読</h2>");
+        body.push_str(if view.read {
+            "<h2>過去の記事</h2>"
+        } else {
+            "<h2>過去の未読</h2>"
+        });
         body.extend(earlier.iter().map(|i| card(i, page)));
     }
     layout("一覧", page, &body)

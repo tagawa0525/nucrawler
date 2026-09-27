@@ -818,6 +818,16 @@ mod tests {
         );
     }
 
+    /// 検索語の欄は画面の幅いっぱいに広げる。
+    #[test]
+    fn search_page_widens_the_query_field() {
+        let html = search_page(&Params::default(), None, &[], None, &Page::default());
+        let at = html.find(r#"<input name="q""#).expect(&html);
+        let input = &html[at..at + html[at..].find('>').unwrap()];
+        assert!(input.contains(r#"class="wide""#), "{input}");
+        assert!(html.contains(".wide { width: 100%;"), "{html}");
+    }
+
     /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。
     #[test]
     fn search_page_keeps_topics_outside_the_vocabulary() {

@@ -72,6 +72,7 @@ pub enum Change {
     Added {
         topic: String,
         weight: f64,
+        note: Option<String>,
     },
     Removed {
         topic: String,
@@ -99,6 +100,7 @@ pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
             changes.push(Change::Added {
                 topic: new.topic.clone(),
                 weight: new.weight,
+                note: None,
             });
             continue;
         };
@@ -141,7 +143,7 @@ impl std::fmt::Display for Change {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let note = |n: &Option<String>| n.clone().unwrap_or_else(|| "(none)".into());
         match self {
-            Self::Added { topic, weight } => write!(f, "add {topic} (weight {weight:?})"),
+            Self::Added { topic, weight, .. } => write!(f, "add {topic} (weight {weight:?})"),
             Self::Removed { topic } => write!(f, "remove {topic}"),
             Self::Weight { topic, from, to } => write!(f, "weight {topic}: {from:?} → {to:?}"),
             Self::Note { topic, from, to } => {
@@ -191,7 +193,7 @@ mod tests {
             interests: vec![
                 interest("規制・審査", 1.0, Some("再稼働審査、検査制度")),
                 interest("燃料", 0.7, None),
-                interest("SMR", 0.5, None),
+                interest("SMR", 0.5, Some("BWRX-300")),
             ],
             exclude: vec!["核兵器".into(), "電力市場".into()],
         };
@@ -212,6 +214,7 @@ mod tests {
                 Change::Added {
                     topic: "SMR".into(),
                     weight: 0.5,
+                    note: Some("BWRX-300".into()),
                 },
                 Change::Removed {
                     topic: "廃止措置".into(),
@@ -226,7 +229,7 @@ mod tests {
             [
                 "note 規制・審査: 再稼働審査 → 再稼働審査、検査制度",
                 "weight 燃料: 0.9 → 0.7",
-                "add SMR (weight 0.5)",
+                "add SMR (weight 0.5, note BWRX-300)",
                 "remove 廃止措置",
                 "exclude + 電力市場",
                 "exclude - 核融合",
@@ -270,6 +273,8 @@ mod tests {
                 "[[interest]]\ntopic = \"a\"\nweight = 0.5\n[[interest]]\ntopic = \"a\"\nweight = 0.2\n",
                 "duplicate",
             ),
+            ("exclude = [\" \"]\n", "exclude"),
+            ("exclude = [\"核融合\", \"核融合\"]\n", "duplicate exclude"),
         ] {
             let err = parse(toml).unwrap_err();
             assert!(

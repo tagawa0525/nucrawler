@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use super::Cancel;
 use crate::check;
 use crate::config::Source;
-use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, NewArticle};
+use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, FetchCounts, NewArticle};
 use crate::errors;
 use crate::http::Fetcher;
 use crate::source::Candidate;
@@ -45,9 +45,23 @@ pub async fn fetch_sources(
         }
         match check::fetch_source(fetcher, s).await {
             Ok(stats) => {
-                let new = store(db, s, &stats.matched)?;
+                let Stored { new, duplicate } = store(db, s, &stats.matched)?;
                 db.record_source_success(&s.id)?;
-                tracing::info!(source = %s.id, total = stats.total, new, "fetched");
+                let counts = FetchCounts {
+                    total: stats.total,
+                    matched: stats.matched.len(),
+                    new,
+                    duplicate,
+                };
+                db.record_fetch_run(&s.id, &counts, now)?;
+                tracing::info!(
+                    source = %s.id,
+                    total = stats.total,
+                    matched = counts.matched,
+                    new,
+                    duplicate,
+                    "fetched"
+                );
                 summary.new_articles += new;
             }
             Err(e) => {
@@ -61,9 +75,16 @@ pub async fn fetch_sources(
     Ok(summary)
 }
 
-/// 新しい記事を登録し、その数を返す。URL が不正な候補は記録せずに飛ばす。
-fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError> {
+/// `store` で登録した件数と、登録済みだった件数。
+struct Stored {
+    new: usize,
+    duplicate: usize,
+}
+
+/// 候補を登録する。URL が不正な候補は記録せずに飛ばす。
+fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<Stored, DbError> {
     let mut new = 0;
+    let mut duplicate = 0;
     for c in candidates {
         let published_at = c.published_at.map(db::timestamp);
         let lead = c.summary.as_deref().map(text::html_to_text);
@@ -85,14 +106,14 @@ fn store(db: &Db, s: &Source, candidates: &[Candidate]) -> Result<usize, DbError
         };
         match db.insert_article_with_contents(&article, &contents) {
             Ok(Some(_)) => new += 1,
-            Ok(None) => {}
+            Ok(None) => duplicate += 1,
             Err(e @ (DbError::InvalidUrl { .. } | DbError::UnsupportedScheme { .. })) => {
                 tracing::warn!(source = %s.id, "skipping candidate: {}", errors::error_chain(&e));
             }
             Err(e) => return Err(e),
         }
     }
-    Ok(new)
+    Ok(Stored { new, duplicate })
 }
 
 #[cfg(test)]
@@ -204,7 +225,8 @@ mod tests {
             .unwrap();
         assert_eq!(again.new_articles, 0);
         assert_eq!(count(&db, "SELECT count(*) FROM articles"), 3);
-        // 成功したソースは回ごとに件数を残す（reg は 3 件中 1 件が絞り込みに一致）。失敗した回は残さない
+        // 成功したソースは回ごとに件数を残す（reg はリンクのある 2 件中 1 件が絞り込みに一致）。
+        // 失敗した回は残さない
         assert_eq!(
             db.query_strings(
                 "SELECT source_id || ':' || total || '/' || matched || ' new ' || new
@@ -213,9 +235,9 @@ mod tests {
             )
             .unwrap(),
             [
-                "reg:3/1 new 1 dup 0",
+                "reg:2/1 new 1 dup 0",
                 "utility:2/2 new 2 dup 0",
-                "reg:3/1 new 0 dup 1",
+                "reg:2/1 new 0 dup 1",
                 "utility:2/2 new 0 dup 2",
             ]
         );

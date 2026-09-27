@@ -63,7 +63,20 @@ impl Db {
         counts: &FetchCounts,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!("{source_id} {counts:?} {at}")
+        let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        self.conn.execute(
+            "INSERT INTO fetch_runs (source_id, fetched_at, total, matched, new, duplicate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                source_id,
+                timestamp(at),
+                count(counts.total),
+                count(counts.matched),
+                count(counts.new),
+                count(counts.duplicate),
+            ],
+        )?;
+        Ok(())
     }
 
     /// 取得の失敗を記録する。最後に成功した時刻は残す。

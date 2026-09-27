@@ -188,8 +188,9 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         ..view
     };
     let mut body = format!(
-        "<nav class=\"bar\">{}{}{}{}</nav>",
+        "<nav class=\"bar\">{}{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
+        button("/search?liked=1", "いいね", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
         button(
             &all_toggle.href(),

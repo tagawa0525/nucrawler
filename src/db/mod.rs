@@ -43,7 +43,7 @@ pub enum DbError {
 
 /// 訳語の指摘。`found` は気になった訳で、ほかは分からなければ `None`。
 #[derive(Debug, Clone, Copy)]
-pub struct NewTermReport<'a> {
+pub struct NewReport<'a> {
     pub found: &'a str,
     pub wanted: Option<&'a str>,
     pub source: Option<&'a str>,
@@ -87,7 +87,7 @@ impl ReportStatus {
 
 /// 受付箱の 1 件。`term` は結び付けた訳語（id と訳）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TermReport {
+pub struct Report {
     pub id: i64,
     pub article_id: i64,
     /// 最新の要約の見出し（無ければ原題）
@@ -1609,11 +1609,11 @@ impl Db {
     }
 
     /// 訳語の指摘を受付箱に入れる。
-    pub fn report_term(
+    pub fn add_report(
         &self,
         user_id: i64,
         article_id: i64,
-        report: &NewTermReport<'_>,
+        report: &NewReport<'_>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
         self.conn.execute(
@@ -1635,12 +1635,12 @@ impl Db {
 
     /// 受付箱（新しい順）。`status` と `article_id` で絞る。記事の見出しは、利用者 `user_id` が
     /// 閲覧できる最新の要約から取る（無ければ原題）。
-    pub fn term_reports(
+    pub fn reports(
         &self,
         user_id: i64,
         status: Option<ReportStatus>,
         article_id: Option<i64>,
-    ) -> Result<Vec<TermReport>, DbError> {
+    ) -> Result<Vec<Report>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.article_id,
                     coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
@@ -1671,7 +1671,7 @@ impl Db {
                 };
                 Ok((
                     r.get::<_, String>(7)?,
-                    TermReport {
+                    Report {
                         id: r.get(0)?,
                         article_id: r.get(1)?,
                         article_title: r.get(2)?,
@@ -1692,13 +1692,13 @@ impl Db {
             let (status, report) = row?;
             let status = ReportStatus::parse(&status)
                 .ok_or_else(|| DbError::UnexpectedValue(format!("report status {status:?}")))?;
-            Ok(TermReport { status, ..report })
+            Ok(Report { status, ..report })
         })
         .collect()
     }
 
     /// 対応状況ごとの件数（`ReportStatus::ALL` の順。0 件も含む）。
-    pub fn term_report_counts(&self) -> Result<Vec<(ReportStatus, i64)>, DbError> {
+    pub fn report_counts(&self) -> Result<Vec<(ReportStatus, i64)>, DbError> {
         ReportStatus::ALL
             .into_iter()
             .map(|status| {
@@ -1714,7 +1714,7 @@ impl Db {
 
     /// 指摘の対応状況を変える。無ければ false。対応日時は状況が変わったときだけ `now` にし、
     /// 受付中に戻せば消す。
-    pub fn resolve_term_report(
+    pub fn resolve_report(
         &self,
         id: i64,
         status: ReportStatus,
@@ -5186,13 +5186,13 @@ mod tests {
 
     fn report(db: &Db, article_id: i64, found: &str, at: &str) {
         let owner = db.owner_id().unwrap();
-        let report = NewTermReport {
+        let report = NewReport {
             found,
             wanted: Some("燃料取替停止"),
             source: None,
             note: None,
         };
-        db.report_term(owner, article_id, &report, t(at)).unwrap();
+        db.add_report(owner, article_id, &report, t(at)).unwrap();
     }
 
     /// 指摘は受付中で入り、新しい順に並ぶ。見出しは要約が無ければ原題。
@@ -5209,7 +5209,7 @@ mod tests {
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
         report(&db, b, "燃料補給停止", "2026-09-27T01:00:00Z");
-        let reports = db.term_reports(db.owner_id().unwrap(), None, None).unwrap();
+        let reports = db.reports(db.owner_id().unwrap(), None, None).unwrap();
         let found: Vec<&str> = reports.iter().map(|r| r.found.as_str()).collect();
         assert_eq!(found, ["燃料補給停止", "給油停止"]);
         let r = &reports[1];
@@ -5223,13 +5223,13 @@ mod tests {
             (None, &None, &None)
         );
         assert_eq!(
-            db.term_reports(db.owner_id().unwrap(), None, Some(a))
+            db.reports(db.owner_id().unwrap(), None, Some(a))
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            db.term_report_counts().unwrap(),
+            db.report_counts().unwrap(),
             [
                 (ReportStatus::Pending, 2),
                 (ReportStatus::Added, 0),
@@ -5249,7 +5249,7 @@ mod tests {
             .unwrap()
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
-        let id = db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].id;
+        let id = db.reports(db.owner_id().unwrap(), None, None).unwrap()[0].id;
         let term = db
             .add_glossary_term(
                 &glossary_term(&["refuelling outage"], "燃料取替停止（英綴り）", None),
@@ -5257,7 +5257,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            db.resolve_term_report(
+            db.resolve_report(
                 id,
                 ReportStatus::Added,
                 Some(term),
@@ -5267,25 +5267,25 @@ mod tests {
             .unwrap()
         );
         let r = &db
-            .term_reports(db.owner_id().unwrap(), Some(ReportStatus::Added), None)
+            .reports(db.owner_id().unwrap(), Some(ReportStatus::Added), None)
             .unwrap()[0];
         assert_eq!(r.term, Some((term, "燃料取替停止（英綴り）".to_string())));
         assert_eq!(r.reply.as_deref(), Some("英綴りを追加"));
         assert_eq!(r.resolved_at.as_deref(), Some("2026-09-27T02:00:00.000Z"));
         assert!(
-            db.term_reports(db.owner_id().unwrap(), Some(ReportStatus::Pending), None)
+            db.reports(db.owner_id().unwrap(), Some(ReportStatus::Pending), None)
                 .unwrap()
                 .is_empty()
         );
 
         db.delete_glossary_term(term).unwrap();
         assert_eq!(
-            db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].term,
+            db.reports(db.owner_id().unwrap(), None, None).unwrap()[0].term,
             None
         );
 
         assert!(
-            db.resolve_term_report(
+            db.resolve_report(
                 id,
                 ReportStatus::Pending,
                 None,
@@ -5294,13 +5294,13 @@ mod tests {
             )
             .unwrap()
         );
-        let r = &db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0];
+        let r = &db.reports(db.owner_id().unwrap(), None, None).unwrap()[0];
         assert_eq!(
             (r.status, r.resolved_at.as_deref()),
             (ReportStatus::Pending, None)
         );
         assert!(
-            !db.resolve_term_report(
+            !db.resolve_report(
                 9999,
                 ReportStatus::Rejected,
                 None,
@@ -5331,10 +5331,7 @@ mod tests {
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
         let owner = db.owner_id().unwrap();
-        assert_eq!(
-            db.term_reports(owner, None, None).unwrap()[0].article_title,
-            "t"
-        );
+        assert_eq!(db.reports(owner, None, None).unwrap()[0].article_title, "t");
     }
 
     /// 対応日時は状況を変えたときだけ進み、ひとことや訳語だけを直しても変わらない。
@@ -5347,11 +5344,11 @@ mod tests {
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
         let owner = db.owner_id().unwrap();
-        let id = db.term_reports(owner, None, None).unwrap()[0].id;
+        let id = db.reports(owner, None, None).unwrap()[0].id;
         let resolve = |status, reply, at| {
-            db.resolve_term_report(id, status, None, Some(reply), t(at))
+            db.resolve_report(id, status, None, Some(reply), t(at))
                 .unwrap();
-            db.term_reports(owner, None, None).unwrap()[0]
+            db.reports(owner, None, None).unwrap()[0]
                 .resolved_at
                 .clone()
         };

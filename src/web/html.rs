@@ -2,7 +2,7 @@
 //! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
 //! だけ使い、無くても読める。
 
-use crate::db::{ArticleDetail, ListItem, ReportStatus, TermReport, TopicUsage, Warning};
+use crate::db::{ArticleDetail, ListItem, Report, ReportStatus, TopicUsage, Warning};
 use crate::search::Params;
 
 /// HTML の特殊文字を実体参照にする。
@@ -259,7 +259,7 @@ pub fn settings_page(glossary_terms: usize, pending_reports: i64, page: &Page) -
 
 /// 受付箱。`filter` が None ならすべて。対応のフォームは開いたときだけ出す。
 pub fn reports_page(
-    reports: &[TermReport],
+    reports: &[Report],
     counts: &[(ReportStatus, i64)],
     filter: Option<ReportStatus>,
     terms: &[crate::glossary::Entry],
@@ -833,12 +833,7 @@ pub struct DetailView {
     pub reported: bool,
 }
 
-pub fn detail_page(
-    d: &ArticleDetail,
-    reports: &[TermReport],
-    view: DetailView,
-    page: &Page,
-) -> String {
+pub fn detail_page(d: &ArticleDetail, reports: &[Report], view: DetailView, page: &Page) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -917,7 +912,7 @@ pub fn detail_page(
 
 /// 訳語の指摘。畳んでおき、開いたときだけフォームを出す（読む画面の密度を上げない）。
 /// これまでの指摘は対応状況とともに小さく並べる。
-fn term_report_form(id: i64, reports: &[TermReport], view: DetailView) -> String {
+fn term_report_form(id: i64, reports: &[Report], view: DetailView) -> String {
     let field = |name: &str, label: &str, extra: &str| {
         format!("<label>{label}<input class=\"wide\" name=\"{name}\"{extra}></label>")
     };
@@ -1716,8 +1711,8 @@ mod tests {
         assert!(html.contains("受付中 3 件"), "{html}");
     }
 
-    fn term_report(id: i64, status: ReportStatus) -> TermReport {
-        TermReport {
+    fn term_report(id: i64, status: ReportStatus) -> Report {
+        Report {
             id,
             article_id: 7,
             article_title: "見出し<A>".into(),

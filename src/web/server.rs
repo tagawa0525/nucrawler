@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, NewTermReport, ReportStatus, SignalKind};
+use crate::db::{Db, DbError, ListQuery, NewReport, ReportStatus, SignalKind};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -360,7 +360,7 @@ async fn detail(
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
-        let reports = db.term_reports(user, None, Some(id))?;
+        let reports = db.reports(user, None, Some(id))?;
         // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
         // 採点に渡す直近の反応が偏る）
         let opened = if view.show_translation {
@@ -496,13 +496,13 @@ async fn term_report(
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        let report = NewTermReport {
+        let report = NewReport {
             found: &found,
             wanted: wanted.as_deref(),
             source: source.as_deref(),
             note: note.as_deref(),
         };
-        Ok(db.report_term(user, id, &report, Utc::now())?)
+        Ok(db.add_report(user, id, &report, Utc::now())?)
     })
     .await?;
     let view = if form.view.as_deref() == Some("translation") {
@@ -520,7 +520,7 @@ async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppErro
     let page = with_db(&state, move |db| {
         let terms = db.glossary()?.len();
         let pending = db
-            .term_report_counts()?
+            .report_counts()?
             .into_iter()
             .find_map(|(status, n)| (status == ReportStatus::Pending).then_some(n))
             .unwrap_or(0);
@@ -667,8 +667,8 @@ async fn reports(
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        let reports = db.term_reports(user, filter, None)?;
-        let counts = db.term_report_counts()?;
+        let reports = db.reports(user, filter, None)?;
+        let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
         let warnings = warnings(db)?;
         let page = Page {
@@ -682,7 +682,7 @@ async fn reports(
 }
 
 #[derive(serde::Deserialize)]
-struct ReportForm {
+struct ResolveReportForm {
     #[serde(default)]
     status: String,
     /// 結び付ける訳語の id（空なら無し）
@@ -699,7 +699,7 @@ async fn resolve_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<ReportForm>,
+    Form(form): Form<ResolveReportForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
     let status = ReportStatus::parse(&form.status).ok_or(AppError::BadRequest(
@@ -723,7 +723,7 @@ async fn resolve_report(
         {
             return Err(AppError::BadRequest("unknown term_id"));
         }
-        Ok(db.resolve_term_report(id, status, term_id, reply.as_deref(), Utc::now())?)
+        Ok(db.resolve_report(id, status, term_id, reply.as_deref(), Utc::now())?)
     })
     .await?;
     if !found {

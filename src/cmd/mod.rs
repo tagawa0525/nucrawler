@@ -8,10 +8,12 @@ use crate::Error;
 mod crawl;
 mod eval;
 mod redo;
+mod suggest;
 
 pub(crate) use crawl::crawl;
 pub(crate) use eval::eval;
 pub(crate) use redo::redo;
+pub(crate) use suggest::suggest;
 
 /// 実行の結果をエラーにする。中断を最優先し、次に LLM の失敗、最後に取得に失敗したソースを報告する。
 fn finish(report: RunReport) -> Result<(), Error> {

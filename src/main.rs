@@ -54,6 +54,15 @@ enum Error {
     },
     #[error("no profile yet; run `nucrawler profile import FILE` first")]
     NoProfile,
+    #[error("no reactions yet; 👍, bookmark, 👎 or dismiss articles in the web UI first")]
+    NoLabels,
+    #[error("{0} already exists; choose a new file for the suggestion")]
+    OutputExists(PathBuf),
+    #[error("failed to write {path}")]
+    WriteFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to create data directory {path}")]
     DataDir {
         path: PathBuf,
@@ -127,7 +136,14 @@ async fn run() -> Result<(), Error> {
             )
             .await
         }
-        Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
+        Command::Profile => {
+            profile(
+                inv.config_dir,
+                inv.data_dir,
+                cli::parse_profile_args(&inv.args)?,
+            )
+            .await
+        }
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
         Command::Search => search(
             inv.config_dir,
@@ -210,9 +226,16 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
 }
 
 /// プロファイルはオーナー（このマシンの利用者）のものを扱う。
-fn profile(data: Option<PathBuf>, args: ProfileArgs) -> Result<(), Error> {
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
-    let owner = db.owner_id()?;
+async fn profile(
+    config: Option<PathBuf>,
+    data: Option<PathBuf>,
+    args: ProfileArgs,
+) -> Result<(), Error> {
+    let open = |data| -> Result<(Db, i64), Error> {
+        let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+        let owner = db.owner_id()?;
+        Ok((db, owner))
+    };
     match args {
         ProfileArgs::Import { file } => {
             let text = std::fs::read_to_string(&file).map_err(|source| Error::ReadFile {
@@ -220,20 +243,26 @@ fn profile(data: Option<PathBuf>, args: ProfileArgs) -> Result<(), Error> {
                 source,
             })?;
             let parsed = profile::parse(&text)?;
+            let (db, owner) = open(data)?;
             db.save_profile(owner, &parsed, chrono::Utc::now())?;
             tracing::info!(
                 interests = parsed.interests.len(),
                 hash = %profile::hash(&parsed),
                 "profile imported"
             );
+            Ok(())
         }
         ProfileArgs::Export => {
+            let (db, owner) = open(data)?;
             let (saved, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
             print!("{}", profile::to_toml(&saved));
+            Ok(())
         }
-        ProfileArgs::Suggest { .. } => todo!(),
+        // 更新案は LLM を呼ぶので、ロックを取ってから DB を開く
+        ProfileArgs::Suggest { out, max_llm_calls } => {
+            cmd::suggest(config, data, &out, max_llm_calls).await
+        }
     }
-    Ok(())
 }
 
 async fn serve(

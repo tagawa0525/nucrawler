@@ -81,7 +81,7 @@ commands:
   serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
-  profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
+  profile   関心プロファイルの取り込み・書き出し・更新案（profile import FILE / profile export / profile suggest --out FILE）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
@@ -340,9 +340,32 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
             file: PathBuf::from(file),
         }),
         [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
-        [cmd, rest @ ..] if cmd == "suggest" => todo!("{rest:?}"),
+        [cmd, rest @ ..] if cmd == "suggest" => parse_suggest_args(rest),
         _ => Err(ParseError::ProfileUsage),
     }
+}
+
+fn parse_suggest_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
+    let mut it = args.iter();
+    let (mut out, mut max_llm_calls) = (None, None);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--out" => {
+                out = Some(PathBuf::from(
+                    option_value(&mut it).ok_or(ParseError::ProfileUsage)?,
+                ));
+            }
+            "--max-llm-calls" => {
+                let n = option_value(&mut it).ok_or(ParseError::ProfileUsage)?;
+                max_llm_calls = Some(n.parse().map_err(|_| ParseError::ProfileUsage)?);
+            }
+            _ => return Err(ParseError::ProfileUsage),
+        }
+    }
+    Ok(ProfileArgs::Suggest {
+        out: out.ok_or(ParseError::ProfileUsage)?,
+        max_llm_calls,
+    })
 }
 
 /// `search` サブコマンドの引数。条件は Web の検索画面と同じ（`search::Params`）。

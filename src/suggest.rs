@@ -1,11 +1,32 @@
 //! `profile suggest` の表示：現行から案への差分（Rust で計算したもの）と、LLM が挙げた根拠。
 
+use std::fmt::Write as _;
+
 use crate::profile::Profile;
 use crate::prompt::suggest::Suggestion;
 
 /// 差分が無ければ `None`（案を書き出す必要が無い）。
 pub fn render(current: &Profile, suggestion: &Suggestion, out: &str) -> Option<String> {
-    todo!("{current:?} {suggestion:?} {out}")
+    let changes = crate::profile::diff(current, &suggestion.profile);
+    if changes.is_empty() {
+        return None;
+    }
+    let mut text = String::from("changes:\n");
+    for change in &changes {
+        let _ = writeln!(text, "  {change}");
+    }
+    if !suggestion.reasons.is_empty() {
+        text.push_str("reasons:\n");
+        for r in &suggestion.reasons {
+            let _ = writeln!(text, "  {}: {}", r.change, r.evidence);
+        }
+    }
+    let _ = writeln!(
+        text,
+        "\nwrote {out}. compare it with `nucrawler eval --profile {out}`, \
+         then `nucrawler profile import {out}` to adopt it"
+    );
+    Some(text)
 }
 
 #[cfg(test)]

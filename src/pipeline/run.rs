@@ -6,10 +6,10 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, tidy, translate};
+use super::{digest, extract, fetch, score, suggest, tidy, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, Source};
-use crate::db::{Db, DbError, RedoFilter};
+use crate::db::{Db, DbError, Evidence, RedoFilter};
 use crate::http::Fetcher;
 use crate::llm::Llm;
 use crate::profile::Profile;
@@ -31,6 +31,8 @@ pub enum RunError {
     Translate(#[from] translate::TranslateStageError),
     #[error(transparent)]
     Tidy(#[from] tidy::TidyStageError),
+    #[error(transparent)]
+    Suggest(#[from] suggest::SuggestStageError),
 }
 
 /// 1 回の実行で共有する環境。クォータは実行全体に効くので、ステージ間で引き継ぐ。
@@ -271,6 +273,23 @@ pub async fn redo<L: Llm>(
     }
     report.cancelled = env.cancel.is_requested();
     Ok(report)
+}
+
+/// `profile suggest`：反応を根拠に、プロファイルの更新案を 1 回の呼び出しで作る。案は保存しない。
+/// 上限などで呼べなかったら案は `None`。
+pub async fn suggest_profile<L: Llm>(
+    mut env: RunEnv<'_, L>,
+    config: &Config,
+    profile: &Profile,
+    evidence: &[Evidence],
+) -> Result<(RunReport, Option<crate::prompt::suggest::Suggestion>), RunError> {
+    let mut report = RunReport::default();
+    let now = (env.clock)();
+    let summary =
+        suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
+    report_halt(summary.halted, &mut report.llm_failure);
+    report.cancelled = summary.cancelled || env.cancel.is_requested();
+    Ok((report, summary.suggestion))
 }
 
 /// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。

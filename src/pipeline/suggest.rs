@@ -4,11 +4,12 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::LlmStage;
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use crate::config::LlmConfig;
 use crate::db::{DbError, Evidence};
-use crate::llm::Llm;
+use crate::llm::{Llm, LlmRequest};
 use crate::profile::Profile;
+use crate::prompt;
 use crate::prompt::suggest::{SuggestError, Suggestion};
 
 pub const STAGE: &str = "suggest";
@@ -32,14 +33,58 @@ pub struct SuggestSummary {
 
 /// モデルは採点と同じ `llm.score_model`（点数の付け方を知っているモデルに、その元を見直させる）。
 pub async fn suggest_profile<L: Llm>(
-    stage: LlmStage<'_, L>,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,
     evidence: &[Evidence],
     now: DateTime<Utc>,
 ) -> Result<SuggestSummary, SuggestStageError> {
-    let _ = (stage.db, cfg, profile, evidence, now);
-    todo!()
+    let mut summary = SuggestSummary::default();
+    if let Err(stop) = quota.permit(now) {
+        tracing::info!("suggest stops: {stop}");
+        summary.halted = Some(Halt::Quota(stop));
+        return Ok(summary);
+    }
+    let prompt = prompt::suggest::build_prompt(profile, evidence);
+    let schema = prompt::suggest::schema();
+    let outcome = call_recorded(
+        db,
+        llm,
+        quota,
+        Call {
+            stage: STAGE,
+            n_items: evidence.len(),
+            req: LlmRequest {
+                system: prompt::suggest::system_prompt(),
+                prompt: &prompt,
+                schema: &schema,
+                model: &cfg.score_model,
+            },
+        },
+        now,
+        cancel,
+    )
+    .await?;
+    let response = match outcome {
+        Outcome::Response(response) => response,
+        Outcome::Cancelled => {
+            summary.cancelled = true;
+            return Ok(summary);
+        }
+        Outcome::Halted(halt) => {
+            summary.calls += 1;
+            summary.halted = Some(halt);
+            return Ok(summary);
+        }
+    };
+    summary.calls += 1;
+    summary.suggestion = Some(prompt::suggest::parse(&response.output)?);
+    Ok(summary)
 }
 
 #[cfg(test)]

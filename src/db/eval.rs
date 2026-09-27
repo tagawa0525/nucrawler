@@ -278,6 +278,65 @@ mod tests {
         );
     }
 
+    /// 会員限定の本文から作った digest は、会員でない利用者の根拠にしない（見出しを LLM に渡すため）。
+    #[test]
+    fn evidence_skips_digests_the_user_cannot_view() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let gated_digest = |article_id: i64, title: &str, at: &str| {
+            let gated = insert_content(&db, article_id, Some(aesj));
+            let payload = serde_json::json!({
+                "title_ja": title, "summary_ja": "s", "points_ja": ["p"],
+                "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
+            });
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id,
+                    kind: ArtifactKind::Digest,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &payload,
+                    inputs: &[gated],
+                    glossary_at: None,
+                },
+                t(at),
+            )
+            .unwrap();
+        };
+        // 公開の digest より新しい会員限定の digest があっても、公開の方を使う
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "公開の見出し",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        gated_digest(a, "会員限定の見出し", "2026-09-26T02:00:00Z");
+        // 会員限定の digest しか無い記事は根拠にしない
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        gated_digest(b, "会員限定だけ", "2026-09-26T01:00:00Z");
+        for article in [a, b] {
+            db.record_event(owner, article, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
+        let titles: Vec<String> = db
+            .label_evidence(owner)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.title_ja)
+            .collect();
+        assert_eq!(titles, ["公開の見出し"]);
+    }
+
     #[test]
     fn scores_use_the_latest_digest_scored_by_each_key() {
         let db = Db::open_in_memory().unwrap();

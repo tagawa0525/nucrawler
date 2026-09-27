@@ -20,6 +20,15 @@ pub enum Warning {
         median: i64,
         at: String,
     },
+    /// 取得は成功しているのに、新着が普段の間隔よりずっと長く途絶えている（フィードの停止や
+    /// 絞り込み・日付の読み取りが外れた疑い）
+    SourceStale {
+        source_id: String,
+        /// 最新の記事の公開日から今日までの日数
+        idle_days: i64,
+        /// 普段の新着の間隔（日）
+        typical_gap_days: i64,
+    },
     /// 直近の LLM の呼び出しが失敗している
     LlmFailed { error: String, at: String },
 }
@@ -30,6 +39,27 @@ const DROP_HISTORY: usize = 20;
 const DROP_MIN_HISTORY: usize = 8;
 /// 前の回の中央値のこの割合（1/3）を下回ったら急減とみなす。週末などの半減は拾わない
 const DROP_RATIO: i64 = 3;
+
+/// 新着の間隔を調べる期間（最新の記事の日から遡る日数）
+const STALE_WINDOW_DAYS: i64 = 60;
+/// 普段の間隔を決めるのに要る、新着のあった日どうしの間隔の数。足りなければ判定しない
+const STALE_MIN_GAPS: usize = 5;
+/// 普段の間隔の何倍途絶えたら警告するか
+const STALE_RATIO: i64 = 3;
+/// 毎日更新されるソースでも、これより短い途絶えは連休などとみなして警告しない
+const STALE_MIN_DAYS: i64 = 7;
+
+/// 新着の途絶え。
+#[derive(Debug, PartialEq, Eq)]
+struct Stale {
+    idle_days: i64,
+    typical_gap_days: i64,
+}
+
+/// 新着のあった日 `days`（古い順、重複なし、最新の日から `STALE_WINDOW_DAYS` 以内）と今日を比べる。
+fn stale(days: &[chrono::NaiveDate], today: chrono::NaiveDate) -> Option<Stale> {
+    todo!("{days:?} {today} {STALE_MIN_GAPS} {STALE_RATIO} {STALE_MIN_DAYS}")
+}
 
 /// 取得の件数の異常。
 #[derive(Debug, PartialEq, Eq)]
@@ -55,8 +85,13 @@ fn count_anomaly(latest: i64, previous: &[i64]) -> Option<CountAnomaly> {
 
 impl Db {
     /// 取得に失敗し続けているソース、`since` 以降の最後の取得で件数が 0 件か急減したソース、
-    /// `since` 以降の直近の LLM の失敗。
-    pub fn warnings(&self, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<Warning>, DbError> {
+    /// `since` 以降の直近の LLM の失敗。`now` は新着の途絶えを測る基準。
+    pub fn warnings(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Warning>, DbError> {
+        let _ = (now, STALE_WINDOW_DAYS);
         use rusqlite::OptionalExtension;
         // 取得に成功するとエラーは消えるので、残っているエラーは今も失敗しているもの
         let mut stmt = self.conn.prepare(
@@ -176,7 +211,9 @@ mod tests {
             t("2026-09-27T01:00:00Z"),
         )
         .unwrap();
-        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert!(
             matches!(&warnings[0], Warning::SourceFailing { source_id, error, .. }
@@ -200,7 +237,12 @@ mod tests {
             t("2026-09-27T02:00:00Z"),
         )
         .unwrap();
-        assert_eq!(db.warnings(t("2026-09-26T00:00:00Z")).unwrap().len(), 1);
+        assert_eq!(
+            db.warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -255,7 +297,9 @@ mod tests {
             &[[100; 30].as_slice(), &[10; 20], &[4]].concat(),
             end,
         );
-        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
         assert_eq!(
             warnings,
             [
@@ -270,6 +314,131 @@ mod tests {
                     at: "2026-09-27T00:00:00.000Z".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn stale_compares_idle_days_with_the_usual_gap() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let every = |start: &str, step: i64, n: i64| -> Vec<_> {
+            (0..n)
+                .map(|i| d(start) + chrono::Duration::days(i * step))
+                .collect()
+        };
+        // 毎日（間隔 1 日）更新されるソースは、7 日を超えて途絶えたら警告する
+        let daily = every("2026-09-01", 1, 10); // 最新は 09-10
+        assert_eq!(stale(&daily, d("2026-09-17")), None);
+        assert_eq!(
+            stale(&daily, d("2026-09-18")),
+            Some(Stale {
+                idle_days: 8,
+                typical_gap_days: 1
+            })
+        );
+        // 週 1 回のソースは 3 週（21 日）を超えるまで待つ
+        let weekly = every("2026-07-01", 7, 8); // 最新は 08-19
+        assert_eq!(stale(&weekly, d("2026-09-09")), None);
+        assert_eq!(
+            stale(&weekly, d("2026-09-10")),
+            Some(Stale {
+                idle_days: 22,
+                typical_gap_days: 7
+            })
+        );
+        // 間隔が 5 個に満たなければ普段の間隔が分からないので判定しない
+        assert_eq!(stale(&every("2026-09-01", 1, 5), d("2026-12-01")), None);
+        assert_eq!(stale(&[], d("2026-12-01")), None);
+        // 間隔は中央値で決める（偶数個なら中央の 2 つの平均：2 と 4 → 3）
+        // 間隔は 1, 2, 4, 10, 1, 5 日。並べると 1, 1, 2, 4, 5, 10 で、閾値は 3 × 3 = 9 日
+        let mixed = [
+            d("2026-09-01"),
+            d("2026-09-02"),
+            d("2026-09-04"),
+            d("2026-09-08"),
+            d("2026-09-18"),
+            d("2026-09-19"),
+            d("2026-09-24"),
+        ];
+        assert_eq!(stale(&mixed, d("2026-10-03")), None);
+        assert_eq!(
+            stale(&mixed, d("2026-10-04")),
+            Some(Stale {
+                idle_days: 10,
+                typical_gap_days: 3
+            })
+        );
+    }
+
+    #[test]
+    fn warnings_report_stale_sources() {
+        let db = Db::open_in_memory().unwrap();
+        let counts = FetchCounts {
+            total: 5,
+            matched: 5,
+            ..FetchCounts::default()
+        };
+        // 取得は今も成功している
+        let fetched = |id| {
+            db.record_source_success(id, &counts, t("2026-09-27T00:00:00Z"))
+                .unwrap()
+        };
+        let publish = |id: &str, day: &str| {
+            db.insert_article(&NewArticle {
+                source_id: id,
+                published_at: Some(&format!("{day}T03:00:00.000Z")),
+                ..article(&format!("https://e.com/{id}/{day}"))
+            })
+            .unwrap();
+        };
+        // 毎日あった新着が 09-10 で途絶えた
+        for day in 1..=10 {
+            publish("quiet", &format!("2026-09-{day:02}"));
+        }
+        fetched("quiet");
+        // 毎日の新着が続いている
+        for day in 17..=26 {
+            publish("busy", &format!("2026-09-{day:02}"));
+        }
+        fetched("busy");
+        // 途絶えているが、最近は取得していない（無効にした、設定から消した）
+        for day in 1..=10 {
+            publish("off", &format!("2026-09-{day:02}"));
+        }
+        db.record_source_success("off", &counts, t("2026-09-20T00:00:00Z"))
+            .unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            warnings,
+            [Warning::SourceStale {
+                source_id: "quiet".into(),
+                idle_days: 17,
+                typical_gap_days: 1,
+            }]
+        );
+    }
+
+    /// 一覧が 0 件のソースは、その警告だけを出す（新着の途絶えは同じ原因の結果なので重ねない）。
+    #[test]
+    fn empty_sources_are_not_also_reported_as_stale() {
+        let db = Db::open_in_memory().unwrap();
+        for day in 1..=10 {
+            db.insert_article(&NewArticle {
+                source_id: "broken",
+                published_at: Some(&format!("2026-09-{day:02}T03:00:00.000Z")),
+                ..article(&format!("https://e.com/{day}"))
+            })
+            .unwrap();
+        }
+        db.record_source_success("broken", &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
+        assert!(
+            matches!(&warnings[..], [Warning::SourceEmpty { .. }]),
+            "{warnings:?}"
         );
     }
 
@@ -292,7 +461,9 @@ mod tests {
         // 古い成功が後から記録された
         db.record_llm_call(&call(true), t("2026-09-27T01:00:00Z"))
             .unwrap();
-        let warnings = db.warnings(t("2026-09-26T00:00:00Z")).unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
         assert!(
             matches!(&warnings[..], [Warning::LlmFailed { .. }]),
             "{warnings:?}"

@@ -23,7 +23,8 @@ pub(super) fn list_items(
 
 /// 警告は直近 24 時間のものだけ出す。
 pub(super) fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
-    db.warnings(Utc::now() - Duration::hours(24))
+    let now = Utc::now();
+    db.warnings(now - Duration::hours(24), now)
 }
 
 #[derive(serde::Deserialize)]

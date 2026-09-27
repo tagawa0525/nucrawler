@@ -112,6 +112,11 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
             escape(page.source(source_id)),
             crate::jst::format_local(at),
         ),
+        Warning::SourceStale {
+            source_id,
+            idle_days,
+            typical_gap_days,
+        } => todo!("{source_id} {idle_days} {typical_gap_days}"),
         // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
         Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
             "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",
@@ -230,6 +235,26 @@ mod tests {
             html.contains(
                 "⚠ fepc の取得件数が減っています（2026-09-27 10:00）：5 件（直近の中央値 30 件）"
             ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn shows_stale_source_warning() {
+        let html = layout(
+            "一覧",
+            &Page {
+                warnings: &[Warning::SourceStale {
+                    source_id: "nrc-news".into(),
+                    idle_days: 13,
+                    typical_gap_days: 2,
+                }],
+                ..Page::default()
+            },
+            "",
+        );
+        assert!(
+            html.contains("⚠ nrc-news の新着が 13 日ありません（普段は 2 日おき）"),
             "{html}"
         );
     }

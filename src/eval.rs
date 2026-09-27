@@ -69,7 +69,8 @@ pub fn render(
     keys.dedup();
     if !all {
         keys.retain(|k| is_current(k) || is_candidate(k));
-        if keys.is_empty() {
+        // 候補だけ採点済みでも、比べる相手が無いことを示す
+        if !keys.iter().any(|k| is_current(k)) {
             out.push('\n');
             if current.is_none() {
                 let _ = writeln!(

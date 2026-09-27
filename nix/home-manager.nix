@@ -40,6 +40,12 @@ let
         ++ args
       );
       Environment = [ "PATH=${path}" ];
+      # 停止（再起動・シャットダウン）の SIGTERM は nucrawler にだけ送る。nucrawler が処理中の
+      # claude を止めて、途中の呼び出しを失敗として記録せずに終わる（残りは次回）。
+      # 既定の control-group だと claude も同時に殺され、要約の失敗として記録されていた
+      KillMode = "mixed";
+      # 止められて途中で終わった（130）のは失敗ではない
+      SuccessExitStatus = 130;
     };
   };
 

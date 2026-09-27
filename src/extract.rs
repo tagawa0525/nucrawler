@@ -4,8 +4,8 @@ use crate::text;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
-    #[error("invalid body_selector {selector:?}")]
-    BadSelector { selector: String },
+    #[error("invalid body_selector {selector:?}: {reason}")]
+    BadSelector { selector: String, reason: String },
     #[error("readability failed")]
     Readability(#[from] dom_smoothie::ReadabilityError),
 }
@@ -20,8 +20,9 @@ pub fn extract_text(
     let text = match selector {
         Some(selector) => {
             let parsed =
-                scraper::Selector::parse(selector).map_err(|_| ExtractError::BadSelector {
+                scraper::Selector::parse(selector).map_err(|e| ExtractError::BadSelector {
                     selector: selector.to_string(),
+                    reason: e.to_string(),
                 })?;
             let doc = scraper::Html::parse_document(html);
             doc.select(&parsed)

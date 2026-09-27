@@ -12,6 +12,13 @@ pub(super) fn article(url: &str) -> NewArticle<'_> {
     }
 }
 
+pub(super) fn insert_membership(db: &Db) -> i64 {
+    db.conn()
+        .execute("INSERT INTO memberships (code, name) VALUES ('m', 'M')", [])
+        .unwrap();
+    db.conn().last_insert_rowid()
+}
+
 pub(super) fn insert_content(db: &Db, article_id: i64, membership: Option<i64>) -> i64 {
     db.conn()
         .execute(

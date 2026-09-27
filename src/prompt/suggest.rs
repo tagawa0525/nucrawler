@@ -162,6 +162,7 @@ struct OutputReason {
 }
 
 /// 応答をプロファイルにし、`profile import` と同じ規則で検証する。空の note は無しにする。
+/// 根拠の文も制御文字を含まないことを確かめる。
 pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
     let output: Output = serde_json::from_value(output.clone())
         .map_err(|e| SuggestError::Malformed(e.to_string()))?;
@@ -178,6 +179,17 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
         exclude: output.exclude,
     };
     crate::profile::validate(&profile)?;
+    // 根拠の文も端末に表示するので、プロファイルと同じくエスケープシーケンスや改行を通さない
+    if let Some(r) = output.reasons.iter().find(|r| {
+        format!("{}{}", r.change, r.evidence)
+            .chars()
+            .any(char::is_control)
+    }) {
+        return Err(SuggestError::Malformed(format!(
+            "reason {:?} contains control characters",
+            r.change
+        )));
+    }
     Ok(Suggestion {
         profile,
         reasons: output

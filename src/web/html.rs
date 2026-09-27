@@ -21,18 +21,19 @@ pub fn escape(s: &str) -> String {
 }
 
 /// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
-/// `include_read` なら後者に既読の記事も残す。ブックマークした記事は振り分け済みなので除く。
+/// `include_read` なら後者に既読の記事も残す。
 /// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
     boundary: Option<&str>,
     include_read: bool,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
-    let items = items.into_iter().filter(|i| !i.bookmarked);
     let Some(boundary) = boundary else {
-        return (items.collect(), Vec::new());
+        return (items, Vec::new());
     };
-    let (new, earlier): (Vec<_>, Vec<_>) = items.partition(|i| i.fetched_at.as_str() > boundary);
+    let (new, earlier): (Vec<_>, Vec<_>) = items
+        .into_iter()
+        .partition(|i| i.fetched_at.as_str() > boundary);
     (
         new,
         earlier

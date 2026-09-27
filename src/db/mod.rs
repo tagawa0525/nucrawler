@@ -1812,6 +1812,11 @@ impl Db {
     ) -> Result<Vec<ListItem>, DbError> {
         const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
+        // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
+        let list_filter = match scope {
+            ItemScope::List { .. } => "AND rows.bookmarked = 0",
+            _ => "",
+        };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
             ItemScope::List {
@@ -1905,6 +1910,7 @@ impl Db {
                 OR (rows.feedback IS NOT 'down' AND rows.dismissed = 0
                     AND rows.relevant = 1 AND s.score >= :min))
                {rows_filter}
+               {list_filter}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),

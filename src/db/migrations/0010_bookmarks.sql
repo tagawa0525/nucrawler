@@ -14,6 +14,7 @@ INSERT INTO events_new (id, user_id, article_id, kind, created_at)
 DROP TABLE events;
 ALTER TABLE events_new RENAME TO events;
 CREATE INDEX events_by_user ON events (user_id, created_at);
+CREATE INDEX events_by_article ON events (article_id);
 
 -- ブックマークの今の状態。外しても、ブックマークした行動（events）は採点のために残す。
 CREATE TABLE bookmarks (
@@ -22,3 +23,5 @@ CREATE TABLE bookmarks (
     created_at TEXT NOT NULL,
     PRIMARY KEY (user_id, article_id)
 ) WITHOUT ROWID;
+-- 記事の削除時に bookmarks を全件走査しないよう、外部キーの子側に索引を付ける
+CREATE INDEX bookmarks_by_article ON bookmarks (article_id);

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Window};
 
@@ -54,9 +54,11 @@ impl Llm for ClaudeCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        // claude は自分のプロセスグループの長なので、グループ ID はその PID
-        let _group = child.id().map(ProcessGroup);
         let mut stdin = child.stdin.take().expect("stdin is piped");
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        // タイムアウトや中断でこの呼び出しを捨てたら、グループごと止める
+        let mut child = Running(child);
         let prompt = req.prompt.as_bytes();
         let run = async {
             // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
@@ -69,9 +71,21 @@ impl Llm for ClaudeCli {
                 drop(stdin);
                 Ok::<_, std::io::Error>(())
             };
-            let (written, output) = tokio::join!(write, child.wait_with_output());
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let (written, read_out, read_err, status) = tokio::join!(
+                write,
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+                child.0.wait()
+            );
             written?;
-            output
+            read_out?;
+            read_err?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status: status?,
+                stdout: out,
+                stderr: err,
+            })
         };
         let output = tokio::time::timeout(self.timeout, run)
             .await
@@ -96,17 +110,23 @@ impl Llm for ClaudeCli {
     }
 }
 
-/// claude のプロセスグループ。drop されたら（完了・タイムアウト・中断のいずれでも）グループ全体を
-/// 止め、claude が起動した子プロセスを残さない（`kill_on_drop` は claude 本体しか止めない）。
-struct ProcessGroup(u32);
+/// 実行中の claude。終了を待たずに捨てられたら（タイムアウト・中断）、claude が起動した子プロセスも
+/// 残さないようグループ全体を止める（`kill_on_drop` は claude 本体しか止めない）。
+/// 終了して回収した後はグループに触れない（グループ ID は再利用されうる）。
+struct Running(tokio::process::Child);
 
-impl Drop for ProcessGroup {
+impl Drop for Running {
     fn drop(&mut self) {
-        let Ok(pgid) = libc::pid_t::try_from(self.0) else {
+        // まだ終わっていない（回収していない）間は、claude の PID とそのグループ ID は
+        // このプロセスのものであることが保証される
+        if !matches!(self.0.try_wait(), Ok(None)) {
+            return;
+        }
+        // claude は自分のプロセスグループの長なので、グループ ID はその PID
+        let Some(pgid) = self.0.id().and_then(|id| libc::pid_t::try_from(id).ok()) else {
             return;
         };
-        // SAFETY: killpg はシグナルを送るだけで、メモリを扱わない。グループが既に無ければ
-        // ESRCH で失敗するだけなので、結果は見ない
+        // SAFETY: killpg はシグナルを送るだけで、メモリを扱わない
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
         }

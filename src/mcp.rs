@@ -622,6 +622,43 @@ mod tests {
         );
     }
 
+    /// キーワードは本文も対象にし、空白で区切った語をすべて含む記事に絞る。月だけの期間も使える。
+    #[test]
+    fn search_keyword_covers_body_and_all_terms() {
+        let db = Db::open_in_memory().unwrap();
+        let hash = with_profile(&db);
+        let a = seed(&db, &hash, Seed::default());
+        db.insert_content(
+            a,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "蒸気発生器の伝熱管を交換した",
+        )
+        .unwrap();
+        seed(
+            &db,
+            &hash,
+            Seed {
+                url: "https://e.com/b",
+                ..Seed::default()
+            },
+        );
+        let search = |keyword: &str| {
+            ids(&run_search(
+                &db,
+                SearchParams {
+                    keyword: Some(keyword.into()),
+                    since: Some("2026-09".into()),
+                    ..SearchParams::default()
+                },
+            )
+            .unwrap())
+        };
+        assert_eq!(search("伝熱管"), [a]);
+        assert_eq!(search("伝熱管　交換"), [a]);
+        assert!(search("伝熱管 燃料棒").is_empty());
+    }
+
     #[test]
     fn search_rejects_malformed_dates() {
         let db = Db::open_in_memory().unwrap();

@@ -344,14 +344,44 @@ pub struct ListQuery<'a> {
     pub limit: usize,
 }
 
-/// 検索の条件。
-#[derive(Debug, Clone)]
+/// 検索の条件。指定しなかった条件（空・None・false）では絞らない。
+#[derive(Debug, Clone, Default)]
 pub struct SearchQuery<'a> {
     pub user_id: i64,
     pub profile_hash: Option<&'a str>,
-    /// 原題・本文・要約・和訳のどれかに含む語。すべてを含む記事に絞る。空なら絞らない
+    /// 原題・本文・要約・和訳のどれかに含む語。すべてを含む記事に絞る
     pub terms: Vec<String>,
+    /// これ以降に公開（無ければ取得）された記事
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// これより前に公開（無ければ取得）された記事
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// 閲覧できる最新の要約に付いている語（別名でもよい）。すべてが付いている記事に絞る
+    pub topics: Vec<String>,
+    /// ソースの ID。どれかのソースの記事に絞る
+    pub sources: Vec<String>,
+    pub lang: Option<Lang>,
+    /// 閲覧できる和訳がある
+    pub translated: bool,
+    /// 最新の評価が 👍
+    pub liked: bool,
+    /// 詳細も和訳も開いていない
+    pub unread: bool,
+    /// この点数以上（未採点は除く）
+    pub min_score: Option<u8>,
+    /// 一覧の既定と同じく、👎・非軽水炉・未採点・この点数未満を隠す
+    pub hide_below: Option<u8>,
+    pub order: SearchOrder,
     pub limit: usize,
+}
+
+/// 検索結果の並び。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchOrder {
+    /// 新しい順
+    #[default]
+    Newest,
+    /// 一覧と同じく点数の高い順（未採点は後ろ）、同点なら新しい順
+    Score,
 }
 
 /// 語彙の語と、その使われ方（語彙の整理に使う）。
@@ -3952,15 +3982,272 @@ mod tests {
 
     fn search_ids(db: &Db, terms: &[&str]) -> Vec<i64> {
         db.search_articles(&SearchQuery {
-            user_id: db.owner_id().unwrap(),
-            profile_hash: Some("h1"),
             terms: terms.iter().map(|t| t.to_string()).collect(),
-            limit: 50,
+            ..search_query(db)
         })
         .unwrap()
         .into_iter()
         .map(|i| i.article_id)
         .collect()
+    }
+
+    fn search_query(db: &Db) -> SearchQuery<'static> {
+        SearchQuery {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            limit: 50,
+            ..SearchQuery::default()
+        }
+    }
+
+    fn found(db: &Db, q: SearchQuery) -> Vec<i64> {
+        db.search_articles(&q)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn search_filters_by_period_source_and_lang() {
+        let db = Db::open_in_memory().unwrap();
+        let early = dated_article(&db, "https://e.com/early", "t", "2026-09-04T14:59:59Z");
+        let start = dated_article(&db, "https://e.com/start", "t", "2026-09-04T15:00:00Z");
+        let end = dated_article(&db, "https://e.com/end", "t", "2026-09-10T14:59:59Z");
+        let late = dated_article(&db, "https://e.com/late", "t", "2026-09-10T15:00:00Z");
+        let nra = db
+            .insert_article(&NewArticle {
+                source_id: "nra",
+                lang: Lang::Ja,
+                published_at: Some("2026-09-06T00:00:00Z"),
+                ..article("https://e.com/nra")
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    since: Some(t("2026-09-04T15:00:00Z")),
+                    until: Some(t("2026-09-10T15:00:00Z")),
+                    ..search_query(&db)
+                }
+            ),
+            [end, nra, start]
+        );
+        assert_eq!(
+            found(&db, search_query(&db)),
+            [late, end, nra, start, early]
+        );
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    sources: vec!["nra".into(), "none".into()],
+                    ..search_query(&db)
+                }
+            ),
+            [nra]
+        );
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    lang: Some(Lang::Ja),
+                    ..search_query(&db)
+                }
+            ),
+            [nra]
+        );
+    }
+
+    fn digest_on(
+        db: &Db,
+        article_id: i64,
+        topics: serde_json::Value,
+        new: serde_json::Value,
+        at: &str,
+    ) {
+        let c = db
+            .insert_content(article_id, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        db.insert_artifact(
+            &NewArtifact {
+                article_id,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 2,
+                payload: &serde_json::json!({
+                    "title_ja": "題", "summary_ja": "要約", "lwr_relevant": true,
+                    "topics": topics, "new_topics": new,
+                }),
+                inputs: &[c],
+            },
+            t(at),
+        )
+        .unwrap();
+    }
+
+    /// トピックは閲覧できる最新の要約で判定し、別名でも統合先で引ける。
+    #[test]
+    fn search_filters_by_topics_of_the_latest_digest() {
+        let db = Db::open_in_memory().unwrap();
+        let both = dated_article(&db, "https://e.com/both", "t", "2026-09-01T00:00:00Z");
+        digest_on(
+            &db,
+            both,
+            serde_json::json!(["燃料", "PWR"]),
+            serde_json::json!([]),
+            "2026-09-01T01:00:00Z",
+        );
+        let fuel = dated_article(&db, "https://e.com/fuel", "t", "2026-09-02T00:00:00Z");
+        digest_on(
+            &db,
+            fuel,
+            serde_json::json!(["燃料"]),
+            serde_json::json!([]),
+            "2026-09-02T01:00:00Z",
+        );
+        let merged = dated_article(&db, "https://e.com/merged", "t", "2026-09-03T00:00:00Z");
+        digest_on(
+            &db,
+            merged,
+            serde_json::json!(["新設炉"]),
+            serde_json::json!([{"name": "新設炉", "facet": "分野"}]),
+            "2026-09-03T01:00:00Z",
+        );
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-09-04T00:00:00Z"),
+        )
+        .unwrap();
+        // 古い版にだけ付いている語では引かない
+        let redone = dated_article(&db, "https://e.com/redone", "t", "2026-09-05T00:00:00Z");
+        digest_on(
+            &db,
+            redone,
+            serde_json::json!(["BWR"]),
+            serde_json::json!([]),
+            "2026-09-05T01:00:00Z",
+        );
+        digest_on(
+            &db,
+            redone,
+            serde_json::json!(["燃料"]),
+            serde_json::json!([]),
+            "2026-09-06T01:00:00Z",
+        );
+
+        let by = |topics: &[&str]| {
+            found(
+                &db,
+                SearchQuery {
+                    topics: topics.iter().map(|t| t.to_string()).collect(),
+                    ..search_query(&db)
+                },
+            )
+        };
+        assert_eq!(by(&["燃料"]), [redone, fuel, both]);
+        assert_eq!(by(&["燃料", "PWR"]), [both]);
+        assert_eq!(by(&["新設・建設"]), [merged]);
+        assert_eq!(by(&["新設炉"]), [merged]);
+        assert!(by(&["BWR"]).is_empty());
+        assert!(by(&["無い語"]).is_empty());
+    }
+
+    #[test]
+    fn search_filters_by_state_and_orders_by_score() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let translated = scored_article(
+            &db,
+            "https://e.com/tr",
+            Lang::En,
+            "2026-09-01T00:00:00.000Z",
+            90,
+        );
+        add_translation_text(&db, translated, "和訳");
+        let liked = scored_article(
+            &db,
+            "https://e.com/up",
+            Lang::En,
+            "2026-09-02T00:00:00.000Z",
+            50,
+        );
+        db.record_event(owner, liked, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let read = scored_article(
+            &db,
+            "https://e.com/read",
+            Lang::En,
+            "2026-09-03T00:00:00.000Z",
+            70,
+        );
+        db.record_event(
+            owner,
+            read,
+            SignalKind::OpenDetail,
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        let disliked = scored_article(
+            &db,
+            "https://e.com/down",
+            Lang::En,
+            "2026-09-04T00:00:00.000Z",
+            95,
+        );
+        db.record_event(owner, disliked, SignalKind::Down, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let unscored = dated_article(&db, "https://e.com/unscored", "t", "2026-09-05T00:00:00Z");
+
+        let with = |q: SearchQuery<'static>| found(&db, q);
+        assert_eq!(
+            with(SearchQuery {
+                translated: true,
+                ..search_query(&db)
+            }),
+            [translated]
+        );
+        assert_eq!(
+            with(SearchQuery {
+                liked: true,
+                ..search_query(&db)
+            }),
+            [liked]
+        );
+        assert_eq!(
+            with(SearchQuery {
+                unread: true,
+                ..search_query(&db)
+            }),
+            [unscored, disliked, liked, translated]
+        );
+        assert_eq!(
+            with(SearchQuery {
+                min_score: Some(60),
+                ..search_query(&db)
+            }),
+            [disliked, read, translated]
+        );
+        // 一覧の既定と同じく隠す：👎・未採点・閾値未満
+        assert_eq!(
+            with(SearchQuery {
+                hide_below: Some(60),
+                ..search_query(&db)
+            }),
+            [read, translated]
+        );
+        assert_eq!(
+            with(SearchQuery {
+                order: SearchOrder::Score,
+                ..search_query(&db)
+            }),
+            [disliked, translated, read, liked, unscored]
+        );
     }
 
     fn dated_article(db: &Db, url: &str, title: &str, published: &str) -> i64 {

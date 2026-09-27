@@ -136,6 +136,15 @@ category = "utility"
 filter = { keywords = ["原子力", "島根"] }
 
 [[source]]
+id = "yonden"
+name = "四国電力"
+kind = "feed"
+url = "https://www.yonden.co.jp/press.xml"
+lang = "ja"
+category = "utility"
+filter = { keywords = ["原子力", "伊方"] }
+
+[[source]]
 id = "kyuden"
 name = "九州電力"
 label = "九電"

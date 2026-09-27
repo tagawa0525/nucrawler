@@ -58,6 +58,7 @@ pub async fn score_articles<L: Llm>(
         profile_hash: &profile_hash,
         backend,
         model,
+        prompt_version: prompt::score::PROMPT_VERSION,
     };
     let failure_stage = score_stage(key);
     let failure_key = |article_id| StageKey {
@@ -272,11 +273,15 @@ mod tests {
         assert!(reqs[0].system.contains("記事2"), "signals in system prompt");
         assert_eq!(
             db.query_strings(
-                "SELECT s.score || '|' || s.backend || '|' || s.model FROM scores AS s
+                "SELECT s.score || '|' || s.backend || '|' || s.model || '|' || s.prompt_version
+                 FROM scores AS s
                  JOIN artifacts AS r ON r.id = s.artifact_id ORDER BY r.article_id"
             )
             .unwrap(),
-            ["90|fake|sonnet", "40|fake|sonnet", "5|fake|sonnet"]
+            [90, 40, 5].map(|score| format!(
+                "{score}|fake|sonnet|{}",
+                crate::prompt::score::PROMPT_VERSION
+            ))
         );
         assert_eq!(
             db.query_strings("SELECT stage FROM llm_calls").unwrap(),
@@ -307,6 +312,7 @@ mod tests {
             profile_hash: &hash,
             backend: "fake",
             model: "sonnet",
+            prompt_version: 1,
         });
         assert_eq!(
             db.query_strings("SELECT stage FROM stage_errors").unwrap(),

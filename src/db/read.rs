@@ -1266,6 +1266,7 @@ mod tests {
                 profile_hash: "h1",
                 backend: "claude-cli",
                 model: "haiku",
+                prompt_version: 1,
             },
             digest,
             50,

@@ -279,6 +279,7 @@ mod tests {
                 profile_hash: &hash,
                 backend: "claude-cli",
                 model: "sonnet",
+                prompt_version: 1,
             },
             digest,
             score,

@@ -370,6 +370,63 @@ mod tests {
     }
 
     #[test]
+    fn migration_adds_prompt_version_to_scores() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("scores_new"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public', '{}', '2026-09-27T00:00:00.000Z');
+             INSERT INTO scores
+               (id, user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
+               VALUES (7, 1, 1, 'h', 'b', 'm', 50, '理由', '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings(
+                "SELECT id || '|' || prompt_version || '|' || score || '|' || reason FROM scores"
+            )
+            .unwrap(),
+            ["7|1|50|理由"]
+        );
+        let insert = |version: i64| {
+            db.conn().execute(
+                "INSERT INTO scores
+                   (user_id, artifact_id, profile_hash, backend, model, prompt_version, score,
+                    created_at)
+                 VALUES (1, 1, 'h', 'b', 'm', ?1, 60, '2026-09-28T00:00:00.000Z')",
+                [version],
+            )
+        };
+        insert(2).unwrap();
+        assert!(insert(2).is_err());
+        assert_eq!(
+            db.query_i64(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'scores_by_artifact'"
+            )
+            .unwrap(),
+            1
+        );
+        // 記事を消せば採点も連鎖して消える
+        db.conn()
+            .execute("DELETE FROM artifacts WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(db.query_i64("SELECT count(*) FROM scores").unwrap(), 0);
+    }
+
+    #[test]
     fn migrate_is_idempotent() {
         let mut db = Db::open_in_memory().unwrap();
         migrate(&mut db.conn).unwrap();

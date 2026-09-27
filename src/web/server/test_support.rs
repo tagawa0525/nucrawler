@@ -60,6 +60,7 @@ pub(super) fn score(db: &Db, digest: i64, score: u8) {
         profile_hash: &hash,
         backend: "claude-cli",
         model: "sonnet",
+        prompt_version: 1,
     };
     db.insert_score(key, digest, score, Some("理由"), chrono::Utc::now())
         .unwrap();

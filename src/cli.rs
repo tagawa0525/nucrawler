@@ -69,6 +69,7 @@ commands:
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
+  topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   help      このヘルプを表示
 ";
 
@@ -97,6 +98,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("mcp") => Command::Mcp,
         Some("rescore") => Command::Rescore,
         Some("profile") => Command::Profile,
+        Some("topics") => Command::Topics,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -285,8 +287,14 @@ pub enum TopicsArgs {
     Export,
 }
 
-pub fn parse_topics_args(_args: &[String]) -> Result<TopicsArgs, ParseError> {
-    Err(ParseError::TopicsUsage)
+pub fn parse_topics_args(args: &[String]) -> Result<TopicsArgs, ParseError> {
+    match args {
+        [cmd, file] if cmd == "import" => Ok(TopicsArgs::Import {
+            file: PathBuf::from(file),
+        }),
+        [cmd] if cmd == "export" => Ok(TopicsArgs::Export),
+        _ => Err(ParseError::TopicsUsage),
+    }
 }
 
 /// `sources` サブコマンドの引数。

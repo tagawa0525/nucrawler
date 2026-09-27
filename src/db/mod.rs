@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_visit_boundary.sql"),
     include_str!("migrations/0005_retry_pdf_extracts.sql"),
     include_str!("migrations/0006_search.sql"),
+    include_str!("migrations/0007_topics.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -800,12 +801,49 @@ impl Db {
 
     /// トピックの語彙（登録順）。
     pub fn topics(&self) -> Result<Vec<crate::topics::Topic>, DbError> {
-        Ok(Vec::new())
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, facet FROM topics ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (name, facet) = row?;
+            let facet = crate::topics::Facet::parse(&facet)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("topic facet {facet:?}")))?;
+            Ok(crate::topics::Topic { name, facet })
+        })
+        .collect()
     }
 
     /// 語彙を `topics` に置き換える。名前で突き合わせ、無い語は追加、軸が変わった語は更新し、
     /// 並びに無い語は削除する。要約に付いている語を消そうとしたら何も変えずに失敗する。
-    pub fn replace_topics(&self, _topics: &[crate::topics::Topic]) -> Result<(), DbError> {
+    pub fn replace_topics(&self, topics: &[crate::topics::Topic]) -> Result<(), DbError> {
+        let names = serde_json::to_string(&topics.iter().map(|t| &t.name).collect::<Vec<_>>())?;
+        let tx = self.conn.unchecked_transaction()?;
+        let in_use: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT t.name FROM topics AS t
+                 JOIN artifact_topics AS at ON at.topic_id = t.id
+                 WHERE t.name NOT IN (SELECT value FROM json_each(?1))
+                 ORDER BY t.name",
+            )?;
+            stmt.query_map([&names], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        if !in_use.is_empty() {
+            return Err(DbError::TopicsInUse(in_use));
+        }
+        tx.execute(
+            "DELETE FROM topics WHERE name NOT IN (SELECT value FROM json_each(?1))",
+            [&names],
+        )?;
+        for t in topics {
+            tx.execute(
+                "INSERT INTO topics (name, facet) VALUES (?1, ?2)
+                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet",
+                [&t.name, t.facet.as_str()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

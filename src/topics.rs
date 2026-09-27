@@ -61,12 +61,33 @@ struct Vocabulary {
 }
 
 /// TOML を読み、値を検証する（1 件以上、名前は空でなく重複しない）。
-pub fn parse(_text: &str) -> Result<Vec<Topic>, TopicsError> {
-    Ok(Vec::new())
+pub fn parse(text: &str) -> Result<Vec<Topic>, TopicsError> {
+    let Vocabulary { topics } = toml::from_str(text)?;
+    if topics.is_empty() {
+        return Err(TopicsError::Invalid(
+            "at least one topic is required".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for t in &topics {
+        if t.name.trim().is_empty() {
+            return Err(TopicsError::Invalid("topic name must not be empty".into()));
+        }
+        if !seen.insert(t.name.as_str()) {
+            return Err(TopicsError::Invalid(format!(
+                "duplicate topic {:?}",
+                t.name
+            )));
+        }
+    }
+    Ok(topics)
 }
 
-pub fn to_toml(_topics: &[Topic]) -> String {
-    String::new()
+pub fn to_toml(topics: &[Topic]) -> String {
+    toml::to_string(&Vocabulary {
+        topics: topics.to_vec(),
+    })
+    .expect("topics are plain data")
 }
 
 #[cfg(test)]

@@ -196,6 +196,7 @@ mod tests {
             enabled: true,
             filter: Filter::default(),
             body_selector: body_selector.map(Into::into),
+            list: None,
         }
     }
 

@@ -4,10 +4,11 @@ use std::fmt::Write as _;
 
 use url::Url;
 
-use crate::config::Source;
+use crate::config::{HtmlList, Source, SourceKind};
 use crate::errors::error_chain;
 use crate::http::{Fetcher, HttpError};
-use crate::source::{self, Candidate, SourceError};
+use crate::source::{self, Candidate, SourceError, html_list};
+use crate::text;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
@@ -79,14 +80,35 @@ pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, Source
         url: s.url.clone(),
         source,
     })?;
-    let fetched = fetcher.get(&url).await?;
-    let candidates = source::parse(s.kind, &fetched.body, &fetched.url)?;
+    let candidates = match (s.kind, &s.list) {
+        (SourceKind::HtmlList, Some(list)) => fetch_html_list(fetcher, &url, list).await?,
+        _ => {
+            let fetched = fetcher.get(&url).await?;
+            source::parse(s.kind, &fetched.body, &fetched.url)?
+        }
+    };
     let total = candidates.len();
     let matched = candidates
         .into_iter()
         .filter(|c| source::matches(&s.filter, c))
         .collect();
     Ok(Stats { total, matched })
+}
+
+/// 一覧ページは記事ページと同じく robots.txt に従って取得する。
+async fn fetch_html_list(
+    fetcher: &Fetcher,
+    url: &Url,
+    list: &HtmlList,
+) -> Result<Vec<Candidate>, SourceFailure> {
+    let mut page = fetcher.get_page(url).await?;
+    if let Some(follow) = &list.follow {
+        let html = text::decode_html(&page.body, page.content_type.as_deref());
+        let next = html_list::follow(follow, &html, &page.url)?;
+        page = fetcher.get_page(&next).await?;
+    }
+    let html = text::decode_html(&page.body, page.content_type.as_deref());
+    Ok(html_list::parse(list, &html, &page.url)?)
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
@@ -143,6 +165,7 @@ mod tests {
             enabled,
             filter,
             body_selector: None,
+            list: None,
         }
     }
 

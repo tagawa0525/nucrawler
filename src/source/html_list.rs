@@ -1,5 +1,116 @@
 //! RSS の無いサイトのニュース一覧ページ（HTML）から、記事へのリンクを候補にする。
 
+use chrono::{DateTime, NaiveDate, Utc};
+use scraper::{ElementRef, Html, Selector};
+use url::Url;
+
+use super::{Candidate, SourceError};
+use crate::config::{HtmlList, UrlDate};
+
+/// 一覧ページから、`list.link` に一致するリンクを候補にする。`base` はページの URL。
+pub fn parse(list: &HtmlList, html: &str, base: &Url) -> Result<Vec<Candidate>, SourceError> {
+    let doc = Html::parse_document(html);
+    let link = selector(&list.link)?;
+    let skip = list.title_skip.as_deref().map(selector).transpose()?;
+    let mut items = Vec::new();
+    for a in doc.select(&link) {
+        let Some(url) = page_link(a, base) else {
+            continue;
+        };
+        let title = title(a, skip.as_ref());
+        if title.is_empty() {
+            tracing::debug!(%url, "skipping link without text");
+            continue;
+        }
+        items.push(Candidate {
+            published_at: list.date_in_url.and_then(|f| date_in_url(&url, f)),
+            url: url.into(),
+            title,
+            summary: None,
+            content: None,
+        });
+    }
+    Ok(items)
+}
+
+/// 入口のページで `follow` に一致する最初のリンク（一覧ページ）の URL。
+pub fn follow(follow: &str, html: &str, base: &Url) -> Result<Url, SourceError> {
+    let doc = Html::parse_document(html);
+    doc.select(&selector(follow)?)
+        .find_map(|a| page_link(a, base))
+        .ok_or_else(|| SourceError::NoFollowLink {
+            selector: follow.to_string(),
+        })
+}
+
+fn selector(s: &str) -> Result<Selector, SourceError> {
+    Selector::parse(s).map_err(|e| SourceError::InvalidSelector {
+        selector: s.to_string(),
+        reason: e.to_string(),
+    })
+}
+
+/// ページへのリンク（http/https）。ページ内の移動や javascript: などは None。
+fn page_link(a: ElementRef, base: &Url) -> Option<Url> {
+    let href = a.value().attr("href")?.trim();
+    if href.is_empty() || href.starts_with('#') {
+        return None;
+    }
+    let url = base
+        .join(href)
+        .inspect_err(|e| tracing::debug!(href, "skipping unparsable link: {e}"))
+        .ok()?;
+    matches!(url.scheme(), "http" | "https").then_some(url)
+}
+
+/// リンクの文字列。`skip` に一致する要素は除き、`<br>` は空白にし、連続する空白は 1 つにする
+/// （全角の空白は見出しの一部なので残す）。
+fn title(a: ElementRef, skip: Option<&Selector>) -> String {
+    fn walk(el: ElementRef, skip: Option<&Selector>, out: &mut String) {
+        for child in el.children() {
+            if let Some(text) = child.value().as_text() {
+                out.push_str(text);
+            } else if let Some(child) = ElementRef::wrap(child) {
+                if skip.is_some_and(|s| s.matches(&child)) {
+                    continue;
+                }
+                if child.value().name() == "br" {
+                    out.push(' ');
+                } else {
+                    walk(child, skip, out);
+                }
+            }
+        }
+    }
+    let mut raw = String::new();
+    walk(a, skip, &mut raw);
+    raw.split(|c: char| c.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// URL のファイル名に含まれる日付（日本時間の 0 時）。見つからなければ None。
+fn date_in_url(url: &Url, format: UrlDate) -> Option<DateTime<Utc>> {
+    let name = url.path_segments()?.next_back()?;
+    let len = match format {
+        UrlDate::Yyyymmdd => 8,
+        UrlDate::Yymmdd => 6,
+    };
+    let digits = name
+        .split(|c: char| !c.is_ascii_digit())
+        .find(|run| run.len() == len)?;
+    let (year, month_day) = digits.split_at(len - 4);
+    let year: i32 = year.parse().ok()?;
+    let year = if len == 6 { 2000 + year } else { year };
+    let date = NaiveDate::from_ymd_opt(
+        year,
+        month_day[..2].parse().ok()?,
+        month_day[2..].parse().ok()?,
+    )?;
+    crate::jst::midnight(date)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

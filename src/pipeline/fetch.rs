@@ -111,6 +111,7 @@ mod tests {
             enabled,
             filter,
             body_selector: None,
+            list: None,
         }
     }
 

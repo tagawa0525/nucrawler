@@ -63,6 +63,7 @@ mod tests {
             enabled,
             filter: Filter::default(),
             body_selector: None,
+            list: None,
         }
     }
 

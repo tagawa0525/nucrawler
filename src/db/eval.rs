@@ -67,6 +67,17 @@ pub struct Evidence {
     pub at: String,
 }
 
+/// 確認枠（閾値未満から無作為に選んだ記事）の反応の内訳。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExploreStats {
+    /// 確認枠に選んだ記事の数
+    pub picked: usize,
+    /// そのうち関心（up・bookmark）が最後の反応の記事
+    pub positive: usize,
+    /// そのうち不要（down・dismiss）が最後の反応の記事
+    pub negative: usize,
+}
+
 impl Db {
     /// 利用者の反応から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
@@ -132,6 +143,32 @@ impl Db {
             })
         })
         .collect()
+    }
+
+    /// 確認枠に選んだ記事と、そのラベルの内訳。
+    pub fn explore_stats(&self, user_id: i64) -> Result<ExploreStats, DbError> {
+        let picked: std::collections::HashSet<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT article_id FROM explore_picks WHERE user_id = ?1")?;
+            let rows = stmt.query_map([user_id], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut stats = ExploreStats {
+            picked: picked.len(),
+            ..ExploreStats::default()
+        };
+        for label in self.eval_labels(user_id)? {
+            if !picked.contains(&label.article_id) {
+                continue;
+            }
+            if label.positive() {
+                stats.positive += 1;
+            } else {
+                stats.negative += 1;
+            }
+        }
+        Ok(stats)
     }
 
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う
@@ -335,6 +372,45 @@ mod tests {
             .map(|e| e.title_ja)
             .collect();
         assert_eq!(titles, ["公開の見出し"]);
+    }
+
+    #[test]
+    fn explore_stats_count_reactions_to_picks() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let ids: Vec<i64> = (0..4)
+            .map(|i| {
+                page_article(
+                    &db,
+                    &format!("https://e.com/{i}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        for &id in &ids[..3] {
+            db.conn()
+                .execute(
+                    "INSERT INTO explore_picks VALUES (?1, ?2, '2026-09-27')",
+                    [owner, id],
+                )
+                .unwrap();
+        }
+        let event = |article, kind| {
+            db.record_event(owner, article, kind, t("2026-09-27T01:00:00Z"))
+                .unwrap()
+        };
+        event(ids[0], SignalKind::Bookmark);
+        event(ids[1], SignalKind::Dismiss);
+        // 確認枠に選んでいない記事の反応は数えない
+        event(ids[3], SignalKind::Up);
+        assert_eq!(
+            db.explore_stats(owner).unwrap(),
+            ExploreStats {
+                picked: 3,
+                positive: 1,
+                negative: 1,
+            }
+        );
     }
 
     #[test]

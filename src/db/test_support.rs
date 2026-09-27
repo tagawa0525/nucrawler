@@ -87,6 +87,69 @@ pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
     }
 }
 
+/// 英語の記事に本文と digest と採点を付ける。
+pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, score: u8) -> i64 {
+    let id = db
+        .insert_article(&NewArticle {
+            lang,
+            published_at: Some(published),
+            ..article(url)
+        })
+        .unwrap()
+        .unwrap();
+    let digest = add_digest(db, id, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+    db.insert_score(
+        ScoreKey {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: "h1",
+            backend: "claude-cli",
+            model: "sonnet",
+        },
+        digest,
+        score,
+        None,
+        t("2026-09-26T02:00:00Z"),
+    )
+    .unwrap();
+    id
+}
+
+pub(super) fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
+    ListQuery {
+        user_id: db.owner_id().unwrap(),
+        profile_hash: Some("h1"),
+        min_score: 60,
+        since: t("2026-09-20T00:00:00Z"),
+        show_all,
+        limit: 50,
+    }
+}
+
+pub(super) fn list_ids(db: &Db, show_all: bool) -> Vec<i64> {
+    db.list_articles(list_query(db, show_all))
+        .unwrap()
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect()
+}
+
+pub(super) fn search_query(db: &Db) -> SearchQuery<'static> {
+    SearchQuery {
+        user_id: db.owner_id().unwrap(),
+        profile_hash: Some("h1"),
+        limit: 50,
+        ..SearchQuery::default()
+    }
+}
+
+pub(super) fn found(db: &Db, q: SearchQuery) -> Vec<i64> {
+    db.search_articles(&q)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect()
+}
+
 pub(super) fn digest_with_topics(
     db: &Db,
     topics: serde_json::Value,

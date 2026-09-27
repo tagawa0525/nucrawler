@@ -169,36 +169,44 @@ source_state(source_id PK, last_success_at, last_error)
 ## PR の順序
 
 各 PR は TDD（RED のコミット → GREEN のコミット）で進める。
+項目が済んだら、その PR で行頭に ✅ を付ける（一部だけ済んだものは 🔶 と残りを書く）。
 
-**MVP**
+**MVP**（すべて済み）
 
-1. `chore/skeleton`：サブコマンドの振り分け、CI、この計画書
-2. `feat/config`：config.toml と sources.toml、examples
-3. `feat/db`：上記のスキーマ全体、マイグレーション、URL の正規化、閲覧判定、ステージごとの「未処理」クエリ
-4. `feat/feed-source`：http.rs、RSS/Atom（Shift_JIS 対応）、電事連の JSON、`sources check`
-5. `feat/crawl-resumable`：ステージの枠組み、ロック、シグナル処理、`status`、取得して保存するまで
-6. `feat/extract`：記事ページの取得、robots.txt、本文抽出
-7. `feat/llm-claude-cli`：Backend、claude_cli（stream-json、`rate_limit_event`、`/usage`）、`llm_calls`、`stage_errors`
-8. `feat/quota`：時間帯ごとの 5時間枠の上限、週次の絶対上限とペース配分
-9. `feat/digest`：digest ステージ
-10. `feat/scoring`：プロファイルの import/export、score ステージ、行動シグナル
-11. `feat/translate`：80 点以上の先回り和訳、和訳の依頼、`--requests-only`
-12. `feat/redo`：`redo digest` と `redo translate`
-13. `feat/web-ui`：スマホ向けの一覧・詳細、版の切り替え、フィードバック、行動の記録、和訳の依頼、警告表示
-14. `feat/deploy`：Nix flake、home-manager モジュール、systemd の user timer（取得 04/10/16/22 時、LLM 10/16/03 時、依頼 15 分ごと、`Persistent=true`）、linger の案内、README
+1. ✅ `chore/skeleton`：サブコマンドの振り分け、CI、この計画書
+2. ✅ `feat/config`：config.toml と sources.toml、examples
+3. ✅ `feat/db`：上記のスキーマ全体、マイグレーション、URL の正規化、閲覧判定、ステージごとの「未処理」クエリ
+4. ✅ `feat/feed-source`：http.rs、RSS/Atom（Shift_JIS 対応）、電事連の JSON、`sources check`
+5. ✅ `feat/crawl-resumable`：ステージの枠組み、ロック、シグナル処理、`status`、取得して保存するまで
+6. ✅ `feat/extract`：記事ページの取得、robots.txt、本文抽出
+7. ✅ `feat/llm-claude-cli`：Backend、claude_cli（stream-json、`rate_limit_event`、`/usage`）、`llm_calls`、`stage_errors`
+8. ✅ `feat/quota`：時間帯ごとの 5時間枠の上限、週次の絶対上限とペース配分
+9. ✅ `feat/digest`：digest ステージ
+10. ✅ `feat/scoring`：プロファイルの import/export、score ステージ、行動シグナル
+11. ✅ `feat/translate`：80 点以上の先回り和訳、和訳の依頼、`--requests-only`
+12. ✅ `feat/redo`：`redo digest` と `redo translate`
+13. ✅ `feat/web-ui`：スマホ向けの一覧・詳細、版の切り替え、フィードバック、行動の記録、和訳の依頼、警告表示
+14. ✅ `feat/deploy`：Nix flake、home-manager モジュール、systemd の user timer（取得 04/10/16/22 時、LLM 10/16/03 時、依頼 15 分ごと、`Persistent=true`）、linger の案内、README
 
 **MVP の後**
 
-15. HTML の一覧ページ（NRA、JAEA、電力各社、東京電力はブラウザ UA）と PDF（pdf-extract、スキャン画像のときは Claude に直接読ませる）
-16. JAIF
+15. 🔶 HTML の一覧ページ（NRA、JAEA、電力各社、東京電力はブラウザ UA）と PDF（pdf-extract、スキャン画像のときは Claude に直接読ませる）
+    - 残り：スキャン画像の PDF を Claude に読ませる（今は文字の無い PDF として断念する）
+16. ✅ JAIF
 17. 論文系（事前フィルタ、Crossref、arXiv、OSTI）
-18. RSS 出力と JSON API
-19. MCP stdio（rmcp）
+18. ✅ RSS 出力と JSON API（出力は Atom フィードにした）
+19. ✅ MCP stdio（rmcp）
 20. `profile suggest`
 21. 複数ユーザー（Tailscale ヘッダ、プロファイル編集画面、会員資格の申告、API バックエンド）
 22. Jev による判定と、Claude の `lwr_relevant` との一致率の比較
 23. ヘッドレス Chromium（Podman）による 403 サイトの取得
 24. 会員向けのログイン取得（`LoadCredential`）
+
+**当初の順序に無かったもの**
+
+- ✅ 記事の全文検索（Web・JSON API・CLI・MCP）。計画は [linear-skipping-pebble.md](linear-skipping-pebble.md)
+- ✅ トピックの語彙を DB で管理（import/export、要約での語彙からの選択と新語の提案、統合と別名、週 1 回の表記揺れの統合）
+- ✅ 一覧の過去の欄で既読を表示するかの切り替え
 
 ## 検証
 

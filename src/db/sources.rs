@@ -20,6 +20,19 @@ pub struct PendingPage {
     pub url: String,
 }
 
+/// 取得 1 回の件数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FetchCounts {
+    /// 一覧・フィードに載っていた件数（絞り込み前）
+    pub total: usize,
+    /// 絞り込み条件に一致した件数
+    pub matched: usize,
+    /// 新しく登録した件数
+    pub new: usize,
+    /// 登録済みだった件数
+    pub duplicate: usize,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SourceState {
     pub last_success_at: Option<String>,
@@ -41,6 +54,16 @@ impl Db {
             [source_id],
         )?;
         Ok(())
+    }
+
+    /// 成功した取得 1 回の件数を記録する。
+    pub fn record_fetch_run(
+        &self,
+        source_id: &str,
+        counts: &FetchCounts,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        todo!("{source_id} {counts:?} {at}")
     }
 
     /// 取得の失敗を記録する。最後に成功した時刻は残す。
@@ -126,6 +149,37 @@ mod tests {
         let st = db.source_state("s").unwrap().unwrap();
         assert!(st.last_success_at.is_some(), "last success is kept");
         assert_eq!(st.last_error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn records_fetch_runs() {
+        let db = Db::open_in_memory().unwrap();
+        let counts = FetchCounts {
+            total: 25,
+            matched: 3,
+            new: 1,
+            duplicate: 2,
+        };
+        db.record_fetch_run("s", &counts, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            db.query_strings(
+                "SELECT source_id || '|' || fetched_at || '|' || total || '|' || matched || '|'
+                        || new || '|' || duplicate
+                 FROM fetch_runs"
+            )
+            .unwrap(),
+            ["s|2026-09-27T00:00:00.000Z|25|3|1|2"]
+        );
+        // 絞り込みで total より増えることはない
+        let bad = FetchCounts {
+            matched: 26,
+            ..counts
+        };
+        assert!(
+            db.record_fetch_run("s", &bad, t("2026-09-27T01:00:00Z"))
+                .is_err()
+        );
     }
 
     #[test]

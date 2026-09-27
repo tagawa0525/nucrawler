@@ -88,7 +88,8 @@ pub async fn crawl<L: Llm>(
         }
         match stage {
             Stage::Fetch => {
-                let summary = fetch::fetch_sources(db, fetcher, sources, env.cancel).await?;
+                let summary =
+                    fetch::fetch_sources(db, fetcher, sources, env.cancel, (env.clock)()).await?;
                 tracing::info!(
                     new_articles = summary.new_articles,
                     failed_sources = summary.failed_sources.len(),

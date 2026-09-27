@@ -1637,14 +1637,15 @@ impl Db {
     /// 閲覧できる最新の要約から取る（無ければ原題）。
     pub fn term_reports(
         &self,
-        _user_id: i64,
+        user_id: i64,
         status: Option<ReportStatus>,
         article_id: Option<i64>,
     ) -> Result<Vec<TermReport>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.article_id,
                     coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
                                           WHERE d.article_id = a.id AND d.kind = 'digest'
+                                            AND {viewable}
                                           ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
                              a.title),
                     r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
@@ -1652,11 +1653,17 @@ impl Db {
              FROM term_reports AS r
              JOIN articles AS a ON a.id = r.article_id
              LEFT JOIN glossary_terms AS t ON t.id = r.term_id
-             WHERE (?1 IS NULL OR r.status = ?1) AND (?2 IS NULL OR r.article_id = ?2)
+             WHERE (:status IS NULL OR r.status = :status)
+               AND (:article IS NULL OR r.article_id = :article)
              ORDER BY r.reported_at DESC, r.id DESC",
-        )?;
+            viewable = viewable("d")
+        ))?;
         let rows = stmt.query_map(
-            rusqlite::params![status.map(ReportStatus::as_str), article_id],
+            rusqlite::named_params! {
+                ":user": user_id,
+                ":status": status.map(ReportStatus::as_str),
+                ":article": article_id,
+            },
             |r| {
                 let term = match (r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?) {
                     (Some(id), Some(target)) => Some((id, target)),

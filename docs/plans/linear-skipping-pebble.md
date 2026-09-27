@@ -177,7 +177,11 @@ PR 1 で合成データ（手元の本文の文を並べ替えた 50KB の PDF �
      - テスト：語彙外・重複・件数超過・不正な新しい語は検証で失敗・語彙にある語の提案は選んだ扱い・
        digest の保存で付与と新しい語が入る・語彙外の名前は保存を拒否・提案した語が次のバッチで選べる
      - 必要なら `redo digest` で既存の要約を作り直す（運用作業）
-   - 2c：`nucrawler topics tidy`（週 1 回の timer）。LLM が語彙全体と直近に増えた語を見て統合案 `{from, into}` を返し、
+   - 2c-1：別名の表（migration 0009 `topic_aliases`）、`Db::merge_topics`、保存時に別名を統合先へ解決
+   - 2c-2：週 1 回の整理。timer は増やさず crawl の最後のステージ `tidy` にし、前回の成功から
+     `llm.tidy_interval_days`（既定 7）日たったら実行する（`crawl --only tidy` なら間隔によらず実行）。
+     統合元にできるのは LLM が足した語（`added_at` あり）だけ。以下は当初案：
+     `nucrawler topics tidy`（週 1 回の timer）。LLM が語彙全体と直近に増えた語を見て統合案 `{from, into}` を返し、
      付与の付け替え・別名の記録（`topic_aliases`）・統合元の削除を 1 トランザクションで行う。
      要約の保存時は別名も統合先に解決する
 3. 絞り込み条件（期間・トピック・ソース・言語・状態）と `Db::topics()`

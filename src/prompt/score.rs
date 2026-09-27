@@ -267,6 +267,14 @@ mod tests {
         );
     }
 
+    /// 点数はプロファイルと記事だけで決める。反応はプロファイルの見直しを通して効かせる。
+    #[test]
+    fn system_prompt_does_not_carry_reactions() {
+        let s = system_prompt(&profile(), &[]);
+        assert!(!s.contains("反応"), "{s}");
+        assert!(!s.contains("<signal"), "{s}");
+    }
+
     #[test]
     fn system_prompt_keeps_weight_precision() {
         let mut p = profile();

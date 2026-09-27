@@ -248,6 +248,18 @@ mod tests {
         assert!(all.contains("scored 1/3  AUC -"), "{all}");
     }
 
+    /// 反応の見出しをプロンプトに入れていたのは版 1 だけなので、それ以降の版には注記しない。
+    #[test]
+    fn notes_late_scores_only_for_prompt_v1() {
+        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let v2 = key("h", 2);
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
+        let out = render(&labels, &scores, Some(("h", 2)), false);
+        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(!out.contains("after the reaction"), "{out}");
+    }
+
     #[test]
     fn says_when_the_current_key_has_no_scores() {
         let labels = [label(1, SignalKind::Up)];

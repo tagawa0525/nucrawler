@@ -270,7 +270,10 @@ mod tests {
             reqs[0].system.contains("規制・審査"),
             "profile in system prompt"
         );
-        assert!(reqs[0].system.contains("記事2"), "signals in system prompt");
+        assert!(
+            !reqs[0].system.contains("記事2"),
+            "reactions are not in the system prompt"
+        );
         assert_eq!(
             db.query_strings(
                 "SELECT s.score || '|' || s.backend || '|' || s.model || '|' || s.prompt_version

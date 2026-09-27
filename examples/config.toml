@@ -33,6 +33,9 @@ score_reserved_calls = 1
 translate_model = "sonnet"
 translate_min_score = 80
 translate_max_input_chars = 20000
+# 語彙の整理（LLM が足したトピックの表記揺れの統合）に使うモデルと、整理の間隔（日）
+tidy_model = "sonnet"
+tidy_interval_days = 7
 
 [quota]
 # 時間帯の判定に使う時差（JST）

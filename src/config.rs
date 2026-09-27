@@ -61,6 +61,10 @@ pub struct LlmConfig {
     pub translate_min_score: u8,
     /// 和訳に入れる本文の最大文字数（記事全体）
     pub translate_max_input_chars: usize,
+    /// 語彙の整理（表記揺れの統合）に使うモデル
+    pub tidy_model: String,
+    /// 語彙の整理の間隔（日）。crawl のたびに、前回の整理からこの日数がたっていれば整理する
+    pub tidy_interval_days: u32,
 }
 
 impl LlmConfig {
@@ -75,6 +79,7 @@ impl LlmConfig {
                 self.translate_max_input_chars == 0,
             ),
             ("timeout_secs", self.timeout_secs == 0),
+            ("tidy_interval_days", self.tidy_interval_days == 0),
         ] {
             if is_zero {
                 return Err(format!("llm.{name} must be at least 1"));
@@ -104,6 +109,8 @@ impl Default for LlmConfig {
             translate_model: "sonnet".into(),
             translate_min_score: 80,
             translate_max_input_chars: 20000,
+            tidy_model: "sonnet".into(),
+            tidy_interval_days: 7,
         }
     }
 }
@@ -513,6 +520,7 @@ mod tests {
             ),
             ("[llm]\ntranslate_min_score = 101\n", "translate_min_score"),
             ("[llm]\ntranslate_min_score = 0\n", "translate_min_score"),
+            ("[llm]\ntidy_interval_days = 0\n", "tidy_interval_days"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -536,6 +544,8 @@ mod tests {
         assert_eq!(d.translate_model, "sonnet");
         assert_eq!(d.translate_min_score, 80);
         assert_eq!(d.translate_max_input_chars, 20000);
+        assert_eq!(d.tidy_model, "sonnet");
+        assert_eq!(d.tidy_interval_days, 7);
     }
 
     #[test]

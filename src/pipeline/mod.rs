@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod llm_call;
 pub mod lock;
 pub mod score;
+pub mod tidy;
 pub mod translate;
 
 use std::sync::Arc;
@@ -84,6 +85,8 @@ pub enum Stage {
     Digest,
     Score,
     Translate,
+    /// 語彙の整理。前回から `llm.tidy_interval_days` 日たったときだけ実行する
+    Tidy,
 }
 
 impl Stage {
@@ -93,6 +96,7 @@ impl Stage {
         Stage::Digest,
         Stage::Score,
         Stage::Translate,
+        Stage::Tidy,
     ];
 
     pub fn name(self) -> &'static str {
@@ -102,6 +106,7 @@ impl Stage {
             Stage::Digest => "digest",
             Stage::Score => "score",
             Stage::Translate => "translate",
+            Stage::Tidy => "tidy",
         }
     }
 

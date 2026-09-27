@@ -354,6 +354,17 @@ pub struct SearchQuery<'a> {
     pub limit: usize,
 }
 
+/// 語彙の語と、その使われ方（語彙の整理に使う）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicUsage {
+    pub name: String,
+    pub facet: crate::topics::Facet,
+    /// 要約が提案して語彙に加えた時刻。初期語彙と `topics import` で入れた語は None
+    pub added_at: Option<String>,
+    /// この語が付いている要約の版の数
+    pub uses: i64,
+}
+
 /// 語彙の統合：`from` の語を `into` にまとめ、`from` は以後 `into` の別名として扱う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicMerge {
@@ -841,9 +852,22 @@ impl Db {
         .collect()
     }
 
+    /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
+    pub fn vocabulary(&self) -> Result<Vec<crate::topics::Entry>, DbError> {
+        Ok(self
+            .topic_usage()?
+            .into_iter()
+            .map(|u| crate::topics::Entry {
+                name: u.name,
+                facet: u.facet,
+                added_at: u.added_at,
+            })
+            .collect())
+    }
+
     /// 語彙を `topics` に置き換える。名前で突き合わせ、無い語は追加、軸が変わった語は更新し、
     /// 並びに無い語は削除する。要約に付いている語を消そうとしたら何も変えずに失敗する。
-    pub fn replace_topics(&self, topics: &[crate::topics::Topic]) -> Result<(), DbError> {
+    pub fn replace_topics(&self, topics: &[crate::topics::Entry]) -> Result<(), DbError> {
         let names = serde_json::to_string(&topics.iter().map(|t| &t.name).collect::<Vec<_>>())?;
         let tx = self.conn.unchecked_transaction()?;
         let in_use: Vec<String> = {
@@ -864,10 +888,11 @@ impl Db {
             [&names],
         )?;
         for t in topics {
+            // LLM が足した語かどうか（added_at）も語彙ファイルに従う
             tx.execute(
-                "INSERT INTO topics (name, facet) VALUES (?1, ?2)
-                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet",
-                [&t.name, t.facet.as_str()],
+                "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet, added_at = excluded.added_at",
+                rusqlite::params![t.name, t.facet.as_str(), t.added_at],
             )?;
         }
         // 語として取り込んだ名前は、別名ではなくその語を指すようにする
@@ -877,6 +902,48 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// 語彙の語と使われ方（登録順）。
+    pub fn topic_usage(&self) -> Result<Vec<TopicUsage>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, t.facet, t.added_at,
+                    (SELECT count(*) FROM artifact_topics AS at WHERE at.topic_id = t.id)
+             FROM topics AS t ORDER BY t.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (name, facet, added_at, uses) = row?;
+            let facet = crate::topics::Facet::parse(&facet)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("topic facet {facet:?}")))?;
+            Ok(TopicUsage {
+                name,
+                facet,
+                added_at,
+                uses,
+            })
+        })
+        .collect()
+    }
+
+    /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。
+    pub fn llm_succeeded_since(
+        &self,
+        stage: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM llm_calls WHERE stage = ?1 AND ok = 1 AND at >= ?2)",
+            [stage, &timestamp(since)],
+            |r| r.get(0),
+        )?)
     }
 
     /// 語を統合する。要約への付与を統合先に付け替え、統合元の名前を別名として記録し、統合元を消す。
@@ -4145,12 +4212,13 @@ mod tests {
         assert_eq!(search_ids(&db, &["要約の題"]), [1]);
     }
 
-    fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Topic> {
+    fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Entry> {
         names
             .iter()
-            .map(|&(name, facet)| crate::topics::Topic {
+            .map(|&(name, facet)| crate::topics::Entry {
                 name: name.into(),
                 facet,
+                added_at: None,
             })
             .collect()
     }
@@ -4170,9 +4238,10 @@ mod tests {
         for name in ["規制・審査", "燃料", "高経年化", "安全解析"] {
             assert!(topics.iter().any(|t| t.name == name), "{name}");
         }
+        let vocabulary = db.vocabulary().unwrap();
         assert_eq!(
-            crate::topics::parse(&crate::topics::to_toml(&topics)).unwrap(),
-            topics,
+            crate::topics::parse(&crate::topics::to_toml(&vocabulary)).unwrap(),
+            vocabulary,
             "seeded vocabulary passes the import validation"
         );
     }
@@ -4214,7 +4283,7 @@ mod tests {
             "only digest topics in the vocabulary"
         );
         let without: Vec<_> = db
-            .topics()
+            .vocabulary()
             .unwrap()
             .into_iter()
             .filter(|t| t.name != "規制・審査")
@@ -4524,7 +4593,7 @@ mod tests {
     /// 手で取り込んだ語彙に別名と同じ名前があれば、その名前は語として復活し、別名ではなくなる。
     #[test]
     fn importing_an_alias_name_makes_it_a_topic_again() {
-        use crate::topics::{Facet, Topic};
+        use crate::topics::{Entry, Facet};
         let db = Db::open_in_memory().unwrap();
         propose(&db, "新設炉");
         db.merge_topics(
@@ -4534,10 +4603,11 @@ mod tests {
             t("2026-10-04T00:00:00Z"),
         )
         .unwrap();
-        let mut topics = db.topics().unwrap();
-        topics.push(Topic {
+        let mut topics = db.vocabulary().unwrap();
+        topics.push(Entry {
             name: "新設炉".into(),
             facet: Facet::Reactor,
+            added_at: None,
         });
         db.replace_topics(&topics).unwrap();
         assert!(aliases(&db).is_empty());
@@ -4547,12 +4617,67 @@ mod tests {
     }
 
     #[test]
+    fn topic_usage_counts_digests_and_marks_proposals() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        digest_with_topics(&db, serde_json::json!(["燃料"]), serde_json::json!([])).unwrap();
+        propose(&db, "データセンター需要");
+        digest_with_topics(
+            &db,
+            serde_json::json!(["燃料", "データセンター需要"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        let usage = db.topic_usage().unwrap();
+        assert_eq!(usage.len(), db.topics().unwrap().len());
+        let fuel = usage.iter().find(|u| u.name == "燃料").unwrap();
+        assert_eq!(
+            (fuel.facet, fuel.added_at.as_deref(), fuel.uses),
+            (Facet::Field, None, 2)
+        );
+        let dc = usage.last().unwrap();
+        assert_eq!(dc.name, "データセンター需要");
+        assert_eq!(dc.added_at.as_deref(), Some("2026-09-27T00:00:00.000Z"));
+        assert_eq!(dc.uses, 2);
+        assert_eq!(usage.iter().find(|u| u.name == "PWR").unwrap().uses, 0);
+    }
+
+    #[test]
+    fn llm_succeeded_since_ignores_failures_and_other_stages() {
+        let db = Db::open_in_memory().unwrap();
+        let call = |stage: &'static str, ok: bool| LlmCall {
+            stage,
+            backend: "fake",
+            model: "sonnet",
+            n_items: 1,
+            ok,
+            duration_ms: 1,
+            error: None,
+            rate_limit: None,
+        };
+        db.record_llm_call(&call("tidy", true), t("2026-09-20T00:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call("tidy", false), t("2026-09-26T00:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call("digest", true), t("2026-09-26T00:00:00Z"))
+            .unwrap();
+        assert!(
+            db.llm_succeeded_since("tidy", t("2026-09-20T00:00:00Z"))
+                .unwrap()
+        );
+        assert!(
+            !db.llm_succeeded_since("tidy", t("2026-09-21T00:00:00Z"))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn replace_topics_adds_updates_and_removes_by_name() {
         use crate::topics::Facet;
         let db = Db::open_in_memory().unwrap();
         let first = vocab(&[("燃料", Facet::Field), ("PWR", Facet::Reactor)]);
         db.replace_topics(&first).unwrap();
-        assert_eq!(db.topics().unwrap(), first);
+        assert_eq!(db.vocabulary().unwrap(), first);
         let fuel_id: i64 = db
             .conn()
             .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
@@ -4562,10 +4687,7 @@ mod tests {
 
         let second = vocab(&[("燃料", Facet::Reactor), ("米国", Facet::Region)]);
         db.replace_topics(&second).unwrap();
-        assert_eq!(
-            db.topics().unwrap(),
-            [second[0].clone(), second[1].clone(),]
-        );
+        assert_eq!(db.vocabulary().unwrap(), second);
         let kept_id: i64 = db
             .conn()
             .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
@@ -4573,6 +4695,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept_id, fuel_id, "an updated topic keeps its id");
+    }
+
+    /// LLM が足した語かどうかは語彙ファイルの added_at で決まる。書き出した語彙を取り込み直しても変わらず、
+    /// added_at を消して取り込めば人が決めた語になる（整理で統合されない）。
+    #[test]
+    fn import_decides_whether_topics_are_proposed() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        let exported = db.vocabulary().unwrap();
+        let proposed = exported.iter().find(|e| e.name == "新設炉").unwrap();
+        assert_eq!(
+            proposed.added_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        assert!(
+            exported
+                .iter()
+                .filter(|e| e.name != "新設炉")
+                .all(|e| e.added_at.is_none())
+        );
+
+        db.replace_topics(&exported).unwrap();
+        assert_eq!(
+            db.vocabulary().unwrap(),
+            exported,
+            "round trip keeps origins"
+        );
+
+        let curated: Vec<_> = exported
+            .iter()
+            .cloned()
+            .map(|e| crate::topics::Entry {
+                added_at: None,
+                ..e
+            })
+            .collect();
+        db.replace_topics(&curated).unwrap();
+        let usage = db.topic_usage().unwrap();
+        assert!(usage.iter().all(|u| u.added_at.is_none()));
     }
 
     #[test]
@@ -4600,7 +4761,11 @@ mod tests {
             matches!(&err, DbError::TopicsInUse(names) if names == &["PWR"]),
             "{err}"
         );
-        assert_eq!(db.topics().unwrap(), before, "nothing changes on failure");
+        assert_eq!(
+            db.vocabulary().unwrap(),
+            before,
+            "nothing changes on failure"
+        );
 
         // 要約の版が消えれば付与も消え、語を削除できる
         db.conn()

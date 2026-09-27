@@ -17,7 +17,7 @@ pub enum ParseError {
     #[error(
         "usage: nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... \
          [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] \
-         [--limit N] [WORD]...  (D: YYYY-MM or YYYY-MM-DD)"
+         [--limit N] [WORD]...  (D: YYYY, YYYY-MM or YYYY-MM-DD)"
     )]
     SearchUsage,
     #[error(

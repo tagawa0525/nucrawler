@@ -1,5 +1,5 @@
 //! 検索の入口（Web・JSON API・CLI・MCP）で共通の、入力の解釈：検索語の分け方と、
-//! 日付（日本時間の年月か年月日）の範囲。
+//! 日付（日本時間の年・年月・年月日）の範囲。
 
 use chrono::{DateTime, NaiveDate, Utc};
 
@@ -8,7 +8,7 @@ use crate::db::{SearchOrder, SearchQuery};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
-    #[error("{name} must be YYYY-MM or YYYY-MM-DD, got {value:?}")]
+    #[error("{name} must be YYYY, YYYY-MM or YYYY-MM-DD, got {value:?}")]
     InvalidDate { name: &'static str, value: String },
     #[error("lang must be en or ja, got {0:?}")]
     InvalidLang(String),
@@ -133,13 +133,14 @@ pub fn parse_terms(q: &str) -> Vec<String> {
         .collect()
 }
 
-/// `since`：その日（年月ならその月の 1 日）の日本時間 0 時。この時刻以降に絞る。
+/// `since`：その日（年月ならその月の 1 日、年ならその年の 1 月 1 日）の日本時間 0 時。この時刻以降に絞る。
 pub fn since(value: &str) -> Result<DateTime<Utc>, SearchError> {
     let (start, _) = period("since", value)?;
     Ok(start)
 }
 
-/// `until`：その日（年月ならその月）の終わり。翌日（翌月 1 日）の日本時間 0 時を返し、この時刻より前に絞る。
+/// `until`：その日（年月ならその月、年ならその年）の終わり。翌日（翌月・翌年の 1 日）の日本時間 0 時を返し、
+/// この時刻より前に絞る。
 pub fn until(value: &str) -> Result<DateTime<Utc>, SearchError> {
     let (_, end) = period("until", value)?;
     Ok(end)
@@ -167,7 +168,7 @@ fn given(value: &str) -> Option<&str> {
     Some(value.trim()).filter(|v| !v.is_empty())
 }
 
-/// 年月日ならその日、年月ならその月の、日本時間での始まりと終わり（終わりは含まない）。
+/// 年月日ならその日、年月ならその月、年ならその年の、日本時間での始まりと終わり（終わりは含まない）。
 fn period(name: &'static str, value: &str) -> Result<(DateTime<Utc>, DateTime<Utc>), SearchError> {
     let invalid = || SearchError::InvalidDate {
         name,
@@ -175,6 +176,10 @@ fn period(name: &'static str, value: &str) -> Result<(DateTime<Utc>, DateTime<Ut
     };
     let (first, next) = if let Ok(day) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
         (day, day.succ_opt())
+    } else if value.len() == 4 && value.bytes().all(|b| b.is_ascii_digit()) {
+        let year = NaiveDate::parse_from_str(&format!("{value}-01-01"), "%Y-%m-%d")
+            .map_err(|_| invalid())?;
+        (year, year.checked_add_months(chrono::Months::new(12)))
     } else {
         let month =
             NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d").map_err(|_| invalid())?;
@@ -354,17 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn reads_days_and_months_in_jst() {
+    fn reads_days_months_and_years_in_jst() {
         assert_eq!(since("2026-09-20").unwrap(), utc("2026-09-19T15:00:00Z"));
         assert_eq!(until("2026-09-20").unwrap(), utc("2026-09-20T15:00:00Z"));
         assert_eq!(since("2026-09").unwrap(), utc("2026-08-31T15:00:00Z"));
         assert_eq!(until("2026-09").unwrap(), utc("2026-09-30T15:00:00Z"));
         assert_eq!(until("2026-12").unwrap(), utc("2026-12-31T15:00:00Z"));
+        assert_eq!(since("2026").unwrap(), utc("2025-12-31T15:00:00Z"));
+        assert_eq!(until("2026").unwrap(), utc("2026-12-31T15:00:00Z"));
     }
 
     #[test]
     fn rejects_malformed_dates() {
-        for bad in ["2026/09/01", "2026-13", "2026-02-30", "", "2026"] {
+        for bad in [
+            "2026/09/01",
+            "2026-13",
+            "2026-02-30",
+            "",
+            "26",
+            "20260",
+            "+2026",
+        ] {
             assert_eq!(
                 since(bad),
                 Err(SearchError::InvalidDate {

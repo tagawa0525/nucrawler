@@ -88,7 +88,7 @@ impl Db {
                                      r.article_id
                         ORDER BY r.created_at DESC, r.id DESC) AS rn
                FROM scores AS s
-               JOIN artifacts AS r ON r.id = s.artifact_id
+               JOIN artifacts AS r ON r.id = s.artifact_id AND r.kind = 'digest'
                JOIN labeled AS l ON l.article_id = r.article_id
                WHERE s.user_id = ?1)
              SELECT profile_hash, backend, model, prompt_version, article_id, score, created_at

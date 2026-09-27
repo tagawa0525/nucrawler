@@ -360,6 +360,26 @@ mod tests {
         assert_eq!(inputs[0].contents.len(), 1);
     }
 
+    /// 点数の条件は、採点のプロンプトの最新の版の点数で判定する。
+    #[test]
+    fn redo_min_score_uses_latest_score_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let by_score = RedoFilter {
+            min_score: Some(80),
+            ..RedoFilter::default()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &by_score), [a]);
+        rescore_with_version(&db, a, 2, 40);
+        assert!(redo_digest_ids(&db, "opus", &by_score).is_empty());
+    }
+
     #[test]
     fn redo_digest_skips_articles_backing_off_for_this_model() {
         let db = Db::open_in_memory().unwrap();

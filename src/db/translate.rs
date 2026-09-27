@@ -334,6 +334,23 @@ mod tests {
         assert!(translate_ids(&db, false, now).is_empty());
     }
 
+    /// 先回りの判定は、採点のプロンプトの最新の版の点数で行う。
+    #[test]
+    fn pending_translate_uses_latest_score_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        assert_eq!(translate_ids(&db, false, now), [a]);
+        rescore_with_version(&db, a, 2, 40);
+        assert!(translate_ids(&db, false, now).is_empty());
+    }
+
     /// 最新の digest が軽水炉と無関係なら先回りはしない。依頼されれば和訳する（明示的に頼んだので）。
     #[test]
     fn pending_translate_skips_non_lwr_unless_requested() {

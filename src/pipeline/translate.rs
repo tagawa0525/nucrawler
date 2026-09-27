@@ -11,7 +11,8 @@ use crate::db::{
     ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateInput, TranslateQuery,
 };
 use crate::llm::{Llm, LlmRequest};
-use crate::{errors, glossary, translate};
+use crate::prompt;
+use crate::{errors, glossary};
 
 pub const STAGE: &str = "translate";
 
@@ -61,7 +62,7 @@ pub async fn translate_articles<L: Llm>(
         model,
     };
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let schema = translate::schema();
+    let schema = prompt::translate::schema();
     let mut summary = TranslateSummary::default();
     // 訳語集の変更による作り直しは、先に対象を決めて順に訳す
     let mut outdated = match target {
@@ -72,7 +73,7 @@ pub async fn translate_articles<L: Llm>(
                 profile_hash: spec.profile_hash.as_deref(),
                 backend,
                 model,
-                prompt_version: translate::PROMPT_VERSION,
+                prompt_version: prompt::translate::PROMPT_VERSION,
             },
             &spec.filter,
             llm_cfg,
@@ -100,7 +101,7 @@ pub async fn translate_articles<L: Llm>(
                     profile_hash: spec.profile_hash.as_deref(),
                     backend,
                     model,
-                    prompt_version: translate::PROMPT_VERSION,
+                    prompt_version: prompt::translate::PROMPT_VERSION,
                 },
                 &spec.filter,
                 now,
@@ -117,9 +118,9 @@ pub async fn translate_articles<L: Llm>(
             backend,
             model,
         };
-        let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
+        let prompt = prompt::translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
         let relevant = glossary::relevant(&db.glossary_entries()?, &prompt);
-        let system = translate::system_prompt(&relevant.terms);
+        let system = prompt::translate::system_prompt(&relevant.terms);
         let outcome = call_recorded(
             db,
             llm,
@@ -153,7 +154,7 @@ pub async fn translate_articles<L: Llm>(
                 break;
             }
         };
-        let body_ja = match translate::parse(&response.output) {
+        let body_ja = match prompt::translate::parse(&response.output) {
             Ok(body_ja) => body_ja,
             Err(e) => {
                 let message = errors::error_chain(&e);
@@ -173,7 +174,7 @@ pub async fn translate_articles<L: Llm>(
                 kind: ArtifactKind::Translation,
                 backend,
                 model,
-                prompt_version: translate::PROMPT_VERSION,
+                prompt_version: prompt::translate::PROMPT_VERSION,
                 payload: &serde_json::json!({ "body_ja": body_ja }),
                 inputs: &inputs,
                 glossary_at: relevant.glossary_at.as_deref(),
@@ -200,7 +201,7 @@ fn outdated_translations(
         .redo_translate_existing(key, filter, now)?
         .into_iter()
         .filter(|(input, made_with)| {
-            let prompt = translate::build_prompt(input, llm_cfg.translate_max_input_chars);
+            let prompt = prompt::translate::build_prompt(input, llm_cfg.translate_max_input_chars);
             glossary::relevant(&entries, &prompt).glossary_at > *made_with
         })
         .map(|(input, _)| input)
@@ -415,8 +416,8 @@ mod tests {
         let reqs = llm.requests();
         assert!(reqs[0].prompt.contains("Body 2"), "requests first");
         assert!(reqs[1].prompt.contains("Body 0"));
-        assert_eq!(reqs[0].system, crate::translate::system_prompt(&[]));
-        assert_eq!(reqs[0].schema, crate::translate::schema());
+        assert_eq!(reqs[0].system, crate::prompt::translate::system_prompt(&[]));
+        assert_eq!(reqs[0].schema, crate::prompt::translate::schema());
         assert_eq!(
             db.query_strings(
                 "SELECT article_id || '|' || backend || '|' || model || '|' ||

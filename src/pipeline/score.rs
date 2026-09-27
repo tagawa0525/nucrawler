@@ -7,8 +7,9 @@ use super::Halt;
 use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{DbError, ScoreKey, StageKey, score_stage};
+use crate::errors;
 use crate::llm::{Llm, LlmRequest};
-use crate::{errors, scoring};
+use crate::prompt;
 
 pub const STAGE: &str = "score";
 
@@ -66,8 +67,8 @@ pub async fn score_articles<L: Llm>(
         model,
     };
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let system = scoring::system_prompt(&profile, &db.recent_signals(user_id, SIGNALS)?);
-    let schema = scoring::schema();
+    let system = prompt::score::system_prompt(&profile, &db.recent_signals(user_id, SIGNALS)?);
+    let schema = prompt::score::schema();
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -83,7 +84,7 @@ pub async fn score_articles<L: Llm>(
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
-        let prompt = scoring::build_prompt(&batch);
+        let prompt = prompt::score::build_prompt(&batch);
         let outcome = call_recorded(
             db,
             llm,
@@ -118,7 +119,7 @@ pub async fn score_articles<L: Llm>(
                 break;
             }
         };
-        let parsed = match scoring::parse(&response.output, &ids) {
+        let parsed = match prompt::score::parse(&response.output, &ids) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let message = errors::error_chain(&e);
@@ -263,7 +264,7 @@ mod tests {
         assert_eq!((summary.scored, summary.failed, summary.calls), (3, 0, 2));
         let reqs = llm.requests();
         assert_eq!(reqs[0].model, "sonnet");
-        assert_eq!(reqs[0].schema, crate::scoring::schema());
+        assert_eq!(reqs[0].schema, crate::prompt::score::schema());
         assert!(
             reqs[0].system.contains("規制・審査"),
             "profile in system prompt"

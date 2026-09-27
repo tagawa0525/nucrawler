@@ -179,7 +179,7 @@ mod tests {
     use super::*;
 
     fn profile() -> Profile {
-        crate::profile::parse(include_str!("../examples/profile.toml")).unwrap()
+        crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap()
     }
 
     #[test]

@@ -62,3 +62,62 @@ pub fn atom(items: &[ListItem], base: &str, labels: &SourceLabels, updated: &str
     out.push_str("</feed>\n");
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: i64, url: &str) -> ListItem {
+        ListItem {
+            article_id: id,
+            source_id: "wnn".into(),
+            url: url.into(),
+            title: format!("Title {id}"),
+            lang: "en".into(),
+            at: "2026-09-26T00:00:00.000Z".into(),
+            fetched_at: "2026-09-26T00:00:00.000Z".into(),
+            title_ja: None,
+            summary_ja: None,
+            lwr_relevant: Some(true),
+            score: Some(80),
+            reason: None,
+            read: false,
+            feedback: None,
+            has_translation: false,
+            translation_requested: false,
+            locked_by: vec![],
+        }
+    }
+
+    /// ID は tag URI（RFC 4151）で、エントリは DB の ID ではなく元記事の正規化済み URL から作る。
+    /// tag URI に書けない文字（IPv6 の角括弧や `|` など）はパーセントエンコードする。
+    #[test]
+    fn ids_are_tag_uris_from_the_article_url() {
+        let items = [
+            item(1, "https://e.com/a?b=1&c=2"),
+            item(2, "http://[::1]/x|y"),
+        ];
+        let xml = atom(
+            &items,
+            "http://h",
+            &SourceLabels::new(),
+            "2026-09-27T00:00:00Z",
+        );
+        assert!(
+            xml.contains("<id>tag:tagawa0525.github.io,2026:nucrawler:feed</id>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                "<id>tag:tagawa0525.github.io,2026:nucrawler:article:https://e.com/a?b=1&amp;c=2</id>"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                "<id>tag:tagawa0525.github.io,2026:nucrawler:article:http://%5B::1%5D/x%7Cy</id>"
+            ),
+            "{xml}"
+        );
+    }
+}

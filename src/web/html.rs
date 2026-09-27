@@ -2,7 +2,9 @@
 //! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
 //! だけ使い、無くても読める。
 
-use crate::db::{ArticleDetail, ListItem, Report, ReportStatus, TopicUsage, Warning};
+use crate::db::{
+    ArticleDetail, ListItem, Report, ReportFilter, ReportKind, ReportStatus, TopicUsage, Warning,
+};
 use crate::search::Params;
 
 /// HTML の特殊文字を実体参照にする。
@@ -261,7 +263,7 @@ pub fn settings_page(glossary_terms: usize, pending_reports: i64, page: &Page) -
 pub fn reports_page(
     reports: &[Report],
     counts: &[(ReportStatus, i64)],
-    filter: Option<ReportStatus>,
+    filter: &ReportFilter,
     terms: &[crate::glossary::Entry],
     page: &Page,
 ) -> String {
@@ -275,16 +277,16 @@ pub fn reports_page(
             filter_link(
                 &reports_href(Some(status)),
                 format!("{} {n}", status_label(status)),
-                filter == Some(status),
+                filter.status == Some(status),
             )
         })
         .collect();
     links.push(filter_link(
         &reports_href(None),
         "すべて".into(),
-        filter.is_none(),
+        filter.status.is_none(),
     ));
-    let back = filter.map_or("all", ReportStatus::as_str);
+    let back = filter.status.map_or("all", ReportStatus::as_str);
     let mut sorted_terms: Vec<&crate::glossary::Entry> = terms.iter().collect();
     sorted_terms.sort_by(|a, b| a.term.target.cmp(&b.term.target));
     let mut body = format!(
@@ -364,7 +366,7 @@ pub fn reports_page(
              <label>ひとこと（任意）<input class=\"wide\" name=\"reply\" value=\"{reply}\"></label>\
              <button>保存</button></form></details></div>",
             id = r.id,
-            found = escape(&r.found),
+            found = escape(r.found.as_deref().unwrap_or_default()),
             wanted = r
                 .wanted
                 .as_ref()
@@ -396,6 +398,7 @@ fn status_label(status: ReportStatus) -> &'static str {
         ReportStatus::Pending => "受付中",
         ReportStatus::Added => "追加済",
         ReportStatus::Existing => "登録済",
+        ReportStatus::Done => "対応済",
         ReportStatus::Rejected => "却下",
     }
 }
@@ -921,7 +924,7 @@ fn term_report_form(id: i64, reports: &[Report], view: DetailView) -> String {
         .map(|r| {
             format!(
                 "<p class=\"meta\">{}{}（{}）</p>",
-                escape(&r.found),
+                escape(r.found.as_deref().unwrap_or_default()),
                 r.wanted
                     .as_ref()
                     .map(|w| format!(" → {}", escape(w)))
@@ -1661,12 +1664,8 @@ mod tests {
         let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(
-                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary>"#
+                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary><form method="post" action="/articles/7/report"><input type="hidden" name="kind" value="term">"#
             ),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"<form method="post" action="/articles/7/term-report">"#),
             "{html}"
         );
         assert!(html.contains(r#"name="found" required"#), "{html}");
@@ -1685,20 +1684,46 @@ mod tests {
             ..DetailView::default()
         };
         let html = detail_page(&detail(), &[], view, &Page::default());
-        assert!(
-            html.contains(r#"<input type="hidden" name="view" value="translation">"#),
-            "{html}"
+        assert_eq!(
+            html.matches(r#"<input type="hidden" name="view" value="translation">"#)
+                .count(),
+            2,
+            "both forms return to the translation: {html}"
         );
-        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+        assert!(html.contains("指摘を受け付けました"), "{html}");
     }
 
-    /// 要約も和訳も無ければ、指摘する訳が無い。
+    /// 訳語以外の指摘は種類を選んで内容を書く。これも畳んでおく。
+    #[test]
+    fn detail_page_offers_a_folded_report_of_other_kinds() {
+        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
+        assert!(
+            html.contains(
+                r#"<details class="report" id="other-report"><summary>その他の指摘</summary><form method="post" action="/articles/7/report">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<select name="kind"><option value="translation">和訳の誤り</option><option value="digest">要約の誤り</option><option value="topic">トピック</option><option value="body">本文の取得漏れ</option><option value="other">その他</option></select>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<textarea class="wide" name="note" rows="3" required></textarea>"#),
+            "{html}"
+        );
+    }
+
+    /// 要約も和訳も無ければ、指摘する訳が無い。ほかの指摘はできる。
     #[test]
     fn detail_page_without_japanese_has_no_term_report() {
         let mut d = detail();
         d.digests.clear();
         let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(!html.contains("term-report"), "{html}");
+        // 本文の取得漏れなどは、要約が無くても指摘できる
+        assert!(html.contains(r#"id="other-report""#), "{html}");
     }
 
     #[test]
@@ -1716,7 +1741,8 @@ mod tests {
             id,
             article_id: 7,
             article_title: "見出し<A>".into(),
-            found: "給油停止".into(),
+            kind: ReportKind::Term,
+            found: Some("給油停止".into()),
             wanted: Some("燃料取替停止".into()),
             source: Some("refueling outage".into()),
             note: None,
@@ -1739,6 +1765,7 @@ mod tests {
             (ReportStatus::Pending, 1),
             (ReportStatus::Added, 1),
             (ReportStatus::Existing, 0),
+            (ReportStatus::Done, 0),
             (ReportStatus::Rejected, 0),
         ];
         let terms = [entry(
@@ -1750,7 +1777,7 @@ mod tests {
         let html = reports_page(
             &[term_report(1, ReportStatus::Pending), added],
             &counts,
-            None,
+            &ReportFilter::default(),
             &terms,
             &Page::default(),
         );
@@ -1762,8 +1789,12 @@ mod tests {
             r#"<a href="/reports">受付中 1</a>"#,
             r#"<a href="/reports?status=added">追加済 1</a>"#,
             r#"<a href="/reports?status=existing">登録済 0</a>"#,
+            r#"<a href="/reports?status=done">対応済 0</a>"#,
             r#"<a href="/reports?status=rejected">却下 0</a>"#,
             r#"<a class="on" href="/reports?status=all">すべて</a>"#,
+            r#"<a class="on" href="/reports?status=all">すべての種類</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=term">訳語</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=digest">要約の誤り</a>"#,
         ] {
             assert!(html.contains(link), "{link}: {html}");
         }
@@ -1787,7 +1818,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<input type="hidden" name="back" value="all">"#),
+            html.contains(r#"<input type="hidden" name="back_status" value="all">"#),
             "{html}"
         );
         assert!(
@@ -1798,6 +1829,60 @@ mod tests {
             html.contains(r#"<option value="1" selected>燃料取替停止（定期検査）</option>"#),
             "{html}"
         );
+    }
+
+    fn other_report(id: i64, kind: ReportKind) -> Report {
+        Report {
+            kind,
+            found: None,
+            wanted: None,
+            source: None,
+            note: Some("数値が<違う>".into()),
+            ..term_report(id, ReportStatus::Pending)
+        }
+    }
+
+    /// 訳語以外の指摘は種類と内容を出し、対応は受付中・対応済・却下から選ぶ（訳語は結び付けない）。
+    /// 絞り込みは状況と種類を互いに引き継ぐ。
+    #[test]
+    fn reports_page_shows_other_kinds_and_keeps_both_filters() {
+        let counts: Vec<_> = ReportStatus::ALL.into_iter().map(|s| (s, 0)).collect();
+        let filter = ReportFilter {
+            status: Some(ReportStatus::Pending),
+            kind: Some(ReportKind::Digest),
+            ..ReportFilter::default()
+        };
+        let html = reports_page(
+            &[other_report(3, ReportKind::Digest)],
+            &counts,
+            &filter,
+            &[],
+            &Page::default(),
+        );
+        assert!(
+            html.contains("<b>要約の誤り</b> 数値が&lt;違う&gt;"),
+            "{html}"
+        );
+        let form = &html[html.find(r#"action="/reports/3""#).unwrap()..];
+        assert!(
+            form.contains(
+                r#"<select name="status"><option value="pending" selected>受付中</option><option value="done">対応済</option><option value="rejected">却下</option></select>"#
+            ),
+            "{form}"
+        );
+        assert!(!form.contains(r#"name="term_id""#), "{form}");
+        assert!(
+            form.contains(r#"<input type="hidden" name="back_kind" value="digest">"#),
+            "{form}"
+        );
+        for link in [
+            r#"<a class="on" href="/reports?kind=digest">受付中 0</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=digest">すべて</a>"#,
+            r#"<a href="/reports">すべての種類</a>"#,
+            r#"<a class="on" href="/reports?kind=digest">要約の誤り</a>"#,
+        ] {
+            assert!(html.contains(link), "{link}: {html}");
+        }
     }
 
     /// 詳細では、その記事への指摘と対応状況を小さく並べる。
@@ -1811,6 +1896,16 @@ mod tests {
         );
         assert!(
             html.contains(r#"<p class="meta">給油停止 → 燃料取替停止（却下）</p>"#),
+            "{html}"
+        );
+        let html = detail_page(
+            &detail(),
+            &[other_report(2, ReportKind::Body)],
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<p class="meta">本文の取得漏れ：数値が&lt;違う&gt;（受付中）</p>"#),
             "{html}"
         );
     }

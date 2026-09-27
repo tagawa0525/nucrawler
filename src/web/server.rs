@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, NewReport, ReportStatus, SignalKind};
+use crate::db::{Db, DbError, ListQuery, NewReport, ReportFilter, ReportStatus, SignalKind};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -360,7 +360,13 @@ async fn detail(
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
-        let reports = db.reports(user, None, Some(id))?;
+        let reports = db.reports(
+            user,
+            &ReportFilter {
+                article_id: Some(id),
+                ..ReportFilter::default()
+            },
+        )?;
         // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
         // 採点に渡す直近の反応が偏る）
         let opened = if view.show_translation {
@@ -496,7 +502,7 @@ async fn term_report(
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        let report = NewReport {
+        let report = NewReport::Term {
             found: &found,
             wanted: wanted.as_deref(),
             source: source.as_deref(),
@@ -667,7 +673,13 @@ async fn reports(
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        let reports = db.reports(user, filter, None)?;
+        let reports = db.reports(
+            user,
+            &ReportFilter {
+                status: filter,
+                ..ReportFilter::default()
+            },
+        )?;
         let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
         let warnings = warnings(db)?;
@@ -675,7 +687,16 @@ async fn reports(
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::reports_page(&reports, &counts, filter, &terms, &page))
+        Ok(html::reports_page(
+            &reports,
+            &counts,
+            &ReportFilter {
+                status: filter,
+                ..ReportFilter::default()
+            },
+            &terms,
+            &page,
+        ))
     })
     .await?;
     Ok(Html(page))
@@ -1357,60 +1378,102 @@ mod tests {
         assert!(html.contains("和訳待ち"), "{html}");
     }
 
-    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面に戻る。
+    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面の指摘の欄に戻る。
     #[tokio::test]
     async fn term_report_is_recorded_and_returns_to_detail() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let path = format!("/articles/{id}/term-report");
+        let path = format!("/articles/{id}/report");
         let res = server
             .post(
                 &path,
-                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
             )
             .await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation&reported=1#term-report")
+            format!("/articles/{id}?view=translation&reported=1#reports")
         );
         assert_eq!(
             server.count(&format!(
-                "SELECT count(*) FROM term_reports
-                 WHERE article_id = {id} AND found = '給油停止' AND wanted IS NULL
+                "SELECT count(*) FROM reports
+                 WHERE article_id = {id} AND kind = 'term' AND found = '給油停止' AND wanted IS NULL
                    AND source = 'refueling outage' AND note IS NULL AND resolved_at IS NULL"
             )),
             1
         );
-        let res = server.post(&path, "found=x").await;
+        let res = server.post(&path, "kind=term&found=x").await;
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?reported=1#term-report")
+            format!("/articles/{id}?reported=1#reports")
         );
         let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
-        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+        assert!(html.contains("指摘を受け付けました"), "{html}");
 
         // 気になった訳は必須（欄が無くても空でも同じ）
-        assert_eq!(server.post(&path, "wanted=a").await.status().as_u16(), 400);
         assert_eq!(
             server
-                .post(&path, "found=+&wanted=a")
+                .post(&path, "kind=term&wanted=a")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server
+                .post(&path, "kind=term&found=+&wanted=a")
                 .await
                 .status()
                 .as_u16(),
             400
         );
         let res = server
-            .form(&path, "found=x")
+            .form(&path, "kind=term&found=x")
             .header("origin", "https://evil.example")
             .send()
             .await
             .unwrap();
         assert_eq!(res.status().as_u16(), 403);
-        let res = server.post("/articles/999/term-report", "found=x").await;
+        let res = server
+            .post("/articles/999/report", "kind=term&found=x")
+            .await;
         assert_eq!(res.status().as_u16(), 404);
-        assert_eq!(server.count("SELECT count(*) FROM term_reports"), 2);
+        assert_eq!(server.count("SELECT count(*) FROM reports"), 2);
+    }
+
+    /// 訳語以外の指摘は種類と内容だけを記録し、内容は必須。
+    #[tokio::test]
+    async fn other_reports_are_recorded_with_their_kind() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let path = format!("/articles/{id}/report");
+        let res = server
+            .post(
+                &path,
+                "kind=body&note=+%E5%BE%8C%E5%8D%8A%E3%81%8C%E7%84%A1%E3%81%84+&found=x",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.strings("SELECT kind || '|' || note || '|' || (found IS NULL) FROM reports"),
+            ["body|後半が無い|1"]
+        );
+        for body in [
+            "kind=body&note=+",
+            "kind=body",
+            "kind=bogus&note=x",
+            "note=x",
+        ] {
+            assert_eq!(
+                server.post(&path, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
+        assert_eq!(server.count("SELECT count(*) FROM reports"), 1);
     }
 
     #[tokio::test]
@@ -1527,11 +1590,11 @@ mod tests {
         let server = Server::start(db).await;
         server
             .post(
-                &format!("/articles/{id}/term-report"),
-                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+                &format!("/articles/{id}/report"),
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
             )
             .await;
-        let report = server.count("SELECT id FROM term_reports");
+        let report = server.count("SELECT id FROM reports");
         let (_, html) = server.get("/settings").await;
         assert!(html.contains("受付中 1 件"), "{html}");
         let (status, html) = server.get("/reports").await;
@@ -1544,14 +1607,14 @@ mod tests {
         let res = server
             .post(
                 &format!("/reports/{report}"),
-                "status=added&term_id=1&reply=&back=pending",
+                "status=added&term_id=1&reply=&back_status=pending",
             )
             .await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"].to_str().unwrap(), "/reports");
         assert_eq!(
             server.count(
-                "SELECT count(*) FROM term_reports
+                "SELECT count(*) FROM reports
                  WHERE status = 'added' AND term_id = 1 AND reply IS NULL AND resolved_at IS NOT NULL"
             ),
             1
@@ -1566,7 +1629,7 @@ mod tests {
         let res = server
             .post(
                 &format!("/reports/{report}"),
-                "status=rejected&term_id=&back=all",
+                "status=rejected&term_id=&back_status=all",
             )
             .await;
         assert_eq!(
@@ -1575,15 +1638,72 @@ mod tests {
         );
     }
 
+    /// 訳語以外の指摘は対応済にでき、訳語集の状況や訳語は付けられない。種類で絞れる。
+    #[tokio::test]
+    async fn other_reports_are_resolved_as_done_and_filtered_by_kind() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let article = format!("/articles/{id}/report");
+        server
+            .post(
+                &article,
+                "kind=topic&note=%E3%83%88%E3%83%94%E3%83%83%E3%82%AF%E9%81%95%E3%81%84",
+            )
+            .await;
+        server
+            .post(
+                &article,
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+            )
+            .await;
+        let (status, html) = server.get("/reports?status=all&kind=topic").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("トピック違い") && !html.contains("給油停止"),
+            "{html}"
+        );
+        assert_eq!(server.get("/reports?kind=bogus").await.0, 400);
+
+        let topic = server.count("SELECT id FROM reports WHERE kind = 'topic'");
+        let path = format!("/reports/{topic}");
+        for body in ["status=added", "status=existing", "status=done&term_id=1"] {
+            assert_eq!(
+                server.post(&path, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
+        let res = server
+            .post(&path, "status=done&back_status=all&back_kind=topic")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            "/reports?status=all&kind=topic"
+        );
+        assert_eq!(
+            server.count(
+                "SELECT count(*) FROM reports WHERE status = 'done' AND resolved_at IS NOT NULL"
+            ),
+            1
+        );
+        let term = server.count("SELECT id FROM reports WHERE kind = 'term'");
+        let res = server
+            .post(&format!("/reports/{term}"), "status=done")
+            .await;
+        assert_eq!(res.status().as_u16(), 400);
+    }
+
     #[tokio::test]
     async fn reports_reject_invalid_requests() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         server
-            .post(&format!("/articles/{id}/term-report"), "found=x")
+            .post(&format!("/articles/{id}/report"), "kind=term&found=x")
             .await;
-        let path = format!("/reports/{}", server.count("SELECT id FROM term_reports"));
+        let path = format!("/reports/{}", server.count("SELECT id FROM reports"));
         assert_eq!(server.get("/reports?status=bogus").await.0, 400);
         assert_eq!(
             server.post(&path, "status=bogus").await.status().as_u16(),
@@ -1614,7 +1734,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status().as_u16(), 403);
         assert_eq!(
-            server.count("SELECT count(*) FROM term_reports WHERE status = 'pending'"),
+            server.count("SELECT count(*) FROM reports WHERE status = 'pending'"),
             1
         );
     }

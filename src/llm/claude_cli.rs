@@ -378,6 +378,36 @@ mod tests {
         );
     }
 
+    /// 端末の Ctrl-C（プロセスグループへの SIGINT）が claude に直接届かないよう、別の
+    /// プロセスグループで起動する。止めるときは nucrawler が自分で止める。
+    #[tokio::test]
+    async fn runs_in_its_own_process_group() {
+        let (script, dir) = fake_claude(
+            "cli-pgid",
+            "echo \"pgid $(cut -d' ' -f5 /proc/$$/stat)\" >&2\nexit 1",
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        let LlmError::Exit { stderr, .. } = &err else {
+            panic!("{err}");
+        };
+        let ours = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ours = ours
+            .rsplit(')')
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(2)
+            .unwrap();
+        let child = stderr.trim().strip_prefix("pgid ").unwrap();
+        assert_ne!(child, ours, "{stderr}");
+    }
+
     /// stdin を読まずに終了されると、書き込みが Broken pipe になる。その場合も、終了コードと
     /// stderr で原因を報告する（認証エラーで即終了した場合などに原因を失わないため）。
     #[tokio::test]

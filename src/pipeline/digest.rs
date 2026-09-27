@@ -492,6 +492,103 @@ mod tests {
         assert_eq!(again.calls, 0);
     }
 
+    /// 応答を返さない LLM（中断されるまで待ち続ける呼び出し）。
+    struct Hanging;
+
+    impl Llm for Hanging {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+            std::future::pending().await
+        }
+    }
+
+    /// 止める指示と同時に子プロセスが終了させられた（systemd が cgroup 全体に SIGTERM を送った）。
+    struct KilledWithCancel(Cancel);
+
+    impl Llm for KilledWithCancel {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+            self.0.request();
+            Err(LlmError::Exit {
+                status: "exit status: 143".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn assert_nothing_recorded(db: &Db) {
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            0
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
+    }
+
+    /// 呼び出しの途中で止める指示が来たら、応答を待たずに止め、記事の失敗にも LLM の失敗にも
+    /// 数えない（次回そのまま続きから処理する）。
+    #[tokio::test]
+    async fn cancel_during_a_call_stops_without_recording_failures() {
+        let db = Db::open_in_memory().unwrap();
+        articles(&db, 2);
+        let cancel = Cancel::default();
+        let requester = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            requester.request();
+        });
+        let summary = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            digest_articles(
+                &db,
+                &Hanging,
+                &mut quota(10),
+                &llm_cfg(5),
+                &PipelineConfig::default(),
+                &Target::Pending {
+                    requests_only: false,
+                },
+                now(),
+                &cancel,
+            ),
+        )
+        .await
+        .expect("the stage must stop without waiting for the response")
+        .unwrap();
+        assert!(summary.cancelled, "{summary:?}");
+        assert_eq!((summary.failed, summary.halted), (0, None));
+        assert_nothing_recorded(&db);
+    }
+
+    #[tokio::test]
+    async fn llm_killed_by_the_stop_is_not_a_failure() {
+        let db = Db::open_in_memory().unwrap();
+        articles(&db, 2);
+        let cancel = Cancel::default();
+        let summary = digest_articles(
+            &db,
+            &KilledWithCancel(cancel.clone()),
+            &mut quota(10),
+            &llm_cfg(5),
+            &PipelineConfig::default(),
+            &Target::Pending {
+                requests_only: false,
+            },
+            now(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(summary.cancelled, "{summary:?}");
+        assert_eq!((summary.failed, summary.halted), (0, None));
+        assert_nothing_recorded(&db);
+    }
+
     #[tokio::test]
     async fn stops_when_cancelled() {
         let db = Db::open_in_memory().unwrap();

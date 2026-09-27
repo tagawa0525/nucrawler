@@ -114,9 +114,11 @@ impl Db {
              candidates AS (
                SELECT b.*,
                       -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
-                      (SELECT max(s.score) FROM scores AS s
+                      -- 採点のプロンプトの最新の版で、モデル間の最高点
+                      (SELECT s.score FROM scores AS s
                        WHERE s.user_id = ?1 AND s.profile_hash = ?2
-                         AND s.artifact_id = b.digest_id) AS score,
+                         AND s.artifact_id = b.digest_id
+                       ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) AS score,
                       (SELECT json_extract(r.payload, '$.lwr_relevant') FROM artifacts AS r
                        WHERE r.id = b.digest_id) AS relevant
                FROM base AS b

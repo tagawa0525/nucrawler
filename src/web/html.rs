@@ -191,11 +191,11 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         "<nav class=\"bar\">{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
-        button(&all_toggle.href(), "すべて表示", "🗂", Some(view.all)),
+        button(&all_toggle.href(), "すべて表示", "👁", Some(view.all)),
         button(
             &read_toggle.href(),
             "過去の既読も表示",
-            "📖",
+            "🕘",
             Some(view.read)
         ),
     );
@@ -905,13 +905,13 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn on" href="/" aria-label="すべて表示：ON" title="すべて表示：ON">🗂</a>"#
+                r#"<a class="btn on" href="/" aria-label="すべて表示：ON" title="すべて表示：ON">👁</a>"#
             ),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">📖</a>"#
+                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">🕘</a>"#
             ),
             "{html}"
         );

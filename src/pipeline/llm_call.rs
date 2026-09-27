@@ -19,6 +19,14 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// LLM ステージが共有する実行環境。クォータは実行全体で 1 つなので、ステージ間で引き継ぐ。
+pub struct LlmStage<'a, L> {
+    pub db: &'a Db,
+    pub llm: &'a L,
+    pub quota: &'a mut Quota,
+    pub cancel: &'a Cancel,
+}
+
 /// 呼び出しが失敗したとき、それが止める指示によるものかを見極めるために待つ時間。
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 

@@ -2,12 +2,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, Outcome, call_recorded};
-use super::{Cancel, Halt, Target};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
+use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
 use crate::llm::{Llm, LlmRequest};
-use crate::quota::Quota;
 use crate::{errors, translate};
 
 pub const STAGE: &str = "translate";
@@ -28,17 +27,18 @@ pub struct TranslateSummary {
 }
 
 /// 通常は依頼と先回りの対象を、`requests_only` なら依頼だけを、`Redo` なら条件に合う記事を和訳する。
-#[allow(clippy::too_many_arguments)]
 pub async fn translate_articles<L: Llm>(
-    db: &Db,
-    llm: &L,
-    quota: &mut Quota,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
     target: &Target,
     now: DateTime<Utc>,
-    cancel: &Cancel,
 ) -> Result<TranslateSummary, TranslateStageError> {
     let backend = llm.backend();
     let model = llm_cfg.translate_model.as_str();
@@ -167,10 +167,13 @@ pub async fn translate_articles<L: Llm>(
 mod tests {
     use super::*;
     use crate::config::Lang;
-    use crate::db::{ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact, ScoreKey};
+    use crate::db::{
+        ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, ScoreKey,
+    };
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
-    use crate::quota::{QuotaConfig, Stop};
+    use crate::pipeline::Cancel;
+    use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-09-28T02:00:00Z")
@@ -263,15 +266,17 @@ mod tests {
         requests_only: bool,
     ) -> TranslateSummary {
         translate_articles(
-            db,
-            llm,
-            quota,
+            LlmStage {
+                db,
+                llm,
+                quota,
+                cancel: &Cancel::default(),
+            },
             &LlmConfig::default(),
             &PipelineConfig::default(),
             owner,
             &Target::Pending { requests_only },
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap()
@@ -403,15 +408,17 @@ mod tests {
         };
         let llm = FakeLlm::new([ok("再訳")]);
         let summary = translate_articles(
-            &db,
-            &llm,
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
             &opus,
             &PipelineConfig::default(),
             owner,
             &target,
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap();
@@ -433,9 +440,12 @@ mod tests {
         let cancel = Cancel::default();
         cancel.request();
         let summary = translate_articles(
-            &db,
-            &FakeLlm::new([]),
-            &mut quota(10),
+            LlmStage {
+                db: &db,
+                llm: &FakeLlm::new([]),
+                quota: &mut quota(10),
+                cancel: &cancel,
+            },
             &LlmConfig::default(),
             &PipelineConfig::default(),
             owner,
@@ -443,7 +453,6 @@ mod tests {
                 requests_only: false,
             },
             now(),
-            &cancel,
         )
         .await
         .unwrap();

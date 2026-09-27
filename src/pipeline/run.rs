@@ -6,10 +6,10 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, tidy, translate};
+use super::{digest, extract, fetch, score, suggest, tidy, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, Source};
-use crate::db::{Db, DbError, RedoFilter};
+use crate::db::{Db, DbError, Evidence, RedoFilter};
 use crate::http::Fetcher;
 use crate::llm::Llm;
 use crate::profile::Profile;
@@ -31,6 +31,8 @@ pub enum RunError {
     Translate(#[from] translate::TranslateStageError),
     #[error(transparent)]
     Tidy(#[from] tidy::TidyStageError),
+    #[error(transparent)]
+    Suggest(#[from] suggest::SuggestStageError),
 }
 
 /// 1 回の実行で共有する環境。クォータは実行全体に効くので、ステージ間で引き継ぐ。
@@ -273,6 +275,42 @@ pub async fn redo<L: Llm>(
     Ok(report)
 }
 
+/// `profile suggest`：反応を根拠に、プロファイルの更新案を 1 回の呼び出しで作る。案は保存しない。
+/// 上限などで呼べなかったら案は `None`。
+pub async fn suggest_profile<L: Llm>(
+    mut env: RunEnv<'_, L>,
+    config: &Config,
+    profile: &Profile,
+    evidence: &[Evidence],
+) -> Result<(RunReport, Suggested), RunError> {
+    let mut report = RunReport::default();
+    let now = (env.clock)();
+    let summary =
+        suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
+    // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
+    let reason = match &summary.halted {
+        Some(Halt::Quota(stop)) => stop.to_string(),
+        Some(Halt::UsageLimit { .. }) => "the subscription usage limit was reached".into(),
+        Some(Halt::LlmFailed(message)) => message.clone(),
+        None => "interrupted".into(),
+    };
+    report_halt(summary.halted, &mut report.llm_failure);
+    report.cancelled = summary.cancelled || env.cancel.is_requested();
+    let suggested = match summary.suggestion {
+        Some(s) => Suggested::Profile(s),
+        None => Suggested::NotAsked(reason),
+    };
+    Ok((report, suggested))
+}
+
+/// `profile suggest` の結果。
+#[derive(Debug)]
+pub enum Suggested {
+    Profile(crate::prompt::suggest::Suggestion),
+    /// 上限などで呼ばなかった。利用者に見せる理由
+    NotAsked(String),
+}
+
 /// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。
 /// 候補は保存しない。
 pub async fn eval_profile<L: Llm>(
@@ -422,6 +460,35 @@ mod tests {
         assert_eq!(report, RunReport::default());
         article(db, 1);
         id
+    }
+
+    /// 上限で呼べなかったときは、どの上限で止まったかを返す（利用者に正しい理由を示すため）。
+    #[tokio::test]
+    async fn suggest_reports_why_it_did_not_ask() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([]);
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(0));
+        let profile = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        let (report, suggested) = suggest_profile(
+            RunEnv {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota,
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &Config::default(),
+            &profile,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(report, RunReport::default());
+        let stop = crate::quota::Stop::MaxCalls { limit: 0 }.to_string();
+        assert!(
+            matches!(&suggested, Suggested::NotAsked(reason) if *reason == stop),
+            "{suggested:?}"
+        );
     }
 
     /// 認証切れなどで LLM が失敗したら、同じ実行の後続の LLM ステージは呼ばず、最後に報告する。

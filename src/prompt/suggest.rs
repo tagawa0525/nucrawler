@@ -124,8 +124,8 @@ pub fn schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "change": {"type": "string"},
-                        "evidence": {"type": "string"},
+                        "change": {"type": "string", "minLength": 1},
+                        "evidence": {"type": "string", "minLength": 1},
                     },
                     "required": ["change", "evidence"],
                     "additionalProperties": false,
@@ -179,6 +179,17 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
         exclude: output.exclude,
     };
     crate::profile::validate(&profile)?;
+    // 空の根拠は根拠にならない
+    if let Some(r) = output
+        .reasons
+        .iter()
+        .find(|r| r.change.trim().is_empty() || r.evidence.trim().is_empty())
+    {
+        return Err(SuggestError::Malformed(format!(
+            "reason {:?} has an empty change or evidence",
+            r.change
+        )));
+    }
     // 根拠の文も端末に表示するので、プロファイルと同じくエスケープシーケンスや改行を通さない
     if let Some(r) = output.reasons.iter().find(|r| {
         format!("{}{}", r.change, r.evidence)
@@ -283,6 +294,9 @@ mod tests {
             s["required"],
             serde_json::json!(["interests", "exclude", "reasons"])
         );
+        let reason = &s["properties"]["reasons"]["items"]["properties"];
+        assert_eq!(reason["change"]["minLength"], 1);
+        assert_eq!(reason["evidence"]["minLength"], 1);
     }
 
     #[test]
@@ -336,6 +350,17 @@ mod tests {
         assert!(matches!(parse(&duplicate), Err(SuggestError::Invalid(_))));
         let extra = serde_json::json!({"interests": [], "exclude": [], "reasons": [], "x": 1});
         assert!(matches!(parse(&extra), Err(SuggestError::Malformed(_))));
+        // 空の根拠は根拠にならない
+        for (change, evidence) in [("", "b"), ("a", " ")] {
+            let reason = serde_json::json!({
+                "interests": [], "exclude": [],
+                "reasons": [{"change": change, "evidence": evidence}],
+            });
+            assert!(
+                matches!(parse(&reason), Err(SuggestError::Malformed(_))),
+                "{change:?} {evidence:?}"
+            );
+        }
         // 根拠の文も端末に表示するので、制御文字（改行を含む）は受け付けない
         for (change, evidence) in [("a\u{1b}[2J", "b"), ("a", "b\nc")] {
             let reason = serde_json::json!({

@@ -10,7 +10,10 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
-    #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
+    #[error(
+        "usage: nucrawler profile import FILE | nucrawler profile export | \
+         nucrawler profile suggest --out FILE [--max-llm-calls N]"
+    )]
     ProfileUsage,
     #[error("usage: nucrawler topics import FILE | nucrawler topics export")]
     TopicsUsage,
@@ -78,7 +81,7 @@ commands:
   serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
-  profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
+  profile   関心プロファイルの取り込み・書き出し・更新案（profile import FILE / profile export / profile suggest --out FILE）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
@@ -324,6 +327,11 @@ pub enum ProfileArgs {
     Import { file: PathBuf },
     /// `profile export`（標準出力へ）
     Export,
+    /// `profile suggest --out FILE [--max-llm-calls N]`：反応を根拠に更新案を作り、`out` に書く
+    Suggest {
+        out: PathBuf,
+        max_llm_calls: Option<u32>,
+    },
 }
 
 pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
@@ -332,8 +340,32 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
             file: PathBuf::from(file),
         }),
         [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
+        [cmd, rest @ ..] if cmd == "suggest" => parse_suggest_args(rest),
         _ => Err(ParseError::ProfileUsage),
     }
+}
+
+fn parse_suggest_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
+    let mut it = args.iter();
+    let (mut out, mut max_llm_calls) = (None, None);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--out" => {
+                out = Some(PathBuf::from(
+                    option_value(&mut it).ok_or(ParseError::ProfileUsage)?,
+                ));
+            }
+            "--max-llm-calls" => {
+                let n = option_value(&mut it).ok_or(ParseError::ProfileUsage)?;
+                max_llm_calls = Some(n.parse().map_err(|_| ParseError::ProfileUsage)?);
+            }
+            _ => return Err(ParseError::ProfileUsage),
+        }
+    }
+    Ok(ProfileArgs::Suggest {
+        out: out.ok_or(ParseError::ProfileUsage)?,
+        max_llm_calls,
+    })
 }
 
 /// `search` サブコマンドの引数。条件は Web の検索画面と同じ（`search::Params`）。
@@ -733,10 +765,35 @@ mod tests {
             parse_profile_args(&args(&["export"])).unwrap(),
             ProfileArgs::Export
         );
+        assert_eq!(
+            parse_profile_args(&args(&["suggest", "--out", "new.toml"])).unwrap(),
+            ProfileArgs::Suggest {
+                out: PathBuf::from("new.toml"),
+                max_llm_calls: None,
+            }
+        );
+        assert_eq!(
+            parse_profile_args(&args(&[
+                "suggest",
+                "--max-llm-calls",
+                "1",
+                "--out",
+                "n.toml"
+            ]))
+            .unwrap(),
+            ProfileArgs::Suggest {
+                out: PathBuf::from("n.toml"),
+                max_llm_calls: Some(1),
+            }
+        );
         for bad in [
             &[][..],
             &["import"][..],
             &["export", "x"][..],
+            // 案の書き出し先は必須
+            &["suggest"][..],
+            &["suggest", "--out"][..],
+            &["suggest", "--out", "a", "--bogus"][..],
             &["show"][..],
         ] {
             let err = parse_profile_args(&args(bad)).unwrap_err();

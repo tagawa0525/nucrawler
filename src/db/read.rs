@@ -441,6 +441,18 @@ impl Db {
         .collect()
     }
 
+    /// その日（日本時間の日付 `today`）の確認枠の記事。閾値（`q.min_score`）未満の記事から無作為に
+    /// 選び、日ごとに `per_day` 件まで記録する。同じ日は同じ記事を返し、1 つの記事は 1 回しか選ばない。
+    /// 選んだ記事のうち、明示的な反応が付いたものは返さない。
+    pub fn explore(
+        &self,
+        q: ListQuery,
+        per_day: usize,
+        today: &str,
+    ) -> Result<Vec<ListItem>, DbError> {
+        todo!("{q:?} {per_day} {today}")
+    }
+
     /// 一覧・詳細に共通の行の組み立て。
     fn query_items(
         &self,
@@ -1347,6 +1359,73 @@ mod tests {
         let items = db.list_articles(list_query(&db, true)).unwrap();
         let unscored = items.iter().find(|i| i.article_id == b).unwrap();
         assert!(unscored.matched.is_empty() && unscored.excluded.is_empty());
+    }
+
+    /// 確認枠は閾値未満・軽水炉・採点済み・反応なし・未選択の記事から選び、同じ日は同じ記事を返す。
+    #[test]
+    fn explore_picks_below_threshold_articles_once() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let low: Vec<i64> = (0..3)
+            .map(|i| {
+                scored_article(
+                    &db,
+                    &format!("https://e.com/low{i}"),
+                    Lang::En,
+                    "2026-09-26T00:00:00.000Z",
+                    20,
+                )
+            })
+            .collect();
+        // 閾値以上、👎 済み、見送り済みの記事は選ばない
+        scored_article(
+            &db,
+            "https://e.com/high",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let reacted = scored_article(
+            &db,
+            "https://e.com/r",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            20,
+        );
+        db.record_event(
+            owner,
+            reacted,
+            SignalKind::Dismiss,
+            t("2026-09-26T05:00:00Z"),
+        )
+        .unwrap();
+        let q = list_query(&db, false);
+        let ids = |items: Vec<ListItem>| -> Vec<i64> {
+            let mut ids: Vec<i64> = items.into_iter().map(|i| i.article_id).collect();
+            ids.sort();
+            ids
+        };
+
+        let first = ids(db.explore(q, 2, "2026-09-27").unwrap());
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|id| low.contains(id)), "{first:?}");
+        // 同じ日は同じ記事
+        assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), first);
+        // 次の日は、まだ選んでいない記事だけから選ぶ（残りは 1 件）
+        let second = ids(db.explore(q, 2, "2026-09-28").unwrap());
+        assert_eq!(second.len(), 1);
+        assert!(!first.contains(&second[0]));
+        // 反応が付いた記事は枠から消える
+        db.record_event(
+            owner,
+            first[0],
+            SignalKind::Bookmark,
+            t("2026-09-27T06:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), [first[1]]);
+        // 0 件なら選ばない
+        assert!(db.explore(q, 0, "2026-09-29").unwrap().is_empty());
     }
 
     /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。

@@ -219,6 +219,27 @@ mod tests {
     use crate::db::Db;
     use crate::web::server::test_support::*;
 
+    /// 既定の一覧には、閾値未満の記事を確認枠として出す。「すべて表示」では全部出ているので出さない。
+    #[tokio::test]
+    async fn list_shows_below_threshold_articles_in_the_explore_section() {
+        let db = Db::open_in_memory().unwrap();
+        seed_recommended_and_hidden(&db);
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/").await;
+        assert_eq!(status, 200);
+        let section = html
+            .split("<h2>確認枠</h2>")
+            .nth(1)
+            .expect("explore section");
+        assert!(section.contains("低い点"), "{html}");
+        // 👎・無関係・未採点は候補にしない
+        for hidden in ["👎した", "無関係", "未採点"] {
+            assert!(!section.contains(hidden), "{hidden}: {html}");
+        }
+        let (_, all) = server.get("/?all=1").await;
+        assert!(!all.contains("確認枠"), "{all}");
+    }
+
     /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
     #[tokio::test]
     async fn feed_lists_recommended_articles_as_atom() {

@@ -147,6 +147,8 @@ pub struct WebConfig {
     pub list_limit: usize,
     /// 一覧を見てからこの分数以内の閲覧は、同じ訪問として「前回から」の区切りを保つ
     pub visit_gap_minutes: u32,
+    /// 1 日に確認枠へ出す、閾値未満の記事の数（無作為に選ぶ）。0 なら出さない
+    pub explore_per_day: u32,
 }
 
 impl WebConfig {
@@ -176,6 +178,7 @@ impl Default for WebConfig {
             list_days: 7,
             list_limit: 200,
             visit_gap_minutes: 30,
+            explore_per_day: 2,
         }
     }
 }

@@ -19,6 +19,18 @@ pub(super) fn insert_membership(db: &Db) -> i64 {
     db.conn().last_insert_rowid()
 }
 
+pub(super) fn insert_artifact(db: &Db, article_id: i64, input_scope: &str) -> i64 {
+    db.conn()
+        .execute(
+            "INSERT INTO artifacts
+               (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+             VALUES (?1, 'digest', 'b', 'm', 1, ?2, '{}', '2026-09-27T00:00:00Z')",
+            rusqlite::params![article_id, input_scope],
+        )
+        .unwrap();
+    db.conn().last_insert_rowid()
+}
+
 pub(super) fn insert_content(db: &Db, article_id: i64, membership: Option<i64>) -> i64 {
     db.conn()
         .execute(
@@ -157,6 +169,19 @@ pub(super) fn found(db: &Db, q: SearchQuery) -> Vec<i64> {
         .collect()
 }
 
+pub(super) fn glossary_term(
+    sources: &[&str],
+    target: &str,
+    abbr: Option<&str>,
+) -> crate::glossary::Term {
+    crate::glossary::Term {
+        sources: sources.iter().map(|s| s.to_string()).collect(),
+        target: target.into(),
+        abbr: abbr.map(Into::into),
+        note: None,
+    }
+}
+
 pub(super) fn digest_with_topics(
     db: &Db,
     topics: serde_json::Value,
@@ -194,4 +219,11 @@ pub(super) fn linked_topics(db: &Db, artifact_id: i64) -> Vec<String> {
          WHERE at.artifact_id = {artifact_id} ORDER BY t.id"
     ))
     .unwrap()
+}
+
+pub(super) fn merge(from: &str, into: &str) -> TopicMerge {
+    TopicMerge {
+        from: from.into(),
+        into: into.into(),
+    }
 }

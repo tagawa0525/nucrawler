@@ -97,7 +97,10 @@ nucrawler topics import FILE | nucrawler topics export
   手で変えるときは `topics export > topics.toml` で書き出して編集し、`topics import topics.toml` で取り込む。
   軸（facet）は `分野`・`炉型`・`地域`・`組織` のいずれか。発電所名などの固有名は語彙に入れず全文検索で探す。
   要約に付いている語は削除できない（取り込みがエラーになり、語彙は変わらない）。
-  統合した語は別名として残り、LLM が同じ名前を付けても統合先に付く。別名と同じ名前を取り込むと、その名前は語に戻る
+  LLM が足した語の表記揺れは、crawl の最後の `tidy` ステージで週 1 回（`llm.tidy_interval_days`）LLM に見直させ、
+  既存の語へ自動で統合する（初期の語と取り込んだ語は統合元にしない）。すぐ整理するなら `crawl --only tidy`。
+  統合した語は別名として残り（`topic_aliases` に統合した時刻と LLM を記録）、LLM が同じ名前を付けても統合先に付く。
+  誤った統合は、`topics export` した語彙に統合元を足して `topics import` すれば語に戻る
 
 ## Web UI
 

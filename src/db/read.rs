@@ -127,6 +127,13 @@ enum ItemScope<'a> {
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
+    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、明示的な反応も確認枠の記録も無いもの。
+    /// 無作為な順に `limit` 件
+    Explore {
+        since: chrono::DateTime<chrono::Utc>,
+        min_score: u8,
+        limit: usize,
+    },
 }
 
 /// 検索の条件を、`query_items` の SQL に足す条件とその名前付きパラメータにしたもの。
@@ -441,6 +448,69 @@ impl Db {
         .collect()
     }
 
+    /// その日（日本時間の日付 `today`）の確認枠の記事。閾値（`q.min_score`）未満の記事から無作為に
+    /// 選び、日ごとに `per_day` 件まで記録する。同じ日は同じ記事を返し、1 つの記事は 1 回しか選ばない。
+    /// 選んだ記事のうち、明示的な反応が付いたものは返さない。
+    pub fn explore(
+        &self,
+        q: ListQuery,
+        per_day: usize,
+        today: &str,
+    ) -> Result<Vec<ListItem>, DbError> {
+        if per_day == 0 {
+            return Ok(Vec::new());
+        }
+        let labeled: std::collections::HashSet<i64> = self
+            .eval_labels(q.user_id)?
+            .into_iter()
+            .map(|l| l.article_id)
+            .collect();
+        let picked_on = |day: Option<&str>| -> Result<Vec<i64>, DbError> {
+            let mut stmt = self.conn.prepare(
+                "SELECT article_id FROM explore_picks
+                 WHERE user_id = ?1 AND (?2 IS NULL OR picked_on = ?2) ORDER BY article_id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![q.user_id, day], |r| r.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        };
+        let need = per_day.saturating_sub(picked_on(Some(today))?.len());
+        if need > 0 {
+            // 条件と無作為な選択は SQL で済ませ、足りない分だけを読む
+            let candidates = self.query_items(
+                q.user_id,
+                q.profile_hash,
+                ItemScope::Explore {
+                    since: q.since,
+                    min_score: q.min_score,
+                    limit: need,
+                },
+            )?;
+            let tx = self.conn.unchecked_transaction()?;
+            for c in &candidates {
+                tx.execute(
+                    "INSERT INTO explore_picks (user_id, article_id, picked_on) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![q.user_id, c.article_id, today],
+                )?;
+            }
+            tx.commit()?;
+        }
+        let mut items = Vec::new();
+        for id in picked_on(Some(today))? {
+            if labeled.contains(&id) {
+                continue;
+            }
+            // 選んだ後に採点し直されたり要約が変わったりして条件を外れた記事は出さない
+            items.extend(
+                self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?
+                    .into_iter()
+                    .filter(|i| {
+                        i.lwr_relevant == Some(true) && i.score.is_some_and(|s| s < q.min_score)
+                    }),
+            );
+        }
+        Ok(items)
+    }
+
     /// 一覧・詳細に共通の行の組み立て。
     fn query_items(
         &self,
@@ -450,9 +520,19 @@ impl Db {
     ) -> Result<Vec<ListItem>, DbError> {
         const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
-        // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
         let list_filter = match scope {
+            // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
             ItemScope::List { .. } => "AND rows.bookmarked = 0",
+            ItemScope::Explore { .. } => {
+                "AND rows.relevant = 1 AND s.score < :min
+                 AND NOT EXISTS (
+                   SELECT 1 FROM events AS e
+                   WHERE e.user_id = :user AND e.article_id = rows.id
+                     AND e.kind IN ('up', 'down', 'bookmark', 'dismiss'))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM explore_picks AS p
+                   WHERE p.user_id = :user AND p.article_id = rows.id)"
+            }
             _ => "",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
@@ -463,6 +543,12 @@ impl Db {
                 min_score,
                 limit,
             } => (None, Some(since), show_all, min_score, limit, BY_SCORE),
+            // 既定の条件（:all = 0 のときの絞り込み）は使わず、list_filter で絞る
+            ItemScope::Explore {
+                since,
+                min_score,
+                limit,
+            } => (None, Some(since), true, min_score, limit, "random()"),
             ItemScope::Search(q) => (
                 None,
                 q.since,
@@ -1347,6 +1433,96 @@ mod tests {
         let items = db.list_articles(list_query(&db, true)).unwrap();
         let unscored = items.iter().find(|i| i.article_id == b).unwrap();
         assert!(unscored.matched.is_empty() && unscored.excluded.is_empty());
+    }
+
+    /// 確認枠は閾値未満・軽水炉・採点済み・反応なし・未選択の記事から選び、同じ日は同じ記事を返す。
+    #[test]
+    fn explore_picks_below_threshold_articles_once() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let low: Vec<i64> = (0..3)
+            .map(|i| {
+                scored_article(
+                    &db,
+                    &format!("https://e.com/low{i}"),
+                    Lang::En,
+                    "2026-09-26T00:00:00.000Z",
+                    20,
+                )
+            })
+            .collect();
+        // 閾値以上、👎 済み、見送り済みの記事は選ばない
+        scored_article(
+            &db,
+            "https://e.com/high",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let reacted = scored_article(
+            &db,
+            "https://e.com/r",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            20,
+        );
+        db.record_event(
+            owner,
+            reacted,
+            SignalKind::Dismiss,
+            t("2026-09-26T05:00:00Z"),
+        )
+        .unwrap();
+        let q = list_query(&db, false);
+        let ids = |items: Vec<ListItem>| -> Vec<i64> {
+            let mut ids: Vec<i64> = items.into_iter().map(|i| i.article_id).collect();
+            ids.sort();
+            ids
+        };
+
+        let first = ids(db.explore(q, 2, "2026-09-27").unwrap());
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|id| low.contains(id)), "{first:?}");
+        // 同じ日は同じ記事
+        assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), first);
+        // 次の日は、まだ選んでいない記事だけから選ぶ（残りは 1 件）
+        let second = ids(db.explore(q, 2, "2026-09-28").unwrap());
+        assert_eq!(second.len(), 1);
+        assert!(!first.contains(&second[0]));
+        // 反応が付いた記事は枠から消える
+        db.record_event(
+            owner,
+            first[0],
+            SignalKind::Bookmark,
+            t("2026-09-27T06:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), [first[1]]);
+        // 0 件なら選ばない
+        assert!(db.explore(q, 0, "2026-09-29").unwrap().is_empty());
+    }
+
+    /// 選んだ後に採点し直されて閾値以上になった記事は、確認枠から外す（一覧と二重に出さない）。
+    #[test]
+    fn explore_drops_picks_that_no_longer_qualify() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            20,
+        );
+        let q = list_query(&db, false);
+        let picked: Vec<i64> = db
+            .explore(q, 1, "2026-09-27")
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
+        assert_eq!(picked, [a]);
+        rescore_with_version(&db, a, 2, 90);
+        assert!(db.explore(q, 1, "2026-09-27").unwrap().is_empty());
     }
 
     /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。

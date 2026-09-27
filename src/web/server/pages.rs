@@ -2,7 +2,25 @@
 
 use super::*;
 
-/// Web の一覧に出す記事（設定の期間・件数・最低点）。
+/// Web の一覧の条件（設定の期間・件数・最低点）。
+fn list_query<'a>(
+    web: &WebConfig,
+    user: i64,
+    profile_hash: Option<&'a str>,
+    now: chrono::DateTime<Utc>,
+    show_all: bool,
+) -> ListQuery<'a> {
+    ListQuery {
+        user_id: user,
+        profile_hash,
+        min_score: web.min_score,
+        since: now - Duration::days(web.list_days.into()),
+        show_all,
+        limit: web.list_limit,
+    }
+}
+
+/// Web の一覧に出す記事。
 pub(super) fn list_items(
     db: &Db,
     web: &WebConfig,
@@ -11,14 +29,7 @@ pub(super) fn list_items(
     now: chrono::DateTime<Utc>,
     show_all: bool,
 ) -> Result<Vec<crate::db::ListItem>, DbError> {
-    db.list_articles(ListQuery {
-        user_id: user,
-        profile_hash,
-        min_score: web.min_score,
-        since: now - Duration::days(web.list_days.into()),
-        show_all,
-        limit: web.list_limit,
-    })
+    db.list_articles(list_query(web, user, profile_hash, now, show_all))
 }
 
 /// 警告は直近 24 時間のものだけ出す。
@@ -49,6 +60,17 @@ pub(super) async fn list(
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref(), show_read);
+        // 「すべて表示」では閾値未満も並んでいるので、確認枠は出さない
+        let explore = if show_all {
+            Vec::new()
+        } else {
+            let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
+            db.explore(
+                list_query(&web, user, hash.as_deref(), now, false),
+                web.explore_per_day as usize,
+                &today.to_string(),
+            )?
+        };
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
@@ -58,7 +80,9 @@ pub(super) async fn list(
             all: show_all,
             read: show_read,
         };
-        Ok(html::list_page(&new, &earlier, view, &page))
+        Ok(html::list_page_with_explore(
+            &new, &earlier, &explore, view, &page,
+        ))
     })
     .await?;
     Ok(Html(page))
@@ -218,6 +242,27 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::web::server::test_support::*;
+
+    /// 既定の一覧には、閾値未満の記事を確認枠として出す。「すべて表示」では全部出ているので出さない。
+    #[tokio::test]
+    async fn list_shows_below_threshold_articles_in_the_explore_section() {
+        let db = Db::open_in_memory().unwrap();
+        seed_recommended_and_hidden(&db);
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/").await;
+        assert_eq!(status, 200);
+        let section = html
+            .split("<h2>確認枠</h2>")
+            .nth(1)
+            .expect("explore section");
+        assert!(section.contains("低い点"), "{html}");
+        // 👎・無関係・未採点は候補にしない
+        for hidden in ["👎した", "無関係", "未採点"] {
+            assert!(!section.contains(hidden), "{hidden}: {html}");
+        }
+        let (_, all) = server.get("/?all=1").await;
+        assert!(!all.contains("確認枠"), "{all}");
+    }
 
     /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
     #[tokio::test]

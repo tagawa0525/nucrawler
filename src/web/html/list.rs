@@ -50,6 +50,17 @@ impl ListView {
 }
 
 pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
+    list_page_with_explore(new, earlier, &[], view, page)
+}
+
+/// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）を添える。
+pub fn list_page_with_explore(
+    new: &[ListItem],
+    earlier: &[ListItem],
+    explore: &[ListItem],
+    view: ListView,
+    page: &Page,
+) -> String {
     let all_toggle = ListView {
         all: !view.all,
         ..view
@@ -89,6 +100,13 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
             "<h2>過去の未読</h2>"
         });
         body.extend(earlier.iter().map(|i| card(i, true, page)));
+    }
+    if !explore.is_empty() {
+        body.push_str(
+            "<h2>確認枠</h2><p class=\"meta\">おすすめの閾値に届かなかった記事から無作為に選んでいます。\
+             関心があれば 🔖、無ければ見送ってください</p>",
+        );
+        body.extend(explore.iter().map(|i| card(i, true, page)));
     }
     body.push_str(SWIPE_SCRIPT);
     layout("一覧", page, &body)
@@ -365,6 +383,24 @@ mod tests {
             &Page::default(),
         );
         assert!(!plain.contains("class=\"match"), "{plain}");
+    }
+
+    #[test]
+    fn list_page_adds_the_explore_section() {
+        let picked = item(9, "2026-09-27T05:00:00.000Z");
+        let html = list_page_with_explore(
+            &[],
+            &[],
+            std::slice::from_ref(&picked),
+            ListView::default(),
+            &Page::default(),
+        );
+        assert!(html.contains("<h2>確認枠</h2>"), "{html}");
+        assert!(html.contains("無作為"), "{html}");
+        // 他のカードと同じく振り分けられる
+        assert!(html.contains("data-id=\"9\""), "{html}");
+        let none = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(!none.contains("確認枠"), "{none}");
     }
 
     #[test]

@@ -89,4 +89,13 @@ mod tests {
             extract_text(&article(), "https://utility.example/news/3", Some("<<<")).unwrap_err();
         assert!(matches!(err, ExtractError::BadSelector { .. }), "{err}");
     }
+
+    /// 設定の誤りを直せるよう、どこが解釈できないのかも伝える。
+    #[test]
+    fn bad_selector_error_tells_why() {
+        let err =
+            extract_text(&article(), "https://utility.example/news/3", Some("<<<")).unwrap_err();
+        let reason = scraper::Selector::parse("<<<").unwrap_err().to_string();
+        assert!(err.to_string().contains(&reason), "{err}");
+    }
 }

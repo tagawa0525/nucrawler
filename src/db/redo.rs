@@ -220,12 +220,12 @@ const REDO_NOT_BACKING_OFF: &str = "NOT EXISTS (
       AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))";
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
-/// 付いた、現在のプロファイルの採点で判定する。
+/// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。
 const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
     AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
     AND (:ids = '[]' OR a.id IN (SELECT value FROM json_each(:ids)))
     AND (:min_score IS NULL OR (
-      SELECT max(s.score) FROM scores AS s
+      SELECT s.score FROM scores AS s
       WHERE s.user_id = :user AND s.profile_hash = :profile
         AND s.artifact_id = (
           SELECT r.id FROM artifacts AS r
@@ -235,7 +235,8 @@ const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
               WHERE aa.artifact_id = r.id
                 AND aa.membership_id NOT IN (
                   SELECT membership_id FROM user_memberships WHERE user_id = :user))
-          ORDER BY r.created_at DESC, r.id DESC LIMIT 1)) >= :min_score)";
+          ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+      ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)";
 
 /// 名前付きパラメータ（名前と値）の並び。
 type NamedParams = Vec<(&'static str, Box<dyn rusqlite::ToSql>)>;
@@ -358,6 +359,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inputs[0].contents.len(), 1);
+    }
+
+    /// 点数の条件は、採点のプロンプトの最新の版の点数で判定する。
+    #[test]
+    fn redo_min_score_uses_latest_score_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let by_score = RedoFilter {
+            min_score: Some(80),
+            ..RedoFilter::default()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &by_score), [a]);
+        rescore_with_version(&db, a, 2, 40);
+        assert!(redo_digest_ids(&db, "opus", &by_score).is_empty());
     }
 
     #[test]

@@ -116,6 +116,25 @@ pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
     }
 }
 
+/// 記事の最新の digest を、`score_key` のプロンプトの版だけを変えて採点し直す。
+pub(super) fn rescore_with_version(db: &Db, article_id: i64, prompt_version: i64, score: u8) {
+    let digest: i64 = db
+        .conn()
+        .query_row(
+            "SELECT id FROM artifacts WHERE article_id = ?1 AND kind = 'digest'
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            [article_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let key = ScoreKey {
+        prompt_version,
+        ..score_key(db)
+    };
+    db.insert_score(key, digest, score, None, t("2026-09-26T03:00:00Z"))
+        .unwrap();
+}
+
 /// 英語の記事に本文と digest と採点を付ける。
 pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, score: u8) -> i64 {
     let id = db

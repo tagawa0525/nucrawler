@@ -498,8 +498,10 @@ impl Db {
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile
                          AND s.artifact_id = i.digest_id
-                       -- 複数のモデルの採点があれば、先回り和訳と同じく最高点を使う
-                       ORDER BY s.score DESC, s.created_at DESC, s.id DESC LIMIT 1) AS score_id,
+                       -- 採点のプロンプトの最新の版を使い、その版で複数のモデルの採点があれば、
+                       -- 先回り和訳と同じく最高点を使う
+                       ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
+                       LIMIT 1) AS score_id,
                       EXISTS (
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id
@@ -1276,6 +1278,25 @@ mod tests {
         .unwrap();
         let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
         assert_eq!(item.score, Some(90));
+    }
+
+    /// 採点のプロンプトの版を上げたら、古い版の点数ではなく最新の版の点数を使う
+    /// （版をまたいだ最高点にすると、古いプロンプトの高い点が新しい採点を隠してしまう）。
+    #[test]
+    fn list_prefers_latest_score_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        rescore_with_version(&db, a, 2, 40);
+        // 閾値未満になるので「すべて表示」で確かめる
+        let item = &db.list_articles(list_query(&db, true)).unwrap()[0];
+        assert_eq!(item.score, Some(40));
+        assert!(list_ids(&db, false).is_empty());
     }
 
     /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。

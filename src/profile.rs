@@ -37,8 +37,21 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
     Ok(profile)
 }
 
-/// 値を検証する（重みは 0〜1、topic と exclude は空でなく重複しない）。
+/// 値を検証する（重みは 0〜1、topic と exclude は空でなく重複しない、どの文字列も制御文字を含まない）。
 pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
+    // 案は LLM が作って端末に表示するので、エスケープシーケンスや改行を通さない
+    let texts = profile
+        .interests
+        .iter()
+        .flat_map(|i| std::iter::once(&i.topic).chain(i.note.as_ref()))
+        .chain(&profile.exclude);
+    for text in texts {
+        if text.chars().any(char::is_control) {
+            return Err(ProfileError::Invalid(format!(
+                "{text:?} must not contain control characters"
+            )));
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     for i in &profile.interests {
         if i.topic.trim().is_empty() {

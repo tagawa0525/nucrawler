@@ -36,6 +36,9 @@ pub enum DbError {
     /// 訳語集の訳語・略語・原語が、ほかの訳語のものと重なった
     #[error("{0}")]
     GlossaryConflict(String),
+    /// マイグレーションの後に外部キーの違反が残った（その件数）
+    #[error("migration left {0} foreign key violations")]
+    ForeignKeyViolation(i64),
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
@@ -228,6 +231,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0014_report_status.sql"),
     include_str!("migrations/0015_report_kinds.sql"),
     include_str!("migrations/0016_comments.sql"),
+    include_str!("migrations/0017_artifact_glossary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -2623,17 +2627,39 @@ fn schema_version(conn: &Connection) -> Result<i64, DbError> {
 /// 同時に開いたプロセス同士で二重に適用しないよう、IMMEDIATE トランザクションで
 /// 書き込みロックを取ってから版を読み、未適用分をまとめて適用する。
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+/// `migrations` のうち未適用のものを 1 つのトランザクションで適用する。テーブルを作り直すときに
+/// 参照している側の行が連鎖して消えないよう、適用の間は外部キーを止め、最後に違反が無いことを
+/// 確かめてから確定する（SQLite の推奨する手順）。外部キーは失敗しても有効に戻す。
+fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
+    // トランザクションの中では切り替えられないので、その外で止める
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let applied = apply_migrations(conn, migrations);
+    conn.pragma_update(None, "foreign_keys", true)?;
+    applied
+}
+
+fn apply_migrations(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let found = schema_version(&tx)?;
     let applied = usize::try_from(found).map_err(|_| DbError::InvalidSchemaVersion(found))?;
-    let pending = MIGRATIONS.get(applied..).ok_or(DbError::SchemaTooNew {
+    let pending = migrations.get(applied..).ok_or(DbError::SchemaTooNew {
         found,
-        supported: MIGRATIONS.len(),
+        supported: migrations.len(),
     })?;
     let mut version = found;
     for sql in pending {
         tx.execute_batch(sql)?;
         version += 1;
+    }
+    let violations: i64 =
+        tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })?;
+    if violations > 0 {
+        return Err(DbError::ForeignKeyViolation(violations));
     }
     tx.pragma_update(None, "user_version", version)?;
     tx.commit()?;
@@ -2874,6 +2900,115 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(left, [2]);
+    }
+
+    /// 外部キーの違反を残すマイグレーションは適用せず、外部キーは有効に戻る。
+    #[test]
+    fn migration_leaving_foreign_key_violations_is_not_applied() {
+        let mut db = Db::open_in_memory().unwrap();
+        let mut migrations = MIGRATIONS.to_vec();
+        migrations.push("INSERT INTO artifact_topics (artifact_id, topic_id) VALUES (999, 1);");
+        let err = migrate_with(&mut db.conn, &migrations).unwrap_err();
+        assert!(matches!(err, DbError::ForeignKeyViolation(1)), "{err}");
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM artifact_topics")
+                .unwrap(),
+            0
+        );
+        let on: bool = db
+            .conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert!(on);
+    }
+
+    /// 成果物を作り直しても、行・参照している側の行・全文検索を保つ。
+    /// 作り直した後は、訳語集の時点が違えば同じモデル・プロンプト版でも別の版として残せる。
+    #[test]
+    fn migration_rebuilds_artifacts_keeping_references() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("glossary_at"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"title_ja\": \"題\", \"summary_ja\": \"要約\"}', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1);
+             INSERT INTO artifact_topics (artifact_id, topic_id) VALUES (1, 1);
+             INSERT INTO scores (user_id, artifact_id, profile_hash, backend, model, score, created_at)
+               VALUES (1, 1, 'h', 'b', 'm', 50, '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let count = |sql: &str| db.query_i64(sql).unwrap();
+        let children = ["artifact_inputs", "artifact_topics", "scores"];
+        for table in children {
+            assert_eq!(
+                count(&format!("SELECT count(*) FROM {table}")),
+                1,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM artifacts WHERE id = 1 AND glossary_at IS NULL AND title_ja = '題'"
+            ),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id = 1"),
+            1
+        );
+
+        let insert = |glossary_at: &str| {
+            db.conn().execute(
+                &format!(
+                    "INSERT INTO artifacts
+                       (article_id, kind, backend, model, prompt_version, input_scope, payload,
+                        created_at, glossary_at)
+                     VALUES (1, 'digest', 'b', 'm', 1, 'public', '{{}}', '2026-09-28T00:00:00.000Z',
+                             {glossary_at})"
+                ),
+                [],
+            )
+        };
+        insert("'2026-09-27T12:00:00.000Z'").unwrap();
+        assert!(insert("NULL").is_err());
+        assert!(insert("'2026-09-27T12:00:00.000Z'").is_err());
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id IS NOT NULL"),
+            2
+        );
+
+        // 参照している側は引き続き連鎖して消える
+        db.conn()
+            .execute("DELETE FROM artifacts WHERE id = 1", [])
+            .unwrap();
+        for table in children {
+            assert_eq!(
+                count(&format!("SELECT count(*) FROM {table}")),
+                0,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id = 1"),
+            0
+        );
     }
 
     #[test]

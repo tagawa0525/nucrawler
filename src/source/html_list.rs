@@ -190,6 +190,7 @@ mod tests {
             title_skip: None,
             follow: None,
             date: None,
+            also: vec![],
         }
     }
 
@@ -292,6 +293,49 @@ mod tests {
         assert_eq!(items[0].published_at, jst_midnight(2026, 9, 18));
         // URL は 20230918 を含むが、公表日は 2026 年 9 月 15 日
         assert_eq!(items[2].published_at, jst_midnight(2026, 9, 15));
+    }
+
+    /// 規制委のトップの新着情報は、月をまたいで最新の 5 件を載せる（2026 年 9 月 2 日の実ページ）。
+    /// 新着履歴と同じ読み方で読める。
+    #[test]
+    fn nra_top_page_lists_the_latest_items_across_months() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".news__date".into()),
+                ..list("dl.news__list dd.news__title a")
+            },
+            include_str!("../../tests/fixtures/nra_top.html"),
+            &base("https://www.nra.go.jp/"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 5, "{items:#?}");
+        assert_eq!(
+            items[0].url,
+            "https://www.nra.go.jp/news_only/20251114.html"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 9, 2));
+        assert_eq!(
+            items[1].title,
+            "令和9年度概算要求及び機構・定員要求のHP掲載について"
+        );
+        assert_eq!(items[1].published_at, jst_midnight(2026, 8, 31));
+        assert_eq!(items[4].published_at, jst_midnight(2026, 8, 13));
+    }
+
+    /// 月（年度）が替わった直後の新着履歴は項目が無い（2026 年 4 月 1 日の実ページ）。
+    /// 項目が無いのはエラーではない。
+    #[test]
+    fn nra_month_list_without_items_is_empty() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".news__date".into()),
+                ..list("dl.news__list dd.news__title a")
+            },
+            include_str!("../../tests/fixtures/nra_news_empty.html"),
+            &base("https://www.nra.go.jp/news/index.html"),
+        )
+        .unwrap();
+        assert!(items.is_empty(), "{items:#?}");
     }
 
     /// 原子力機構のトップの新着は種類ごとに印が付く。プレス発表だけを、dt の日付で取る。

@@ -1,5 +1,6 @@
 //! `sources check`：各ソースを実際に取得して解析し、件数と先頭の数件を表示する。DB には書かない。
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use url::Url;
@@ -95,7 +96,8 @@ pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, Source
     Ok(Stats { total, matched })
 }
 
-/// 一覧ページは記事ページと同じく robots.txt に従って取得する。
+/// 一覧ページは記事ページと同じく robots.txt に従って取得する。`also` のページは一覧に続けて
+/// 同じ読み方で読み、同じ URL の記事は最初の 1 件だけにする。
 async fn fetch_html_list(
     fetcher: &Fetcher,
     url: &Url,
@@ -108,7 +110,19 @@ async fn fetch_html_list(
         page = fetcher.get_page(&next).await?;
     }
     let html = text::decode_html(&page.body, page.content_type.as_deref());
-    Ok(html_list::parse(list, &html, &page.url)?)
+    let mut items = html_list::parse(list, &html, &page.url)?;
+    for also in &list.also {
+        let url = Url::parse(also).map_err(|source| SourceFailure::InvalidUrl {
+            url: also.clone(),
+            source,
+        })?;
+        let page = fetcher.get_page(&url).await?;
+        let html = text::decode_html(&page.body, page.content_type.as_deref());
+        items.extend(html_list::parse(list, &html, &page.url)?);
+    }
+    let mut seen = HashSet::new();
+    items.retain(|c| seen.insert(c.url.clone()));
+    Ok(items)
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
@@ -245,6 +259,7 @@ mod tests {
             title_skip: None,
             follow: Some("h3 a".into()),
             date: None,
+            also: vec![],
         };
         let source = |path: &str| Source {
             list: Some(list.clone()),
@@ -276,6 +291,99 @@ mod tests {
                 SourceFailure::Http(HttpError::DisallowedByRobots { .. })
             ),
             "{err}"
+        );
+    }
+
+    /// 規制委の新着履歴は月ごとで、月が替わると前の月の分は載らない。月の初めに新着履歴が
+    /// 空でも、同じ読み方で読むトップの新着情報（月をまたいで最新の数件）から前の月の記事を拾う。
+    #[tokio::test]
+    async fn html_list_also_reads_other_pages_when_the_list_is_empty() {
+        let html = |body: Vec<u8>| Route {
+            content_type: "text/html; charset=utf-8",
+            ..Route::ok(body)
+        };
+        let server = Server::start(
+            [
+                ("/news/index.html", html(fixture("nra_news_empty.html"))),
+                ("/", html(fixture("nra_top.html"))),
+            ]
+            .into(),
+        );
+        let source = Source {
+            list: Some(HtmlList {
+                link: "dl.news__list dd.news__title a".into(),
+                date_in_url: None,
+                title_skip: None,
+                follow: None,
+                date: Some(".news__date".into()),
+                also: vec![server.url("/")],
+            }),
+            ..src(
+                "nra",
+                SourceKind::HtmlList,
+                server.url("/news/index.html"),
+                true,
+                Filter::default(),
+            )
+        };
+        let stats = fetch_source(&fetcher(), &source).await.unwrap();
+        assert_eq!(stats.total, 5);
+        assert_eq!(
+            stats.matched[1].url,
+            server.url("/news_only/20260831_01.html")
+        );
+        assert_eq!(
+            stats.matched[1].published_at,
+            crate::jst::midnight(chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap())
+        );
+    }
+
+    /// 一覧とほかのページの両方に載る記事は、一覧の側の 1 件だけにする。順は一覧、ほかのページの順。
+    #[tokio::test]
+    async fn html_list_also_pages_come_after_the_list_without_duplicates() {
+        let html = |body: &'static str| Route {
+            content_type: "text/html; charset=utf-8",
+            ..Route::ok(body)
+        };
+        let server = Server::start(
+            [
+                (
+                    "/news/",
+                    html(r#"<dd><a href="/a.html">A</a></dd><dd><a href="/b.html">B</a></dd>"#),
+                ),
+                (
+                    "/",
+                    html(r#"<dd><a href="/b.html">B（トップ）</a></dd><dd><a href="/c.html">C</a></dd>"#),
+                ),
+            ]
+            .into(),
+        );
+        let source = Source {
+            list: Some(HtmlList {
+                link: "dd a".into(),
+                date_in_url: None,
+                title_skip: None,
+                follow: None,
+                date: None,
+                also: vec![server.url("/")],
+            }),
+            ..src(
+                "x",
+                SourceKind::HtmlList,
+                server.url("/news/"),
+                true,
+                Filter::default(),
+            )
+        };
+        let stats = fetch_source(&fetcher(), &source).await.unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(
+            stats
+                .matched
+                .iter()
+                .map(|c| c.title.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C"]
         );
     }
 
@@ -466,6 +574,34 @@ mod tests {
                 "{}",
                 c.url
             );
+        }
+    }
+
+    /// 実サイトの確認。`cargo test -- --ignored nra` で実行する。新着履歴（当月分）に加えて
+    /// トップの新着情報（月をまたいで最新の 5 件）を読むので、月の初めでも 0 件にならない。
+    #[tokio::test]
+    #[ignore = "uses the real network"]
+    async fn nra_example_source_reads_the_month_list_and_the_top_page() {
+        let sources = crate::config::parse_sources(
+            include_str!("../examples/sources.toml"),
+            std::path::Path::new("examples/sources.toml"),
+        )
+        .unwrap();
+        let nra = sources.sources.iter().find(|s| s.id == "nra").unwrap();
+        let fetcher = Fetcher::new(
+            "nucrawler-test",
+            Duration::from_secs(30),
+            Duration::ZERO,
+            8 << 20,
+        )
+        .unwrap();
+        let stats = fetch_source(&fetcher, nra).await.unwrap();
+        assert!(stats.total >= 5, "{:#?}", stats.matched);
+        let mut urls = std::collections::HashSet::new();
+        for c in &stats.matched {
+            assert!(c.url.starts_with("https://www.nra.go.jp/"), "{}", c.url);
+            assert!(c.published_at.is_some(), "{}", c.url);
+            assert!(urls.insert(&c.url), "duplicate {}", c.url);
         }
     }
 }

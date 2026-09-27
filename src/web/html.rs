@@ -63,6 +63,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .actions button.on { background: #0b57a4; color: #fff; }
 .versions a { margin-right: 0.6rem; font-size: 0.85rem; }
 .card[data-id] { touch-action: pan-y; transition: transform 0.2s; }
+.card[data-id]:focus { outline: 2px solid #0b57a4; outline-offset: 2px; }
 .card[data-dir=bookmark] { box-shadow: inset 5px 0 #2e7d32; }
 .card[data-dir=dismiss] { box-shadow: inset -5px 0 #b3261e; }
 .toast { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); background: #1d1d1b;
@@ -194,7 +195,8 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     };
     body.push_str(&format!(
         "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"/search?bookmarked=1\">🔖 ブックマーク</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>\
-         <p class=\"meta\">右へスワイプでブックマーク、左へスワイプで見ない</p>",
+         <p class=\"meta\">右へスワイプか l / → でブックマーク、左へスワイプか h / ← で見ない\
+         （j / k・↓ / ↑ で選ぶ、u で取り消す）</p>",
         all_toggle.href(),
         read_toggle.href(),
     ));
@@ -345,6 +347,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
 /// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
+/// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
 const SWIPE_SCRIPT: &str = r#"<script>
 (() => {
   const post = (url, kind) => fetch(url, {
@@ -357,18 +360,20 @@ const SWIPE_SCRIPT: &str = r#"<script>
   toast.className = "toast";
   toast.hidden = true;
   document.body.append(toast);
-  let timer;
+  let timer, undoLast = null;
+  const hideToast = () => { toast.hidden = true; undoLast = null; };
   const notify = (text, undo) => {
     clearTimeout(timer);
     toast.textContent = text;
+    undoLast = undo || null;
     if (undo) {
       const button = document.createElement("button");
       button.textContent = "元に戻す";
-      button.onclick = () => { toast.hidden = true; undo(); };
+      button.onclick = () => { hideToast(); undo(); };
       toast.append(button);
     }
     toast.hidden = false;
-    timer = setTimeout(() => { toast.hidden = true; }, 6000);
+    timer = setTimeout(hideToast, 6000);
   };
   const reset = (card) => {
     card.style.transform = "";
@@ -392,6 +397,31 @@ const SWIPE_SCRIPT: &str = r#"<script>
       }
     });
   };
+  const TRIAGE_KEYS = { l: "bookmark", ArrowRight: "bookmark", h: "dismiss", ArrowLeft: "dismiss" };
+  const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
+    const cards = [...document.querySelectorAll(".card[data-id]")].filter((c) => !c.hidden);
+    const current = e.target.closest(".card[data-id]");
+    const at = cards.indexOf(current);
+    if (e.key in MOVE_KEYS) {
+      const next = cards[at < 0 ? 0 : Math.min(Math.max(at + MOVE_KEYS[e.key], 0), cards.length - 1)];
+      if (next) { e.preventDefault(); next.focus(); }
+    } else if (e.key in TRIAGE_KEYS && at >= 0) {
+      e.preventDefault();
+      // 振り分けたカードは隠れるので、隣のカードを選んでおく
+      const next = cards[at + 1] || cards[at - 1];
+      triage(current, TRIAGE_KEYS[e.key]);
+      if (next) next.focus();
+    } else if (e.key === "Enter" && e.target === current) {
+      current.querySelector("a.title").click();
+    } else if (e.key === "u" && undoLast) {
+      e.preventDefault();
+      const undo = undoLast;
+      hideToast();
+      undo();
+    }
+  });
   const EDGE = 24, START = 10, COMMIT = 0.35;
   for (const card of document.querySelectorAll(".card[data-id]")) {
     let x0 = null, y0 = 0, dx = 0, dragging = false, moved = false;
@@ -464,7 +494,7 @@ fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
          <div class=\"meta\">{source} ・{at}{lock}{translation}</div>{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
-            format!(" data-id=\"{}\"", i.article_id)
+            format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
         } else {
             String::new()
         },

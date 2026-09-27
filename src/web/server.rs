@@ -282,6 +282,10 @@ mod tests {
 
     /// 英語の記事に本文と digest を付ける。
     fn seed(db: &Db, url: &str, title_ja: &str) -> (i64, i64) {
+        seed_with(db, url, title_ja, true)
+    }
+
+    fn seed_with(db: &Db, url: &str, title_ja: &str, lwr_relevant: bool) -> (i64, i64) {
         let id = db
             .insert_article(&NewArticle {
                 source_id: "wnn",
@@ -297,7 +301,7 @@ mod tests {
             .unwrap();
         let payload = serde_json::json!({
             "title_ja": title_ja, "summary_ja": "要約", "points_ja": ["点"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["規制・審査"],
+            "implications_ja": "", "lwr_relevant": lwr_relevant, "topics": ["規制・審査"],
         });
         let digest = db
             .insert_artifact(
@@ -314,6 +318,43 @@ mod tests {
             )
             .unwrap();
         (id, digest)
+    }
+
+    /// 所有者の現在のプロファイルで digest を採点する。
+    fn score(db: &Db, digest: i64, score: u8) {
+        let owner = db.owner_id().unwrap();
+        let profile = crate::profile::Profile {
+            interests: vec![],
+            exclude: vec![],
+        };
+        db.save_profile(owner, &profile, chrono::Utc::now())
+            .unwrap();
+        let hash = crate::profile::hash(&profile);
+        let key = crate::db::ScoreKey {
+            user_id: owner,
+            profile_hash: &hash,
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        db.insert_score(key, digest, score, Some("理由"), chrono::Utc::now())
+            .unwrap();
+    }
+
+    /// 既定の一覧に出る記事 1 件と、出ない記事（低い点、👎、軽水炉と無関係、未採点）。
+    /// 出る記事の ID を返す。
+    fn seed_recommended_and_hidden(db: &Db) -> i64 {
+        let (good, digest) = seed(db, "https://e.com/good?a=1&b=2", "A&B <C>\u{1}");
+        score(db, digest, 90);
+        let (_, digest) = seed(db, "https://e.com/low", "低い点");
+        score(db, digest, 10);
+        let (down, digest) = seed(db, "https://e.com/down", "👎した");
+        score(db, digest, 90);
+        db.record_event(db.owner_id().unwrap(), down, SignalKind::Down, Utc::now())
+            .unwrap();
+        let (_, digest) = seed_with(db, "https://e.com/unrelated", "無関係", false);
+        score(db, digest, 90);
+        seed(db, "https://e.com/unscored", "未採点");
+        good
     }
 
     fn add_translation(db: &Db, article_id: i64) {
@@ -388,6 +429,138 @@ mod tests {
         fn count(&self, sql: &str) -> i64 {
             self.state.db.lock().unwrap().query_i64(sql).unwrap()
         }
+
+        /// 閲覧の行動（開いた記録と訪問の区切り）が 1 つも記録されていない。
+        fn assert_no_views(&self) {
+            assert_eq!(
+                self.count("SELECT count(*) FROM events WHERE kind LIKE 'open_%'"),
+                0
+            );
+            assert_eq!(
+                self.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
+                0
+            );
+        }
+
+        async fn get_with_type(&self, path: &str) -> (u16, String, String) {
+            let res = self
+                .client
+                .get(format!("{}{path}", self.base))
+                .send()
+                .await
+                .unwrap();
+            let content_type = res
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            (
+                res.status().as_u16(),
+                content_type,
+                res.text().await.unwrap(),
+            )
+        }
+
+        async fn get_json(&self, path: &str) -> (u16, serde_json::Value) {
+            let (status, content_type, body) = self.get_with_type(path).await;
+            if status != 200 {
+                return (status, serde_json::Value::Null);
+            }
+            assert!(
+                content_type.starts_with("application/json"),
+                "{content_type}"
+            );
+            (status, serde_json::from_str(&body).unwrap())
+        }
+    }
+
+    /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
+    #[tokio::test]
+    async fn feed_lists_recommended_articles_as_atom() {
+        let db = Db::open_in_memory().unwrap();
+        let good = seed_recommended_and_hidden(&db);
+        let server = Server::start(db).await;
+        let (status, content_type, xml) = server.get_with_type("/feed.xml").await;
+        assert_eq!(status, 200);
+        assert!(
+            content_type.starts_with("application/atom+xml"),
+            "{content_type}"
+        );
+        assert!(
+            xml.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<feed xmlns=\"http://www.w3.org/2005/Atom\">"),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<entry>").count(), 1, "{xml}");
+        for hidden in ["低い点", "👎した", "無関係", "未採点"] {
+            assert!(!xml.contains(hidden), "{hidden}: {xml}");
+        }
+        // 和訳タイトル・要約・元記事と詳細ページへのリンク・日付
+        assert!(xml.contains("<title>A&amp;B &lt;C&gt;</title>"), "{xml}");
+        assert!(xml.contains("<summary>要約</summary>"), "{xml}");
+        assert!(
+            xml.contains(&format!(
+                "<link rel=\"alternate\" href=\"{}/articles/{good}\"/>",
+                server.base
+            )),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<link rel=\"related\" href=\"https://e.com/good?a=1&amp;b=2\"/>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<updated>20"), "{xml}");
+        // XML 1.0 に書けない制御文字は、実体参照にもできないので落とす
+        assert!(!xml.contains('\u{1}') && !xml.contains("&#1;"), "{xml}");
+        server.assert_no_views();
+    }
+
+    /// API の一覧は既定では Web と同じ記事を出し、`all=1` ですべてを出す。閲覧としては記録しない。
+    #[tokio::test]
+    async fn api_lists_the_same_articles_as_the_web() {
+        let db = Db::open_in_memory().unwrap();
+        let good = seed_recommended_and_hidden(&db);
+        let server = Server::start(db).await;
+        let (status, json) = server.get_json("/api/articles").await;
+        assert_eq!(status, 200);
+        let articles = json["articles"].as_array().unwrap();
+        assert_eq!(articles.len(), 1, "{json}");
+        let a = &articles[0];
+        assert_eq!(a["id"], good);
+        assert_eq!(a["title_ja"], "A&B <C>\u{1}");
+        assert_eq!(a["summary_ja"], "要約");
+        assert_eq!(a["score"], 90);
+        assert_eq!(a["url"], "https://e.com/good?a=1&b=2");
+
+        let (_, json) = server.get_json("/api/articles?all=1").await;
+        assert_eq!(json["articles"].as_array().unwrap().len(), 5, "{json}");
+        server.assert_no_views();
+    }
+
+    /// API の詳細は最新の要約と、和訳があればその本文を返す。閲覧としては記録しない。
+    #[tokio::test]
+    async fn api_detail_returns_latest_digest_and_translation() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        add_translation(&db, id);
+        let (plain, _) = seed(&db, "https://e.com/b", "見出しB");
+        let server = Server::start(db).await;
+
+        let (status, json) = server.get_json(&format!("/api/articles/{id}")).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["id"], id);
+        assert_eq!(json["digest"]["title_ja"], "見出しA");
+        assert_eq!(json["digest"]["summary_ja"], "要約");
+        assert_eq!(json["digest"]["points_ja"], serde_json::json!(["点"]));
+        assert_eq!(json["translation"]["body_ja"], "和訳の本文");
+
+        let (_, json) = server.get_json(&format!("/api/articles/{plain}")).await;
+        assert_eq!(json["translation"], serde_json::Value::Null, "{json}");
+        assert_eq!(server.get_json("/api/articles/999").await.0, 404);
+        server.assert_no_views();
     }
 
     #[tokio::test]

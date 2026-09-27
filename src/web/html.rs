@@ -888,6 +888,7 @@ mod tests {
 
     /// 一覧の上部は見出しも説明も出さず、絵文字のボタンだけを並べる。
     /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。
+    /// ⭐ は「おすすめだけ」なので、すべて表示のとき OFF になる。
     #[test]
     fn list_page_shows_only_emoji_buttons_above_the_cards() {
         let view = ListView {
@@ -905,13 +906,13 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn on" href="/" aria-label="すべて表示：ON" title="すべて表示：ON">👁</a>"#
+                r#"<a class="btn off" href="/" aria-label="おすすめだけ表示：OFF" title="おすすめだけ表示：OFF">⭐</a>"#
             ),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">🕘</a>"#
+                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">👁</a>"#
             ),
             "{html}"
         );

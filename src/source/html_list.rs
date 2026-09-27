@@ -208,6 +208,26 @@ mod tests {
         assert_eq!(items[0].published_at, jst_midnight(2026, 8, 28));
     }
 
+    /// ページ内の見出しへのリンクは記事ではない。記事の URL からはフラグメントを除く。
+    #[test]
+    fn fragments_are_dropped_and_links_to_the_list_itself_skipped() {
+        let html = r##"<ul>
+            <li><a href="index.html#top">ページの先頭へ</a></li>
+            <li><a href="/news/index.html?#x">一覧</a></li>
+            <li><a href="/a.html#section2">記事</a></li>
+        </ul>"##;
+        let items = parse(
+            &list("li a"),
+            html,
+            &base("https://e.example/news/index.html"),
+        )
+        .unwrap();
+        assert_eq!(
+            items.iter().map(|c| c.url.as_str()).collect::<Vec<_>>(),
+            ["https://e.example/a.html"]
+        );
+    }
+
     #[test]
     fn follow_without_a_match_is_error() {
         let err = follow(

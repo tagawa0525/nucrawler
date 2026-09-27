@@ -460,8 +460,11 @@ const SWIPE_SCRIPT: &str = r#"<script>
       }
     };
     card.addEventListener("pointerup", end);
+    // ドラッグ中の取り消しだけを戻す（送信中のカードの状態は消さない）
     card.addEventListener("pointercancel", () => {
+      const was = dragging;
       x0 = null; dragging = false;
+      if (!was) return;
       card.style.transition = "";
       reset(card);
     });

@@ -176,8 +176,8 @@ impl Db {
         matches: ScoreMatches<'_>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        let _ = matches;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO scores
                (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, reason,
                 created_at)
@@ -194,6 +194,19 @@ impl Db {
                 timestamp(now),
             ],
         )?;
+        let score_id = tx.last_insert_rowid();
+        for (kind, topics) in [
+            ("interest", matches.interests),
+            ("exclude", matches.excludes),
+        ] {
+            for topic in topics {
+                tx.execute(
+                    "INSERT INTO score_matches (score_id, kind, topic) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![score_id, kind, topic],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 }

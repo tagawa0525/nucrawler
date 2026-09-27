@@ -9,7 +9,8 @@ use crate::prompt::escape_data;
 /// `pipeline.backlog_days` の範囲の記事が採点し直しになる。
 /// 版 1 は直近の反応の見出しを system prompt に入れていた。版 2 で外し、点数をプロファイルと記事だけで
 /// 決めるようにした（同じ記事・プロファイルなら採点の時期によらない。反応はプロファイルの見直しで効かせる）。
-pub const PROMPT_VERSION: i64 = 2;
+/// 版 3 で、当たった関心分野と推薦しない話題（`matched`・`excluded`）を返させるようにした。
+pub const PROMPT_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScoreError {
@@ -59,11 +60,27 @@ pub fn system_prompt(profile: &Profile) -> String {
             profile.exclude.join("、")
         ));
     }
+    s.push_str(
+        "\n# 出力\n\
+         - score：0〜100 の点数。reason：理由を 1 文で\n\
+         - matched：この記事が当たった関心分野。上の関心分野の名前をそのまま使う。当たらなければ空の配列\n\
+         - excluded：この記事が当たった推薦しない話題。上の名前をそのまま使う。当たらなければ空の配列\n",
+    );
     s
 }
 
+/// 出力の JSON Schema。当たった分野と話題は、プロファイルの語だけから選ばせる。
 pub fn schema(profile: &Profile) -> serde_json::Value {
-    let _ = profile;
+    let terms = |terms: Vec<&str>| {
+        if terms.is_empty() {
+            // 空の enum は JSON Schema として不正なので、要素を持たせない
+            serde_json::json!({"type": "array", "maxItems": 0})
+        } else {
+            serde_json::json!({"type": "array", "items": {"type": "string", "enum": terms}})
+        }
+    };
+    let matched = terms(profile.interests.iter().map(|i| i.topic.as_str()).collect());
+    let excluded = terms(profile.exclude.iter().map(String::as_str).collect());
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -75,8 +92,10 @@ pub fn schema(profile: &Profile) -> serde_json::Value {
                         "id": {"type": "integer"},
                         "score": {"type": "integer", "minimum": 0, "maximum": 100},
                         "reason": {"type": "string"},
+                        "matched": matched,
+                        "excluded": excluded,
                     },
-                    "required": ["id", "score", "reason"],
+                    "required": ["id", "score", "reason", "matched", "excluded"],
                     "additionalProperties": false,
                 },
             },
@@ -108,9 +127,7 @@ struct Item {
     id: i64,
     score: i64,
     reason: String,
-    #[serde(default)]
     matched: Vec<String>,
-    #[serde(default)]
     excluded: Vec<String>,
 }
 
@@ -119,7 +136,6 @@ pub fn parse(
     requested: &[i64],
     profile: &Profile,
 ) -> Result<Parsed, ScoreError> {
-    let _ = profile;
     let top = output
         .as_object()
         .ok_or_else(|| ScoreError::Malformed("the output is not an object".into()))?;
@@ -152,13 +168,28 @@ pub fn parse(
             tracing::warn!(id, score = checked.score, "ignoring score outside 0..=100");
             continue;
         };
+        // プロファイルに無い語はスキーマ違反と同じに扱う（捨てて再試行に回す）
+        let known = |terms: &[String], allowed: &mut dyn Iterator<Item = &str>| {
+            let allowed: Vec<&str> = allowed.collect();
+            terms.iter().all(|t| allowed.contains(&t.as_str()))
+        };
+        if !known(
+            &checked.matched,
+            &mut profile.interests.iter().map(|i| i.topic.as_str()),
+        ) || !known(
+            &checked.excluded,
+            &mut profile.exclude.iter().map(String::as_str),
+        ) {
+            tracing::warn!(id, "ignoring score whose matches are not in the profile");
+            continue;
+        }
         if found.iter().all(|seen| seen.id != checked.id) {
             found.push(Scored {
                 id: checked.id,
                 score,
                 reason: checked.reason,
-                matched: vec![],
-                excluded: vec![],
+                matched: dedup(checked.matched),
+                excluded: dedup(checked.excluded),
             });
         }
     }
@@ -171,6 +202,17 @@ pub fn parse(
         items: found,
         missing,
     })
+}
+
+/// 順を保って重複を除く（同じ語を 2 度返されても 1 つとして残す）。
+fn dedup(terms: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in terms {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -223,10 +265,6 @@ mod tests {
         assert_eq!(item["additionalProperties"], false);
         assert_eq!(item["properties"]["score"]["minimum"], 0);
         assert_eq!(item["properties"]["score"]["maximum"], 100);
-        assert_eq!(
-            item["required"],
-            serde_json::json!(["id", "score", "reason"])
-        );
     }
 
     /// 当たった分野と除外は、プロファイルの語だけから選ばせる。

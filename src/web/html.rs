@@ -869,9 +869,10 @@ mod tests {
         let html = search_page(&params, None, &[], None, &Page::default());
         // 月だけの指定もできるよう、文字の欄は残す
         assert!(html.contains(r#"name="since" value="2026-09""#), "{html}");
-        for name in ["since", "until"] {
+        // キーボードでも操作できるよう、日付の入力はフォーカスでき、名前を持つ
+        for (name, label) in [("since", "開始日"), ("until", "終了日")] {
             let cal = format!(
-                r#"<label class="cal" title="カレンダー">📅<input type="date" data-for="{name}" tabindex="-1"></label>"#
+                r#"<label class="cal" title="カレンダー">📅<input type="date" data-for="{name}" aria-label="{label}をカレンダーで選ぶ"></label>"#
             );
             let text = html.find(&format!(r#"name="{name}""#)).expect(&html);
             let at = html.find(&cal).expect(&html);

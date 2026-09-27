@@ -227,6 +227,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0013_glossary_changes.sql"),
     include_str!("migrations/0014_report_status.sql"),
     include_str!("migrations/0015_report_kinds.sql"),
+    include_str!("migrations/0016_comments.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1716,37 +1717,95 @@ impl Db {
     }
 
     /// 記事へのコメント（古い順）。利用者 `user_id` が書いたものと、ほかの利用者の公開のもの。
-    pub fn comments(&self, _user_id: i64, _article_id: i64) -> Result<Vec<Comment>, DbError> {
-        todo!()
+    pub fn comments(&self, user_id: i64, article_id: i64) -> Result<Vec<Comment>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, body, visibility, user_id = ?1, created_at, updated_at
+             FROM comments
+             WHERE article_id = ?2 AND (user_id = ?1 OR visibility = 'public')
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([user_id, article_id], |r| {
+            Ok((
+                r.get::<_, String>(2)?,
+                Comment {
+                    id: r.get(0)?,
+                    body: r.get(1)?,
+                    visibility: Visibility::Private,
+                    mine: r.get(3)?,
+                    created_at: r.get(4)?,
+                    updated_at: r.get(5)?,
+                },
+            ))
+        })?;
+        rows.map(|row| {
+            let (visibility, comment) = row?;
+            let visibility = Visibility::parse(&visibility).ok_or_else(|| {
+                DbError::UnexpectedValue(format!("comment visibility {visibility:?}"))
+            })?;
+            Ok(Comment {
+                visibility,
+                ..comment
+            })
+        })
+        .collect()
     }
 
     /// コメントを書いて id を返す。
     pub fn add_comment(
         &self,
-        _user_id: i64,
-        _article_id: i64,
-        _body: &str,
-        _visibility: Visibility,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        article_id: i64,
+        body: &str,
+        visibility: Visibility,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        todo!()
+        self.conn.execute(
+            "INSERT INTO comments (user_id, article_id, body, visibility, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            rusqlite::params![
+                user_id,
+                article_id,
+                body,
+                visibility.as_str(),
+                timestamp(now)
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
     }
 
     /// 自分のコメントを直し、その記事の id を返す。無いか他人のものなら None。
     pub fn update_comment(
         &self,
-        _user_id: i64,
-        _id: i64,
-        _body: &str,
-        _visibility: Visibility,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        id: i64,
+        body: &str,
+        visibility: Visibility,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<i64>, DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "UPDATE comments SET body = ?3, visibility = ?4, updated_at = ?5
+                 WHERE id = ?1 AND user_id = ?2
+                 RETURNING article_id",
+                rusqlite::params![id, user_id, body, visibility.as_str(), timestamp(now)],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// 自分のコメントを消し、その記事の id を返す。無いか他人のものなら None。
-    pub fn delete_comment(&self, _user_id: i64, _id: i64) -> Result<Option<i64>, DbError> {
-        todo!()
+    pub fn delete_comment(&self, user_id: i64, id: i64) -> Result<Option<i64>, DbError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "DELETE FROM comments WHERE id = ?1 AND user_id = ?2 RETURNING article_id",
+                [id, user_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     /// 指摘を受付箱に入れる。

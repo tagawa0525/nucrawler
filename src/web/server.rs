@@ -12,6 +12,7 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 use crate::db::{
     Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+    Visibility,
 };
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
@@ -62,6 +63,9 @@ pub fn router(state: AppState) -> axum::Router {
             post(translation_request),
         )
         .route("/articles/{id}/report", post(add_report))
+        .route("/articles/{id}/comments", post(add_comment))
+        .route("/comments/{id}", post(update_comment))
+        .route("/comments/{id}/delete", post(delete_comment))
         .route("/settings", get(settings))
         .route("/glossary", get(glossary).post(add_glossary_term))
         .route("/glossary/{id}", post(update_glossary_term))
@@ -385,9 +389,10 @@ async fn detail(
             warnings: &warnings,
             labels: &labels,
         };
+        let comments = db.comments(user, id)?;
         let notes = html::Notes {
             reports: &reports,
-            comments: &[],
+            comments: &comments,
         };
         Ok(html::detail_page(&detail, &notes, view, &page))
     })
@@ -542,6 +547,101 @@ async fn add_report(
     Ok(Redirect::to(&format!(
         "/articles/{id}?{view}reported=1#reports"
     )))
+}
+
+#[derive(serde::Deserialize)]
+struct CommentForm {
+    // 欄が無いときも空と同じく検証で 400 にする
+    #[serde(default)]
+    body: String,
+    /// チェックしたときだけ `1`（公開）。無ければ非公開
+    public: Option<String>,
+    /// 和訳を読んでいたなら `translation`（戻る先）
+    view: Option<String>,
+}
+
+impl CommentForm {
+    fn body(&self) -> Result<String, AppError> {
+        Some(self.body.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or(AppError::BadRequest("body must not be empty"))
+    }
+
+    fn visibility(&self) -> Visibility {
+        if self.public.is_some() {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        }
+    }
+}
+
+/// 記事のコメントの欄へ戻る。和訳を読んでいたなら和訳のまま。
+fn back_to_comments(article_id: i64, view: Option<&str>) -> Redirect {
+    let view = if view == Some("translation") {
+        "?view=translation"
+    } else {
+        ""
+    };
+    Redirect::to(&format!("/articles/{article_id}{view}#comments"))
+}
+
+async fn add_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let (body, visibility) = (form.body()?, form.visibility());
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.add_comment(user, id, &body, visibility, Utc::now())?)
+    })
+    .await?;
+    Ok(back_to_comments(id, form.view.as_deref()))
+}
+
+/// 自分のコメントを直す。他人のコメントは無いものとして扱う。
+async fn update_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let (body, visibility) = (form.body()?, form.visibility());
+    let article = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(db.update_comment(user, id, &body, visibility, Utc::now())?)
+    })
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(back_to_comments(article, form.view.as_deref()))
+}
+
+#[derive(serde::Deserialize)]
+struct CommentDeleteForm {
+    view: Option<String>,
+}
+
+/// 自分のコメントを消す。他人のコメントは無いものとして扱う。
+async fn delete_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentDeleteForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let article = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(db.delete_comment(user, id)?)
+    })
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(back_to_comments(article, form.view.as_deref()))
 }
 
 async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {

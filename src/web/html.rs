@@ -83,6 +83,14 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
 .toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
+.comments { margin-top: 1.5rem; }
+.comment { border-left: 3px solid #ddd; padding-left: 0.6rem; margin: 0.5rem 0; }
+.comment p { margin: 0.2rem 0; }
+.comments details { font-size: 0.85rem; color: #666; }
+.comments label { display: block; margin: 0.4rem 0; }
+.comments button { margin: 0.3rem 0.5rem 0 0; font-size: 1rem; padding: 0.3rem 0.9rem; }
+.comments form { display: inline-block; }
+.comments form:first-of-type, .comment-add form { display: block; }
 .reports { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
 .report { margin: 0.3rem 0; }
 .report label { display: block; margin: 0.4rem 0; }
@@ -986,8 +994,65 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     }
     body.push_str(&translation_section(d, view));
     let has_japanese = !d.digests.is_empty() || !d.translations.is_empty();
+    body.push_str(&comment_section(id, notes.comments, view));
     body.push_str(&report_section(id, notes.reports, has_japanese, view));
     layout(&title, page, &body)
+}
+
+/// コメントの欄。コメントは改行を保って並べ、書く欄と自分のコメントの編集は畳んでおく。
+fn comment_section(id: i64, comments: &[Comment], view: DetailView) -> String {
+    let back = if view.show_translation {
+        "<input type=\"hidden\" name=\"view\" value=\"translation\">"
+    } else {
+        ""
+    };
+    // 既定は非公開（チェックしたときだけ公開）
+    let public = |checked: bool| {
+        format!(
+            "<label><input type=\"checkbox\" name=\"public\" value=\"1\"{}> 公開する</label>",
+            if checked { " checked" } else { "" }
+        )
+    };
+    let mut out = String::from("<section class=\"comments\" id=\"comments\">");
+    for c in comments {
+        let body = escape(&c.body).replace('\n', "<br>");
+        let updated = if c.updated_at != c.created_at {
+            format!("（更新 {}）", crate::jst::format_local(&c.updated_at))
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<div class=\"comment\"><p>{body}</p><p class=\"meta\">{} ・{}{updated}</p>",
+            match c.visibility {
+                Visibility::Private => "🔒 非公開",
+                Visibility::Public => "公開",
+            },
+            crate::jst::format_local(&c.created_at)
+        ));
+        if c.mine {
+            out.push_str(&format!(
+                "<details><summary>編集</summary>\
+                 <form method=\"post\" action=\"/comments/{cid}\">{back}\
+                 <textarea class=\"wide\" name=\"body\" rows=\"3\" required>{text}</textarea>{public}\
+                 <button>保存</button></form>\
+                 <form method=\"post\" action=\"/comments/{cid}/delete\" \
+                 onsubmit=\"return confirm('このコメントを削除しますか')\">{back}<button>削除</button></form>\
+                 </details>",
+                cid = c.id,
+                text = escape(&c.body),
+                public = public(c.visibility == Visibility::Public),
+            ));
+        }
+        out.push_str("</div>");
+    }
+    out.push_str(&format!(
+        "<details class=\"comment-add\"><summary>コメントを書く</summary>\
+         <form method=\"post\" action=\"/articles/{id}/comments\">{back}\
+         <textarea class=\"wide\" name=\"body\" rows=\"3\" required></textarea>{}\
+         <button>保存</button></form></details></section>",
+        public(false)
+    ));
+    out
 }
 
 /// 指摘の欄。これまでの指摘を対応状況とともに小さく並べ、訳語の指摘とその他の指摘の
@@ -1824,11 +1889,13 @@ mod tests {
             ..DetailView::default()
         };
         let html = detail_page(&detail(), &Notes::default(), view, &Page::default());
+        let reports = &html[html.find(r#"id="reports""#).unwrap()..];
         assert_eq!(
-            html.matches(r#"<input type="hidden" name="view" value="translation">"#)
+            reports
+                .matches(r#"<input type="hidden" name="view" value="translation">"#)
                 .count(),
             2,
-            "both forms return to the translation: {html}"
+            "both report forms return to the translation: {html}"
         );
         assert!(html.contains("指摘を受け付けました"), "{html}");
     }

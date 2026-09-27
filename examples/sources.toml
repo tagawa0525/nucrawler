@@ -63,6 +63,17 @@ url = "https://www.ans.org/news/feed/"
 lang = "en"
 category = "industry"
 
+# 国内・海外のニュース。本文はフィードに入っている（会員限定の記事は無い）。
+# コラムや特集は別のフィード（/journal/column/feed など）
+[[source]]
+id = "jaif"
+name = "原子力産業新聞（日本原子力産業協会）"
+label = "原産新聞"
+kind = "feed"
+url = "https://www.jaif.or.jp/journal/feed"
+lang = "ja"
+category = "industry"
+
 [[source]]
 id = "fepc"
 name = "電気事業連合会"

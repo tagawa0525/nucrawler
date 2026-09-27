@@ -233,6 +233,41 @@ mod tests {
         );
     }
 
+    /// 原子力産業新聞（JAIF）の実フィード（2026-09-25 取得、2 件に削ったもの）。
+    /// content:encoded に本文があるので、記事ページを取りに行かずに済む。
+    #[test]
+    fn parses_jaif_journal_feed_with_full_text() {
+        let items = parse(
+            SourceKind::Feed,
+            &fixture("jaif_journal.xml"),
+            &base("https://www.jaif.or.jp/journal/feed"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "加カメコ　GLEと独占的オフテイク契約を締結");
+        assert_eq!(
+            items[0].url,
+            "https://www.jaif.or.jp/journal/oversea/35993.html"
+        );
+        assert_eq!(items[0].published_at, utc("2026-09-25T08:14:12Z"));
+        assert_eq!(
+            items[1].url,
+            "https://www.jaif.or.jp/journal/japan/35943.html"
+        );
+
+        let body = crate::text::html_to_text(items[0].content.as_deref().unwrap());
+        assert!(
+            body.contains("パデューカ・レーザー濃縮施設（PLEF）"),
+            "{body}"
+        );
+        // 脚注の本文は残り、脚注プラグインのスクリプトは捨てる
+        assert!(
+            body.contains("買い手が一定量・一定条件で長期的に引き取る"),
+            "{body}"
+        );
+        assert!(!body.contains("jQuery"), "{body}");
+    }
+
     /// 空の href を解決すると取得元（フィード自体）の URL になり、別の記事と区別できなくなる。
     #[test]
     fn skips_entries_with_blank_link() {

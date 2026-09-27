@@ -10,6 +10,8 @@ pub struct SourceOverview {
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub last_error_at: Option<String>,
+    /// 最後に成功した取得の件数
+    pub last_run: Option<FetchCounts>,
 }
 
 /// 抽出待ちの記事。
@@ -112,21 +114,42 @@ impl Db {
     pub fn source_overview(&self) -> Result<Vec<SourceOverview>, DbError> {
         let mut stmt = self.conn.prepare(
             "WITH ids AS (SELECT source_id FROM articles UNION SELECT source_id FROM source_state),
-                  counts AS (SELECT source_id, count(*) AS n FROM articles GROUP BY source_id)
+                  counts AS (SELECT source_id, count(*) AS n FROM articles GROUP BY source_id),
+                  runs AS (
+                    SELECT source_id, total, matched, new, duplicate,
+                           row_number() OVER (
+                             PARTITION BY source_id ORDER BY fetched_at DESC, id DESC) AS rn
+                    FROM fetch_runs)
              SELECT ids.source_id, coalesce(counts.n, 0),
-                    st.last_success_at, st.last_error, st.last_error_at
+                    st.last_success_at, st.last_error, st.last_error_at,
+                    runs.total, runs.matched, runs.new, runs.duplicate
              FROM ids
              LEFT JOIN counts USING (source_id)
              LEFT JOIN source_state AS st USING (source_id)
+             LEFT JOIN runs ON runs.source_id = ids.source_id AND runs.rn = 1
              ORDER BY ids.source_id",
         )?;
         let rows = stmt.query_map([], |r| {
+            let count = |i| -> rusqlite::Result<Option<usize>> {
+                Ok(r.get::<_, Option<i64>>(i)?
+                    .map(|n| usize::try_from(n).unwrap_or(0)))
+            };
+            let last_run = match (count(5)?, count(6)?, count(7)?, count(8)?) {
+                (Some(total), Some(matched), Some(new), Some(duplicate)) => Some(FetchCounts {
+                    total,
+                    matched,
+                    new,
+                    duplicate,
+                }),
+                _ => None,
+            };
             Ok(SourceOverview {
                 source_id: r.get(0)?,
                 articles: r.get(1)?,
                 last_success_at: r.get(2)?,
                 last_error: r.get(3)?,
                 last_error_at: r.get(4)?,
+                last_run,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -214,7 +237,15 @@ mod tests {
             })
             .unwrap();
         }
-        db.record_source_success("a", &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+        let run = |total, new| FetchCounts {
+            total,
+            matched: total,
+            new,
+            duplicate: total - new,
+        };
+        db.record_source_success("a", &run(5, 2), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_source_success("a", &run(4, 0), t("2026-09-27T06:00:00Z"))
             .unwrap();
         db.record_source_failure("b", "HTTP 403").unwrap();
         let ov = db.source_overview().unwrap();
@@ -224,6 +255,8 @@ mod tests {
             .collect();
         assert_eq!(ids, [("a", 2), ("b", 0)]);
         assert!(ov[0].last_success_at.is_some());
+        assert_eq!(ov[0].last_run, Some(run(4, 0)), "the latest run");
         assert_eq!(ov[1].last_error.as_deref(), Some("HTTP 403"));
+        assert_eq!(ov[1].last_run, None);
     }
 }

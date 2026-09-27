@@ -743,6 +743,11 @@ mod tests {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
         let (status, html) = server.get("/search?since=2026%2F09").await;
         assert_eq!(status, 400);
+        // 並びは条件に数えないが、誤りは誤りとして返す
+        let (status, _) = server.get("/search?sort=old").await;
+        assert_eq!(status, 400);
+        let (status, _) = server.get("/search?sort=score").await;
+        assert_eq!(status, 200);
         assert!(
             html.contains("since must be YYYY-MM or YYYY-MM-DD"),
             "{html}"

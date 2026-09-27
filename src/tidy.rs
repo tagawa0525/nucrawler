@@ -109,6 +109,7 @@ pub fn parse(
             _ if m.from == m.into => Some("merges a topic into itself"),
             (None, _) | (_, None) => Some("names a topic not in the vocabulary"),
             (Some(from), _) if from.added_at.is_none() => Some("merges away a curated topic"),
+            (Some(from), Some(into)) if from.facet != into.facet => Some("crosses facets"),
             _ if kept.iter().any(|k| k.from == m.from) => Some("merges the same topic twice"),
             _ => None,
         };

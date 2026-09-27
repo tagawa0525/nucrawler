@@ -4041,6 +4041,52 @@ mod tests {
         );
     }
 
+    /// 語彙を入れる前の要約も、語彙と同じ名前のトピックは付与として移し、消せないようにする。
+    #[test]
+    fn migration_links_existing_digest_topics_in_the_vocabulary() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..6] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"topics\": [\"規制・審査\", \"新設炉\", \"規制・審査\"]}',
+                       '2026-09-27T00:00:00Z'),
+                      (2, 1, 'judgment', 'b', 'm', 1, 'public',
+                       '{\"topics\": [\"燃料\"]}', '2026-09-27T00:00:00Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1), (2, 1, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let linked = db
+            .query_strings(
+                "SELECT t.name FROM artifact_topics AS at JOIN topics AS t ON t.id = at.topic_id
+                 WHERE at.artifact_id IN (1, 2)",
+            )
+            .unwrap();
+        assert_eq!(
+            linked,
+            ["規制・審査"],
+            "only digest topics in the vocabulary"
+        );
+        let without: Vec<_> = db
+            .topics()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name != "規制・審査")
+            .collect();
+        let err = db.replace_topics(&without).unwrap_err();
+        assert!(matches!(err, DbError::TopicsInUse(_)), "{err}");
+    }
+
     #[test]
     fn replace_topics_adds_updates_and_removes_by_name() {
         use crate::topics::Facet;

@@ -331,6 +331,16 @@ pub struct ListQuery<'a> {
     pub limit: usize,
 }
 
+/// 検索の条件。
+#[derive(Debug, Clone)]
+pub struct SearchQuery<'a> {
+    pub user_id: i64,
+    pub profile_hash: Option<&'a str>,
+    /// 原題・本文・要約・和訳のどれかに含む語。すべてを含む記事に絞る。空なら絞らない
+    pub terms: Vec<String>,
+    pub limit: usize,
+}
+
 /// 成果物の 1 版。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactVersion {
@@ -1299,6 +1309,11 @@ impl Db {
                 limit: q.limit,
             },
         )
+    }
+
+    /// 検索。一覧で隠す記事も含め、新しい順。
+    pub fn search_articles(&self, _q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
+        Ok(Vec::new())
     }
 
     /// 詳細画面の内容。記事が無ければ None。
@@ -3593,6 +3608,268 @@ mod tests {
         assert!(detail.translations.is_empty());
         assert!(detail.has_body);
         assert_eq!(db.article_detail(owner, None, 9999).unwrap(), None);
+    }
+
+    fn search_ids(db: &Db, terms: &[&str]) -> Vec<i64> {
+        db.search_articles(&SearchQuery {
+            user_id: db.owner_id().unwrap(),
+            profile_hash: Some("h1"),
+            terms: terms.iter().map(|t| t.to_string()).collect(),
+            limit: 50,
+        })
+        .unwrap()
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect()
+    }
+
+    fn dated_article(db: &Db, url: &str, title: &str, published: &str) -> i64 {
+        db.insert_article(&NewArticle {
+            title,
+            published_at: Some(published),
+            ..article(url)
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn add_translation_text(db: &Db, article_id: i64, body_ja: &str) {
+        let c = db
+            .insert_content(article_id, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        db.insert_translation(
+            &NewArtifact {
+                article_id,
+                kind: ArtifactKind::Translation,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({ "body_ja": body_ja }),
+                inputs: &[c],
+            },
+            t("2026-09-26T03:00:00Z"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn search_matches_titles_bodies_digests_and_translations() {
+        let db = Db::open_in_memory().unwrap();
+        let title = dated_article(
+            &db,
+            "https://e.com/title",
+            "Reactor Vessel Inspection",
+            "2026-09-01T00:00:00Z",
+        );
+        let body = dated_article(&db, "https://e.com/body", "t", "2026-09-02T00:00:00Z");
+        db.insert_content(
+            body,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "蒸気発生器の伝熱管を交換した",
+        )
+        .unwrap();
+        let digest = dated_article(&db, "https://e.com/digest", "t", "2026-09-03T00:00:00Z");
+        add_digest(
+            &db,
+            digest,
+            "sonnet",
+            "炉心溶融の解析",
+            true,
+            "2026-09-03T01:00:00Z",
+        );
+        let translation = dated_article(
+            &db,
+            "https://e.com/translation",
+            "t",
+            "2026-09-04T00:00:00Z",
+        );
+        add_translation_text(&db, translation, "格納容器の漏えい率試験");
+
+        // 3 文字以上の語は索引で引く。英語は大文字と小文字を区別しない
+        assert_eq!(search_ids(&db, &["reactor vessel"]), [title]);
+        assert_eq!(search_ids(&db, &["伝熱管"]), [body]);
+        assert_eq!(search_ids(&db, &["炉心溶融"]), [digest]);
+        assert_eq!(search_ids(&db, &["漏えい率"]), [translation]);
+        // 3 文字未満の語も引ける
+        assert_eq!(search_ids(&db, &["炉心"]), [digest]);
+        assert_eq!(search_ids(&db, &["交換"]), [body]);
+        assert!(search_ids(&db, &["存在しない語"]).is_empty());
+    }
+
+    #[test]
+    fn search_requires_every_term_across_parts_of_an_article() {
+        let db = Db::open_in_memory().unwrap();
+        let both = dated_article(
+            &db,
+            "https://e.com/both",
+            "NRC approves uprate",
+            "2026-09-01T00:00:00Z",
+        );
+        db.insert_content(
+            both,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "出力向上を承認",
+        )
+        .unwrap();
+        let one = dated_article(&db, "https://e.com/one", "NRC news", "2026-09-02T00:00:00Z");
+        assert_eq!(search_ids(&db, &["NRC", "出力向上"]), [both]);
+        assert_eq!(search_ids(&db, &["nrc"]), [one, both]);
+    }
+
+    /// 語は FTS5 の構文として解釈せず、そのままの文字列として探す。
+    #[test]
+    fn search_treats_terms_literally() {
+        let db = Db::open_in_memory().unwrap();
+        let a = dated_article(
+            &db,
+            "https://e.com/a",
+            "the \"AP1000\" OR* plan",
+            "2026-09-01T00:00:00Z",
+        );
+        assert_eq!(search_ids(&db, &["\"AP1000\""]), [a]);
+        assert_eq!(search_ids(&db, &["OR*"]), [a]);
+        assert!(search_ids(&db, &["NOT"]).is_empty());
+    }
+
+    #[test]
+    fn search_hides_text_the_user_cannot_view() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = dated_article(&db, "https://e.com/a", "t", "2026-09-01T00:00:00Z");
+        db.conn()
+            .execute(
+                "INSERT INTO contents (article_id, kind, access_membership_id, text, origin, fetched_at)
+                 VALUES (?1, 'fulltext', ?2, '会員限定の燃料設計', 'login', '2026-09-27T00:00:00Z')",
+                [a, aesj],
+            )
+            .unwrap();
+        let gated = db.conn().last_insert_rowid();
+        let payload = serde_json::json!({"title_ja": "限定要約の題", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["t"]});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+            },
+            t("2026-09-26T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(search_ids(&db, &["燃料設計"]).is_empty());
+        assert!(search_ids(&db, &["限定要約"]).is_empty());
+
+        db.conn()
+            .execute(
+                "INSERT INTO user_memberships VALUES (?1, ?2)",
+                [owner, aesj],
+            )
+            .unwrap();
+        assert_eq!(search_ids(&db, &["燃料設計"]), [a]);
+        assert_eq!(search_ids(&db, &["限定要約"]), [a]);
+    }
+
+    /// 検索は一覧の既定で隠す記事（非軽水炉・未採点・閾値未満）も含め、点数ではなく新しい順に並べる。
+    #[test]
+    fn search_includes_hidden_articles_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let old_high = scored_article(
+            &db,
+            "https://e.com/old",
+            Lang::En,
+            "2026-09-01T00:00:00.000Z",
+            95,
+        );
+        let new_low = scored_article(
+            &db,
+            "https://e.com/new",
+            Lang::En,
+            "2026-09-20T00:00:00.000Z",
+            10,
+        );
+        let unscored = dated_article(&db, "https://e.com/unscored", "t", "2026-09-10T00:00:00Z");
+        add_digest(&db, unscored, "sonnet", "題", false, "2026-09-10T01:00:00Z");
+        assert_eq!(search_ids(&db, &["題"]), [new_low, unscored, old_high]);
+        assert_eq!(search_ids(&db, &[]), [new_low, unscored, old_high]);
+    }
+
+    /// 3 文字未満の語は索引を使えず走査になるが、論文の本文も含めてすべての文書を探す。
+    /// LIKE の `%` と `_` は文字どおりに扱う。
+    #[test]
+    fn short_terms_scan_every_document_literally() {
+        let db = Db::open_in_memory().unwrap();
+        let pdf = dated_article(&db, "https://e.com/a.pdf", "t", "2026-09-01T00:00:00Z");
+        db.insert_content(pdf, ContentKind::Body, ContentOrigin::Pdf, "炉心溶融の解析")
+            .unwrap();
+        let fulltext = dated_article(&db, "https://e.com/paper", "t", "2026-09-02T00:00:00Z");
+        db.insert_content(
+            fulltext,
+            ContentKind::Fulltext,
+            ContentOrigin::Upload,
+            "炉心溶融の実験",
+        )
+        .unwrap();
+        assert_eq!(search_ids(&db, &["炉心"]), [fulltext, pdf]);
+        let percent = dated_article(&db, "https://e.com/p", "uprate 5%", "2026-09-03T00:00:00Z");
+        let underscore = dated_article(&db, "https://e.com/u", "a_b", "2026-09-04T00:00:00Z");
+        dated_article(&db, "https://e.com/x", "5x axb", "2026-09-05T00:00:00Z");
+        assert_eq!(search_ids(&db, &["5%"]), [percent]);
+        assert_eq!(search_ids(&db, &["_"]), [underscore]);
+    }
+
+    #[test]
+    fn deleting_article_removes_it_from_the_index() {
+        let db = Db::open_in_memory().unwrap();
+        let a = dated_article(&db, "https://e.com/a", "t", "2026-09-01T00:00:00Z");
+        db.insert_content(a, ContentKind::Body, ContentOrigin::Page, "本文")
+            .unwrap();
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-01T01:00:00Z");
+        add_translation_text(&db, a, "和訳");
+        let docs = || -> i64 { db.query_i64("SELECT count(*) FROM search_docs").unwrap() };
+        assert!(docs() > 0);
+        db.conn()
+            .execute("DELETE FROM articles WHERE id = ?1", [a])
+            .unwrap();
+        assert_eq!(docs(), 0);
+    }
+
+    /// 索引を作る前に入っていた記事も引ける。
+    #[test]
+    fn migration_indexes_existing_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, published_at, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 'Old Title', 'en', '2026-09-01T00:00:00Z',
+                       '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', '古い本文の記述', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"title_ja\": \"古い要約の題\", \"summary_ja\": \"s\"}', '2026-09-27T00:00:00Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(search_ids(&db, &["old title"]), [1]);
+        assert_eq!(search_ids(&db, &["本文の記述"]), [1]);
+        assert_eq!(search_ids(&db, &["要約の題"]), [1]);
     }
 
     #[test]

@@ -1743,6 +1743,35 @@ mod tests {
         assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
     }
 
+    /// PDF に対応する前に「未対応」で断念した抽出は、対応後に再試行する。
+    #[test]
+    fn migration_retries_extracts_given_up_on_pdf() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a.pdf', 't', 'ja', '2026-09-27T00:00:00.000Z'),
+                      (2, 's', 'https://e.example/b', 't', 'ja', '2026-09-27T00:00:00.000Z');
+             INSERT INTO stage_errors VALUES
+               (1, 'extract', '', '', 5, 'PDF is not supported yet (application/pdf)', '9999'),
+               (2, 'extract', '', '', 5, 'no article text found', '9999');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let left: Vec<i64> = conn
+            .prepare("SELECT article_id FROM stage_errors")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(left, [2]);
+    }
+
     #[test]
     fn migrate_is_idempotent() {
         let mut db = Db::open_in_memory().unwrap();

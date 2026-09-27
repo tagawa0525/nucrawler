@@ -186,6 +186,13 @@ mod tests {
         }
     }
 
+    fn pdf(body: Vec<u8>) -> Route {
+        Route {
+            content_type: "application/pdf",
+            ..Route::ok(body)
+        }
+    }
+
     fn server() -> Server {
         Server::start(
             [
@@ -195,13 +202,9 @@ mod tests {
                 ),
                 ("/news/1", html(fixture("article.html"))),
                 ("/news/2", html(fixture("article.html"))),
-                (
-                    "/doc.pdf",
-                    Route {
-                        content_type: "application/pdf",
-                        ..Route::ok(b"%PDF-1.7".to_vec())
-                    },
-                ),
+                ("/doc.pdf", pdf(fixture("press.pdf"))),
+                ("/scan.pdf", pdf(fixture("scanned.pdf"))),
+                ("/broken.pdf", pdf(b"%PDF-1.7".to_vec())),
                 ("/down", Route::status(500)),
                 ("/blocked", Route::status(403)),
                 ("/private/x", html(fixture("article.html"))),
@@ -250,10 +253,13 @@ mod tests {
             &db,
             &server,
             "u",
-            // PDF、404、403（bot 対策）、robots.txt の禁止は断念し、500 は再試行に回す
+            // PDF は本文を取り出す。壊れた PDF と文字の無い PDF（スキャン）、404、
+            // 403（bot 対策）、robots.txt の禁止は断念し、500 は再試行に回す
             &[
                 "/news/1",
                 "/doc.pdf",
+                "/scan.pdf",
+                "/broken.pdf",
                 "/missing",
                 "/down",
                 "/blocked",
@@ -274,13 +280,19 @@ mod tests {
         assert_eq!(
             summary,
             ExtractSummary {
-                extracted: 1,
+                extracted: 2,
                 failed: 1,
-                gave_up: 4,
+                gave_up: 5,
                 cancelled: false,
             }
         );
-        assert_eq!(bodies(&db), ["/news/1|body|page|Unit 2 of the exampl"]);
+        assert_eq!(
+            bodies(&db),
+            [
+                "/doc.pdf|body|pdf|Unit 3 of the Mihama",
+                "/news/1|body|page|Unit 2 of the exampl"
+            ]
+        );
 
         // 同じ時刻に再実行しても、断念したものと再試行待ちのものは処理しない
         let again = extract_pages(

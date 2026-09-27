@@ -90,7 +90,7 @@ pub(crate) async fn crawl(
                     score_reserved_calls: pipeline::score_reserve(
                         &stages,
                         &config.llm,
-                        db.load_profile(db.owner_id()?)?.is_some(),
+                        db.profile_hash(db.owner_id()?)?.is_some(),
                     ),
                     ..config.llm.clone()
                 };

@@ -190,7 +190,7 @@ fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> R
     let (config, _) = config::load(&config_dir(config)?)?;
     let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
     let owner = db.owner_id()?;
-    let hash = db.load_profile(owner)?.map(|(_, hash)| hash);
+    let hash = db.profile_hash(owner)?;
     let limit = args.limit.unwrap_or(config.web.list_limit);
     let query = args.params.to_query(owner, hash.as_deref(), limit)?;
     for item in db.search_articles(&query)? {

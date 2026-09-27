@@ -168,7 +168,7 @@ async fn with_db<T: Send + 'static>(
 /// 利用者（今は所有者だけ）と、現在のプロファイルのハッシュ。
 fn viewer(db: &Db) -> Result<(i64, Option<String>), DbError> {
     let user = db.owner_id()?;
-    let hash = db.load_profile(user)?.map(|(_, hash)| hash);
+    let hash = db.profile_hash(user)?;
     Ok((user, hash))
 }
 

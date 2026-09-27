@@ -147,6 +147,7 @@ mod tests {
             date_in_url: None,
             title_skip: None,
             follow: None,
+            date: None,
         }
     }
 
@@ -223,6 +224,78 @@ mod tests {
         assert_eq!(items.len(), 3, "{items:#?}");
         assert_eq!(items[1].title, "役員人事");
         assert_eq!(items[0].published_at, jst_midnight(2026, 8, 28));
+    }
+
+    /// 規制委の一覧は日付を dt に書く。URL の数字（元の募集の日付など）は公表日ではない。
+    #[test]
+    fn nra_links_with_date_from_the_list() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".news__date".into()),
+                ..list("dl.news__list dd.news__title a")
+            },
+            include_str!("../../tests/fixtures/nra_news.html"),
+            &base("https://www.nra.go.jp/news/index.html"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4, "{items:#?}");
+        assert_eq!(
+            items[1].url,
+            "https://www.nra.go.jp/news_only/20260917_ILC.html"
+        );
+        assert_eq!(
+            items[1].title,
+            "国際原子力機関(IAEA)と共同で実施した分析機関間比較(ILC2024)の報告書の公表"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 9, 18));
+        // URL は 20230918 を含むが、公表日は 2026 年 9 月 15 日
+        assert_eq!(items[2].published_at, jst_midnight(2026, 9, 15));
+    }
+
+    /// 原子力機構のトップの新着は種類ごとに印が付く。プレス発表だけを、dt の日付で取る。
+    #[test]
+    fn jaea_press_links_with_date_from_the_list() {
+        let items = parse(
+            &HtmlList {
+                date: Some("dt".into()),
+                ..list(r#"li[data-info-category="newsPress"] dd a"#)
+            },
+            include_str!("../../tests/fixtures/jaea_top.html"),
+            &base("https://www.jaea.go.jp/"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4, "{items:#?}");
+        assert!(
+            items.iter().all(|c| c.url.contains("/02/press2026/")),
+            "{items:#?}"
+        );
+        assert_eq!(items[0].title, "原子力機構週報（9/12～9/18）");
+        assert_eq!(items[0].published_at, jst_midnight(2026, 9, 18));
+        assert_eq!(items[3].published_at, jst_midnight(2026, 8, 7));
+    }
+
+    /// 日付は、リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の中から探す。
+    /// 項目に日付が無いときや読めないときは、隣の項目の日付を使わずに None にする。
+    #[test]
+    fn dates_come_only_from_the_item_of_the_link() {
+        let html = r#"<ul>
+            <li><span class="d">2026/09/07：</span><p><a href="/a.html">A</a></p></li>
+            <li><a href="/b.html">B</a></li>
+            <li><span class="d">日付未定</span><a href="/c.html">C</a></li>
+        </ul>"#;
+        let items = parse(
+            &HtmlList {
+                date: Some(".d".into()),
+                ..list("li a")
+            },
+            html,
+            &base("https://e.example/"),
+        )
+        .unwrap();
+        assert_eq!(
+            items.iter().map(|c| c.published_at).collect::<Vec<_>>(),
+            [jst_midnight(2026, 9, 7), None, None]
+        );
     }
 
     /// ページ内の見出しへのリンクは記事ではない。記事の URL からはフラグメントを除く。

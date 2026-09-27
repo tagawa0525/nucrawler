@@ -12,6 +12,7 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 use crate::db::{
     Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+    Visibility,
 };
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
@@ -62,6 +63,9 @@ pub fn router(state: AppState) -> axum::Router {
             post(translation_request),
         )
         .route("/articles/{id}/report", post(add_report))
+        .route("/articles/{id}/comments", post(add_comment))
+        .route("/comments/{id}", post(update_comment))
+        .route("/comments/{id}/delete", post(delete_comment))
         .route("/settings", get(settings))
         .route("/glossary", get(glossary).post(add_glossary_term))
         .route("/glossary/{id}", post(update_glossary_term))
@@ -385,7 +389,12 @@ async fn detail(
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::detail_page(&detail, &reports, view, &page))
+        let comments = db.comments(user, id)?;
+        let notes = html::Notes {
+            reports: &reports,
+            comments: &comments,
+        };
+        Ok(html::detail_page(&detail, &notes, view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -538,6 +547,102 @@ async fn add_report(
     Ok(Redirect::to(&format!(
         "/articles/{id}?{view}reported=1#reports"
     )))
+}
+
+#[derive(serde::Deserialize)]
+struct CommentForm {
+    // 欄が無いときも空と同じく検証で 400 にする
+    #[serde(default)]
+    body: String,
+    /// チェックしたときだけ `1`（公開）。無ければ非公開
+    public: Option<String>,
+    /// 和訳を読んでいたなら `translation`（戻る先）
+    view: Option<String>,
+}
+
+impl CommentForm {
+    fn body(&self) -> Result<String, AppError> {
+        Some(self.body.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or(AppError::BadRequest("body must not be empty"))
+    }
+
+    /// `1` なら公開、欄が無ければ非公開。ほかの値は公開範囲を取り違えないよう拒否する。
+    fn visibility(&self) -> Result<Visibility, AppError> {
+        match self.public.as_deref() {
+            None => Ok(Visibility::Private),
+            Some("1") => Ok(Visibility::Public),
+            Some(_) => Err(AppError::BadRequest("public must be 1 or absent")),
+        }
+    }
+}
+
+/// 記事のコメントの欄へ戻る。和訳を読んでいたなら和訳のまま。
+fn back_to_comments(article_id: i64, view: Option<&str>) -> Redirect {
+    let view = if view == Some("translation") {
+        "?view=translation"
+    } else {
+        ""
+    };
+    Redirect::to(&format!("/articles/{article_id}{view}#comments"))
+}
+
+async fn add_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let (body, visibility) = (form.body()?, form.visibility()?);
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.add_comment(user, id, &body, visibility, Utc::now())?)
+    })
+    .await?;
+    Ok(back_to_comments(id, form.view.as_deref()))
+}
+
+/// 自分のコメントを直す。他人のコメントは無いものとして扱う。
+async fn update_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let (body, visibility) = (form.body()?, form.visibility()?);
+    let article = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(db.update_comment(user, id, &body, visibility, Utc::now())?)
+    })
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(back_to_comments(article, form.view.as_deref()))
+}
+
+#[derive(serde::Deserialize)]
+struct CommentDeleteForm {
+    view: Option<String>,
+}
+
+/// 自分のコメントを消す。他人のコメントは無いものとして扱う。
+async fn delete_comment(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<CommentDeleteForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let article = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(db.delete_comment(user, id)?)
+    })
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(back_to_comments(article, form.view.as_deref()))
 }
 
 async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
@@ -1764,6 +1869,108 @@ mod tests {
             server.count("SELECT count(*) FROM reports WHERE status = 'pending'"),
             1
         );
+    }
+
+    /// コメントは書いて、直して、消せる。公開はチェックしたときだけで、読んでいた画面に戻る。
+    #[tokio::test]
+    async fn comments_are_written_edited_and_deleted() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let res = server
+            .post(
+                &format!("/articles/{id}/comments"),
+                "body=+%E3%83%A1%E3%83%A2+&public=1&view=translation",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation#comments")
+        );
+        assert_eq!(
+            server.strings("SELECT body || '|' || visibility FROM comments"),
+            ["メモ|public"]
+        );
+        let (_, html) = server.get(&format!("/articles/{id}")).await;
+        assert!(html.contains("<p>メモ</p>"), "{html}");
+
+        let comment = server.count("SELECT id FROM comments");
+        let res = server
+            .post(&format!("/comments/{comment}"), "body=%E6%94%B9")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}#comments")
+        );
+        assert_eq!(
+            server.strings("SELECT body || '|' || visibility FROM comments"),
+            ["改|private"]
+        );
+        let res = server
+            .post(&format!("/comments/{comment}/delete"), "view=translation")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation#comments")
+        );
+        assert_eq!(server.count("SELECT count(*) FROM comments"), 0);
+    }
+
+    #[tokio::test]
+    async fn comments_reject_invalid_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        db.conn()
+            .execute_batch(&format!(
+                "INSERT INTO users (id, login, display_name) VALUES (99, 'other', 'other');
+                 INSERT INTO comments (id, user_id, article_id, body, visibility, created_at, updated_at)
+                   VALUES (5, 99, {id}, 'x', 'public', '2026-09-27T00:00:00.000Z', '2026-09-27T00:00:00.000Z');"
+            ))
+            .unwrap();
+        let server = Server::start(db).await;
+        let add = format!("/articles/{id}/comments");
+        assert_eq!(server.post(&add, "body=+").await.status().as_u16(), 400);
+        assert_eq!(server.post(&add, "public=1").await.status().as_u16(), 400);
+        // 公開は `1` のときだけ。ほかの値で公開範囲を変えさせない
+        for body in ["body=x&public=0", "body=x&public="] {
+            assert_eq!(
+                server.post(&add, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
+        assert_eq!(
+            server
+                .post("/articles/999/comments", "body=x")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        // 他人のコメントは直せず消せない
+        assert_eq!(
+            server.post("/comments/5", "body=y").await.status().as_u16(),
+            404
+        );
+        assert_eq!(
+            server
+                .post("/comments/5/delete", "")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        let res = server
+            .form(&add, "body=x")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(server.strings("SELECT body FROM comments"), ["x"]);
     }
 
     /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。

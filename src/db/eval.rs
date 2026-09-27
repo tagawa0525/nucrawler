@@ -41,6 +41,18 @@ pub struct LabeledScore {
 /// 正解ラベルに使う明示的な反応の種類（SQL の IN 句）
 const EXPLICIT: &str = "('up', 'down', 'bookmark', 'dismiss')";
 
+/// プロファイルの見直しの根拠：ラベルの付いた記事の見出しとトピック。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence {
+    pub article_id: i64,
+    /// 関心（up・bookmark）なら真、不要（down・dismiss）なら偽
+    pub positive: bool,
+    pub title_ja: String,
+    pub topics: Vec<String>,
+    /// ラベルを決めた反応の時刻
+    pub at: String,
+}
+
 impl Db {
     /// 利用者の反応から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
@@ -71,6 +83,12 @@ impl Db {
             })
         })
         .collect()
+    }
+
+    /// ラベルの付いた記事に、利用者が閲覧できる最新の digest の見出しとトピックを付けて、反応の
+    /// 新しい順に返す。digest の無い記事は含めない。
+    pub fn label_evidence(&self, user_id: i64) -> Result<Vec<Evidence>, DbError> {
+        todo!("{user_id}")
     }
 
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う
@@ -161,6 +179,58 @@ mod tests {
                 (a, true, "2026-09-27T01:00:00.000Z"),
                 (c, false, "2026-09-27T02:00:00.000Z"),
                 (d, true, "2026-09-27T00:00:00.000Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn evidence_carries_the_latest_digest_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "haiku", "古い見出し", true, "2026-09-26T01:00:00Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "新しい見出し",
+            true,
+            "2026-09-26T02:00:00Z",
+        );
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            b,
+            "sonnet",
+            "見送った記事",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        // digest の無い記事は根拠にできない
+        let bare = page_article(&db, "https://e.com/bare", "2026-09-26T00:00:00.000Z");
+        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
+        event(a, SignalKind::Up, "2026-09-27T00:00:00Z");
+        event(b, SignalKind::Dismiss, "2026-09-27T01:00:00Z");
+        event(bare, SignalKind::Up, "2026-09-27T02:00:00Z");
+
+        let evidence = db.label_evidence(owner).unwrap();
+        assert_eq!(
+            evidence,
+            [
+                Evidence {
+                    article_id: b,
+                    positive: false,
+                    title_ja: "見送った記事".into(),
+                    topics: vec!["規制・審査".into()],
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                },
+                Evidence {
+                    article_id: a,
+                    positive: true,
+                    title_ja: "新しい見出し".into(),
+                    topics: vec!["規制・審査".into()],
+                    at: "2026-09-27T00:00:00.000Z".into(),
+                },
             ]
         );
     }

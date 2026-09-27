@@ -60,6 +60,42 @@ pub fn to_toml(profile: &Profile) -> String {
     toml::to_string(profile).expect("a profile is plain data")
 }
 
+/// 現行のプロファイルから案への変更の 1 つ。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Added {
+        topic: String,
+        weight: f64,
+    },
+    Removed {
+        topic: String,
+    },
+    Weight {
+        topic: String,
+        from: f64,
+        to: f64,
+    },
+    Note {
+        topic: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    ExcludeAdded(String),
+    ExcludeRemoved(String),
+}
+
+/// 現行（`from`）と案（`to`）の差分。分野は案の順、削除は現行の順、除外は追加・削除の順に並べる。
+pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
+    todo!("{from:?} {to:?}")
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = f;
+        todo!()
+    }
+}
+
 /// 内容から決まるハッシュ（16 進 16 桁）。採点はこの値ごとに記録するので、内容が変われば
 /// 採点し直しの対象になる。Rust のバージョンで値が変わらないよう FNV-1a を使う。
 pub fn hash(profile: &Profile) -> String {
@@ -75,6 +111,72 @@ pub fn hash(profile: &Profile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interest(topic: &str, weight: f64, note: Option<&str>) -> Interest {
+        Interest {
+            topic: topic.into(),
+            weight,
+            note: note.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn diff_lists_every_kind_of_change() {
+        let from = Profile {
+            interests: vec![
+                interest("規制・審査", 1.0, Some("再稼働審査")),
+                interest("燃料", 0.9, None),
+                interest("廃止措置", 0.4, None),
+            ],
+            exclude: vec!["核兵器".into(), "核融合".into()],
+        };
+        let to = Profile {
+            interests: vec![
+                interest("規制・審査", 1.0, Some("再稼働審査、検査制度")),
+                interest("燃料", 0.7, None),
+                interest("SMR", 0.5, None),
+            ],
+            exclude: vec!["核兵器".into(), "電力市場".into()],
+        };
+        let changes = diff(&from, &to);
+        assert_eq!(
+            changes,
+            [
+                Change::Note {
+                    topic: "規制・審査".into(),
+                    from: Some("再稼働審査".into()),
+                    to: Some("再稼働審査、検査制度".into()),
+                },
+                Change::Weight {
+                    topic: "燃料".into(),
+                    from: 0.9,
+                    to: 0.7,
+                },
+                Change::Added {
+                    topic: "SMR".into(),
+                    weight: 0.5,
+                },
+                Change::Removed {
+                    topic: "廃止措置".into(),
+                },
+                Change::ExcludeAdded("電力市場".into()),
+                Change::ExcludeRemoved("核融合".into()),
+            ]
+        );
+        let text: Vec<String> = changes.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "note 規制・審査: 再稼働審査 → 再稼働審査、検査制度",
+                "weight 燃料: 0.9 → 0.7",
+                "add SMR (weight 0.5)",
+                "remove 廃止措置",
+                "exclude + 電力市場",
+                "exclude - 核融合",
+            ]
+        );
+        assert!(diff(&from, &from).is_empty());
+    }
 
     fn example() -> Profile {
         parse(include_str!("../examples/profile.toml")).unwrap()

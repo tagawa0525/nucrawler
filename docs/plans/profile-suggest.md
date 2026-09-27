@@ -65,7 +65,7 @@ LLM の説明をそのまま信じず、現行と案の差分は Rust で計算�
 
 ### 4a `feat/profile-suggest-prompt`：根拠の集計・依頼内容・差分（LLM は呼ばない）
 
-- `Db::label_evidence(user_id) -> Vec<Evidence { article_id, positive, title_ja, topics, at }>`（`src/db/eval.rs`）。全件を反応の新しい順に返す。見出しの上限（100 件）は `build_prompt` が掛け、トピックの件数は全件で数える
+- `Db::label_evidence(user_id) -> Result<Vec<Evidence>, DbError>`（`Evidence { article_id, positive, title_ja, topics, at }`）（`src/db/eval.rs`）。全件を反応の新しい順に返す。見出しの上限（100 件）は `build_prompt` が掛け、トピックの件数は全件で数える
 - `src/prompt/suggest.rs`：`system_prompt`、`build_prompt(profile, evidence)`、`schema`、`parse -> Suggestion { profile, reasons }`
 - `profile::validate`（`parse` から切り出す。exclude の空・重複も拒む）、`profile::diff(current, proposed) -> Vec<Change>` と `Change` の `Display`（1 変更 1 行）。空の note と note 無しは同じとみなす
 - テスト：集計（最新の digest のトピック、digest の無い記事は除く、上限と新しい順）、プロンプト（件数・区切り・無害化）、parse（規則違反を拒む）、diff（追加・削除・重み・note・exclude、変更なし）

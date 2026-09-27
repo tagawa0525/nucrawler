@@ -75,7 +75,7 @@ fn without_fragment(mut url: Url) -> Url {
     url
 }
 
-/// リンクの文字列。`skip` に一致する要素は除き、`<br>` は空白にし、連続する空白は 1 つにする
+/// リンクの文字列。script などの画面に出ない要素と `skip` に一致する要素は除き、`<br>` は空白にし、連続する空白は 1 つにする
 /// （全角の空白は見出しの一部なので残す）。
 fn title(a: ElementRef, skip: Option<&Selector>) -> String {
     fn walk(el: ElementRef, skip: Option<&Selector>, out: &mut String) {
@@ -83,7 +83,12 @@ fn title(a: ElementRef, skip: Option<&Selector>) -> String {
             if let Some(text) = child.value().as_text() {
                 out.push_str(text);
             } else if let Some(child) = ElementRef::wrap(child) {
-                if skip.is_some_and(|s| s.matches(&child)) {
+                // 画面に出ない要素と、設定で除く要素の中身は入れない
+                let hidden = matches!(
+                    child.value().name(),
+                    "script" | "style" | "noscript" | "template"
+                );
+                if hidden || skip.is_some_and(|s| s.matches(&child)) {
                     continue;
                 }
                 if child.value().name() == "br" {

@@ -147,7 +147,8 @@ impl Db {
         Ok(warnings)
     }
 
-    /// 最後の取得が `since` 以降に成功したソースについて、新着の途絶えの警告（source_id 順）。
+    /// 最後の取得が `since` 以降に成功し、今は失敗していないソースについて、新着の途絶えの警告
+    /// （source_id 順）。
     /// 新着の日は一覧と同じ日時（公開日時、無ければ取得日時）の UTC の日付で数える。
     fn stale_warnings(
         &self,
@@ -163,13 +164,14 @@ impl Db {
                        WHERE a.source_id = st.source_id
                        ORDER BY coalesce(a.published_at, a.fetched_at) DESC LIMIT 1) AS last
                FROM source_state AS st
-               WHERE st.last_success_at >= ?1)
+               -- 失敗中のソースは取得失敗の警告だけを出す
+               WHERE st.last_success_at >= ?1 AND st.last_error IS NULL)
              SELECT l.source_id, substr(coalesce(a.published_at, a.fetched_at), 1, 10) AS day
              FROM latest AS l
              JOIN articles AS a
                ON a.source_id = l.source_id
-              AND coalesce(a.published_at, a.fetched_at)
-                  >= strftime('%Y-%m-%dT%H:%M:%fZ', l.last, ?2)
+              -- 数えるのは日付なので、期間も日付で区切る（その日の早い時刻の記事も含める）
+              AND coalesce(a.published_at, a.fetched_at) >= date(l.last, ?2)
              GROUP BY l.source_id, day
              ORDER BY l.source_id, day",
         )?;

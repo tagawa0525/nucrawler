@@ -116,7 +116,10 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
             source_id,
             idle_days,
             typical_gap_days,
-        } => todo!("{source_id} {idle_days} {typical_gap_days}"),
+        } => format!(
+            "<div class=\"warn\">⚠ {} の新着が {idle_days} 日ありません（普段は {typical_gap_days} 日おき）</div>",
+            escape(page.source(source_id)),
+        ),
         // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
         Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
             "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",

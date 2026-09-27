@@ -58,7 +58,18 @@ struct Stale {
 
 /// 新着のあった日 `days`（古い順、重複なし、最新の日から `STALE_WINDOW_DAYS` 以内）と今日を比べる。
 fn stale(days: &[chrono::NaiveDate], today: chrono::NaiveDate) -> Option<Stale> {
-    todo!("{days:?} {today} {STALE_MIN_GAPS} {STALE_RATIO} {STALE_MIN_DAYS}")
+    let mut gaps: Vec<i64> = days.windows(2).map(|w| (w[1] - w[0]).num_days()).collect();
+    if gaps.len() < STALE_MIN_GAPS {
+        return None;
+    }
+    gaps.sort_unstable();
+    let n = gaps.len();
+    let typical_gap_days = (gaps[(n - 1) / 2] + gaps[n / 2]) / 2;
+    let idle_days = (today - *days.last()?).num_days();
+    (idle_days > STALE_MIN_DAYS.max(STALE_RATIO * typical_gap_days)).then_some(Stale {
+        idle_days,
+        typical_gap_days,
+    })
 }
 
 /// 取得の件数の異常。
@@ -85,13 +96,13 @@ fn count_anomaly(latest: i64, previous: &[i64]) -> Option<CountAnomaly> {
 
 impl Db {
     /// 取得に失敗し続けているソース、`since` 以降の最後の取得で件数が 0 件か急減したソース、
-    /// `since` 以降の直近の LLM の失敗。`now` は新着の途絶えを測る基準。
+    /// 新着が普段より長く途絶えているソース、`since` 以降の直近の LLM の失敗。
+    /// `now` は新着の途絶えを測る基準。
     pub fn warnings(
         &self,
         since: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Warning>, DbError> {
-        let _ = (now, STALE_WINDOW_DAYS);
         use rusqlite::OptionalExtension;
         // 取得に成功するとエラーは消えるので、残っているエラーは今も失敗しているもの
         let mut stmt = self.conn.prepare(
@@ -107,7 +118,20 @@ impl Db {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        warnings.extend(self.fetch_count_warnings(since)?);
+        let counts = self.fetch_count_warnings(since)?;
+        // 一覧が空・急減のソースは、新着の途絶えもその結果なので重ねて出さない
+        let flagged: Vec<String> = counts
+            .iter()
+            .filter_map(|w| match w {
+                Warning::SourceEmpty { source_id, .. }
+                | Warning::SourceDropped { source_id, .. } => Some(source_id.clone()),
+                _ => None,
+            })
+            .collect();
+        warnings.extend(counts);
+        warnings.extend(self.stale_warnings(since, now)?.into_iter().filter(
+            |w| !matches!(w, Warning::SourceStale { source_id, .. } if flagged.contains(source_id)),
+        ));
         let latest: Option<(bool, Option<String>, String)> = self
             .conn
             .query_row(
@@ -119,6 +143,61 @@ impl Db {
             .optional()?;
         if let Some((false, Some(error), at)) = latest {
             warnings.push(Warning::LlmFailed { error, at });
+        }
+        Ok(warnings)
+    }
+
+    /// 最後の取得が `since` 以降に成功したソースについて、新着の途絶えの警告（source_id 順）。
+    /// 新着の日は一覧と同じ日時（公開日時、無ければ取得日時）の UTC の日付で数える。
+    fn stale_warnings(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Warning>, DbError> {
+        // ソースごとに最新の記事と、そこから STALE_WINDOW_DAYS 日遡った期間だけを索引
+        // （articles_by_source_at）で読む
+        let mut stmt = self.conn.prepare(
+            "WITH latest AS (
+               SELECT st.source_id,
+                      (SELECT coalesce(a.published_at, a.fetched_at) FROM articles AS a
+                       WHERE a.source_id = st.source_id
+                       ORDER BY coalesce(a.published_at, a.fetched_at) DESC LIMIT 1) AS last
+               FROM source_state AS st
+               WHERE st.last_success_at >= ?1)
+             SELECT l.source_id, substr(coalesce(a.published_at, a.fetched_at), 1, 10) AS day
+             FROM latest AS l
+             JOIN articles AS a
+               ON a.source_id = l.source_id
+              AND coalesce(a.published_at, a.fetched_at)
+                  >= strftime('%Y-%m-%dT%H:%M:%fZ', l.last, ?2)
+             GROUP BY l.source_id, day
+             ORDER BY l.source_id, day",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![timestamp(since), format!("-{STALE_WINDOW_DAYS} days")],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let today = now.date_naive();
+        let mut warnings = Vec::new();
+        for days in rows.chunk_by(|a, b| a.0 == b.0) {
+            // 日付として読めない値（壊れた公開日時）は数えない
+            let dates: Vec<chrono::NaiveDate> = days
+                .iter()
+                .filter_map(|(_, day)| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok())
+                .collect();
+            if let Some(Stale {
+                idle_days,
+                typical_gap_days,
+            }) = stale(&dates, today)
+            {
+                warnings.push(Warning::SourceStale {
+                    source_id: days[0].0.clone(),
+                    idle_days,
+                    typical_gap_days,
+                });
+            }
         }
         Ok(warnings)
     }

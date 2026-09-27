@@ -40,7 +40,17 @@ enum CountAnomaly {
 
 /// 最新の回の件数 `latest` を、その前の回の件数 `previous`（新しい順、最大 `DROP_HISTORY` 回）と比べる。
 fn count_anomaly(latest: i64, previous: &[i64]) -> Option<CountAnomaly> {
-    todo!("{latest} {previous:?} {DROP_HISTORY} {DROP_MIN_HISTORY} {DROP_RATIO}")
+    if latest == 0 {
+        return Some(CountAnomaly::Empty);
+    }
+    if previous.len() < DROP_MIN_HISTORY {
+        return None;
+    }
+    let mut sorted = previous.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let median = (sorted[(n - 1) / 2] + sorted[n / 2]) / 2;
+    (latest * DROP_RATIO < median).then_some(CountAnomaly::Dropped { median })
 }
 
 impl Db {
@@ -62,6 +72,7 @@ impl Db {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        warnings.extend(self.fetch_count_warnings(since)?);
         let latest: Option<(bool, Option<String>, String)> = self
             .conn
             .query_row(
@@ -73,6 +84,59 @@ impl Db {
             .optional()?;
         if let Some((false, Some(error), at)) = latest {
             warnings.push(Warning::LlmFailed { error, at });
+        }
+        Ok(warnings)
+    }
+
+    /// 最後の取得が `since` 以降のソースについて、その回の件数を前の回と比べた警告（source_id 順）。
+    fn fetch_count_warnings(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Warning>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "WITH ranked AS (
+               SELECT source_id, fetched_at, total,
+                      row_number() OVER (
+                        PARTITION BY source_id ORDER BY fetched_at DESC, id DESC) AS rn
+               FROM fetch_runs)
+             SELECT r.source_id, r.fetched_at, r.total FROM ranked AS r
+             WHERE r.rn <= ?1
+               AND EXISTS (
+                 SELECT 1 FROM ranked AS l
+                 WHERE l.source_id = r.source_id AND l.rn = 1 AND l.fetched_at >= ?2)
+             ORDER BY r.source_id, r.rn",
+        )?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![
+                    i64::try_from(DROP_HISTORY + 1).unwrap_or(i64::MAX),
+                    timestamp(since)
+                ],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut warnings = Vec::new();
+        // 行はソースごとに新しい順に並んでいるので、先頭が最新の回
+        for runs in rows.chunk_by(|a, b| a.0 == b.0) {
+            let (source_id, at, total) = &runs[0];
+            let previous: Vec<i64> = runs[1..].iter().map(|r| r.2).collect();
+            let (source_id, at, total) = (source_id.clone(), at.clone(), *total);
+            match count_anomaly(total, &previous) {
+                Some(CountAnomaly::Empty) => warnings.push(Warning::SourceEmpty { source_id, at }),
+                Some(CountAnomaly::Dropped { median }) => warnings.push(Warning::SourceDropped {
+                    source_id,
+                    total,
+                    median,
+                    at,
+                }),
+                None => {}
+            }
         }
         Ok(warnings)
     }

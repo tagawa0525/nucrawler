@@ -96,13 +96,22 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
             crate::jst::format_local(at),
             escape(error)
         ),
-        Warning::SourceEmpty { source_id, at } => todo!("{source_id} {at}"),
+        // 取得は成功しているので、一覧の selector やフィードの形が変わった疑いがある
+        Warning::SourceEmpty { source_id, at } => format!(
+            "<div class=\"warn\">⚠ {} の一覧が 0 件でした（{}）</div>",
+            escape(page.source(source_id)),
+            crate::jst::format_local(at),
+        ),
         Warning::SourceDropped {
             source_id,
             total,
             median,
             at,
-        } => todo!("{source_id} {total} {median} {at}"),
+        } => format!(
+            "<div class=\"warn\">⚠ {} の取得件数が減っています（{}）：{total} 件（直近の中央値 {median} 件）</div>",
+            escape(page.source(source_id)),
+            crate::jst::format_local(at),
+        ),
         // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
         Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
             "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",

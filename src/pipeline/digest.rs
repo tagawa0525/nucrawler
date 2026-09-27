@@ -43,8 +43,6 @@ pub async fn digest_articles<L: Llm>(
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let vocab = db.topics()?;
-    let schema = digest::schema(&vocab);
     let mut summary = DigestSummary::default();
     loop {
         if cancel.is_requested() {
@@ -79,6 +77,10 @@ pub async fn digest_articles<L: Llm>(
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
         let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
+        // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
+        let vocab = db.topics()?;
+        let system = digest::system_prompt(&vocab);
+        let schema = digest::schema(&vocab);
         let outcome = call_recorded(
             db,
             llm,
@@ -87,7 +89,7 @@ pub async fn digest_articles<L: Llm>(
                 stage: STAGE,
                 n_items: batch.len(),
                 req: LlmRequest {
-                    system: digest::system_prompt(&vocab),
+                    system: &system,
                     prompt: &prompt,
                     schema: &schema,
                     model,

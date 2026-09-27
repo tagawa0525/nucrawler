@@ -45,6 +45,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_retry_pdf_extracts.sql"),
     include_str!("migrations/0006_search.sql"),
     include_str!("migrations/0007_topics.sql"),
+    include_str!("migrations/0008_topic_proposals.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1843,7 +1844,49 @@ fn write_artifact(
             [id, a.article_id, content_id],
         )?;
     }
+    if a.kind == ArtifactKind::Digest {
+        link_digest_topics(tx, id, a.payload, now)?;
+    }
     Ok(id)
+}
+
+/// 要約の `new_topics` を語彙に加え、`topics` の語を付与として書く。語彙に無い語があれば失敗する
+/// （呼び出し側のトランザクションごと取り消される）。
+fn link_digest_topics(
+    tx: &Connection,
+    artifact_id: i64,
+    payload: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    use rusqlite::OptionalExtension;
+    let new_topics: Vec<crate::topics::Topic> = match payload.get("new_topics") {
+        Some(v) => serde_json::from_value(v.clone())?,
+        None => Vec::new(),
+    };
+    for t in &new_topics {
+        tx.execute(
+            "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (name) DO NOTHING",
+            [&t.name, t.facet.as_str(), &timestamp(now)],
+        )?;
+    }
+    let names: Vec<String> = match payload.get("topics") {
+        Some(v) => serde_json::from_value(v.clone())?,
+        None => Vec::new(),
+    };
+    for name in names {
+        let topic_id: Option<i64> = tx
+            .query_row("SELECT id FROM topics WHERE name = ?1", [&name], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let topic_id = topic_id.ok_or(DbError::UnknownTopic(name))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO artifact_topics (artifact_id, topic_id) VALUES (?1, ?2)",
+            [artifact_id, topic_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// 重複判定用に URL を正規化する：fragment と追跡用のクエリ（utm_*、fbclid、gclid）を除く。

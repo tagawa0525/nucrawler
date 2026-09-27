@@ -4044,7 +4044,7 @@ mod tests {
     /// 語彙を入れる前の要約も、語彙と同じ名前のトピックは付与として移し、消せないようにする。
     #[test]
     fn migration_links_existing_digest_topics_in_the_vocabulary() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
         for sql in &MIGRATIONS[..6] {
             conn.execute_batch(sql).unwrap();

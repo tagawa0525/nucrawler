@@ -5,12 +5,14 @@ use rusqlite::Connection;
 use crate::config::Lang;
 
 mod articles;
+mod artifacts;
 mod sources;
 mod stages;
 #[cfg(test)]
 mod test_support;
 
 pub use articles::*;
+pub use artifacts::*;
 pub use sources::*;
 pub use stages::*;
 
@@ -256,54 +258,6 @@ pub struct Db {
 /// DB に書く時刻の書式。SQL の `NOW` と同じく UTC・ミリ秒・'Z' に揃え、文字列の大小で比較できるようにする。
 pub fn timestamp(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactKind {
-    Digest,
-    Translation,
-    Judgment,
-}
-
-impl ArtifactKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Digest => "digest",
-            Self::Translation => "translation",
-            Self::Judgment => "judgment",
-        }
-    }
-}
-
-/// 登録する成果物。`inputs` は元にした本文の部分（contents.id）で、空は許さない。
-#[derive(Debug)]
-pub struct NewArtifact<'a> {
-    pub article_id: i64,
-    pub kind: ArtifactKind,
-    pub backend: &'a str,
-    pub model: &'a str,
-    pub prompt_version: i64,
-    pub payload: &'a serde_json::Value,
-    pub inputs: &'a [i64],
-    /// 使った訳語集の時点（[`crate::glossary::Relevant::glossary_at`]）
-    pub glossary_at: Option<&'a str>,
-}
-
-/// 要約の入力にする記事と、その公開の本文の部分。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DigestInput {
-    pub article_id: i64,
-    pub source_id: String,
-    pub title: String,
-    pub lang: String,
-    pub contents: Vec<InputContent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputContent {
-    pub id: i64,
-    pub kind: String,
-    pub text: String,
 }
 
 /// 採点の対象を特定するキー（誰の・どのプロファイルで・どのモデルで）。
@@ -1032,87 +986,6 @@ impl Db {
             Ok((profile, hash))
         })
         .transpose()
-    }
-
-    /// 成果物と、その入力（artifact_inputs）を 1 つのトランザクションで登録する。
-    /// `input_scope` は入力の会員資格から導出する（会員限定の部分が無ければ "public"）。
-    pub fn insert_artifact(
-        &self,
-        a: &NewArtifact,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<i64, DbError> {
-        let tx = self.conn.unchecked_transaction()?;
-        let id = write_artifact(&tx, a, now)?;
-        tx.commit()?;
-        Ok(id)
-    }
-
-    /// まだ digest が 1 つも無い記事を、新しい順に最大 `limit` 件、公開の入力とともに返す
-    /// （会員限定の本文は、ログイン取得を実装するまで扱わない）。
-    /// 本文（body/fulltext）がある記事に加え、抽出を断念して概要（lead/abstract）しか無い記事も含める。
-    /// 抽出の再試行待ちの記事は、本文が取れるのを待つので含めない。
-    /// `backend`/`model` の digest の失敗で再試行待ち・断念済みの記事も含めない。
-    pub fn pending_digest(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-        now: chrono::DateTime<chrono::Utc>,
-        backend: &str,
-        model: &str,
-        limit: usize,
-    ) -> Result<Vec<DigestInput>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
-             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
-               AND NOT EXISTS (
-                 SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'digest')
-               AND (
-                 EXISTS (
-                   SELECT 1 FROM contents AS c
-                   WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
-                     AND c.access_membership_id IS NULL)
-                 OR (
-                   EXISTS (
-                     SELECT 1 FROM contents AS c
-                     WHERE c.article_id = a.id AND c.kind IN ('lead', 'abstract')
-                       AND c.access_membership_id IS NULL)
-                   AND EXISTS (
-                     SELECT 1 FROM stage_errors AS e
-                     WHERE e.article_id = a.id AND e.stage = 'extract'
-                       AND e.backend = '' AND e.model = '' AND e.attempts >= ?2)))
-               AND NOT EXISTS (
-                 SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = a.id AND e.stage = 'digest'
-                   AND e.backend = ?3 AND e.model = ?4
-                   AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
-             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
-             LIMIT ?6",
-        )?;
-        let articles = stmt
-            .query_map(
-                rusqlite::params![
-                    timestamp(cutoff),
-                    MAX_ATTEMPTS,
-                    backend,
-                    model,
-                    timestamp(now),
-                    i64::try_from(limit).unwrap_or(i64::MAX),
-                ],
-                |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?
-            .collect::<Result<Vec<(i64, String, String, String)>, _>>()?;
-        articles
-            .into_iter()
-            .map(|(article_id, source_id, title, lang)| {
-                let contents = self.public_contents(article_id, ContentSet::All)?;
-                Ok(DigestInput {
-                    article_id,
-                    source_id,
-                    title,
-                    lang,
-                    contents,
-                })
-            })
-            .collect()
     }
 
     /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
@@ -2440,113 +2313,10 @@ fn redo_params(
     ])
 }
 
-/// 成果物と入力を、呼び出し側のトランザクションの中で書く。
-fn write_artifact(
-    tx: &Connection,
-    a: &NewArtifact,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<i64, DbError> {
-    if a.inputs.is_empty() {
-        return Err(DbError::NoArtifactInputs {
-            article_id: a.article_id,
-        });
-    }
-    let mut codes = std::collections::BTreeSet::new();
-    for &content_id in a.inputs {
-        let code: Option<String> = tx.query_row(
-            "SELECT m.code FROM contents AS c
-             LEFT JOIN memberships AS m ON m.id = c.access_membership_id
-             WHERE c.id = ?1",
-            [content_id],
-            |r| r.get(0),
-        )?;
-        codes.extend(code);
-    }
-    let input_scope = if codes.is_empty() {
-        "public".to_string()
-    } else {
-        codes.into_iter().collect::<Vec<_>>().join("+")
-    };
-    let id: i64 = tx.query_row(
-        "INSERT INTO artifacts
-           (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at,
-            glossary_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
-        rusqlite::params![
-            a.article_id,
-            a.kind.as_str(),
-            a.backend,
-            a.model,
-            a.prompt_version,
-            input_scope,
-            a.payload.to_string(),
-            timestamp(now),
-            a.glossary_at,
-        ],
-        |r| r.get(0),
-    )?;
-    for &content_id in a.inputs {
-        tx.execute(
-            "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
-             VALUES (?1, ?2, ?3)",
-            [id, a.article_id, content_id],
-        )?;
-    }
-    if a.kind == ArtifactKind::Digest {
-        link_digest_topics(tx, id, a.payload, now)?;
-    }
-    Ok(id)
-}
-
-/// 要約の `new_topics` を語彙に加え、`topics` の語を付与として書く。語彙に無い語があれば失敗する
-/// （呼び出し側のトランザクションごと取り消される）。
-fn link_digest_topics(
-    tx: &Connection,
-    artifact_id: i64,
-    payload: &serde_json::Value,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), DbError> {
-    use rusqlite::OptionalExtension;
-    let new_topics: Vec<crate::topics::Topic> = match payload.get("new_topics") {
-        Some(v) => serde_json::from_value(v.clone())?,
-        None => Vec::new(),
-    };
-    // 統合済みの語（別名）が提案されても語彙に戻さず、下で統合先に付ける
-    for t in &new_topics {
-        tx.execute(
-            "INSERT INTO topics (name, facet, added_at)
-             SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM topic_aliases WHERE alias = ?1)
-             ON CONFLICT (name) DO NOTHING",
-            [&t.name, t.facet.as_str(), &timestamp(now)],
-        )?;
-    }
-    let names: Vec<String> = match payload.get("topics") {
-        Some(v) => serde_json::from_value(v.clone())?,
-        None => Vec::new(),
-    };
-    for name in names {
-        let topic_id: Option<i64> = tx
-            .query_row(
-                "SELECT id FROM topics WHERE name = ?1
-                 UNION ALL
-                 SELECT topic_id FROM topic_aliases WHERE alias = ?1
-                 LIMIT 1",
-                [&name],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let topic_id = topic_id.ok_or(DbError::UnknownTopic(name))?;
-        tx.execute(
-            "INSERT OR IGNORE INTO artifact_topics (artifact_id, topic_id) VALUES (?1, ?2)",
-            [artifact_id, topic_id],
-        )?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::test_support::linked_topics;
     use crate::db::test_support::*;
 
     #[test]
@@ -2768,17 +2538,6 @@ mod tests {
         assert_eq!(n, 0);
     }
 
-    fn insert_content(db: &Db, article_id: i64, membership: Option<i64>) -> i64 {
-        db.conn()
-            .execute(
-                "INSERT INTO contents (article_id, kind, access_membership_id, text, origin, fetched_at)
-                 VALUES (?1, 'body', ?2, 'x', 'page', '2026-09-27T00:00:00Z')",
-                rusqlite::params![article_id, membership],
-            )
-            .unwrap();
-        db.conn().last_insert_rowid()
-    }
-
     /// 成果物の記事 id を使って入力を紐付ける。
     fn link_input(db: &Db, artifact_id: i64, content_id: i64) -> rusqlite::Result<usize> {
         db.conn().execute(
@@ -2804,17 +2563,6 @@ mod tests {
         let art = insert_artifact(&db, a, "public");
         let err = link_input(&db, art, content_of_b).unwrap_err();
         assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
-    }
-
-    fn access_of(db: &Db, artifact_id: i64) -> Vec<i64> {
-        let mut stmt = db
-            .conn()
-            .prepare("SELECT membership_id FROM artifact_access WHERE artifact_id = ?1 ORDER BY 1")
-            .unwrap();
-        stmt.query_map([artifact_id], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
     }
 
     /// 閲覧に必要な資格は、入力に使った本文の資格から必ず導出されること。
@@ -2953,89 +2701,6 @@ mod tests {
         assert_eq!(now.len(), "2026-09-27T01:02:03.000Z".len(), "{now}");
     }
 
-    fn digest_payload() -> serde_json::Value {
-        serde_json::json!({"title_ja": "題", "summary_ja": "要約"})
-    }
-
-    #[test]
-    fn insert_artifact_links_inputs_and_derives_scope() {
-        let db = Db::open_in_memory().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
-        let lead = db
-            .insert_content(a, ContentKind::Lead, ContentOrigin::Feed, "lead")
-            .unwrap();
-        let body = db
-            .insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        let payload = digest_payload();
-        let id = db
-            .insert_artifact(
-                &NewArtifact {
-                    article_id: a,
-                    kind: ArtifactKind::Digest,
-                    backend: "claude-cli",
-                    model: "sonnet",
-                    prompt_version: 1,
-                    payload: &payload,
-                    inputs: &[lead, body],
-                    glossary_at: None,
-                },
-                t("2026-09-27T00:00:00Z"),
-            )
-            .unwrap();
-        let row = db
-            .query_strings(&format!(
-                "SELECT kind || '|' || input_scope || '|' || title_ja || '|' || created_at
-                 FROM artifacts WHERE id = {id}"
-            ))
-            .unwrap();
-        assert_eq!(row, ["digest|public|題|2026-09-27T00:00:00.000Z"]);
-        assert_eq!(
-            db.query_i64(&format!(
-                "SELECT count(*) FROM artifact_inputs WHERE artifact_id = {id}"
-            ))
-            .unwrap(),
-            2
-        );
-    }
-
-    #[test]
-    fn insert_artifact_scope_reflects_gated_inputs() {
-        let db = Db::open_in_memory().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
-        let aesj: i64 = db
-            .conn()
-            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let gated = insert_content(&db, a, Some(aesj));
-        let payload = digest_payload();
-        let id = db
-            .insert_artifact(
-                &NewArtifact {
-                    article_id: a,
-                    kind: ArtifactKind::Digest,
-                    backend: "claude-cli",
-                    model: "sonnet",
-                    prompt_version: 1,
-                    payload: &payload,
-                    inputs: &[gated],
-                    glossary_at: None,
-                },
-                t("2026-09-27T00:00:00Z"),
-            )
-            .unwrap();
-        assert_eq!(
-            db.query_strings(&format!(
-                "SELECT input_scope FROM artifacts WHERE id = {id}"
-            ))
-            .unwrap(),
-            ["aesj"]
-        );
-        assert_eq!(access_of(&db, id), vec![aesj]);
-    }
-
     /// input_scope は会員資格の code を "+" でつないだものなので、区切りや予約語を code に使わせない。
     #[test]
     fn membership_codes_cannot_collide_with_scope_encoding() {
@@ -3079,162 +2744,6 @@ mod tests {
                 [],
             )
             .unwrap();
-    }
-
-    #[test]
-    fn insert_artifact_rejects_empty_inputs() {
-        let db = Db::open_in_memory().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
-        let payload = digest_payload();
-        let err = db
-            .insert_artifact(
-                &NewArtifact {
-                    article_id: a,
-                    kind: ArtifactKind::Digest,
-                    backend: "claude-cli",
-                    model: "sonnet",
-                    prompt_version: 1,
-                    payload: &payload,
-                    inputs: &[],
-                    glossary_at: None,
-                },
-                t("2026-09-27T00:00:00Z"),
-            )
-            .unwrap_err();
-        assert!(matches!(err, DbError::NoArtifactInputs { .. }), "{err}");
-        assert_eq!(db.query_i64("SELECT count(*) FROM artifacts").unwrap(), 0);
-    }
-
-    fn digest_ids(db: &Db, now: &str) -> Vec<i64> {
-        db.pending_digest(
-            t("2026-09-10T00:00:00Z"),
-            t(now),
-            "claude-cli",
-            "sonnet",
-            10,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|d| d.article_id)
-        .collect()
-    }
-
-    #[test]
-    fn pending_digest_selects_articles_ready_for_summary() {
-        let db = Db::open_in_memory().unwrap();
-        let now = "2026-09-27T00:00:00Z";
-        let extract_key = |article_id| StageKey {
-            article_id,
-            stage: "extract",
-            backend: "",
-            model: "",
-        };
-        // 本文あり → 対象
-        let with_body = page_article(&db, "https://e.com/body", "2026-09-26T00:00:00.000Z");
-        db.insert_content(with_body, ContentKind::Lead, ContentOrigin::Feed, "lead")
-            .unwrap();
-        db.insert_content(with_body, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        // 概要だけで抽出を断念 → 対象
-        let lead_only = page_article(&db, "https://e.com/lead", "2026-09-25T00:00:00.000Z");
-        db.insert_content(lead_only, ContentKind::Lead, ContentOrigin::Feed, "lead")
-            .unwrap();
-        db.record_stage_failure(extract_key(lead_only), "403", t(now), true)
-            .unwrap();
-        // 概要だけで抽出の再試行待ち → 本文を待つ
-        let waiting = page_article(&db, "https://e.com/wait", "2026-09-24T00:00:00.000Z");
-        db.insert_content(waiting, ContentKind::Lead, ContentOrigin::Feed, "lead")
-            .unwrap();
-        db.record_stage_failure(extract_key(waiting), "500", t(now), false)
-            .unwrap();
-        // 本文なし・概要なし → 入力が無い
-        let _empty = page_article(&db, "https://e.com/empty", "2026-09-23T00:00:00.000Z");
-        // 期間外
-        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
-        db.insert_content(old, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        // digest 済み
-        let done = page_article(&db, "https://e.com/done", "2026-09-22T00:00:00.000Z");
-        let c = db
-            .insert_content(done, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        let payload = digest_payload();
-        db.insert_artifact(
-            &NewArtifact {
-                article_id: done,
-                kind: ArtifactKind::Digest,
-                backend: "claude-cli",
-                model: "haiku",
-                prompt_version: 1,
-                payload: &payload,
-                inputs: &[c],
-                glossary_at: None,
-            },
-            t(now),
-        )
-        .unwrap();
-
-        assert_eq!(digest_ids(&db, now), [with_body, lead_only]);
-
-        let inputs = db
-            .pending_digest(t("2026-09-10T00:00:00Z"), t(now), "claude-cli", "sonnet", 1)
-            .unwrap();
-        assert_eq!(inputs.len(), 1);
-        let kinds: Vec<_> = inputs[0].contents.iter().map(|c| c.kind.as_str()).collect();
-        assert_eq!(kinds, ["lead", "body"]);
-        assert_eq!(inputs[0].lang, "en");
-        assert_eq!(inputs[0].source_id, "s");
-    }
-
-    /// 公開の本文が無ければ（会員限定の本文しか無ければ）、入力が作れないので選ばない。
-    #[test]
-    fn pending_digest_ignores_member_only_contents() {
-        let db = Db::open_in_memory().unwrap();
-        let aesj: i64 = db
-            .conn()
-            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
-        insert_content(&db, a, Some(aesj));
-        assert!(digest_ids(&db, "2026-09-27T00:00:00Z").is_empty());
-    }
-
-    /// 抽出の断念は、抽出ステージのキー（backend と model が空）の記録だけで判断する。
-    #[test]
-    fn pending_digest_checks_extract_failures_by_exact_key() {
-        let db = Db::open_in_memory().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
-        db.insert_content(a, ContentKind::Lead, ContentOrigin::Feed, "lead")
-            .unwrap();
-        let other = StageKey {
-            article_id: a,
-            stage: "extract",
-            backend: "chromium",
-            model: "",
-        };
-        db.record_stage_failure(other, "x", t("2026-09-27T00:00:00Z"), true)
-            .unwrap();
-        assert!(digest_ids(&db, "2026-09-27T00:00:00Z").is_empty());
-    }
-
-    #[test]
-    fn pending_digest_skips_articles_backing_off_for_this_model() {
-        let db = Db::open_in_memory().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
-        db.insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        let key = StageKey {
-            article_id: a,
-            stage: "digest",
-            backend: "claude-cli",
-            model: "sonnet",
-        };
-        db.record_stage_failure(key, "bad output", t("2026-09-27T00:00:00Z"), false)
-            .unwrap();
-        assert!(digest_ids(&db, "2026-09-27T00:30:00Z").is_empty());
-        assert_eq!(digest_ids(&db, "2026-09-27T01:00:00Z"), [a]);
     }
 
     #[test]
@@ -5572,104 +5081,6 @@ mod tests {
             .collect();
         let err = db.replace_topics(&without).unwrap_err();
         assert!(matches!(err, DbError::TopicsInUse(_)), "{err}");
-    }
-
-    fn digest_with_topics(
-        db: &Db,
-        topics: serde_json::Value,
-        new: serde_json::Value,
-    ) -> Result<i64, DbError> {
-        let a = db
-            .insert_article(&article(&format!(
-                "https://e.com/{}",
-                db.query_i64("SELECT count(*) FROM articles").unwrap()
-            )))
-            .unwrap()
-            .unwrap();
-        let c = db
-            .insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
-            .unwrap();
-        let payload = serde_json::json!({"title_ja": "題", "summary_ja": "s", "topics": topics, "new_topics": new});
-        db.insert_artifact(
-            &NewArtifact {
-                article_id: a,
-                kind: ArtifactKind::Digest,
-                backend: "claude-cli",
-                model: "sonnet",
-                prompt_version: 2,
-                payload: &payload,
-                inputs: &[c],
-                glossary_at: None,
-            },
-            t("2026-09-27T00:00:00Z"),
-        )
-    }
-
-    fn linked_topics(db: &Db, artifact_id: i64) -> Vec<String> {
-        db.query_strings(&format!(
-            "SELECT t.name FROM artifact_topics AS at JOIN topics AS t ON t.id = at.topic_id
-             WHERE at.artifact_id = {artifact_id} ORDER BY t.id"
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn insert_digest_links_topics_and_adds_proposed_ones() {
-        use crate::topics::Facet;
-        let db = Db::open_in_memory().unwrap();
-        let before = db.topics().unwrap().len();
-        let id = digest_with_topics(
-            &db,
-            serde_json::json!(["燃料", "データセンター需要"]),
-            serde_json::json!([{"name": "データセンター需要", "facet": "分野"}]),
-        )
-        .unwrap();
-        assert_eq!(linked_topics(&db, id), ["燃料", "データセンター需要"]);
-        let topics = db.topics().unwrap();
-        assert_eq!(topics.len(), before + 1);
-        assert_eq!(
-            topics.last().unwrap(),
-            &crate::topics::Topic {
-                name: "データセンター需要".into(),
-                facet: Facet::Field
-            }
-        );
-        // 提案された語は追加の時刻を持つ（初期語彙は持たない）
-        assert_eq!(
-            db.query_strings("SELECT name FROM topics WHERE added_at = '2026-09-27T00:00:00.000Z'")
-                .unwrap(),
-            ["データセンター需要"]
-        );
-        // 同じ語を別の要約が提案しても、語彙は増えず同じ語に付く
-        let again = digest_with_topics(
-            &db,
-            serde_json::json!(["データセンター需要"]),
-            serde_json::json!([{"name": "データセンター需要", "facet": "炉型"}]),
-        )
-        .unwrap();
-        assert_eq!(linked_topics(&db, again), ["データセンター需要"]);
-        assert_eq!(db.topics().unwrap().len(), before + 1);
-    }
-
-    #[test]
-    fn insert_digest_rejects_unknown_topics_without_writing() {
-        let db = Db::open_in_memory().unwrap();
-        let err = digest_with_topics(
-            &db,
-            serde_json::json!(["燃料", "新設炉"]),
-            serde_json::json!([]),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(&err, DbError::UnknownTopic(name) if name == "新設炉"),
-            "{err}"
-        );
-        assert_eq!(db.query_i64("SELECT count(*) FROM artifacts").unwrap(), 0);
-        assert_eq!(
-            db.query_i64("SELECT count(*) FROM artifact_topics")
-                .unwrap(),
-            0
-        );
     }
 
     /// 語彙の表を作ってから要約の保存が付与を書くまでの間に作られた要約も、付与を移す。

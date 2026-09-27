@@ -2,11 +2,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, EvalArgs, ProfileArgs, SearchArgs, SourcesArgs, TopicsArgs};
+use nucrawler::cli::{self, Command, ProfileArgs, SearchArgs, SourcesArgs, TopicsArgs};
 use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
-use nucrawler::eval;
 use nucrawler::http::{Fetcher, HttpError};
 use nucrawler::mcp::{self, McpError};
 use nucrawler::pipeline::lock::LockError;
@@ -143,7 +142,14 @@ async fn run() -> Result<(), Error> {
             )
             .await
         }
-        Command::Eval => eval(inv.data_dir, cli::parse_eval_args(&inv.args)?),
+        Command::Eval => {
+            cmd::eval(
+                inv.config_dir,
+                inv.data_dir,
+                cli::parse_eval_args(&inv.args)?,
+            )
+            .await
+        }
         Command::Mcp => mcp(inv.config_dir, inv.data_dir).await,
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
@@ -286,26 +292,6 @@ fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
     print!(
         "{}",
         status::render(&sources.sources, &db.source_overview()?)
-    );
-    Ok(())
-}
-
-fn eval(data: Option<PathBuf>, args: EvalArgs) -> Result<(), Error> {
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
-    let owner = db.owner_id()?;
-    let hash = db.profile_hash(owner)?;
-    let current = hash
-        .as_deref()
-        .map(|h| (h, nucrawler::prompt::score::PROMPT_VERSION));
-    print!(
-        "{}",
-        eval::render(
-            &db.eval_labels(owner)?,
-            &db.eval_scores(owner)?,
-            current,
-            None,
-            args.all
-        )
     );
     Ok(())
 }

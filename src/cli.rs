@@ -81,7 +81,7 @@ commands:
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
-  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all]）
+  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE]）
   help      このヘルプを表示
 ";
 
@@ -294,14 +294,27 @@ pub struct EvalArgs {
 }
 
 pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
-    match args {
-        [] => Ok(EvalArgs::default()),
-        [flag] if flag == "--all" => Ok(EvalArgs {
-            all: true,
-            ..EvalArgs::default()
-        }),
-        _ => todo!("{args:?}"),
+    let mut it = args.iter();
+    let mut parsed = EvalArgs::default();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--all" => parsed.all = true,
+            "--profile" => {
+                let file = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
+                parsed.profile = Some(PathBuf::from(file));
+            }
+            "--max-llm-calls" => {
+                let n = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
+                parsed.max_llm_calls = Some(n.parse().map_err(|_| ParseError::EvalUsage)?);
+            }
+            _ => return Err(ParseError::EvalUsage),
+        }
     }
+    // 上限は候補で採点するときだけ意味がある
+    if parsed.max_llm_calls.is_some() && parsed.profile.is_none() {
+        return Err(ParseError::EvalUsage);
+    }
+    Ok(parsed)
 }
 
 /// `profile` サブコマンドの引数。

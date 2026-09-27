@@ -12,6 +12,7 @@ use crate::config::{Config, LlmConfig, Source};
 use crate::db::{Db, DbError, RedoFilter};
 use crate::http::Fetcher;
 use crate::llm::Llm;
+use crate::profile::Profile;
 use crate::quota::Quota;
 
 #[derive(Debug, thiserror::Error)]
@@ -268,6 +269,37 @@ pub async fn redo<L: Llm>(
             report_halt(summary.halted, &mut report.llm_failure);
         }
     }
+    report.cancelled = env.cancel.is_requested();
+    Ok(report)
+}
+
+/// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。
+/// 候補は保存しない。
+pub async fn eval_profile<L: Llm>(
+    mut env: RunEnv<'_, L>,
+    config: &Config,
+    profile: &Profile,
+    articles: &[i64],
+) -> Result<RunReport, RunError> {
+    let owner = env.db.owner_id()?;
+    let mut report = RunReport::default();
+    let now = (env.clock)();
+    let summary = score::score_articles(
+        env.stage(),
+        &config.llm,
+        &config.pipeline,
+        owner,
+        score::ScoreTarget::Candidate { profile, articles },
+        now,
+    )
+    .await?;
+    tracing::info!(
+        scored = summary.scored,
+        failed = summary.failed,
+        calls = summary.calls,
+        "candidate profile scored"
+    );
+    report_halt(summary.halted, &mut report.llm_failure);
     report.cancelled = env.cancel.is_requested();
     Ok(report)
 }

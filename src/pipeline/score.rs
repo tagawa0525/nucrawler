@@ -1,6 +1,8 @@
 //! 採点ステージ：利用者のプロファイルをもとに、要約済みの記事を数件ずつ LLM で採点する。
 //! プロファイルのハッシュと採点のプロンプトの版ごとに記録するので、どちらかを変えれば自動的に採点し直しになる。
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 
 use super::Halt;
@@ -57,13 +59,23 @@ pub async fn score_articles<L: Llm>(
     now: DateTime<Utc>,
 ) -> Result<ScoreSummary, ScoreStageError> {
     let mut summary = ScoreSummary::default();
-    if let ScoreTarget::Candidate { profile, articles } = target {
-        todo!("{profile:?} {articles:?}")
-    }
-    let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
-        tracing::warn!("no profile yet; run `nucrawler profile import FILE` to enable scoring");
-        summary.no_profile = true;
-        return Ok(summary);
+    let (profile, profile_hash, scope) = match target {
+        ScoreTarget::Saved => {
+            let Some((profile, hash)) = db.load_profile(user_id)? else {
+                tracing::warn!(
+                    "no profile yet; run `nucrawler profile import FILE` to enable scoring"
+                );
+                summary.no_profile = true;
+                return Ok(summary);
+            };
+            let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+            (Cow::Owned(profile), hash, ScoreScope::Since(cutoff))
+        }
+        ScoreTarget::Candidate { profile, articles } => (
+            Cow::Borrowed(profile),
+            crate::profile::hash(profile),
+            ScoreScope::Articles(articles),
+        ),
     };
     let backend = llm.backend();
     let model = llm_cfg.score_model.as_str();
@@ -81,8 +93,6 @@ pub async fn score_articles<L: Llm>(
         backend,
         model,
     };
-    let scope =
-        ScoreScope::Since(now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days)));
     let system = prompt::score::system_prompt(&profile);
     let schema = prompt::score::schema();
     loop {

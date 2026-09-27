@@ -52,9 +52,10 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
-        let cutoff = match scope {
-            ScoreScope::Since(cutoff) => cutoff,
-            ScoreScope::Articles(ids) => todo!("{ids:?}"),
+        // 使わない方の条件は NULL にして常に真にする
+        let (cutoff, ids) = match scope {
+            ScoreScope::Since(cutoff) => (Some(timestamp(cutoff)), None),
+            ScoreScope::Articles(ids) => (None, Some(serde_json::to_string(ids)?)),
         };
         let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
@@ -81,7 +82,8 @@ impl Db {
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
-               AND coalesce(a.published_at, a.fetched_at) >= ?2
+               AND (?2 IS NULL OR coalesce(a.published_at, a.fetched_at) >= ?2)
+               AND (?11 IS NULL OR a.id IN (SELECT value FROM json_each(?11)))
                AND NOT EXISTS (
                  SELECT 1 FROM scores AS s
                  WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
@@ -98,7 +100,7 @@ impl Db {
         let rows = stmt.query_map(
             rusqlite::params![
                 key.user_id,
-                timestamp(cutoff),
+                cutoff,
                 key.profile_hash,
                 key.backend,
                 key.model,
@@ -107,6 +109,7 @@ impl Db {
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 score_stage(key),
                 key.prompt_version,
+                ids,
             ],
             |r| {
                 Ok((

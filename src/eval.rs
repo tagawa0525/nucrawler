@@ -39,7 +39,6 @@ pub fn render(
     candidate: Option<&str>,
     all: bool,
 ) -> String {
-    let _ = candidate;
     let mut out = String::new();
     let count = |kind| labels.iter().filter(|l| l.kind == kind).count();
     let (up, bookmark) = (count(SignalKind::Up), count(SignalKind::Bookmark));
@@ -59,11 +58,17 @@ pub fn render(
     let is_current = |k: &EvalKey| {
         current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
     };
+    // 候補は現行と同じ版のプロンプトで採点する
+    let is_candidate = |k: &EvalKey| {
+        current.is_some_and(|(_, version)| k.prompt_version == version)
+            && candidate.is_some_and(|hash| k.profile_hash == hash)
+            && !is_current(k)
+    };
     let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
-    keys.sort_by_key(|k| (!is_current(k), *k));
+    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), *k));
     keys.dedup();
     if !all {
-        keys.retain(|k| is_current(k));
+        keys.retain(|k| is_current(k) || is_candidate(k));
         if keys.is_empty() {
             out.push('\n');
             if current.is_none() {
@@ -81,27 +86,31 @@ pub fn render(
     }
     for key in keys {
         out.push('\n');
-        render_key(&mut out, key, is_current(key), labels, scores);
+        let role = if is_current(key) {
+            "  (current)"
+        } else if is_candidate(key) {
+            "  (candidate)"
+        } else {
+            ""
+        };
+        render_key(&mut out, key, role, labels, scores);
     }
     out
 }
 
-/// 1 つのキーの結果：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
+/// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
 fn render_key(
     out: &mut String,
     key: &EvalKey,
-    current: bool,
+    role: &str,
     labels: &[Label],
     scores: &[LabeledScore],
 ) {
     let hash: String = key.profile_hash.chars().take(8).collect();
     let _ = writeln!(
         out,
-        "profile {hash}  {}/{}  prompt v{}{}",
-        key.backend,
-        key.model,
-        key.prompt_version,
-        if current { "  (current)" } else { "" }
+        "profile {hash}  {}/{}  prompt v{}{role}",
+        key.backend, key.model, key.prompt_version,
     );
     // ラベルと突き合わせた (点数, 正例か, 反応より後に採点したか)
     let matched: Vec<(u8, bool, bool)> = scores

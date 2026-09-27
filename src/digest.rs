@@ -28,7 +28,10 @@ pub struct Parsed {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Item {
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "id は検証前に JSON から読むので、ここでは受け付けるだけ"
+    )]
     id: i64,
     title_ja: String,
     summary_ja: String,

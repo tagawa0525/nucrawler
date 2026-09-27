@@ -76,3 +76,22 @@ pub(super) fn other_report(id: i64, kind: ReportKind) -> Report {
         ..term_report(id, ReportStatus::Pending)
     }
 }
+
+pub(super) fn entry(
+    id: i64,
+    sources: &[&str],
+    target: &str,
+    abbr: Option<&str>,
+) -> crate::glossary::Entry {
+    crate::glossary::Entry {
+        id,
+        term: crate::glossary::Term {
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            target: target.into(),
+            abbr: abbr.map(Into::into),
+            note: Some("注<記>".into()),
+        },
+        term_changed_at: None,
+        sources_added_at: vec![None; sources.len()],
+    }
+}

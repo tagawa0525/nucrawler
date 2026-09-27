@@ -31,7 +31,7 @@ pub enum ParseError {
     CrawlUsage { stages: String },
     #[error("usage: nucrawler serve [--addr IP:PORT]")]
     ServeUsage,
-    #[error("usage: nucrawler eval [--all] [--profile FILE] [--max-llm-calls N]")]
+    #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
     EvalUsage,
 }
 
@@ -81,7 +81,7 @@ commands:
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
-  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE]）
+  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
   help      このヘルプを表示
 ";
 

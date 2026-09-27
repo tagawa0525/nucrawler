@@ -60,9 +60,9 @@ pub fn render(
     let is_current = |k: &EvalKey| {
         current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
     };
-    // 候補は現行と同じ版のプロンプトで採点する
+    // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
     let is_candidate = |k: &EvalKey| {
-        current.is_some_and(|(_, version)| k.prompt_version == version)
+        k.prompt_version == version
             && candidate.is_some_and(|hash| k.profile_hash == hash)
             && !is_current(k)
     };

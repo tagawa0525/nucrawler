@@ -83,6 +83,13 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .report { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
 .report label { display: block; margin: 0.4rem 0; }
 .report button { margin-top: 0.3rem; font-size: 1rem; padding: 0.3rem 0.9rem; }
+.menu { padding-left: 1.2rem; line-height: 2; }
+.term, .add { border-bottom: 1px solid #ddd; padding: 0.4rem 0; }
+.term summary .meta { display: block; margin: 0.1rem 0 0 1rem; }
+.term label, .add label { display: block; margin: 0.4rem 0; font-size: 0.85rem; color: #666; }
+.term form, .add form { display: inline-block; margin: 0.2rem 0.5rem 0.2rem 0; }
+.term form:first-of-type, .add form { display: block; }
+.term button, .add button { font-size: 1rem; padding: 0.3rem 0.9rem; }
 ";
 
 /// ソースの ID から画面に出す名前へ（`Source::display_name`）。
@@ -196,7 +203,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         ..view
     };
     let mut body = format!(
-        "<nav class=\"bar\">{}{}{}{}{}</nav>",
+        "<nav class=\"bar\">{}{}{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
         button("/search?liked=1", "いいね", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
@@ -212,6 +219,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
             "👁",
             Some(view.read)
         ),
+        button("/settings", "設定", "⚙️", None),
     );
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
@@ -231,13 +239,72 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 }
 
 /// 管理の画面への入口（一覧の ⚙ から入る）。
-pub fn settings_page(_glossary_terms: usize, _page: &Page) -> String {
-    todo!()
+pub fn settings_page(glossary_terms: usize, page: &Page) -> String {
+    let body = format!(
+        "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>設定</h1>\
+         <ul class=\"menu\"><li><a href=\"/glossary\">訳語集</a> \
+         <span class=\"meta\">{glossary_terms} 語</span></li></ul>"
+    );
+    layout("設定", page, &body)
 }
 
-/// 訳語集。訳語ごとに畳み、開いたときだけ編集のフォームを出す。
-pub fn glossary_page(_entries: &[crate::glossary::Entry], _page: &Page) -> String {
-    todo!()
+/// 訳語集。訳語ごとに畳み、開いたときだけ編集のフォームを出す（一覧の密度を上げない）。
+/// 並びは最初の原語の順（大文字小文字を問わない）。
+pub fn glossary_page(entries: &[crate::glossary::Entry], page: &Page) -> String {
+    let mut sorted: Vec<&crate::glossary::Entry> = entries.iter().collect();
+    sorted.sort_by_cached_key(|e| e.term.sources.first().map(|s| s.to_lowercase()));
+    let mut body = format!(
+        "<p class=\"meta\"><a href=\"/settings\">← 設定</a></p><h1>訳語集</h1>\
+         <details class=\"add\"><summary>＋ 訳語を追加</summary>\
+         <form method=\"post\" action=\"/glossary\">{}<button>追加</button></form></details>",
+        glossary_fields(None)
+    );
+    for e in sorted {
+        let id = e.id;
+        let t = &e.term;
+        let abbr = t
+            .abbr
+            .as_ref()
+            .map(|a| format!("（{}）", escape(a)))
+            .unwrap_or_default();
+        let changed = e
+            .changed_at
+            .as_deref()
+            .map(|at| {
+                format!(
+                    "<p class=\"meta\">変更 {}</p>",
+                    crate::jst::format_local(at)
+                )
+            })
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "<details class=\"term\" id=\"term-{id}\"><summary><b>{}{abbr}</b>\
+             <span class=\"meta\">{}</span></summary>\
+             <form method=\"post\" action=\"/glossary/{id}\">{}<button>保存</button></form>\
+             <form method=\"post\" action=\"/glossary/{id}/delete\" \
+             onsubmit=\"return confirm('この訳語を削除しますか')\"><button>削除</button></form>\
+             {changed}</details>",
+            escape(&t.target),
+            escape(&t.sources.join(" / ")),
+            glossary_fields(Some(t)),
+        ));
+    }
+    layout("訳語集", page, &body)
+}
+
+/// 訳語の入力欄。原語は 1 行に 1 つ。
+fn glossary_fields(term: Option<&crate::glossary::Term>) -> String {
+    let value = |v: Option<&str>| escape(v.unwrap_or_default());
+    format!(
+        "<label>訳語<input class=\"wide\" name=\"target\" value=\"{}\" required></label>\
+         <label>略語（任意）<input class=\"wide\" name=\"abbr\" value=\"{}\"></label>\
+         <label>原語（1 行に 1 つ）<textarea class=\"wide\" name=\"sources\" rows=\"3\" required>{}</textarea></label>\
+         <label>メモ（任意）<input class=\"wide\" name=\"note\" value=\"{}\"></label>",
+        value(term.map(|t| t.target.as_str())),
+        value(term.and_then(|t| t.abbr.as_deref())),
+        escape(&term.map(|t| t.sources.join("\n")).unwrap_or_default()),
+        value(term.and_then(|t| t.note.as_deref())),
+    )
 }
 
 /// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
@@ -1053,7 +1120,7 @@ mod tests {
         // 管理の画面へは右端の ⚙ から入る
         assert!(
             html.contains(
-                r#"<a class="btn" href="/settings" aria-label="設定" title="設定">⚙</a></nav>"#
+                r#"<a class="btn" href="/settings" aria-label="設定" title="設定">⚙️</a></nav>"#
             ),
             "{html}"
         );
@@ -1070,7 +1137,7 @@ mod tests {
                     let rest = &html[at + 6..];
                     rest[..rest.find('"').unwrap()].to_string()
                 })
-                .filter(|h| !h.starts_with("/search"))
+                .filter(|h| h == "/" || h.starts_with("/?"))
                 .collect();
             hrefs.sort();
             hrefs
@@ -1535,7 +1602,9 @@ mod tests {
         assert!(html.contains(r#"name="abbr" value="ATF""#), "{html}");
         assert!(html.contains(r#"value="注&lt;記&gt;""#), "{html}");
         assert!(
-            html.contains(r#"<form method="post" action="/glossary/1/delete">"#),
+            html.contains(
+                r#"<form method="post" action="/glossary/1/delete" onsubmit="return confirm("#
+            ),
             "{html}"
         );
     }

@@ -65,6 +65,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0010_bookmarks.sql"),
     include_str!("migrations/0011_glossary.sql"),
     include_str!("migrations/0012_term_reports.sql"),
+    include_str!("migrations/0013_glossary_changes.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -982,59 +983,104 @@ impl Db {
 
     /// 訳語集（登録順）。原語も登録順に並べる。
     pub fn glossary(&self) -> Result<Vec<crate::glossary::Term>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT t.id, t.target, t.abbr, t.note, s.source
-             FROM glossary_terms AS t JOIN glossary_sources AS s ON s.term_id = t.id
-             ORDER BY t.id, s.rowid",
-        )?;
-        let mut rows = stmt.query([])?;
-        let mut terms: Vec<(i64, crate::glossary::Term)> = Vec::new();
-        while let Some(r) = rows.next()? {
-            let id: i64 = r.get(0)?;
-            let source: String = r.get(4)?;
-            match terms.last_mut() {
-                Some((last, term)) if *last == id => term.sources.push(source),
-                _ => terms.push((
-                    id,
-                    crate::glossary::Term {
-                        sources: vec![source],
-                        target: r.get(1)?,
-                        abbr: r.get(2)?,
-                        note: r.get(3)?,
-                    },
-                )),
-            }
-        }
-        Ok(terms.into_iter().map(|(_, term)| term).collect())
+        Ok(self
+            .glossary_entries()?
+            .into_iter()
+            .map(|e| e.term)
+            .collect())
     }
 
     /// 画面に出す訳語集（登録順）。
     pub fn glossary_entries(&self) -> Result<Vec<crate::glossary::Entry>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.target, t.abbr, t.note, t.changed_at, s.source, s.added_at
+             FROM glossary_terms AS t JOIN glossary_sources AS s ON s.term_id = t.id
+             ORDER BY t.id, s.rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut entries: Vec<crate::glossary::Entry> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let source: String = r.get(5)?;
+            let added_at: Option<String> = r.get(6)?;
+            match entries.last_mut() {
+                Some(entry) if entry.id == id => {
+                    entry.term.sources.push(source);
+                    entry.changed_at = entry.changed_at.take().max(added_at);
+                }
+                _ => {
+                    let changed_at: Option<String> = r.get(4)?;
+                    entries.push(crate::glossary::Entry {
+                        id,
+                        term: crate::glossary::Term {
+                            sources: vec![source],
+                            target: r.get(1)?,
+                            abbr: r.get(2)?,
+                            note: r.get(3)?,
+                        },
+                        changed_at: changed_at.max(added_at),
+                    });
+                }
+            }
+        }
+        Ok(entries)
     }
 
-    /// 訳語を加えて id を返す。原語がほかの訳語に使われていれば、何も変えずに失敗する。
+    /// 訳語を加えて id を返す。訳語・略語・原語がほかの訳語のものと重なれば、何も変えずに失敗する。
     pub fn add_glossary_term(
         &self,
-        _term: &crate::glossary::Term,
-        _now: chrono::DateTime<chrono::Utc>,
+        term: &crate::glossary::Term,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        todo!()
+        let tx = self.conn.unchecked_transaction()?;
+        check_glossary_conflicts(&tx, None, term)?;
+        tx.execute(
+            "INSERT INTO glossary_terms (target, abbr, note, changed_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![term.target, term.abbr, term.note, timestamp(now)],
+        )?;
+        let id = tx.last_insert_rowid();
+        replace_glossary_sources(&tx, id, &term.sources, now)?;
+        tx.commit()?;
+        Ok(id)
     }
 
-    /// 訳語を置き換える。無ければ false。原語がほかの訳語に使われていれば、何も変えずに失敗する。
+    /// 訳語を置き換える。無ければ false。訳語・略語・原語がほかの訳語のものと重なれば、
+    /// 何も変えずに失敗する。残した原語は加えた時刻を保ち、訳・略語・メモは変わったときだけ時刻を進める。
     pub fn update_glossary_term(
         &self,
-        _id: i64,
-        _term: &crate::glossary::Term,
-        _now: chrono::DateTime<chrono::Utc>,
+        id: i64,
+        term: &crate::glossary::Term,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        let tx = self.conn.unchecked_transaction()?;
+        let exists = tx
+            .query_row("SELECT 1 FROM glossary_terms WHERE id = ?1", [id], |_| {
+                Ok(())
+            })
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        check_glossary_conflicts(&tx, Some(id), term)?;
+        tx.execute(
+            "UPDATE glossary_terms SET target = ?2, abbr = ?3, note = ?4, changed_at = ?5
+             WHERE id = ?1
+               AND (target IS NOT ?2 OR abbr IS NOT ?3 OR note IS NOT ?4)",
+            rusqlite::params![id, term.target, term.abbr, term.note, timestamp(now)],
+        )?;
+        replace_glossary_sources(&tx, id, &term.sources, now)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// 訳語と原語を消す。無ければ false。
-    pub fn delete_glossary_term(&self, _id: i64) -> Result<bool, DbError> {
-        todo!()
+    pub fn delete_glossary_term(&self, id: i64) -> Result<bool, DbError> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM glossary_terms WHERE id = ?1", [id])?
+            > 0)
     }
 
     /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
@@ -2106,6 +2152,79 @@ impl Db {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
+}
+
+/// 訳語・略語・原語が、`id` 以外の訳語のものと重なっていないか確かめる。
+/// 原語は大文字小文字を問わず比べる（`glossary_sources.source` の照合順序）。
+fn check_glossary_conflicts(
+    conn: &Connection,
+    id: Option<i64>,
+    term: &crate::glossary::Term,
+) -> Result<(), DbError> {
+    use rusqlite::OptionalExtension;
+    let owner = |sql: &str, value: &str| -> Result<Option<String>, DbError> {
+        Ok(conn
+            .query_row(sql, rusqlite::params![value, id], |r| r.get(0))
+            .optional()?)
+    };
+    if owner(
+        "SELECT target FROM glossary_terms WHERE target = ?1 AND id IS NOT ?2",
+        &term.target,
+    )?
+    .is_some()
+    {
+        return Err(DbError::GlossaryConflict(format!(
+            "訳語「{}」は登録済み",
+            term.target
+        )));
+    }
+    if let Some(abbr) = &term.abbr
+        && let Some(target) = owner(
+            "SELECT target FROM glossary_terms WHERE abbr = ?1 AND id IS NOT ?2",
+            abbr,
+        )?
+    {
+        return Err(DbError::GlossaryConflict(format!(
+            "略語「{abbr}」は「{target}」で使っている"
+        )));
+    }
+    for source in &term.sources {
+        if let Some(target) = owner(
+            "SELECT t.target FROM glossary_sources AS s
+             JOIN glossary_terms AS t ON t.id = s.term_id
+             WHERE s.source = ?1 AND s.term_id IS NOT ?2",
+            source,
+        )? {
+            return Err(DbError::GlossaryConflict(format!(
+                "原語「{source}」は「{target}」に登録済み"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 訳語 `id` の原語を `sources` にする。表記の同じ原語は加えた時刻を保ち、
+/// 無くした原語は消し、新しい原語（大文字小文字だけ変えたものを含む）は `now` に加えた扱いにする。
+fn replace_glossary_sources(
+    conn: &Connection,
+    id: i64,
+    sources: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    let sources = serde_json::to_string(sources)?;
+    conn.execute(
+        "DELETE FROM glossary_sources
+         WHERE term_id = ?1
+           AND source COLLATE BINARY NOT IN (SELECT value FROM json_each(?2))",
+        rusqlite::params![id, sources],
+    )?;
+    conn.execute(
+        "INSERT INTO glossary_sources (source, term_id, added_at)
+         SELECT value, ?1, ?3 FROM json_each(?2) WHERE true
+         ON CONFLICT (source) DO NOTHING",
+        rusqlite::params![id, sources, timestamp(now)],
+    )?;
+    Ok(())
 }
 
 /// WAL への切り替えは排他ロックが必要で、競合すると busy_timeout を待たずに
@@ -4832,12 +4951,16 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let id = db
             .add_glossary_term(
-                &glossary_term(&["spent fuel", "used fuel"], "使用済燃料", None),
+                &glossary_term(&["reactor coolant pump", "RCP"], "一次冷却材ポンプ", None),
                 t("2026-09-27T00:00:00Z"),
             )
             .unwrap();
         let later = t("2026-09-27T00:00:00Z") + chrono::Duration::hours(1);
-        let updated = glossary_term(&["spent fuel", "spent nuclear fuel"], "使用済燃料", None);
+        let updated = glossary_term(
+            &["reactor coolant pump", "primary coolant pump"],
+            "一次冷却材ポンプ",
+            None,
+        );
         assert!(db.update_glossary_term(id, &updated, later).unwrap());
         let entry = glossary_entry(&db, id);
         assert_eq!(entry.term, updated);

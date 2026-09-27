@@ -60,6 +60,10 @@ pub fn router(state: AppState) -> axum::Router {
             post(translation_request),
         )
         .route("/articles/{id}/term-report", post(term_report))
+        .route("/settings", get(settings))
+        .route("/glossary", get(glossary).post(add_glossary_term))
+        .route("/glossary/{id}", post(update_glossary_term))
+        .route("/glossary/{id}/delete", post(delete_glossary_term))
         .with_state(state)
 }
 
@@ -93,6 +97,8 @@ enum AppError {
     BadRequest(&'static str),
     #[error("cross-site request")]
     CrossSite,
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
     InvalidSearch(#[from] crate::search::SearchError),
 }
@@ -109,6 +115,7 @@ impl IntoResponse for AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) | AppError::InvalidSearch(_) => StatusCode::BAD_REQUEST,
             AppError::CrossSite => StatusCode::FORBIDDEN,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
         };
         (status, self.to_string()).into_response()
     }
@@ -503,6 +510,129 @@ async fn term_report(
     Ok(Redirect::to(&format!(
         "/articles/{id}?{view}reported=1#term-report"
     )))
+}
+
+async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+    let labels = state.labels.clone();
+    let page = with_db(&state, move |db| {
+        let terms = db.glossary()?.len();
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        Ok(html::settings_page(terms, &page))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+async fn glossary(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+    let labels = state.labels.clone();
+    let page = with_db(&state, move |db| {
+        let entries = db.glossary_entries()?;
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        Ok(html::glossary_page(&entries, &page))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+#[derive(serde::Deserialize)]
+struct GlossaryForm {
+    // 欄が無いときも空と同じく検証で 400 にする
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    abbr: String,
+    #[serde(default)]
+    note: String,
+    /// 1 行に 1 つ
+    #[serde(default)]
+    sources: String,
+}
+
+impl GlossaryForm {
+    /// 空白を除き、空の行と大文字小文字だけ違う重複の原語を落とす。訳語と原語は必須。
+    fn into_term(self) -> Result<crate::glossary::Term, AppError> {
+        let filled = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
+        let target =
+            filled(&self.target).ok_or(AppError::BadRequest("target must not be empty"))?;
+        let mut sources: Vec<String> = Vec::new();
+        for source in self.sources.lines().filter_map(filled) {
+            if !sources.iter().any(|s| s.eq_ignore_ascii_case(&source)) {
+                sources.push(source);
+            }
+        }
+        if sources.is_empty() {
+            return Err(AppError::BadRequest("sources must not be empty"));
+        }
+        Ok(crate::glossary::Term {
+            sources,
+            target,
+            abbr: filled(&self.abbr),
+            note: filled(&self.note),
+        })
+    }
+}
+
+/// 訳語集の重なりは、どの訳語と重なったかを利用者に返す。
+fn glossary_error(e: DbError) -> AppError {
+    match e {
+        DbError::GlossaryConflict(message) => AppError::Conflict(message),
+        e => e.into(),
+    }
+}
+
+async fn add_glossary_term(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<GlossaryForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let term = form.into_term()?;
+    let id = with_db(&state, move |db| {
+        db.add_glossary_term(&term, Utc::now())
+            .map_err(glossary_error)
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/glossary#term-{id}")))
+}
+
+async fn update_glossary_term(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<GlossaryForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let term = form.into_term()?;
+    let found = with_db(&state, move |db| {
+        db.update_glossary_term(id, &term, Utc::now())
+            .map_err(glossary_error)
+    })
+    .await?;
+    if !found {
+        return Err(AppError::NotFound);
+    }
+    Ok(Redirect::to(&format!("/glossary#term-{id}")))
+}
+
+async fn delete_glossary_term(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let found = with_db(&state, move |db| Ok(db.delete_glossary_term(id)?)).await?;
+    if !found {
+        return Err(AppError::NotFound);
+    }
+    Ok(Redirect::to("/glossary"))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {

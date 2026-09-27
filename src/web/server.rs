@@ -54,6 +54,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/search", get(search))
         .route("/api/search", get(api_search))
         .route("/articles/{id}/feedback", post(feedback))
+        .route("/articles/{id}/feedback/undo", post(undo_feedback))
         .route(
             "/articles/{id}/translation-request",
             post(translation_request),
@@ -381,18 +382,52 @@ async fn feedback(
     Form(form): Form<FeedbackForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
+    // ブックマークを外すのは行動ではなく状態の変更（ブックマークした行動は残す）
     let kind = match form.kind.as_str() {
-        "up" => SignalKind::Up,
-        "down" => SignalKind::Down,
-        _ => return Err(AppError::BadRequest("kind must be up or down")),
+        "up" => Some(SignalKind::Up),
+        "down" => Some(SignalKind::Down),
+        "bookmark" => Some(SignalKind::Bookmark),
+        "dismiss" => Some(SignalKind::Dismiss),
+        "unbookmark" => None,
+        _ => {
+            return Err(AppError::BadRequest(
+                "kind must be up, down, bookmark, unbookmark or dismiss",
+            ));
+        }
     };
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        Ok(db.record_event(user, id, kind, Utc::now())?)
+        match kind {
+            Some(kind) => db.record_event(user, id, kind, Utc::now())?,
+            None => db.unbookmark(user, id)?,
+        }
+        Ok(())
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+/// 一覧のスワイプの取り消し。その振り分けを無かったことにする。
+async fn undo_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FeedbackForm>,
+) -> Result<StatusCode, AppError> {
+    check_same_origin(&headers)?;
+    let kind = match form.kind.as_str() {
+        "bookmark" => SignalKind::Bookmark,
+        "dismiss" => SignalKind::Dismiss,
+        _ => return Err(AppError::BadRequest("kind must be bookmark or dismiss")),
+    };
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.undo_event(user, id, kind)?)
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn translation_request(

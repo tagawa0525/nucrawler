@@ -50,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0007_topics.sql"),
     include_str!("migrations/0008_topic_proposals.sql"),
     include_str!("migrations/0009_topic_aliases.sql"),
+    include_str!("migrations/0010_bookmarks.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -227,13 +228,18 @@ pub struct ScoreInput {
     pub topics: Vec<String>,
 }
 
-/// 利用者の行動。推薦への効き方は 👎 ≫ 詳細を開いた ＜ 和訳を開いた ≪ 👍。
+/// 利用者の行動。推薦への効き方は、不要が 👎 ≫ 見ない、関心が
+/// 詳細を開いた ＜ 和訳を開いた・ブックマーク ≪ 👍。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalKind {
     OpenDetail,
     OpenTranslation,
     Up,
     Down,
+    /// 一覧で後で読むために残した（外すまでブックマークとして残る）
+    Bookmark,
+    /// 一覧で見出しだけ見て見送った
+    Dismiss,
 }
 
 impl SignalKind {
@@ -243,6 +249,8 @@ impl SignalKind {
             Self::OpenTranslation => "open_translation",
             Self::Up => "up",
             Self::Down => "down",
+            Self::Bookmark => "bookmark",
+            Self::Dismiss => "dismiss",
         }
     }
 }
@@ -324,6 +332,7 @@ pub struct ListItem {
     /// 詳細か和訳を開いたことがある
     pub read: bool,
     pub feedback: Option<Feedback>,
+    pub bookmarked: bool,
     pub has_translation: bool,
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
@@ -339,7 +348,7 @@ pub struct ListQuery<'a> {
     pub min_score: u8,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
-    /// 👎、閾値未満、未採点、非軽水炉の記事も表示する
+    /// 👎、見ない、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
     pub limit: usize,
 }
@@ -366,9 +375,11 @@ pub struct SearchQuery<'a> {
     pub liked: bool,
     /// 詳細も和訳も開いていない
     pub unread: bool,
+    /// ブックマークしている
+    pub bookmarked: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、👎・非軽水炉・未採点・この点数未満を隠す
+    /// 一覧の既定と同じく、👎・見ない・非軽水炉・未採点・この点数未満を隠す
     pub hide_below: Option<u8>,
     pub order: SearchOrder,
     pub limit: usize,
@@ -515,6 +526,9 @@ impl SearchFilters {
         }
         if q.unread {
             f.rows.push_str(" AND rows.read = 0");
+        }
+        if q.bookmarked {
+            f.rows.push_str(" AND rows.bookmarked = 1");
         }
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND s.score >= :min_score");
@@ -1311,6 +1325,7 @@ impl Db {
         Ok(())
     }
 
+    /// 行動を記録する。ブックマークなら、外すまでブックマークとしても残す。
     pub fn record_event(
         &self,
         user_id: i64,
@@ -1318,10 +1333,53 @@ impl Db {
         kind: SignalKind,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
         )?;
+        if kind == SignalKind::Bookmark {
+            tx.execute(
+                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, created_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![user_id, article_id, timestamp(now)],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// ブックマークを外す。ブックマークした行動は採点の手がかりとして残す。
+    pub fn unbookmark(&self, user_id: i64, article_id: i64) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
+            rusqlite::params![user_id, article_id],
+        )?;
+        Ok(())
+    }
+
+    /// 誤操作の取り消し。その種類の最新の行動を無かったことにする（ブックマークなら外す）。
+    pub fn undo_event(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: SignalKind,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM events WHERE id = (
+               SELECT id FROM events
+               WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
+               ORDER BY created_at DESC, id DESC LIMIT 1)",
+            rusqlite::params![user_id, article_id, kind.as_str()],
+        )?;
+        if kind == SignalKind::Bookmark {
+            tx.execute(
+                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
+                rusqlite::params![user_id, article_id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1356,6 +1414,8 @@ impl Db {
                 "open_translation" => SignalKind::OpenTranslation,
                 "up" => SignalKind::Up,
                 "down" => SignalKind::Down,
+                "bookmark" => SignalKind::Bookmark,
+                "dismiss" => SignalKind::Dismiss,
                 other => {
                     return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}")));
                 }
@@ -1809,6 +1869,13 @@ impl Db {
                        WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
                        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
                       EXISTS (
+                        SELECT 1 FROM events AS e
+                        WHERE e.user_id = :user AND e.article_id = i.id AND e.kind = 'dismiss')
+                        AS dismissed,
+                      EXISTS (
+                        SELECT 1 FROM bookmarks AS b
+                        WHERE b.user_id = :user AND b.article_id = i.id) AS bookmarked,
+                      EXISTS (
                         SELECT 1 FROM artifacts AS t
                         WHERE t.article_id = i.id AND t.kind = 'translation' AND {viewable_t})
                         AS has_translation,
@@ -1830,12 +1897,13 @@ impl Db {
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
-                    rows.requested, rows.locked_by
+                    rows.requested, rows.locked_by, rows.bookmarked
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
+             -- 既定では 👎、見ない、非軽水炉、未採点、閾値未満を隠す
              WHERE (:all = 1
-                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min))
+                OR (rows.feedback IS NOT 'down' AND rows.dismissed = 0
+                    AND rows.relevant = 1 AND s.score >= :min))
                {rows_filter}
              ORDER BY {order}
              LIMIT :limit",
@@ -1880,6 +1948,7 @@ impl Db {
                     Some("down") => Some(Feedback::Down),
                     _ => None,
                 },
+                bookmarked: r.get(17)?,
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),

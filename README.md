@@ -87,11 +87,14 @@ nucrawler serve [--addr IP:PORT]
 nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
 nucrawler topics import FILE | nucrawler topics export
+nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--min-score N] [--sort newest|score] [--limit N] [語]...
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
 - 別の `crawl` が実行中なら終了コード 75（EX_TEMPFAIL）で終わる。`--wait-lock` を付けると終わるのを待ってから始める（unit はこちらを使う）
 - `status` はソースごとの記事数と取得状況を表示する
+- `search` は Web の検索画面（下記）と同じ条件で記事を探し、1 行 1 件（公開日時・点数・見出し・URL）で出す。
+  閲覧としては記録しない
 - `topics` は要約に付けるトピックの語彙を扱う。要約では語彙から選び、当てはまる語が無いときだけ
   LLM が新しい語を 1 個まで提案して語彙に加える。初期の語彙は DB を作るときに入るので、
   手で変えるときは `topics export > topics.toml` で書き出して編集し、`topics import topics.toml` で取り込む。

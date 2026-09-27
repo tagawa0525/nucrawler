@@ -15,6 +15,12 @@ pub enum ParseError {
     #[error("usage: nucrawler topics import FILE | nucrawler topics export")]
     TopicsUsage,
     #[error(
+        "usage: nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... \
+         [--lang en|ja] [--translated] [--liked] [--unread] [--min-score N] [--sort newest|score] \
+         [--limit N] [WORD]...  (D: YYYY-MM or YYYY-MM-DD)"
+    )]
+    SearchUsage,
+    #[error(
         "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
          [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
     )]
@@ -50,6 +56,7 @@ pub enum Command {
     Rescore,
     Profile,
     Topics,
+    Search,
     Help,
 }
 
@@ -70,6 +77,7 @@ commands:
   rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
+  search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   help      このヘルプを表示
 ";
 
@@ -99,6 +107,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("rescore") => Command::Rescore,
         Some("profile") => Command::Profile,
         Some("topics") => Command::Topics,
+        Some("search") => Command::Search,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -278,6 +287,51 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
     }
 }
 
+/// `search` サブコマンドの引数。条件は Web の検索画面と同じ（`search::Params`）。
+#[derive(Debug, PartialEq, Eq)]
+pub struct SearchArgs {
+    pub params: crate::search::Params,
+    /// 最大件数（既定は設定の `web.list_limit`）
+    pub limit: Option<usize>,
+}
+
+/// オプション以外の引数は検索語として空白でつなぐ。
+pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
+    fn value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Result<String, ParseError> {
+        option_value(it).cloned().ok_or(ParseError::SearchUsage)
+    }
+    let mut params = crate::search::Params::default();
+    let mut words = Vec::new();
+    let mut limit = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--since" => params.since = value(&mut it)?,
+            "--until" => params.until = value(&mut it)?,
+            "--topic" => params.topics.push(value(&mut it)?),
+            "--source" => params.sources.push(value(&mut it)?),
+            "--lang" => params.lang = value(&mut it)?,
+            "--min-score" => params.min_score = value(&mut it)?,
+            "--sort" => params.sort = value(&mut it)?,
+            "--translated" => params.translated = true,
+            "--liked" => params.liked = true,
+            "--unread" => params.unread = true,
+            "--limit" => {
+                let n = value(&mut it)?
+                    .parse()
+                    .ok()
+                    .filter(|&n: &usize| n > 0)
+                    .ok_or(ParseError::SearchUsage)?;
+                limit = Some(n);
+            }
+            other if other.starts_with("--") => return Err(ParseError::SearchUsage),
+            word => words.push(word.to_string()),
+        }
+    }
+    params.q = words.join(" ");
+    Ok(SearchArgs { params, limit })
+}
+
 /// `topics` サブコマンドの引数。
 #[derive(Debug, PartialEq, Eq)]
 pub enum TopicsArgs {
@@ -348,6 +402,7 @@ mod tests {
             ("rescore", Command::Rescore),
             ("profile", Command::Profile),
             ("topics", Command::Topics),
+            ("search", Command::Search),
             ("help", Command::Help),
             ("--help", Command::Help),
             ("-h", Command::Help),
@@ -613,6 +668,71 @@ mod tests {
         ] {
             let err = parse_topics_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::TopicsUsage), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_search_args() {
+        let parsed = parse_search_args(&args(&[
+            "炉心",
+            "--since",
+            "2026-09",
+            "--until",
+            "2026-09-20",
+            "--topic",
+            "燃料",
+            "--topic",
+            "PWR",
+            "--source",
+            "nra",
+            "--lang",
+            "ja",
+            "--translated",
+            "--liked",
+            "--unread",
+            "--min-score",
+            "60",
+            "--sort",
+            "score",
+            "--limit",
+            "5",
+            "NRC",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            SearchArgs {
+                params: crate::search::Params {
+                    q: "炉心 NRC".into(),
+                    since: "2026-09".into(),
+                    until: "2026-09-20".into(),
+                    topics: vec!["燃料".into(), "PWR".into()],
+                    sources: vec!["nra".into()],
+                    lang: "ja".into(),
+                    translated: true,
+                    liked: true,
+                    unread: true,
+                    min_score: "60".into(),
+                    sort: "score".into(),
+                },
+                limit: Some(5),
+            }
+        );
+        assert_eq!(
+            parse_search_args(&[]).unwrap(),
+            SearchArgs {
+                params: crate::search::Params::default(),
+                limit: None
+            }
+        );
+        for bad in [
+            &["--since"][..],
+            &["--limit", "x"][..],
+            &["--limit", "0"][..],
+            &["--bogus"][..],
+        ] {
+            let err = parse_search_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::SearchUsage), "{bad:?}");
         }
     }
 

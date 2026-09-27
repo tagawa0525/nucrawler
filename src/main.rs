@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, ProfileArgs, RedoArgs, RedoKind, SourcesArgs, TopicsArgs};
+use nucrawler::cli::{
+    self, Command, ProfileArgs, RedoArgs, RedoKind, SearchArgs, SourcesArgs, TopicsArgs,
+};
 use nucrawler::config::{self, ConfigError, LlmConfig};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
@@ -56,6 +58,8 @@ enum Error {
     Profile(#[from] ProfileError),
     #[error(transparent)]
     Topics(#[from] TopicsError),
+    #[error(transparent)]
+    Search(#[from] nucrawler::search::SearchError),
     #[error(transparent)]
     Serve(#[from] ServeError),
     #[error(transparent)]
@@ -142,6 +146,11 @@ async fn run() -> Result<(), Error> {
         }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
+        Command::Search => search(
+            inv.config_dir,
+            inv.data_dir,
+            cli::parse_search_args(&inv.args)?,
+        ),
         Command::Serve => {
             serve(
                 inv.config_dir,
@@ -509,6 +518,20 @@ fn spawn_signal_handler(cancel: Cancel) {
             cancel.request();
         }
     });
+}
+
+/// 検索して 1 行 1 件で出す。オーナーとして閲覧判定し、閲覧としては記録しない。
+fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> Result<(), Error> {
+    let (config, _) = config::load(&config_dir(config)?)?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let owner = db.owner_id()?;
+    let hash = db.load_profile(owner)?.map(|(_, hash)| hash);
+    let limit = args.limit.unwrap_or(config.web.list_limit);
+    let query = args.params.to_query(owner, hash.as_deref(), limit)?;
+    for item in db.search_articles(&query)? {
+        println!("{}", nucrawler::search::result_line(&item));
+    }
+    Ok(())
 }
 
 fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {

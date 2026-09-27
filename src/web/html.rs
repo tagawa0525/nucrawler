@@ -55,6 +55,11 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .score { display: inline-block; min-width: 2.2rem; text-align: center; border-radius: 0.4rem;
   background: #0b57a4; color: #fff; font-weight: 700; margin-right: 0.4rem; }
 .read { opacity: 0.6; }
+.bar { display: flex; gap: 0.5rem; margin: 0.3rem 0; }
+.btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
+  background: #fff; text-decoration: none; }
+.btn.on { border-color: #2e7d32; background: #e3f1e4; }
+.btn.off { border-color: #b3261e; background: #fbe7e6; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
 .actions form { display: inline; }
@@ -174,32 +179,26 @@ impl ListView {
 }
 
 pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
-    let mut body = String::from("<h1>nucrawler</h1>");
     let all_toggle = ListView {
         all: !view.all,
         ..view
-    };
-    let all_label = if view.all {
-        "おすすめだけ表示"
-    } else {
-        "すべて表示（👎・見ない・低い点・未採点を含む）"
     };
     let read_toggle = ListView {
         read: !view.read,
         ..view
     };
-    let read_label = if view.read {
-        "過去の既読を隠す"
-    } else {
-        "過去の既読も表示"
-    };
-    body.push_str(&format!(
-        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"/search?bookmarked=1\">🔖 ブックマーク</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>\
-         <p class=\"meta\">右へスワイプか l / → でブックマーク、左へスワイプか h / ← で見ない\
-         （j / k・↓ / ↑ で選ぶ、u で取り消す）</p>",
-        all_toggle.href(),
-        read_toggle.href(),
-    ));
+    let mut body = format!(
+        "<nav class=\"bar\">{}{}{}{}</nav>",
+        button("/search", "検索", "🔍", None),
+        button("/search?bookmarked=1", "ブックマーク", "🔖", None),
+        button(&all_toggle.href(), "すべて表示", "🗂", Some(view.all)),
+        button(
+            &read_toggle.href(),
+            "過去の既読も表示",
+            "📖",
+            Some(view.read)
+        ),
+    );
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
@@ -215,6 +214,21 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     }
     body.push_str(SWIPE_SCRIPT);
     layout("一覧", page, &body)
+}
+
+/// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
+/// `state` があれば切り替えとして ON（緑）/ OFF（赤）を示す。`href` はエスケープ済みで渡す。
+fn button(href: &str, name: &str, emoji: &str, state: Option<bool>) -> String {
+    let (class, label) = match state {
+        None => (String::new(), name.to_string()),
+        Some(on) => {
+            let (class, state) = if on { ("on", "ON") } else { ("off", "OFF") };
+            (format!(" {class}"), format!("{name}：{state}"))
+        }
+    };
+    format!(
+        "<a class=\"btn{class}\" href=\"{href}\" aria-label=\"{label}\" title=\"{label}\">{emoji}</a>"
+    )
 }
 
 /// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。

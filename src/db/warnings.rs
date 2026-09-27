@@ -94,17 +94,16 @@ impl Db {
         since: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Warning>, DbError> {
         let mut stmt = self.conn.prepare(
-            "WITH ranked AS (
-               SELECT source_id, fetched_at, total,
-                      row_number() OVER (
-                        PARTITION BY source_id ORDER BY fetched_at DESC, id DESC) AS rn
-               FROM fetch_runs)
-             SELECT r.source_id, r.fetched_at, r.total FROM ranked AS r
-             WHERE r.rn <= ?1
-               AND EXISTS (
-                 SELECT 1 FROM ranked AS l
-                 WHERE l.source_id = r.source_id AND l.rn = 1 AND l.fetched_at >= ?2)
-             ORDER BY r.source_id, r.rn",
+            // 成功と件数は同じ時刻で一緒に記録するので、最後の成功が `since` 以降のソースが対象。
+            // 履歴全体に順位を付けず、索引（source_id, fetched_at）でソースごとに新しい回だけを読む
+            "SELECT st.source_id, r.fetched_at, r.total
+             FROM source_state AS st
+             JOIN fetch_runs AS r ON r.id IN (
+               SELECT id FROM fetch_runs
+               WHERE source_id = st.source_id
+               ORDER BY fetched_at DESC, id DESC LIMIT ?1)
+             WHERE st.last_success_at >= ?2
+             ORDER BY st.source_id, r.fetched_at DESC, r.id DESC",
         )?;
         let rows = stmt
             .query_map(

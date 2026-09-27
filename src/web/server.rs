@@ -1,5 +1,5 @@
 //! Web UI の HTTP サーバー。画面の描画は `html`、データは `Db` に任せ、ここではルーティングと
-//! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。
+//! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。フィードは `feed` が組み立てる。
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -11,6 +11,7 @@ use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
 use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::web::feed;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +47,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/", get(list))
         .route("/articles/{id}", get(detail))
+        .route("/feed.xml", get(feed))
         .route("/articles/{id}/feedback", post(feedback))
         .route(
             "/articles/{id}/translation-request",
@@ -162,6 +164,42 @@ async fn list(
     })
     .await?;
     Ok(Html(page))
+}
+
+/// Web の既定の一覧と同じ記事の Atom フィード。閲覧ではないので、訪問も開いたことも記録しない。
+async fn feed(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
+    // 記事のリンクは絶対 URL にする。http で待ち受けているので `http://` + Host
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map_or_else(|| state.web.bind.to_string(), str::to_string);
+    let base = format!("http://{host}");
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let xml = with_db(&state, move |db| {
+        let now = Utc::now();
+        let (user, hash) = viewer(db)?;
+        let items = db.list_articles(ListQuery {
+            user_id: user,
+            profile_hash: hash.as_deref(),
+            min_score: web.min_score,
+            since: now - Duration::days(web.list_days.into()),
+            show_all: false,
+            limit: web.list_limit,
+        })?;
+        Ok(feed::atom(
+            &items,
+            &base,
+            &labels,
+            &crate::db::timestamp(now),
+        ))
+    })
+    .await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
+        xml,
+    )
+        .into_response())
 }
 
 #[derive(serde::Deserialize)]

@@ -185,7 +185,7 @@ fn card(i: &ListItem, page: &Page) -> String {
 }
 
 /// 見出し。空だとリンクが押せなくなるので、和文の見出し、原題、URL の順に空でないものを使う。
-fn display_title<'a>(title_ja: Option<&'a str>, i: &'a ListItem) -> &'a str {
+pub(crate) fn display_title<'a>(title_ja: Option<&'a str>, i: &'a ListItem) -> &'a str {
     [title_ja.unwrap_or(""), &i.title]
         .into_iter()
         .find(|t| !t.trim().is_empty())

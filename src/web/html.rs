@@ -810,9 +810,18 @@ mod tests {
             ListView::default(),
             &Page::default(),
         );
-        assert!(html.contains(r#"<div class="card" data-id="1">"#), "{html}");
+        // キーボードでも選べるよう、カードにフォーカスを置ける
+        assert!(
+            html.contains(r#"<div class="card" data-id="1" tabindex="0">"#),
+            "{html}"
+        );
         assert!(html.contains("<script>"), "{html}");
         assert!(html.contains("/feedback/undo"), "{html}");
+        // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
+        for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
+            assert!(html.contains(key), "{key}: {html}");
+        }
+        assert!(html.contains("l / →"), "the hint names the keys: {html}");
         // 検索の結果は振り分けの対象にしない
         let p = Params::from_query("q=x");
         let results = [item(1, "2026-09-27T05:00:00.000Z")];

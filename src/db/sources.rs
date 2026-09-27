@@ -114,22 +114,42 @@ impl Db {
     pub fn source_overview(&self) -> Result<Vec<SourceOverview>, DbError> {
         let mut stmt = self.conn.prepare(
             "WITH ids AS (SELECT source_id FROM articles UNION SELECT source_id FROM source_state),
-                  counts AS (SELECT source_id, count(*) AS n FROM articles GROUP BY source_id)
+                  counts AS (SELECT source_id, count(*) AS n FROM articles GROUP BY source_id),
+                  runs AS (
+                    SELECT source_id, total, matched, new, duplicate,
+                           row_number() OVER (
+                             PARTITION BY source_id ORDER BY fetched_at DESC, id DESC) AS rn
+                    FROM fetch_runs)
              SELECT ids.source_id, coalesce(counts.n, 0),
-                    st.last_success_at, st.last_error, st.last_error_at
+                    st.last_success_at, st.last_error, st.last_error_at,
+                    runs.total, runs.matched, runs.new, runs.duplicate
              FROM ids
              LEFT JOIN counts USING (source_id)
              LEFT JOIN source_state AS st USING (source_id)
+             LEFT JOIN runs ON runs.source_id = ids.source_id AND runs.rn = 1
              ORDER BY ids.source_id",
         )?;
         let rows = stmt.query_map([], |r| {
+            let count = |i| -> rusqlite::Result<Option<usize>> {
+                Ok(r.get::<_, Option<i64>>(i)?
+                    .map(|n| usize::try_from(n).unwrap_or(0)))
+            };
+            let last_run = match (count(5)?, count(6)?, count(7)?, count(8)?) {
+                (Some(total), Some(matched), Some(new), Some(duplicate)) => Some(FetchCounts {
+                    total,
+                    matched,
+                    new,
+                    duplicate,
+                }),
+                _ => None,
+            };
             Ok(SourceOverview {
                 source_id: r.get(0)?,
                 articles: r.get(1)?,
                 last_success_at: r.get(2)?,
                 last_error: r.get(3)?,
                 last_error_at: r.get(4)?,
-                last_run: None,
+                last_run,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

@@ -1,4 +1,4 @@
-//! `status`：ソースごとの記事数と取得状況を表示する。
+//! `status`：ソースごとの記事数と取得状況（最後の取得の件数を含む）を表示する。
 
 use std::fmt::Write as _;
 
@@ -32,6 +32,13 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
             out,
             "{id:width$}  {state:13}  {articles:>6} articles  last success {success}"
         );
+        if let Some(c) = ov.and_then(|o| o.last_run) {
+            let _ = write!(
+                out,
+                "  last fetch {}/{} (new {}, dup {})",
+                c.total, c.matched, c.new, c.duplicate
+            );
+        }
         if let Some(o) = ov
             && let Some(error) = &o.last_error
         {
@@ -97,7 +104,13 @@ mod tests {
         ];
         let out = render(&sources, &overview);
         let lines: Vec<_> = out.lines().collect();
-        let pos = |id: &str| lines.iter().position(|l| l.contains(id)).unwrap();
+        // 行の先頭のソース ID で探す（"new" は件数の表示にも含まれる）
+        let pos = |id: &str| {
+            lines
+                .iter()
+                .position(|l| l.split_whitespace().next() == Some(id))
+                .unwrap()
+        };
         assert!(pos("wnn") < pos("nei") && pos("nei") < pos("new") && pos("new") < pos("gone"));
 
         let wnn = lines[pos("wnn")];

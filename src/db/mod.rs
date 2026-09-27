@@ -5368,4 +5368,172 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
     }
+
+    /// 一覧でブックマークした記事は、外すまでブックマークとして残る。
+    /// ブックマークした行動は、外しても採点の手がかりとして残る。
+    #[test]
+    fn bookmark_marks_items_until_removed_and_keeps_the_signal() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let bookmarked = |db: &Db| db.list_articles(list_query(db, false)).unwrap()[0].bookmarked;
+        assert!(!bookmarked(&db));
+
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert!(bookmarked(&db));
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    bookmarked: true,
+                    ..search_query(&db)
+                }
+            ),
+            [a]
+        );
+
+        db.unbookmark(owner, a).unwrap();
+        assert!(!bookmarked(&db));
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Bookmark,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// 「見ない」にした記事は 👎 と同じく一覧の既定から隠れ、弱い不要として採点に渡る。
+    #[test]
+    fn dismissed_articles_are_hidden_by_default_and_become_signals() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let kept = scored_article(
+            &db,
+            "https://e.com/kept",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        let dismissed = scored_article(
+            &db,
+            "https://e.com/dismissed",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(
+            owner,
+            dismissed,
+            SignalKind::Dismiss,
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert_eq!(list_ids(&db, false), [kept]);
+        assert_eq!(list_ids(&db, true), [dismissed, kept]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    hide_below: Some(60),
+                    ..search_query(&db)
+                }
+            ),
+            [kept]
+        );
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Dismiss,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// 誤って振り分けたときの取り消しは、その行動が無かったことにする（採点にも渡さない）。
+    #[test]
+    fn undo_removes_the_latest_event_and_the_bookmark() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let b = scored_article(
+            &db,
+            "https://e.com/b",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::Dismiss, t("2026-09-27T00:01:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::OpenDetail, t("2026-09-27T00:02:00Z"))
+            .unwrap();
+
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        db.undo_event(owner, b, SignalKind::Dismiss).unwrap();
+
+        let items = db.list_articles(list_query(&db, false)).unwrap();
+        let ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
+        assert_eq!(ids, [a, b]);
+        assert!(!items[0].bookmarked);
+        // 取り消したものだけが消え、ほかの行動は残る
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::OpenDetail,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn migration_keeps_existing_events_and_accepts_new_kinds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO events (id, user_id, article_id, kind, created_at)
+               VALUES (7, 1, 1, 'up', '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings("SELECT id || kind || created_at FROM events")
+                .unwrap(),
+            ["7up2026-09-27T00:00:00.000Z"]
+        );
+        db.record_event(1, 1, SignalKind::Dismiss, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.record_event(1, 1, SignalKind::Bookmark, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        let err = db
+            .conn
+            .execute(
+                "INSERT INTO events (user_id, article_id, kind, created_at)
+                 VALUES (1, 1, 'unknown', '2026-09-27T00:00:00.000Z')",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
+    }
 }

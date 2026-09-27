@@ -541,6 +541,7 @@ mod tests {
             feedback: None,
             has_translation: false,
             translation_requested: false,
+            bookmarked: false,
             locked_by: vec![],
         }
     }
@@ -568,6 +569,7 @@ mod tests {
             sources: vec!["nra".into()],
             lang: "ja".into(),
             unread: true,
+            bookmarked: true,
             min_score: "60".into(),
             sort: "score".into(),
             ..Params::default()
@@ -617,6 +619,10 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
+        assert!(
+            html.contains(r#"name="bookmarked" value="1" checked"#),
+            "{html}"
+        );
         assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
         assert!(
             html.contains(r#"<option value="score" selected>"#),
@@ -675,6 +681,32 @@ mod tests {
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
+        assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
+    }
+
+    /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。
+    #[test]
+    fn list_page_cards_can_be_swiped() {
+        let html = list_page(
+            &[item(1, "2026-09-27T05:00:00.000Z")],
+            &[],
+            ListView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="card swipe" data-id="1">"#),
+            "{html}"
+        );
+        assert!(html.contains("<script>"), "{html}");
+        assert!(html.contains("/feedback/undo"), "{html}");
+        // 検索の結果は振り分けの対象にしない
+        let p = Params::from_query("q=x");
+        let results = [item(1, "2026-09-27T05:00:00.000Z")];
+        let html = search_page(&p, Some(&results), &[], None, &Page::default());
+        assert!(
+            !html.contains("swipe") && !html.contains("<script>"),
+            "{html}"
+        );
     }
 
     /// 切り替えのリンクは、もう一方の切り替えの状態を引き継ぐ。
@@ -688,7 +720,7 @@ mod tests {
                     let rest = &html[at + 6..];
                     rest[..rest.find('"').unwrap()].to_string()
                 })
-                .filter(|h| h != "/search")
+                .filter(|h| !h.starts_with("/search"))
                 .collect();
             hrefs.sort();
             hrefs
@@ -752,6 +784,27 @@ mod tests {
         let (new, earlier) = split_sections(items, None, false);
         assert_eq!(new.len(), 3);
         assert!(earlier.is_empty());
+    }
+
+    /// ブックマークした記事は振り分け済みなので、どちらの欄にも出さない。
+    #[test]
+    fn splits_without_bookmarked_articles() {
+        let mut new = item(1, "2026-09-27T05:00:00.000Z");
+        new.bookmarked = true;
+        let mut earlier = item(2, "2026-09-26T00:00:00.000Z");
+        earlier.bookmarked = true;
+        let items = vec![new, earlier, item(3, "2026-09-26T00:00:00.000Z")];
+        let boundary = Some("2026-09-27T00:00:00.000Z");
+        for include_read in [false, true] {
+            let (new, earlier) = split_sections(items.clone(), boundary, include_read);
+            assert!(new.is_empty());
+            assert_eq!(
+                earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
+                [3]
+            );
+        }
+        let (new, _) = split_sections(items, None, false);
+        assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [3]);
     }
 
     #[test]
@@ -955,9 +1008,25 @@ mod tests {
         );
         assert!(html.contains("sonnet"));
         assert!(html.contains(r#"action="/articles/7/feedback""#));
+        assert!(
+            html.contains(r#"<button name="kind" value="bookmark">🔖</button>"#),
+            "{html}"
+        );
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
         assert!(
             html.contains(r#"action="/articles/7/translation-request""#),
+            "{html}"
+        );
+    }
+
+    /// ブックマーク済みなら、同じボタンで外す。
+    #[test]
+    fn detail_page_offers_to_remove_the_bookmark() {
+        let mut d = detail();
+        d.item.bookmarked = true;
+        let html = detail_page(&d, DetailView::default(), &Page::default());
+        assert!(
+            html.contains(r#"<button name="kind" value="unbookmark" class="on">🔖</button>"#),
             "{html}"
         );
     }

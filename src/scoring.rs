@@ -221,6 +221,41 @@ mod tests {
         );
     }
 
+    /// ブックマークと「見ない」は、👍/👎 より弱い手がかりとして渡す。
+    #[test]
+    fn system_prompt_carries_bookmarks_and_dismissals_as_weak_signals() {
+        let signals = [
+            Signal {
+                kind: SignalKind::Bookmark,
+                title_ja: "燃料の輸送容器".into(),
+            },
+            Signal {
+                kind: SignalKind::Dismiss,
+                title_ja: "海外の電力料金".into(),
+            },
+        ];
+        let s = system_prompt(&profile(), &signals);
+        assert!(
+            s.contains("<signal kind=\"bookmark\">関心（ブックマーク）：燃料の輸送容器</signal>"),
+            "{s}"
+        );
+        assert!(
+            s.contains(
+                "<signal kind=\"dismiss\">弱い不要（見出しだけで見送った）：海外の電力料金</signal>"
+            ),
+            "{s}"
+        );
+        // 強さの順の説明にも入れる
+        assert!(
+            s.contains("「強い不要（👎）」≫「弱い不要（見出しだけで見送った）」"),
+            "{s}"
+        );
+        assert!(
+            s.contains("「関心（ブックマーク）」≪「強い関心（👍）」"),
+            "{s}"
+        );
+    }
+
     #[test]
     fn system_prompt_keeps_weight_precision() {
         let mut p = profile();

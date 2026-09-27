@@ -149,7 +149,7 @@ PR 1 で合成データ（手元の本文の文を並べ替えた 50KB の PDF �
 
 ## 入口
 
-3 つの入口で同じ名前のパラメータを使う：`q` `from` `to`（`YYYY-MM` または `YYYY-MM-DD`）
+3 つの入口で同じ名前のパラメータを使う：`q` `since` `until`（`YYYY-MM` または `YYYY-MM-DD`）
 `topic`（複数可）`source`（複数可）`lang` `translated=1` `liked=1` `unread=1` `min_score`。
 クエリ文字列 → `SearchQuery` の変換は共通関数にして、Web・API・CLI から使う。
 
@@ -163,8 +163,9 @@ PR 1 で合成データ（手元の本文の文を並べ替えた 50KB の PDF �
 ## PR の分け方（TDD：RED → GREEN をコミットに残す）
 
 1. 索引と全文の語の検索（migration 0006、`SearchQuery` の `terms` と `limit` だけ）＋合成データでの計測
-   - MCP の `search_articles`（`src/mcp.rs`）はキーワードなどをメモリ上で絞っている。PR 3 で `Db::search_articles` に載せ替え、
-     パラメータ名も MCP の既存の `since` / `until` / `keyword` に揃えるか決める
+   - MCP の `search_articles`（`src/mcp.rs`）はキーワードなどをメモリ上で絞っている。PR 3 で `Db::search_articles` に載せ替える。
+     MCP の「一覧と同じく隠す・点数順」を保つため、`SearchQuery` に `hide_below` と `order` を持たせる。
+     期間の名前は MCP の既存の `since` / `until` に揃え、どの入口でも `YYYY-MM` と `YYYY-MM-DD` を受け付ける（`src/search.rs`）
    - テスト：日本語 2 文字語・3 文字以上の語・英語の大小文字・複数語 AND・
      会員限定の本文にだけ出る語は資格の無い利用者に出ない・要約の版が閲覧不可なら一致しない・
      記事削除で索引から消える・migration 前の既存行が引ける・2 文字語も PDF の本文に当たる・LIKE の `%` `_` を文字どおりに扱う

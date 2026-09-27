@@ -82,3 +82,41 @@ pub async fn call_recorded<L: Llm>(
         Err(_) => Outcome::Halted(Halt::LlmFailed(error.unwrap_or_default())),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::fake::FakeLlm;
+    use crate::quota::QuotaConfig;
+
+    /// 既に止める指示が出ていれば、LLM を呼ばない（claude を起動しない）。
+    #[tokio::test]
+    async fn does_not_call_after_cancel() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([]);
+        let cancel = Cancel::default();
+        cancel.request();
+        let schema = serde_json::json!({});
+        let outcome = call_recorded(
+            &db,
+            &llm,
+            &mut Quota::new(QuotaConfig::default(), None, None),
+            Call {
+                stage: "digest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            },
+            Utc::now(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Cancelled));
+        assert!(llm.requests().is_empty());
+    }
+}

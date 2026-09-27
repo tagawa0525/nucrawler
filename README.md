@@ -88,6 +88,7 @@ nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] [--limit N] [語]...
+nucrawler eval [--all]
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
@@ -98,6 +99,11 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
   （例：訳語集を直した後に `redo translate --model sonnet --glossary`）。当たる訳語は、LLM に渡すのと同じ
   切り詰めた本文で判定する
 - `status` はソースごとの記事数と取得状況を表示する
+- `eval` は、採点が利用者の反応とどれだけ合っているかを表示する。記事ごとに最後の明示的な反応
+  （👍・ブックマークは正例、👎・見送りは負例。開いただけの記事は使わない）を正解とし、採点のキー
+  （プロファイル・モデル・プロンプトの版）ごとに、採点済みの割合、AUC（正例が負例より高い点になっている組の
+  割合。0.5 なら当て推量と同じ）、点数帯ごとの正例・負例の数を出す。既定は今のプロファイルと版のキーだけで、
+  `--all` で過去のキーも並べる
 - `search` は Web の検索画面（下記）と同じ条件で記事を探し、1 行 1 件（公開日時・点数・見出し・URL）で出す。
   閲覧としては記録しない
 - `topics` は要約に付けるトピックの語彙を扱う。要約では語彙から選び、当てはまる語が無いときだけ

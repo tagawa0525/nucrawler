@@ -8,16 +8,16 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ContentBlock, Implementation, IntoContents, ServerCapabilities, ServerConfig};
 use rmcp::schemars::{self, JsonSchema};
-use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError};
+use crate::db::{ArtifactVersion, Db, DbError, Feedback, ListItem, ListQuery};
 use crate::web::html::SourceLabels;
 
 #[derive(Debug, thiserror::Error)]
@@ -217,22 +217,144 @@ impl ServerHandler for Server {
 }
 
 /// stdin/stdout で、クライアントが接続を閉じるまで応答する。
-pub async fn run(_server: Server) -> Result<(), McpError> {
-    todo!()
+pub async fn run(server: Server) -> Result<(), McpError> {
+    let service = server
+        .serve(rmcp::transport::stdio())
+        .await
+        .map_err(Box::new)?;
+    tracing::info!("serving mcp on stdio");
+    service.waiting().await?;
+    Ok(())
+}
+
+/// 利用者（stdio なのでオーナー）と、現在のプロファイルのハッシュ。
+fn viewer(db: &Db) -> Result<(i64, Option<String>), DbError> {
+    let user = db.owner_id()?;
+    let hash = db.load_profile(user)?.map(|(_, hash)| hash);
+    Ok((user, hash))
 }
 
 fn search(
-    _db: &Db,
-    _web: &WebConfig,
-    _labels: &SourceLabels,
-    _params: SearchParams,
-    _now: DateTime<Utc>,
+    db: &Db,
+    web: &WebConfig,
+    labels: &SourceLabels,
+    params: SearchParams,
+    now: DateTime<Utc>,
 ) -> Result<SearchResult, ToolError> {
-    todo!()
+    let since = match params.since.as_deref() {
+        Some(date) => day_start("since", date)?,
+        None => now - Duration::days(web.list_days.into()),
+    };
+    let until = params
+        .until
+        .as_deref()
+        .map(|date| day_start("until", date).map(|t| crate::db::timestamp(t + Duration::days(1))))
+        .transpose()?;
+    let keyword = params
+        .keyword
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_lowercase);
+    let (user, hash) = viewer(db)?;
+    // キーワードなどの条件は DB の件数制限の後では絞れないので、期間内をすべて読んでから絞る
+    let items = db.list_articles(ListQuery {
+        user_id: user,
+        profile_hash: hash.as_deref(),
+        min_score: params.min_score.unwrap_or(web.min_score),
+        since,
+        show_all: params.include_hidden,
+        limit: usize::MAX,
+    })?;
+    let articles = items
+        .into_iter()
+        .filter(|i| until.as_ref().is_none_or(|u| i.at < *u))
+        .filter(|i| params.source.as_ref().is_none_or(|s| i.source_id == *s))
+        .filter(|i| {
+            params
+                .min_score
+                .is_none_or(|min| i.score.is_some_and(|s| s >= min))
+        })
+        .filter(|i| keyword.as_deref().is_none_or(|k| matches_keyword(i, k)))
+        .take(params.limit.unwrap_or(web.list_limit))
+        .map(|i| summary(i, labels))
+        .collect();
+    Ok(SearchResult { articles })
 }
 
-fn article(_db: &Db, _labels: &SourceLabels, _id: i64) -> Result<ArticleOutput, ToolError> {
-    todo!()
+/// `keyword` は小文字にしたもの。
+fn matches_keyword(item: &ListItem, keyword: &str) -> bool {
+    [
+        Some(&item.title),
+        item.title_ja.as_ref(),
+        item.summary_ja.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| text.to_lowercase().contains(keyword))
+}
+
+/// 日付（日本時間）のその日の 0 時。
+fn day_start(name: &str, date: &str) -> Result<DateTime<Utc>, ToolError> {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .and_then(crate::jst::midnight)
+        .ok_or_else(|| ToolError::InvalidParams(format!("{name} must be YYYY-MM-DD, got {date:?}")))
+}
+
+fn article(db: &Db, labels: &SourceLabels, id: i64) -> Result<ArticleOutput, ToolError> {
+    let (user, hash) = viewer(db)?;
+    let detail = db
+        .article_detail(user, hash.as_deref(), id)?
+        .ok_or(ToolError::NotFound(id))?;
+    Ok(ArticleOutput {
+        digest: detail.digests.first().map(|v| DigestOutput {
+            model: v.model.clone(),
+            created_at: v.created_at.clone(),
+            payload: v.payload.clone(),
+        }),
+        translation: detail.translations.first().map(translation),
+        article: summary(detail.item, labels),
+    })
+}
+
+fn translation(v: &ArtifactVersion) -> TranslationOutput {
+    TranslationOutput {
+        model: v.model.clone(),
+        created_at: v.created_at.clone(),
+        body_ja: v.payload["body_ja"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
+    ArticleSummary {
+        source: labels
+            .get(&item.source_id)
+            .cloned()
+            .unwrap_or_else(|| item.source_id.clone()),
+        id: item.article_id,
+        source_id: item.source_id,
+        url: item.url,
+        title: item.title,
+        title_ja: item.title_ja,
+        summary_ja: item.summary_ja,
+        date: item.at,
+        score: item.score,
+        reason: item.reason,
+        lwr_relevant: item.lwr_relevant,
+        feedback: item.feedback.map(|f| {
+            match f {
+                Feedback::Up => "up",
+                Feedback::Down => "down",
+            }
+            .to_string()
+        }),
+        has_translation: item.has_translation,
+        locked_by: item.locked_by,
+    }
 }
 
 #[cfg(test)]

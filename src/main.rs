@@ -8,6 +8,7 @@ use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
 use nucrawler::http::{Fetcher, HttpError};
 use nucrawler::llm::claude_cli::ClaudeCli;
+use nucrawler::mcp::{self, McpError};
 use nucrawler::pipeline::digest::{self, DigestStageError};
 use nucrawler::pipeline::extract::{self, ExtractStageError};
 use nucrawler::pipeline::fetch::{self, FetchError};
@@ -50,6 +51,8 @@ enum Error {
     Profile(#[from] ProfileError),
     #[error(transparent)]
     Serve(#[from] ServeError),
+    #[error(transparent)]
+    Mcp(#[from] McpError),
     #[error("failed to read {path}")]
     ReadFile {
         path: PathBuf,
@@ -97,7 +100,7 @@ fn exit_code(e: &Error) -> u8 {
     }
 }
 
-/// ログは stderr に出す（stdout は help 出力や将来の MCP の JSON-RPC 用）。
+/// ログは stderr に出す（stdout は help 出力や MCP の JSON-RPC 用）。
 /// 詳細度は RUST_LOG で変えられ、既定は info。readability が HTML を書き出すときの
 /// html5ever の警告（"weird namespace" など）は利用者が対処できないので、既定では出さない。
 fn init_tracing() {
@@ -139,6 +142,7 @@ async fn run() -> Result<(), Error> {
             )
             .await
         }
+        Command::Mcp => mcp(inv.config_dir, inv.data_dir).await,
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
         },
@@ -530,6 +534,19 @@ async fn shutdown_signal() {
         () = term => {}
     }
     tracing::info!("shutting down the web ui");
+}
+
+/// MCP の stdio サーバー。一覧の既定値とソースの表示名は Web UI と同じ設定を使う。
+async fn mcp(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
+    let (config, sources) = config::load(&config_dir(config)?)?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let labels = sources
+        .sources
+        .iter()
+        .map(|s| (s.id.clone(), s.display_name().to_string()))
+        .collect();
+    mcp::run(mcp::Server::new(db, config.web, labels)).await?;
+    Ok(())
 }
 
 fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {

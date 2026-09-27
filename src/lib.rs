@@ -5,6 +5,7 @@ pub mod db;
 pub mod digest;
 pub mod errors;
 pub mod extract;
+pub mod glossary;
 pub mod http;
 pub mod jst;
 pub mod llm;

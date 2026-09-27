@@ -7,7 +7,7 @@ use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
 use crate::llm::{Llm, LlmRequest};
-use crate::{errors, translate};
+use crate::{errors, glossary, translate};
 
 pub const STAGE: &str = "translate";
 
@@ -96,6 +96,7 @@ pub async fn translate_articles<L: Llm>(
             model,
         };
         let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
+        let system = translate::system_prompt(&glossary::relevant(db.glossary()?, &prompt));
         let outcome = call_recorded(
             db,
             llm,
@@ -104,7 +105,7 @@ pub async fn translate_articles<L: Llm>(
                 stage: STAGE,
                 n_items: 1,
                 req: LlmRequest {
-                    system: translate::system_prompt(),
+                    system: &system,
                     prompt: &prompt,
                     schema: &schema,
                     model,
@@ -282,6 +283,46 @@ mod tests {
         .unwrap()
     }
 
+    fn mention_edg(db: &Db, article_id: i64) {
+        db.insert_content(
+            article_id,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "The emergency diesel\ngenerators (EDGs) started.",
+        )
+        .unwrap();
+    }
+
+    /// DB に加えた訳語は、記事に原語が出てくれば次の呼び出しから system prompt に載る。
+    fn add_edg_term(db: &Db) {
+        db.conn()
+            .execute_batch(
+                "INSERT INTO glossary_terms (target, abbr) VALUES ('非常用ディーゼル発電機', 'EDG');
+                 INSERT INTO glossary_sources (term_id, source)
+                 SELECT id, 'emergency diesel generator' FROM glossary_terms WHERE abbr = 'EDG';
+                 INSERT INTO glossary_sources (term_id, source)
+                 SELECT id, 'EDG' FROM glossary_terms WHERE abbr = 'EDG';",
+            )
+            .unwrap();
+    }
+
+    const EDG_LINE: &str = "emergency diesel generator / EDG → 非常用ディーゼル発電機（EDG）";
+
+    #[tokio::test]
+    async fn system_prompt_carries_only_glossary_terms_in_the_articles() {
+        let (db, owner) = setup();
+        let requested = article(&db, 0, 10);
+        db.request_translation(owner, requested, now()).unwrap();
+        mention_edg(&db, requested);
+        add_edg_term(&db);
+        let llm = FakeLlm::new([ok("和訳")]);
+        run(&db, owner, &llm, &mut quota(10), true).await;
+        let system = &llm.requests()[0].system;
+        assert!(system.contains(EDG_LINE), "{system}");
+        // 記事に出てこない語は載せない
+        assert!(!system.contains("refueling outage"), "{system}");
+    }
+
     #[tokio::test]
     async fn translates_requests_then_high_scores_and_completes_requests() {
         let (db, owner) = setup();
@@ -298,7 +339,7 @@ mod tests {
         let reqs = llm.requests();
         assert!(reqs[0].prompt.contains("Body 2"), "requests first");
         assert!(reqs[1].prompt.contains("Body 0"));
-        assert_eq!(reqs[0].system, crate::translate::system_prompt());
+        assert_eq!(reqs[0].system, crate::translate::system_prompt(&[]));
         assert_eq!(reqs[0].schema, crate::translate::schema());
         assert_eq!(
             db.query_strings(

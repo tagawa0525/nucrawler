@@ -51,6 +51,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_topic_proposals.sql"),
     include_str!("migrations/0009_topic_aliases.sql"),
     include_str!("migrations/0010_bookmarks.sql"),
+    include_str!("migrations/0011_glossary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -964,6 +965,34 @@ impl Db {
             Ok(crate::topics::Topic { name, facet })
         })
         .collect()
+    }
+
+    /// 訳語集（登録順）。原語も登録順に並べる。
+    pub fn glossary(&self) -> Result<Vec<crate::glossary::Term>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.target, t.abbr, t.note, s.source
+             FROM glossary_terms AS t JOIN glossary_sources AS s ON s.term_id = t.id
+             ORDER BY t.id, s.rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut terms: Vec<(i64, crate::glossary::Term)> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let source: String = r.get(4)?;
+            match terms.last_mut() {
+                Some((last, term)) if *last == id => term.sources.push(source),
+                _ => terms.push((
+                    id,
+                    crate::glossary::Term {
+                        sources: vec![source],
+                        target: r.get(1)?,
+                        abbr: r.get(2)?,
+                        note: r.get(3)?,
+                    },
+                )),
+            }
+        }
+        Ok(terms.into_iter().map(|(_, term)| term).collect())
     }
 
     /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
@@ -4664,6 +4693,40 @@ mod tests {
             vocabulary,
             "seeded vocabulary passes the import validation"
         );
+    }
+
+    /// 以前の定数の訳語集を移し、原語の表記の揺れや略語は 1 つの訳語にまとめる。
+    #[test]
+    fn migration_seeds_glossary_with_sources_and_abbreviations() {
+        let db = Db::open_in_memory().unwrap();
+        let glossary = db.glossary().unwrap();
+        let nrc = glossary
+            .iter()
+            .find(|t| t.target == "米国原子力規制委員会")
+            .unwrap();
+        assert_eq!(nrc.sources, ["Nuclear Regulatory Commission", "NRC"]);
+        assert_eq!(nrc.abbr.as_deref(), Some("NRC"));
+        assert!(
+            glossary
+                .iter()
+                .any(|t| t.sources.contains(&"refueling outage".to_string())),
+            "{glossary:?}"
+        );
+    }
+
+    /// 同じ原語（大文字小文字の違いを含む）を別の訳語に結び付けられない。
+    #[test]
+    fn glossary_rejects_a_source_of_two_terms() {
+        let db = Db::open_in_memory().unwrap();
+        let err = db
+            .conn()
+            .execute_batch(
+                "INSERT INTO glossary_terms (target) VALUES ('運転許可更新');
+                 INSERT INTO glossary_sources (term_id, source)
+                 SELECT id, 'License Renewal' FROM glossary_terms WHERE target = '運転許可更新';",
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
     }
 
     /// 語彙を入れる前の要約も、語彙と同じ名前のトピックは付与として移し、消せないようにする。

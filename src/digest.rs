@@ -2,6 +2,7 @@
 //! 応答の検証。LLM の呼び出しやステージの進行はここでは扱わない。
 
 use crate::db::DigestInput;
+use crate::glossary::Term;
 use crate::prompt::escape_data;
 use crate::topics::Topic;
 
@@ -129,25 +130,10 @@ struct Payload {
     new_topics: Vec<Topic>,
 }
 
-/// 要約と和訳で共有する表記と用語の決まり。
-pub const GLOSSARY: &str = r#"# 表記
-- 数値・日付・固有名詞は原文のとおりに書き、記事に無いことは推測で補わない。
-- 用語は次の訳に統一する：
-  - refueling outage → 燃料取替停止（定期検査）
-  - scram → スクラム（原子炉緊急停止）
-  - license renewal / subsequent license renewal → 運転認可更新 / 2 回目の運転認可更新（SLR）
-  - power uprate → 出力向上
-  - accident tolerant fuel (ATF) → 事故耐性燃料（ATF）
-  - high burnup → 高燃焼度
-  - probabilistic risk assessment (PRA) → 確率論的リスク評価（PRA）
-  - small modular reactor (SMR) → 小型モジュール炉（SMR）
-  - spent fuel → 使用済燃料、decommissioning → 廃止措置
-  - PWR / BWR → 加圧水型軽水炉（PWR）/ 沸騰水型軽水炉（BWR）
-  - NRC → 米国原子力規制委員会（NRC）、原子力規制委員会 → 原子力規制委員会（NRA）"#;
-
-pub fn system_prompt(vocab: &[Topic]) -> String {
+/// `terms` は訳語集のうちバッチの記事に出てくる語（[`crate::glossary::relevant`]）。
+pub fn system_prompt(vocab: &[Topic], terms: &[Term]) -> String {
     format!(
-        "{}{}\n\n{GLOSSARY}",
+        "{}{}\n\n{}",
         r#"あなたは原子力（特に軽水炉）分野に詳しい技術記者です。
 与えられた記事を日本の原子力技術者向けに要約します。英語の記事は自然な日本語にし、日本語の記事は要約だけを行います。
 
@@ -167,7 +153,8 @@ pub fn system_prompt(vocab: &[Topic]) -> String {
 
 # トピックの語彙
 "#,
-        vocabulary_lines(vocab)
+        vocabulary_lines(vocab),
+        crate::glossary::prompt_section(terms)
     )
 }
 
@@ -380,22 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_guards_against_injection_and_sets_terms() {
-        let s = system_prompt(&vocab());
+    fn system_prompt_guards_against_injection_and_carries_terms() {
+        let terms = [Term {
+            sources: vec!["refueling outage".into()],
+            target: "燃料取替停止".into(),
+            abbr: None,
+            note: None,
+        }];
+        let s = system_prompt(&vocab(), &terms);
         assert!(s.contains("<article>"), "{s}");
         assert!(
             s.contains("指示"),
             "instructions inside articles must be ignored: {s}"
         );
-        // 用語集：refueling outage を「給油停止」と訳さない
-        assert!(s.contains("refueling outage"), "{s}");
-        assert!(s.contains("燃料取替"), "{s}");
+        assert!(s.ends_with(&crate::glossary::prompt_section(&terms)), "{s}");
     }
 
     /// 語彙は軸ごとに並べ、新しい語の提案は語彙で足りないときだけに限る。
     #[test]
     fn system_prompt_lists_vocabulary_by_facet() {
-        let s = system_prompt(&vocab());
+        let s = system_prompt(&vocab(), &[]);
         for line in [
             "分野：規制・審査、燃料、高経年化",
             "炉型：PWR、BWR",

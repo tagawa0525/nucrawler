@@ -8,7 +8,7 @@ use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
-use crate::{digest, errors};
+use crate::{digest, errors, glossary};
 
 pub const STAGE: &str = "digest";
 
@@ -79,7 +79,8 @@ pub async fn digest_articles<L: Llm>(
         let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
         // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
         let vocab = db.topics()?;
-        let system = digest::system_prompt(&vocab);
+        let terms = glossary::relevant(db.glossary()?, &prompt);
+        let system = digest::system_prompt(&vocab, &terms);
         let schema = digest::schema(&vocab);
         let outcome = call_recorded(
             db,
@@ -257,6 +258,45 @@ mod tests {
         .unwrap()
     }
 
+    fn mention_edg(db: &Db, article_id: i64) {
+        db.insert_content(
+            article_id,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "The emergency diesel\ngenerators (EDGs) started.",
+        )
+        .unwrap();
+    }
+
+    /// DB に加えた訳語は、記事に原語が出てくれば次の呼び出しから system prompt に載る。
+    fn add_edg_term(db: &Db) {
+        db.conn()
+            .execute_batch(
+                "INSERT INTO glossary_terms (target, abbr) VALUES ('非常用ディーゼル発電機', 'EDG');
+                 INSERT INTO glossary_sources (term_id, source)
+                 SELECT id, 'emergency diesel generator' FROM glossary_terms WHERE abbr = 'EDG';
+                 INSERT INTO glossary_sources (term_id, source)
+                 SELECT id, 'EDG' FROM glossary_terms WHERE abbr = 'EDG';",
+            )
+            .unwrap();
+    }
+
+    const EDG_LINE: &str = "emergency diesel generator / EDG → 非常用ディーゼル発電機（EDG）";
+
+    #[tokio::test]
+    async fn system_prompt_carries_only_glossary_terms_in_the_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 1);
+        mention_edg(&db, ids[0]);
+        add_edg_term(&db);
+        let llm = FakeLlm::new([ok(&ids, 0.1)]);
+        run(&db, &llm, &mut quota(10), 1).await;
+        let system = &llm.requests()[0].system;
+        assert!(system.contains(EDG_LINE), "{system}");
+        // バッチのどの記事にも出てこない語は載せない
+        assert!(!system.contains("refueling outage"), "{system}");
+    }
+
     /// 提案された語は語彙に加わって要約に付き、次のバッチからは語彙として選べる。
     #[tokio::test]
     async fn proposed_topics_join_the_vocabulary_for_later_batches() {
@@ -316,7 +356,7 @@ mod tests {
         assert_eq!(reqs[0].model, "sonnet");
         let vocab = db.topics().unwrap();
         assert_eq!(reqs[0].schema, crate::digest::schema(&vocab));
-        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab));
+        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab, &[]));
         assert!(
             reqs[0]
                 .prompt

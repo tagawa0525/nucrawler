@@ -9,7 +9,7 @@ use nucrawler::db::Db;
 use nucrawler::llm::claude_cli::ClaudeCli;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::lock;
-use nucrawler::pipeline::run::{self, RunEnv};
+use nucrawler::pipeline::run::{self, RunEnv, Suggested};
 use nucrawler::profile;
 use nucrawler::quota::Quota;
 use nucrawler::suggest;
@@ -66,9 +66,12 @@ pub(crate) async fn suggest(
     )
     .await?;
     finish(report)?;
-    let Some(suggestion) = suggestion else {
-        println!("no suggestion: the llm call limit was reached");
-        return Ok(());
+    let suggestion = match suggestion {
+        Suggested::Profile(suggestion) => suggestion,
+        Suggested::NotAsked(reason) => {
+            println!("no suggestion: the llm was not asked ({reason})");
+            return Ok(());
+        }
     };
     let Some(text) = suggest::render(&current, &suggestion, &out.display().to_string()) else {
         println!("no changes suggested");

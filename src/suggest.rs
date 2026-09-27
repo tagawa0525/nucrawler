@@ -68,6 +68,22 @@ mod tests {
         );
     }
 
+    /// 次の手順はそのまま貼り付けて実行できるよう、パスをシェル向けに引用する。
+    #[test]
+    fn quotes_paths_for_the_shell() {
+        let suggestion = Suggestion {
+            profile: profile(0.7),
+            reasons: vec![],
+        };
+        let out = render(&profile(0.9), &suggestion, "my profile's.toml").unwrap();
+        assert!(
+            out.contains("nucrawler eval --profile 'my profile'\\''s.toml'"),
+            "{out}"
+        );
+        let plain = render(&profile(0.9), &suggestion, "dir/new-1.toml").unwrap();
+        assert!(plain.contains("--profile dir/new-1.toml`"), "{plain}");
+    }
+
     #[test]
     fn nothing_to_write_without_changes() {
         let suggestion = Suggestion {

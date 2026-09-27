@@ -282,14 +282,27 @@ pub async fn suggest_profile<L: Llm>(
     config: &Config,
     profile: &Profile,
     evidence: &[Evidence],
-) -> Result<(RunReport, Option<crate::prompt::suggest::Suggestion>), RunError> {
+) -> Result<(RunReport, Suggested), RunError> {
     let mut report = RunReport::default();
     let now = (env.clock)();
     let summary =
         suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
-    report_halt(summary.halted, &mut report.llm_failure);
+    let _ = &summary.halted;
+    report_halt(summary.halted.clone(), &mut report.llm_failure);
     report.cancelled = summary.cancelled || env.cancel.is_requested();
-    Ok((report, summary.suggestion))
+    let suggested = match summary.suggestion {
+        Some(s) => Suggested::Profile(s),
+        None => todo!(),
+    };
+    Ok((report, suggested))
+}
+
+/// `profile suggest` の結果。
+#[derive(Debug)]
+pub enum Suggested {
+    Profile(crate::prompt::suggest::Suggestion),
+    /// 上限などで呼ばなかった。利用者に見せる理由
+    NotAsked(String),
 }
 
 /// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。
@@ -441,6 +454,35 @@ mod tests {
         assert_eq!(report, RunReport::default());
         article(db, 1);
         id
+    }
+
+    /// 上限で呼べなかったときは、どの上限で止まったかを返す（利用者に正しい理由を示すため）。
+    #[tokio::test]
+    async fn suggest_reports_why_it_did_not_ask() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([]);
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(0));
+        let profile = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        let (report, suggested) = suggest_profile(
+            RunEnv {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota,
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &Config::default(),
+            &profile,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(report, RunReport::default());
+        let stop = crate::quota::Stop::MaxCalls { limit: 0 }.to_string();
+        assert!(
+            matches!(&suggested, Suggested::NotAsked(reason) if *reason == stop),
+            "{suggested:?}"
+        );
     }
 
     /// 認証切れなどで LLM が失敗したら、同じ実行の後続の LLM ステージは呼ばず、最後に報告する。

@@ -68,7 +68,7 @@ pub struct SearchParams {
     pub source: Option<String>,
     /// この点数以上の記事だけ。既定は Web UI の一覧と同じ（設定の web.min_score）。指定すると include_hidden でも未採点の記事は除く
     pub min_score: Option<u8>,
-    /// Web UI の「すべて表示」と同じく、👎・閾値未満・未採点・軽水炉に関係しない記事も含める
+    /// Web UI の「すべて表示」と同じく、👎・見ない・閾値未満・未採点・軽水炉に関係しない記事も含める
     #[serde(default)]
     pub include_hidden: bool,
     /// 最大件数。既定は Web UI の一覧と同じ（設定の web.list_limit）
@@ -162,7 +162,7 @@ impl Server {
     }
 
     #[tool(
-        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（👎 を除く）を点数の高い順に返す。"
+        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（👎・見ないにした記事を除く）を点数の高い順に返す。一覧と違い、ブックマークした記事も含む。"
     )]
     pub async fn search_articles(
         &self,
@@ -444,7 +444,7 @@ mod tests {
         )
     }
 
-    /// 既定では Web UI の一覧と同じく、👎・閾値未満・未採点・非軽水炉を除く。
+    /// 既定では Web UI の一覧と同じく、👎・見ない・閾値未満・未採点・非軽水炉を除く。
     #[test]
     fn search_hides_what_the_web_list_hides_by_default() {
         let db = Db::open_in_memory().unwrap();

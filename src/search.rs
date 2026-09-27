@@ -31,6 +31,7 @@ pub struct Params {
     pub translated: bool,
     pub liked: bool,
     pub unread: bool,
+    pub bookmarked: bool,
     pub min_score: String,
     /// `newest`（既定）か `score`
     pub sort: String,
@@ -52,6 +53,7 @@ impl Params {
                 "translated" => p.translated = value == "1",
                 "liked" => p.liked = value == "1",
                 "unread" => p.unread = value == "1",
+                "bookmarked" => p.bookmarked = value == "1",
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
                 _ => {}
@@ -73,7 +75,7 @@ impl Params {
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.liked || self.unread)
+            && !(self.translated || self.liked || self.unread || self.bookmarked)
     }
 
     /// 検索の条件にする。一覧で隠す記事も含める。
@@ -114,6 +116,7 @@ impl Params {
             translated: self.translated,
             liked: self.liked,
             unread: self.unread,
+            bookmarked: self.bookmarked,
             min_score,
             hide_below: None,
             order,
@@ -194,7 +197,7 @@ mod tests {
     fn reads_params_from_a_query_string() {
         let p = Params::from_query(
             "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&source=nra&source=wnn\
-             &since=2026-09&until=&lang=ja&translated=1&liked=0&unread=on&min_score=60&sort=score&x=1",
+             &since=2026-09&until=&lang=ja&translated=1&liked=0&unread=on&bookmarked=1&min_score=60&sort=score&x=1",
         );
         assert_eq!(
             p,
@@ -205,6 +208,7 @@ mod tests {
                 sources: vec!["nra".into(), "wnn".into()],
                 lang: "ja".into(),
                 translated: true,
+                bookmarked: true,
                 min_score: "60".into(),
                 sort: "score".into(),
                 ..Params::default()
@@ -212,6 +216,7 @@ mod tests {
         );
         assert!(!p.is_empty());
         assert!(Params::from_query("").is_empty());
+        assert!(!Params::from_query("bookmarked=1").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -230,6 +235,7 @@ mod tests {
             translated: true,
             liked: true,
             unread: true,
+            bookmarked: true,
             min_score: "60".into(),
             sort: "score".into(),
         };
@@ -241,7 +247,7 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.liked && q.unread);
+        assert!(q.translated && q.liked && q.unread && q.bookmarked);
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert_eq!(q.hide_below, None, "search shows what the list hides");
@@ -320,6 +326,7 @@ mod tests {
             feedback: None,
             has_translation: false,
             translation_requested: false,
+            bookmarked: false,
             locked_by: vec![],
         };
         assert_eq!(

@@ -50,6 +50,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0007_topics.sql"),
     include_str!("migrations/0008_topic_proposals.sql"),
     include_str!("migrations/0009_topic_aliases.sql"),
+    include_str!("migrations/0010_bookmarks.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -227,13 +228,18 @@ pub struct ScoreInput {
     pub topics: Vec<String>,
 }
 
-/// 利用者の行動。推薦への効き方は 👎 ≫ 詳細を開いた ＜ 和訳を開いた ≪ 👍。
+/// 利用者の行動。推薦への効き方は、不要が 👎 ≫ 見ない、関心が
+/// 詳細を開いた ＜ 和訳を開いた・ブックマーク ≪ 👍。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalKind {
     OpenDetail,
     OpenTranslation,
     Up,
     Down,
+    /// 一覧で後で読むために残した（外すまでブックマークとして残る）
+    Bookmark,
+    /// 一覧で見出しだけ見て見送った
+    Dismiss,
 }
 
 impl SignalKind {
@@ -243,6 +249,8 @@ impl SignalKind {
             Self::OpenTranslation => "open_translation",
             Self::Up => "up",
             Self::Down => "down",
+            Self::Bookmark => "bookmark",
+            Self::Dismiss => "dismiss",
         }
     }
 }
@@ -324,6 +332,7 @@ pub struct ListItem {
     /// 詳細か和訳を開いたことがある
     pub read: bool,
     pub feedback: Option<Feedback>,
+    pub bookmarked: bool,
     pub has_translation: bool,
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
@@ -339,7 +348,7 @@ pub struct ListQuery<'a> {
     pub min_score: u8,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
-    /// 👎、閾値未満、未採点、非軽水炉の記事も表示する
+    /// 👎、見ない、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
     pub limit: usize,
 }
@@ -366,9 +375,11 @@ pub struct SearchQuery<'a> {
     pub liked: bool,
     /// 詳細も和訳も開いていない
     pub unread: bool,
+    /// ブックマークしている
+    pub bookmarked: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、👎・非軽水炉・未採点・この点数未満を隠す
+    /// 一覧の既定と同じく、👎・見ない・非軽水炉・未採点・この点数未満を隠す
     pub hide_below: Option<u8>,
     pub order: SearchOrder,
     pub limit: usize,
@@ -515,6 +526,9 @@ impl SearchFilters {
         }
         if q.unread {
             f.rows.push_str(" AND rows.read = 0");
+        }
+        if q.bookmarked {
+            f.rows.push_str(" AND rows.bookmarked = 1");
         }
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND s.score >= :min_score");
@@ -1311,6 +1325,7 @@ impl Db {
         Ok(())
     }
 
+    /// 行動を記録する。ブックマークなら、外すまでブックマークとしても残す。
     pub fn record_event(
         &self,
         user_id: i64,
@@ -1318,9 +1333,45 @@ impl Db {
         kind: SignalKind,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
+        )?;
+        if kind == SignalKind::Bookmark {
+            tx.execute(
+                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, event_id)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![user_id, article_id, tx.last_insert_rowid()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// ブックマークを外す。ブックマークした行動は採点の手がかりとして残す。
+    pub fn unbookmark(&self, user_id: i64, article_id: i64) -> Result<(), DbError> {
+        self.conn.execute(
+            "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
+            rusqlite::params![user_id, article_id],
+        )?;
+        Ok(())
+    }
+
+    /// 誤操作の取り消し。その種類の最新の行動を無かったことにする（ブックマークなら外す）。
+    pub fn undo_event(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: SignalKind,
+    ) -> Result<(), DbError> {
+        // その行動で付いたブックマークは、外部キー（bookmarks.event_id）の CASCADE で外れる
+        self.conn.execute(
+            "DELETE FROM events WHERE id = (
+               SELECT id FROM events
+               WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
+               ORDER BY created_at DESC, id DESC LIMIT 1)",
+            rusqlite::params![user_id, article_id, kind.as_str()],
         )?;
         Ok(())
     }
@@ -1356,6 +1407,8 @@ impl Db {
                 "open_translation" => SignalKind::OpenTranslation,
                 "up" => SignalKind::Up,
                 "down" => SignalKind::Down,
+                "bookmark" => SignalKind::Bookmark,
+                "dismiss" => SignalKind::Dismiss,
                 other => {
                     return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}")));
                 }
@@ -1752,6 +1805,11 @@ impl Db {
     ) -> Result<Vec<ListItem>, DbError> {
         const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
+        // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
+        let list_filter = match scope {
+            ItemScope::List { .. } => "AND rows.bookmarked = 0",
+            _ => "",
+        };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
             ItemScope::List {
@@ -1809,6 +1867,13 @@ impl Db {
                        WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
                        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
                       EXISTS (
+                        SELECT 1 FROM events AS e
+                        WHERE e.user_id = :user AND e.article_id = i.id AND e.kind = 'dismiss')
+                        AS dismissed,
+                      EXISTS (
+                        SELECT 1 FROM bookmarks AS b
+                        WHERE b.user_id = :user AND b.article_id = i.id) AS bookmarked,
+                      EXISTS (
                         SELECT 1 FROM artifacts AS t
                         WHERE t.article_id = i.id AND t.kind = 'translation' AND {viewable_t})
                         AS has_translation,
@@ -1830,13 +1895,15 @@ impl Db {
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
-                    rows.requested, rows.locked_by
+                    rows.requested, rows.locked_by, rows.bookmarked
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
+             -- 既定では 👎、見ない、非軽水炉、未採点、閾値未満を隠す
              WHERE (:all = 1
-                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min))
+                OR (rows.feedback IS NOT 'down' AND rows.dismissed = 0
+                    AND rows.relevant = 1 AND s.score >= :min))
                {rows_filter}
+               {list_filter}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
@@ -1880,6 +1947,7 @@ impl Db {
                     Some("down") => Some(Feedback::Down),
                     _ => None,
                 },
+                bookmarked: r.get(17)?,
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),
@@ -5367,5 +5435,281 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
+    }
+
+    /// 一覧でブックマークした記事は、外すまでブックマークとして残る。
+    /// ブックマークした行動は、外しても採点の手がかりとして残る。
+    #[test]
+    fn bookmark_marks_items_until_removed_and_keeps_the_signal() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let bookmarked = |db: &Db| db.search_articles(&search_query(db)).unwrap()[0].bookmarked;
+        assert!(!bookmarked(&db));
+
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert!(bookmarked(&db));
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    bookmarked: true,
+                    ..search_query(&db)
+                }
+            ),
+            [a]
+        );
+
+        db.unbookmark(owner, a).unwrap();
+        assert!(!bookmarked(&db));
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Bookmark,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。
+    /// 件数の上限は除いた後にかける（ブックマークが上位を占めても一覧が減らない）。
+    #[test]
+    fn list_leaves_out_bookmarked_articles_before_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let top = scored_article(
+            &db,
+            "https://e.com/top",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        let next = scored_article(
+            &db,
+            "https://e.com/next",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.record_event(owner, top, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        for show_all in [false, true] {
+            let ids: Vec<i64> = db
+                .list_articles(ListQuery {
+                    limit: 1,
+                    ..list_query(&db, show_all)
+                })
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect();
+            assert_eq!(ids, [next], "show_all = {show_all}");
+        }
+        // 外せば一覧に戻る
+        db.unbookmark(owner, top).unwrap();
+        assert_eq!(list_ids(&db, false), [top, next]);
+    }
+
+    /// 「見ない」にした記事は 👎 と同じく一覧の既定から隠れ、弱い不要として採点に渡る。
+    #[test]
+    fn dismissed_articles_are_hidden_by_default_and_become_signals() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let kept = scored_article(
+            &db,
+            "https://e.com/kept",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        let dismissed = scored_article(
+            &db,
+            "https://e.com/dismissed",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(
+            owner,
+            dismissed,
+            SignalKind::Dismiss,
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert_eq!(list_ids(&db, false), [kept]);
+        assert_eq!(list_ids(&db, true), [dismissed, kept]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    hide_below: Some(60),
+                    ..search_query(&db)
+                }
+            ),
+            [kept]
+        );
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Dismiss,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// 誤って振り分けたときの取り消しは、その行動が無かったことにする（採点にも渡さない）。
+    #[test]
+    fn undo_removes_the_latest_event_and_the_bookmark() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let b = scored_article(
+            &db,
+            "https://e.com/b",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::Dismiss, t("2026-09-27T00:01:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::OpenDetail, t("2026-09-27T00:02:00Z"))
+            .unwrap();
+
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        db.undo_event(owner, b, SignalKind::Dismiss).unwrap();
+
+        let items = db.list_articles(list_query(&db, false)).unwrap();
+        let ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
+        assert_eq!(ids, [a, b]);
+        assert!(!items[0].bookmarked);
+        // 取り消したものだけが消え、ほかの行動は残る
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::OpenDetail,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// 取り消すのは、取り消す行動で付いたブックマークだけ。それより前からのブックマークは残す。
+    #[test]
+    fn undo_keeps_a_bookmark_made_before() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(db.search_articles(&search_query(&db)).unwrap()[0].bookmarked);
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Bookmark,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
+    /// 同じ時刻（ミリ秒）の行動が重なっても、取り消すのはその行動で付いたブックマークだけ。
+    /// 外した後に付け直したブックマークは、付け直した行動の取り消しで外れる。
+    #[test]
+    fn undo_follows_the_event_that_made_the_bookmark() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let bookmarked = |db: &Db| db.search_articles(&search_query(db)).unwrap()[0].bookmarked;
+        let at = t("2026-09-27T00:00:00Z");
+        db.record_event(owner, a, SignalKind::Bookmark, at).unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, at).unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(bookmarked(&db));
+
+        db.unbookmark(owner, a).unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(!bookmarked(&db));
+    }
+
+    #[test]
+    fn migration_keeps_existing_events_and_accepts_new_kinds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO events (id, user_id, article_id, kind, created_at)
+               VALUES (7, 1, 1, 'up', '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings("SELECT id || kind || created_at FROM events")
+                .unwrap(),
+            ["7up2026-09-27T00:00:00.000Z"]
+        );
+        // 作り直した events の索引と、bookmarks の外部キーの子側の索引
+        assert_eq!(
+            db.query_strings(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name IN ('events', 'bookmarks') AND sql IS NOT NULL
+                 ORDER BY name"
+            )
+            .unwrap(),
+            [
+                "bookmarks_by_article",
+                "bookmarks_by_event",
+                "events_by_article",
+                "events_by_user"
+            ]
+        );
+        db.record_event(1, 1, SignalKind::Dismiss, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.record_event(1, 1, SignalKind::Bookmark, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        let err = db
+            .conn
+            .execute(
+                "INSERT INTO events (user_id, article_id, kind, created_at)
+                 VALUES (1, 1, 'unknown', '2026-09-27T00:00:00.000Z')",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
     }
 }

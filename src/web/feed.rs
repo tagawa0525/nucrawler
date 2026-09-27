@@ -109,6 +109,7 @@ mod tests {
             feedback: None,
             has_translation: false,
             translation_requested: false,
+            bookmarked: false,
             locked_by: vec![],
         }
     }

@@ -1,4 +1,5 @@
-//! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。JavaScript は使わない。
+//! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。
+//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）にだけ使い、無くても読める。
 
 use crate::db::{ArticleDetail, ListItem, TopicUsage, Warning};
 use crate::search::Params;
@@ -61,6 +62,13 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   border: 1px solid #bbb; background: #fff; }
 .actions button.on { background: #0b57a4; color: #fff; }
 .versions a { margin-right: 0.6rem; font-size: 0.85rem; }
+.card[data-id] { touch-action: pan-y; transition: transform 0.2s; }
+.card[data-id]:focus { outline: 2px solid #0b57a4; outline-offset: 2px; }
+.card[data-dir=bookmark] { box-shadow: inset 5px 0 #2e7d32; }
+.card[data-dir=dismiss] { box-shadow: inset -5px 0 #b3261e; }
+.toast { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); background: #1d1d1b;
+  color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
+.toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
 ";
 
@@ -144,7 +152,7 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
 #[derive(Clone, Copy, Default)]
 pub struct ListView {
-    /// 👎・低い点・未採点の記事も出す
+    /// 👎・見ない・低い点・未採点の記事も出す
     pub all: bool,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
@@ -174,7 +182,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     let all_label = if view.all {
         "おすすめだけ表示"
     } else {
-        "すべて表示（👎・低い点・未採点を含む）"
+        "すべて表示（👎・見ない・低い点・未採点を含む）"
     };
     let read_toggle = ListView {
         read: !view.read,
@@ -186,7 +194,9 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         "過去の既読も表示"
     };
     body.push_str(&format!(
-        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>",
+        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"/search?bookmarked=1\">🔖 ブックマーク</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>\
+         <p class=\"meta\">右へスワイプか l / → でブックマーク、左へスワイプか h / ← で見ない\
+         （j / k・↓ / ↑ で選ぶ、u で取り消す）</p>",
         all_toggle.href(),
         read_toggle.href(),
     ));
@@ -194,15 +204,16 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
     }
-    body.extend(new.iter().map(|i| card(i, page)));
+    body.extend(new.iter().map(|i| card(i, true, page)));
     if !earlier.is_empty() {
         body.push_str(if view.read {
             "<h2>過去の記事</h2>"
         } else {
             "<h2>過去の未読</h2>"
         });
-        body.extend(earlier.iter().map(|i| card(i, page)));
+        body.extend(earlier.iter().map(|i| card(i, true, page)));
     }
+    body.push_str(SWIPE_SCRIPT);
     layout("一覧", page, &body)
 }
 
@@ -225,7 +236,7 @@ pub fn search_page(
             body.push_str("<p class=\"meta\">該当する記事はありません</p>");
         } else {
             body.push_str(&format!("<h2>{} 件</h2>", items.len()));
-            body.extend(items.iter().map(|i| card(i, page)));
+            body.extend(items.iter().map(|i| card(i, false, page)));
         }
     }
     layout("検索", page, &body)
@@ -300,7 +311,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
          <details{topics_open}><summary>トピック</summary>{topics}</details>\
          <details{sources_open}><summary>ソース</summary>{sources}</details>\
          <p>言語 {lang} 並び {sort}</p>\
-         <p>{translated}{liked}{unread}最低点 {min_score}</p>\
+         <p>{translated}{liked}{unread}{bookmarked}最低点 {min_score}</p>\
          <p><button type=\"submit\">検索</button></p></form>",
         q = text(
             "q",
@@ -324,6 +335,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         translated = checkbox("translated", "1", p.translated, "和訳あり"),
         liked = checkbox("liked", "1", p.liked, "👍"),
         unread = checkbox("unread", "1", p.unread, "未読"),
+        bookmarked = checkbox("bookmarked", "1", p.bookmarked, "🔖"),
         min_score = text(
             "min_score",
             &p.min_score,
@@ -332,7 +344,142 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
     )
 }
 
-fn card(i: &ListItem, page: &Page) -> String {
+/// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
+/// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
+/// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
+/// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
+const SWIPE_SCRIPT: &str = r#"<script>
+(() => {
+  const post = (url, kind) => fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "kind=" + kind,
+    redirect: "manual",
+  }).then((res) => res.ok || res.type === "opaqueredirect");
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  // 振り分けの結果をスクリーンリーダーにも伝える
+  toast.setAttribute("role", "status");
+  toast.hidden = true;
+  document.body.append(toast);
+  let timer, undoLast = null;
+  const hideToast = () => { toast.hidden = true; undoLast = null; };
+  const notify = (text, undo) => {
+    clearTimeout(timer);
+    toast.textContent = text;
+    undoLast = undo || null;
+    if (undo) {
+      const button = document.createElement("button");
+      button.textContent = "元に戻す";
+      button.onclick = () => { hideToast(); undo(); };
+      toast.append(button);
+    }
+    toast.hidden = false;
+    timer = setTimeout(hideToast, 6000);
+  };
+  const reset = (card) => {
+    card.style.transform = "";
+    delete card.dataset.dir;
+    delete card.dataset.busy;
+  };
+  // 送っている間は同じカードを振り分け直さない（行動が二重に記録される）
+  const triage = async (card, kind) => {
+    if (card.dataset.busy) return;
+    card.dataset.busy = "1";
+    const id = card.dataset.id;
+    card.style.transform = `translateX(${kind === "bookmark" ? "" : "-"}110%)`;
+    if (!(await post(`/articles/${id}/feedback`, kind).catch(() => false))) {
+      reset(card);
+      notify("記録できませんでした");
+      return;
+    }
+    card.hidden = true;
+    notify(kind === "bookmark" ? "🔖 ブックマークしました" : "見ない記事にしました", async () => {
+      if (await post(`/articles/${id}/feedback/undo`, kind).catch(() => false)) {
+        reset(card);
+        card.hidden = false;
+      } else {
+        notify("取り消せませんでした");
+      }
+    });
+  };
+  const TRIAGE_KEYS = { l: "bookmark", ArrowRight: "bookmark", h: "dismiss", ArrowLeft: "dismiss" };
+  const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
+    const cards = [...document.querySelectorAll(".card[data-id]")]
+      .filter((c) => !c.hidden && !c.dataset.busy);
+    const current = e.target.closest(".card[data-id]");
+    const at = cards.indexOf(current);
+    if (e.key in MOVE_KEYS) {
+      const next = cards[at < 0 ? 0 : Math.min(Math.max(at + MOVE_KEYS[e.key], 0), cards.length - 1)];
+      if (next) { e.preventDefault(); next.focus(); }
+    } else if (e.key in TRIAGE_KEYS && at >= 0) {
+      e.preventDefault();
+      // 振り分けたカードは隠れるので、隣のカードを選んでおく
+      const next = cards[at + 1] || cards[at - 1];
+      triage(current, TRIAGE_KEYS[e.key]);
+      if (next) next.focus();
+    } else if (e.key === "Enter" && e.target === current) {
+      current.querySelector("a.title").click();
+    } else if (e.key === "u" && undoLast) {
+      e.preventDefault();
+      const undo = undoLast;
+      hideToast();
+      undo();
+    }
+  });
+  const EDGE = 24, START = 10, COMMIT = 0.35;
+  for (const card of document.querySelectorAll(".card[data-id]")) {
+    let x0 = null, y0 = 0, dx = 0, dragging = false, moved = false;
+    card.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || card.dataset.busy) return;
+      if (e.clientX < EDGE || e.clientX > innerWidth - EDGE) return;
+      x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = false; moved = false;
+    });
+    card.addEventListener("pointermove", (e) => {
+      if (x0 === null) return;
+      dx = e.clientX - x0;
+      if (!dragging) {
+        if (Math.abs(e.clientY - y0) > Math.abs(dx)) { x0 = null; return; }
+        if (Math.abs(dx) < START) return;
+        dragging = moved = true;
+        card.setPointerCapture(e.pointerId);
+        card.style.transition = "none";
+      }
+      card.style.transform = `translateX(${dx}px)`;
+      card.dataset.dir = dx > 0 ? "bookmark" : "dismiss";
+    });
+    const end = () => {
+      const was = dragging;
+      x0 = null; dragging = false;
+      if (!was) return;
+      card.style.transition = "";
+      if (Math.abs(dx) > card.offsetWidth * COMMIT) {
+        triage(card, dx > 0 ? "bookmark" : "dismiss");
+      } else {
+        reset(card);
+      }
+    };
+    card.addEventListener("pointerup", end);
+    // ドラッグ中の取り消しだけを戻す（送信中のカードの状態は消さない）
+    card.addEventListener("pointercancel", () => {
+      const was = dragging;
+      x0 = null; dragging = false;
+      if (!was) return;
+      card.style.transition = "";
+      reset(card);
+    });
+    // スワイプの指を離したときのクリックで、記事を開かない
+    card.addEventListener("click", (e) => {
+      if (moved) { e.preventDefault(); moved = false; }
+    }, true);
+  }
+})();
+</script>"#;
+
+/// 記事のカード。`swipe` なら一覧の振り分けの対象にする（`SWIPE_SCRIPT`）。
+fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
     let score = i
         .score
@@ -354,9 +501,14 @@ fn card(i: &ListItem, page: &Page) -> String {
         .as_deref()
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
-        "<div class=\"card{read}\">{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
+        "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
          <div class=\"meta\">{source} ・{at}{lock}{translation}</div>{summary}</div>",
         read = if i.read { " read" } else { "" },
+        swipe = if swipe {
+            format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
+        } else {
+            String::new()
+        },
         id = i.article_id,
         title = escape(title),
         source = escape(page.source(&i.source_id)),
@@ -439,7 +591,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
             escape(&topics.join("、"))
         ));
     }
-    body.push_str(&feedback_forms(id, i.feedback));
+    body.push_str(&feedback_forms(id, i.feedback, i.bookmarked));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -456,7 +608,8 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
     layout(&title, page, &body)
 }
 
-fn feedback_forms(id: i64, current: Option<crate::db::Feedback>) -> String {
+/// 👍/👎 とブックマーク。ブックマーク済みなら、同じボタンで外す。
+fn feedback_forms(id: i64, current: Option<crate::db::Feedback>, bookmarked: bool) -> String {
     use crate::db::Feedback;
     let button = |value: &str, label: &str, on: bool| {
         format!(
@@ -466,9 +619,14 @@ fn feedback_forms(id: i64, current: Option<crate::db::Feedback>) -> String {
         )
     };
     format!(
-        "<div class=\"actions\">{}{}</div>",
+        "<div class=\"actions\">{}{}{}</div>",
         button("up", "👍", current == Some(Feedback::Up)),
-        button("down", "👎", current == Some(Feedback::Down))
+        button("down", "👎", current == Some(Feedback::Down)),
+        if bookmarked {
+            button("unbookmark", "🔖", true)
+        } else {
+            button("bookmark", "🔖", false)
+        }
     )
 }
 
@@ -541,6 +699,7 @@ mod tests {
             feedback: None,
             has_translation: false,
             translation_requested: false,
+            bookmarked: false,
             locked_by: vec![],
         }
     }
@@ -568,6 +727,7 @@ mod tests {
             sources: vec!["nra".into()],
             lang: "ja".into(),
             unread: true,
+            bookmarked: true,
             min_score: "60".into(),
             sort: "score".into(),
             ..Params::default()
@@ -617,6 +777,10 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
+        assert!(
+            html.contains(r#"name="bookmarked" value="1" checked"#),
+            "{html}"
+        );
         assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
         assert!(
             html.contains(r#"<option value="score" selected>"#),
@@ -675,6 +839,38 @@ mod tests {
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
+        assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
+    }
+
+    /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。
+    #[test]
+    fn list_page_cards_can_be_swiped() {
+        let html = list_page(
+            &[item(1, "2026-09-27T05:00:00.000Z")],
+            &[],
+            ListView::default(),
+            &Page::default(),
+        );
+        // キーボードでも選べるよう、カードにフォーカスを置ける
+        assert!(
+            html.contains(r#"<div class="card" data-id="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(html.contains("<script>"), "{html}");
+        assert!(html.contains("/feedback/undo"), "{html}");
+        // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
+        for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
+            assert!(html.contains(key), "{key}: {html}");
+        }
+        assert!(html.contains("l / →"), "the hint names the keys: {html}");
+        // 検索の結果は振り分けの対象にしない
+        let p = Params::from_query("q=x");
+        let results = [item(1, "2026-09-27T05:00:00.000Z")];
+        let html = search_page(&p, Some(&results), &[], None, &Page::default());
+        assert!(
+            !html.contains(r#"data-id=""#) && !html.contains("<script>"),
+            "{html}"
+        );
     }
 
     /// 切り替えのリンクは、もう一方の切り替えの状態を引き継ぐ。
@@ -688,7 +884,7 @@ mod tests {
                     let rest = &html[at + 6..];
                     rest[..rest.find('"').unwrap()].to_string()
                 })
-                .filter(|h| h != "/search")
+                .filter(|h| !h.starts_with("/search"))
                 .collect();
             hrefs.sort();
             hrefs
@@ -955,9 +1151,25 @@ mod tests {
         );
         assert!(html.contains("sonnet"));
         assert!(html.contains(r#"action="/articles/7/feedback""#));
+        assert!(
+            html.contains(r#"<button name="kind" value="bookmark">🔖</button>"#),
+            "{html}"
+        );
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
         assert!(
             html.contains(r#"action="/articles/7/translation-request""#),
+            "{html}"
+        );
+    }
+
+    /// ブックマーク済みなら、同じボタンで外す。
+    #[test]
+    fn detail_page_offers_to_remove_the_bookmark() {
+        let mut d = detail();
+        d.item.bookmarked = true;
+        let html = detail_page(&d, DetailView::default(), &Page::default());
+        assert!(
+            html.contains(r#"<button name="kind" value="unbookmark" class="on">🔖</button>"#),
             "{html}"
         );
     }

@@ -608,6 +608,52 @@ mod tests {
         server.assert_no_views();
     }
 
+    /// フィードとエントリの ID は、アクセスしたアドレスによらず同じ（リーダーが既読を見失わない）。
+    /// リンクはアクセスしたアドレスから作る。
+    #[tokio::test]
+    async fn feed_ids_do_not_depend_on_the_host() {
+        let db = Db::open_in_memory().unwrap();
+        let good = seed_recommended_and_hidden(&db);
+        let server = Server::start(db).await;
+        let hosts = ["100.64.0.1:8080", "nucrawler.tailnet.ts.net"];
+        let mut feeds = Vec::new();
+        for host in hosts {
+            let res = server
+                .client
+                .get(format!("{}/feed.xml", server.base))
+                .header(header::HOST, host)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(res.status().as_u16(), 200);
+            let xml = res.text().await.unwrap();
+            assert!(
+                xml.contains(&format!(
+                    "<link rel=\"alternate\" href=\"http://{host}/articles/{good}\"/>"
+                )),
+                "{xml}"
+            );
+            feeds.push(xml);
+        }
+        let ids: Vec<Vec<&str>> = feeds
+            .iter()
+            .map(|xml| {
+                xml.split("<id>")
+                    .skip(1)
+                    .map(|s| s.split_once("</id>").unwrap().0)
+                    .collect()
+            })
+            .collect();
+        // フィードとエントリ 1 件
+        assert_eq!(ids[0].len(), 2, "{}", feeds[0]);
+        assert_eq!(ids[0], ids[1]);
+        for id in &ids[0] {
+            for host in hosts {
+                assert!(!id.contains(host), "{id}");
+            }
+        }
+    }
+
     /// API の一覧は既定では Web と同じ記事を出し、`all=1` ですべてを出す。閲覧としては記録しない。
     #[tokio::test]
     async fn api_lists_the_same_articles_as_the_web() {

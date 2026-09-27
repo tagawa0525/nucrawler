@@ -1340,9 +1340,9 @@ impl Db {
         )?;
         if kind == SignalKind::Bookmark {
             tx.execute(
-                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, created_at)
+                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, event_id)
                  VALUES (?1, ?2, ?3)",
-                rusqlite::params![user_id, article_id, timestamp(now)],
+                rusqlite::params![user_id, article_id, tx.last_insert_rowid()],
             )?;
         }
         tx.commit()?;
@@ -1365,27 +1365,14 @@ impl Db {
         article_id: i64,
         kind: SignalKind,
     ) -> Result<(), DbError> {
-        use rusqlite::OptionalExtension;
-        let tx = self.conn.unchecked_transaction()?;
-        let undone: Option<String> = tx
-            .query_row(
-                "DELETE FROM events WHERE id = (
-                   SELECT id FROM events
-                   WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
-                   ORDER BY created_at DESC, id DESC LIMIT 1)
-                 RETURNING created_at",
-                rusqlite::params![user_id, article_id, kind.as_str()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        // ブックマークは同じ時刻で付けているので、その行動で付いたものだけを外す
-        if let (SignalKind::Bookmark, Some(at)) = (kind, undone) {
-            tx.execute(
-                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2 AND created_at = ?3",
-                rusqlite::params![user_id, article_id, at],
-            )?;
-        }
-        tx.commit()?;
+        // その行動で付いたブックマークは、外部キー（bookmarks.event_id）の CASCADE で外れる
+        self.conn.execute(
+            "DELETE FROM events WHERE id = (
+               SELECT id FROM events
+               WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
+               ORDER BY created_at DESC, id DESC LIMIT 1)",
+            rusqlite::params![user_id, article_id, kind.as_str()],
+        )?;
         Ok(())
     }
 
@@ -5706,6 +5693,7 @@ mod tests {
             .unwrap(),
             [
                 "bookmarks_by_article",
+                "bookmarks_by_event",
                 "events_by_article",
                 "events_by_user"
             ]

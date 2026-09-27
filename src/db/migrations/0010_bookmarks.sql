@@ -1,6 +1,6 @@
 -- 一覧での振り分け：ブックマーク（弱い好意）と「見ない」（弱い不要）。
 -- どちらも行動として events に記録し、採点の手がかりにする。既存のテーブルの CHECK は
--- 変えられないので、events を作り直して種類を足す（events を参照するテーブルは無い）。
+-- 変えられないので、events を作り直して種類を足す（この時点で events を参照するテーブルは無い）。
 CREATE TABLE events_new (
     id         INTEGER PRIMARY KEY,
     user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -17,11 +17,13 @@ CREATE INDEX events_by_user ON events (user_id, created_at);
 CREATE INDEX events_by_article ON events (article_id);
 
 -- ブックマークの今の状態。外しても、ブックマークした行動（events）は採点のために残す。
+-- event_id はこのブックマークを付けた行動で、その行動を取り消す（消す）とブックマークも外れる。
 CREATE TABLE bookmarks (
     user_id    INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     article_id INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL,
+    event_id   INTEGER NOT NULL REFERENCES events (id) ON DELETE CASCADE,
     PRIMARY KEY (user_id, article_id)
 ) WITHOUT ROWID;
--- 記事の削除時に bookmarks を全件走査しないよう、外部キーの子側に索引を付ける
+-- 親の削除時に bookmarks を全件走査しないよう、外部キーの子側に索引を付ける
 CREATE INDEX bookmarks_by_article ON bookmarks (article_id);
+CREATE INDEX bookmarks_by_event ON bookmarks (event_id);

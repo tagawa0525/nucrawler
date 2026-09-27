@@ -127,6 +127,13 @@ enum ItemScope<'a> {
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
+    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、明示的な反応も確認枠の記録も無いもの。
+    /// 無作為な順に `limit` 件
+    Explore {
+        since: chrono::DateTime<chrono::Utc>,
+        min_score: u8,
+        limit: usize,
+    },
 }
 
 /// 検索の条件を、`query_items` の SQL に足す条件とその名前付きパラメータにしたもの。
@@ -466,44 +473,40 @@ impl Db {
             let rows = stmt.query_map(rusqlite::params![q.user_id, day], |r| r.get(0))?;
             Ok(rows.collect::<Result<_, _>>()?)
         };
-        let tx = self.conn.unchecked_transaction()?;
         let need = per_day.saturating_sub(picked_on(Some(today))?.len());
         if need > 0 {
-            let ever = picked_on(None)?;
-            // 一覧の「すべて表示」と同じ条件で読み、閾値未満で反応の無い、まだ選んでいない記事に絞る
-            let candidates: Vec<i64> = self
-                .list_articles(ListQuery {
-                    show_all: true,
-                    limit: usize::MAX,
-                    ..q
-                })?
-                .into_iter()
-                .filter(|i| {
-                    i.lwr_relevant == Some(true)
-                        && i.score.is_some_and(|s| s < q.min_score)
-                        && !labeled.contains(&i.article_id)
-                        && !ever.contains(&i.article_id)
-                })
-                .map(|i| i.article_id)
-                .collect();
-            tx.execute(
-                "INSERT INTO explore_picks (user_id, article_id, picked_on)
-                 SELECT ?1, value, ?2 FROM json_each(?3) ORDER BY random() LIMIT ?4",
-                rusqlite::params![
-                    q.user_id,
-                    today,
-                    serde_json::to_string(&candidates)?,
-                    i64::try_from(need).unwrap_or(i64::MAX)
-                ],
+            // 条件と無作為な選択は SQL で済ませ、足りない分だけを読む
+            let candidates = self.query_items(
+                q.user_id,
+                q.profile_hash,
+                ItemScope::Explore {
+                    since: q.since,
+                    min_score: q.min_score,
+                    limit: need,
+                },
             )?;
+            let tx = self.conn.unchecked_transaction()?;
+            for c in &candidates {
+                tx.execute(
+                    "INSERT INTO explore_picks (user_id, article_id, picked_on) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![q.user_id, c.article_id, today],
+                )?;
+            }
+            tx.commit()?;
         }
-        tx.commit()?;
         let mut items = Vec::new();
         for id in picked_on(Some(today))? {
             if labeled.contains(&id) {
                 continue;
             }
-            items.extend(self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?);
+            // 選んだ後に採点し直されたり要約が変わったりして条件を外れた記事は出さない
+            items.extend(
+                self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?
+                    .into_iter()
+                    .filter(|i| {
+                        i.lwr_relevant == Some(true) && i.score.is_some_and(|s| s < q.min_score)
+                    }),
+            );
         }
         Ok(items)
     }
@@ -517,9 +520,19 @@ impl Db {
     ) -> Result<Vec<ListItem>, DbError> {
         const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
-        // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
         let list_filter = match scope {
+            // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
             ItemScope::List { .. } => "AND rows.bookmarked = 0",
+            ItemScope::Explore { .. } => {
+                "AND rows.relevant = 1 AND s.score < :min
+                 AND NOT EXISTS (
+                   SELECT 1 FROM events AS e
+                   WHERE e.user_id = :user AND e.article_id = rows.id
+                     AND e.kind IN ('up', 'down', 'bookmark', 'dismiss'))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM explore_picks AS p
+                   WHERE p.user_id = :user AND p.article_id = rows.id)"
+            }
             _ => "",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
@@ -530,6 +543,12 @@ impl Db {
                 min_score,
                 limit,
             } => (None, Some(since), show_all, min_score, limit, BY_SCORE),
+            // 既定の条件（:all = 0 のときの絞り込み）は使わず、list_filter で絞る
+            ItemScope::Explore {
+                since,
+                min_score,
+                limit,
+            } => (None, Some(since), true, min_score, limit, "random()"),
             ItemScope::Search(q) => (
                 None,
                 q.since,

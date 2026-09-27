@@ -289,3 +289,190 @@ fn report_halt(halt: Option<Halt>, llm_failure: &mut Option<String>) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{HttpConfig, Lang};
+    use crate::db::{ContentKind, ContentOrigin, NewArticle};
+    use crate::llm::fake::FakeLlm;
+    use crate::llm::{LlmError, LlmResponse};
+    use crate::quota::QuotaConfig;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-28T02:00:00Z")
+            .unwrap()
+            .to_utc()
+    }
+
+    /// 本文つきの記事を登録して id を返す。`n` ごとに URL と公開日時を変える。
+    fn article(db: &Db, n: u32) -> i64 {
+        let id = db
+            .insert_article(&NewArticle {
+                source_id: "wnn",
+                url: &format!("https://e.com/{n}"),
+                title: &format!("Title {n}"),
+                lang: Lang::En,
+                published_at: Some(&format!("2026-09-27T{:02}:00:00.000Z", 20 - n)),
+            })
+            .unwrap()
+            .unwrap();
+        db.insert_content(id, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        id
+    }
+
+    fn save_profile(db: &Db) {
+        let profile = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(db.owner_id().unwrap(), &profile, now())
+            .unwrap();
+    }
+
+    fn digest_ok(id: i64) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            output: serde_json::json!({"items": [{
+                "id": id, "title_ja": "題", "summary_ja": "要約", "points_ja": ["点"],
+                "implications_ja": "", "lwr_relevant": true,
+                "topics": ["規制・審査"], "new_topics": [],
+            }]}),
+            rate_limit: None,
+        })
+    }
+
+    fn score_ok(id: i64) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            output: serde_json::json!({"items": [{"id": id, "score": 80, "reason": "理由"}]}),
+            rate_limit: None,
+        })
+    }
+
+    fn not_logged_in() -> Result<LlmResponse, LlmError> {
+        Err(LlmError::Reported {
+            subtype: "error".into(),
+            message: "Not logged in".into(),
+        })
+    }
+
+    async fn crawl_with(
+        db: &Db,
+        llm: &FakeLlm,
+        max_calls: u32,
+        cancel: &Cancel,
+        stages: &[Stage],
+    ) -> RunReport {
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(max_calls));
+        crawl(
+            RunEnv {
+                db,
+                llm,
+                quota: &mut quota,
+                cancel,
+                clock: &now,
+            },
+            stages,
+            CrawlOptions::default(),
+            &Config::default(),
+            &[],
+            &Fetcher::from_config(&HttpConfig::default()).unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// 要約済みで採点を待つ記事と、要約を待つ記事を 1 件ずつ用意し、採点を待つ記事の id を返す。
+    async fn digested_and_pending(db: &Db) -> i64 {
+        save_profile(db);
+        let id = article(db, 0);
+        let llm = FakeLlm::new([digest_ok(id)]);
+        let report = crawl_with(db, &llm, 1, &Cancel::default(), &[Stage::Digest]).await;
+        assert_eq!(report, RunReport::default());
+        article(db, 1);
+        id
+    }
+
+    /// 認証切れなどで LLM が失敗したら、同じ実行の後続の LLM ステージは呼ばず、最後に報告する。
+    #[tokio::test]
+    async fn llm_failure_skips_later_llm_stages() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        // 採点を待つ記事があるので、飛ばさなければ採点が呼び、用意した応答が尽きて panic する
+        let llm = FakeLlm::new([not_logged_in()]);
+        let report = crawl_with(
+            &db,
+            &llm,
+            10,
+            &Cancel::default(),
+            &[Stage::Digest, Stage::Score, Stage::Translate, Stage::Tidy],
+        )
+        .await;
+        assert_eq!(llm.requests().len(), 1);
+        let failure = report.llm_failure.expect("the failure is reported");
+        assert!(failure.contains("Not logged in"), "{failure}");
+        assert!(!report.cancelled);
+    }
+
+    /// クォータで止まるのは正常な先送りなので、後続の LLM ステージは実行する。要約を待つ記事が
+    /// あっても、要約は採点のための 1 回を残して止まり、残した 1 回で採点する。
+    #[tokio::test]
+    async fn quota_stop_leaves_later_llm_stages_running() {
+        let db = Db::open_in_memory().unwrap();
+        let id = digested_and_pending(&db).await;
+        let llm = FakeLlm::new([score_ok(id)]);
+        let report = crawl_with(
+            &db,
+            &llm,
+            1,
+            &Cancel::default(),
+            &[Stage::Digest, Stage::Score],
+        )
+        .await;
+        let reqs = llm.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].schema, crate::prompt::score::schema());
+        assert_eq!(report, RunReport::default());
+    }
+
+    /// 止める指示が出ていれば、ステージを始めずに中断として報告する。
+    #[tokio::test]
+    async fn cancel_stops_before_any_stage() {
+        let db = Db::open_in_memory().unwrap();
+        article(&db, 0);
+        let cancel = Cancel::default();
+        cancel.request();
+        let llm = FakeLlm::new([]);
+        let report = crawl_with(&db, &llm, 10, &cancel, &[Stage::Digest, Stage::Score]).await;
+        assert!(llm.requests().is_empty());
+        assert!(report.cancelled);
+    }
+
+    /// redo は採点しないので、採点のための回数を残さず、指定したモデルで要約する。
+    #[tokio::test]
+    async fn redo_digests_with_the_given_model_without_score_reserve() {
+        let db = Db::open_in_memory().unwrap();
+        save_profile(&db);
+        let id = article(&db, 0);
+        let llm = FakeLlm::new([digest_ok(id)]);
+        // 呼べるのは 1 回だけ。採点のための回数（既定で 1）を残せば要約できない
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(1));
+        let report = redo(
+            RunEnv {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota,
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &Config::default(),
+            RedoKind::Digest,
+            "opus".into(),
+            RedoFilter::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let reqs = llm.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].model, "opus");
+        assert_eq!(report, RunReport::default());
+    }
+}

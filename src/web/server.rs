@@ -128,6 +128,25 @@ fn viewer(db: &Db) -> Result<(i64, Option<String>), DbError> {
     Ok((user, hash))
 }
 
+/// Web の一覧に出す記事（設定の期間・件数・最低点）。
+fn list_items(
+    db: &Db,
+    web: &WebConfig,
+    user: i64,
+    profile_hash: Option<&str>,
+    now: chrono::DateTime<Utc>,
+    show_all: bool,
+) -> Result<Vec<crate::db::ListItem>, DbError> {
+    db.list_articles(ListQuery {
+        user_id: user,
+        profile_hash,
+        min_score: web.min_score,
+        since: now - Duration::days(web.list_days.into()),
+        show_all,
+        limit: web.list_limit,
+    })
+}
+
 /// 警告は直近 24 時間のものだけ出す。
 fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
     db.warnings(Utc::now() - Duration::hours(24))
@@ -150,14 +169,7 @@ async fn list(
         let (user, hash) = viewer(db)?;
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
-        let items = db.list_articles(ListQuery {
-            user_id: user,
-            profile_hash: hash.as_deref(),
-            min_score: web.min_score,
-            since: now - Duration::days(web.list_days.into()),
-            show_all,
-            limit: web.list_limit,
-        })?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
         let warnings = warnings(db)?;
         let page = Page {
@@ -183,14 +195,7 @@ async fn feed(State(state): State<AppState>, headers: HeaderMap) -> Result<Respo
     let xml = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = db.list_articles(ListQuery {
-            user_id: user,
-            profile_hash: hash.as_deref(),
-            min_score: web.min_score,
-            since: now - Duration::days(web.list_days.into()),
-            show_all: false,
-            limit: web.list_limit,
-        })?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, false)?;
         Ok(feed::atom(
             &items,
             &base,
@@ -221,14 +226,7 @@ async fn api_list(
     let body = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = db.list_articles(ListQuery {
-            user_id: user,
-            profile_hash: hash.as_deref(),
-            min_score: web.min_score,
-            since: now - Duration::days(web.list_days.into()),
-            show_all,
-            limit: web.list_limit,
-        })?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,
         ))?)

@@ -86,11 +86,16 @@ nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
 nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
+nucrawler topics import FILE | nucrawler topics export
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
 - 別の `crawl` が実行中なら終了コード 75（EX_TEMPFAIL）で終わる。`--wait-lock` を付けると終わるのを待ってから始める（unit はこちらを使う）
 - `status` はソースごとの記事数と取得状況を表示する
+- `topics` は要約に付けるトピックの語彙を扱う。初期の語彙は DB を作るときに入るので、
+  変えるときは `topics export > topics.toml` で書き出して編集し、`topics import topics.toml` で取り込む。
+  軸（facet）は `分野`・`炉型`・`地域`・`組織` のいずれか。発電所名などの固有名は語彙に入れず全文検索で探す。
+  要約に付いている語は削除できない（取り込みがエラーになり、語彙は変わらない）
 
 ## Web UI
 
@@ -152,6 +157,7 @@ claude mcp add --scope user nucrawler -- nucrawler mcp
 - `config.toml`：HTTP、処理の範囲、LLM のモデルとバッチ、クォータ、Web UI。項目と既定値は [examples/config.toml](examples/config.toml)
 - `sources.toml`：巡回するソース。[examples/sources.toml](examples/sources.toml)
 - 関心プロファイル：[examples/profile.toml](examples/profile.toml)（`profile import` で DB に取り込む）
+- トピックの語彙：DB に初期値が入る（`topics export` / `topics import` で編集する）
 
 home-manager のモジュールを使うときは `services.nucrawler.settings` と `sourcesFile` から生成される。
 

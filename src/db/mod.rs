@@ -33,6 +33,9 @@ pub enum DbError {
     /// 要約のトピックが語彙に無く、新しい語として提案もされていない
     #[error("unknown topic {0:?}")]
     UnknownTopic(String),
+    /// 語を自分自身に統合しようとした
+    #[error("cannot merge topic {0:?} into itself")]
+    SelfMerge(String),
 }
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
@@ -348,6 +351,13 @@ pub struct SearchQuery<'a> {
     /// 原題・本文・要約・和訳のどれかに含む語。すべてを含む記事に絞る。空なら絞らない
     pub terms: Vec<String>,
     pub limit: usize,
+}
+
+/// 語彙の統合：`from` の語を `into` にまとめ、`from` は以後 `into` の別名として扱う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicMerge {
+    pub from: String,
+    pub into: String,
 }
 
 /// 成果物の 1 版。
@@ -848,6 +858,19 @@ impl Db {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// 語を統合する。要約への付与を統合先に付け替え、統合元の名前を別名として記録し、統合元を消す。
+    /// 統合元を指していた別名も統合先に付け替える。どれか 1 つでも失敗したら何も変えない。
+    /// `backend` と `model` は統合を決めた LLM（別名の記録に残す）。
+    pub fn merge_topics(
+        &self,
+        _merges: &[TopicMerge],
+        _backend: &str,
+        _model: &str,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
         Ok(())
     }
 
@@ -4253,6 +4276,151 @@ mod tests {
         .unwrap();
         let db = Db::init(conn).unwrap();
         assert_eq!(linked_topics(&db, 1), ["燃料"]);
+    }
+
+    fn merge(from: &str, into: &str) -> TopicMerge {
+        TopicMerge {
+            from: from.into(),
+            into: into.into(),
+        }
+    }
+
+    fn propose(db: &Db, name: &str) -> i64 {
+        digest_with_topics(
+            db,
+            serde_json::json!([name]),
+            serde_json::json!([{"name": name, "facet": "分野"}]),
+        )
+        .unwrap()
+    }
+
+    fn aliases(db: &Db) -> Vec<String> {
+        db.query_strings(
+            "SELECT a.alias || '>' || t.name || '|' || a.backend || '|' || a.model || '|' || a.merged_at
+             FROM topic_aliases AS a JOIN topics AS t ON t.id = a.topic_id ORDER BY a.alias",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_topics_moves_links_and_records_aliases() {
+        let db = Db::open_in_memory().unwrap();
+        let curated = digest_with_topics(
+            &db,
+            serde_json::json!(["新設・建設"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        let proposed = propose(&db, "新設炉");
+        let both = digest_with_topics(
+            &db,
+            serde_json::json!(["新設・建設", "新設炉"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "claude-cli",
+            "sonnet",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        for id in [curated, proposed, both] {
+            assert_eq!(linked_topics(&db, id), ["新設・建設"], "digest {id}");
+        }
+        assert!(db.topics().unwrap().iter().all(|t| t.name != "新設炉"));
+        assert_eq!(
+            aliases(&db),
+            ["新設炉>新設・建設|claude-cli|sonnet|2026-10-04T00:00:00.000Z"]
+        );
+    }
+
+    /// 統合した語を後でさらに統合しても、古い別名は最終的な統合先を指す。
+    #[test]
+    fn merge_topics_repoints_aliases_of_the_merged_topic() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        propose(&db, "新規建設");
+        let at = t("2026-10-04T00:00:00Z");
+        db.merge_topics(&[merge("新設炉", "新規建設")], "b", "m", at)
+            .unwrap();
+        db.merge_topics(&[merge("新規建設", "新設・建設")], "b", "m", at)
+            .unwrap();
+        let targets: Vec<String> = aliases(&db)
+            .iter()
+            .map(|a| a.split('|').next().unwrap().to_string())
+            .collect();
+        assert_eq!(targets, ["新規建設>新設・建設", "新設炉>新設・建設"]);
+    }
+
+    /// 統合した語を LLM がまた付けたり提案したりしても、統合先に付き、語彙に戻らない。
+    #[test]
+    fn saved_digests_resolve_aliases() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        let again = propose(&db, "新設炉");
+        assert_eq!(linked_topics(&db, again), ["新設・建設"]);
+        assert!(db.topics().unwrap().iter().all(|t| t.name != "新設炉"));
+    }
+
+    #[test]
+    fn merge_topics_changes_nothing_on_failure() {
+        let db = Db::open_in_memory().unwrap();
+        let id = propose(&db, "新設炉");
+        let at = t("2026-10-04T00:00:00Z");
+        let err = db
+            .merge_topics(
+                &[merge("新設炉", "新設・建設"), merge("無い語", "燃料")],
+                "b",
+                "m",
+                at,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::UnknownTopic(name) if name == "無い語"),
+            "{err}"
+        );
+        let err = db
+            .merge_topics(&[merge("新設炉", "新設炉")], "b", "m", at)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::SelfMerge(name) if name == "新設炉"),
+            "{err}"
+        );
+        assert_eq!(linked_topics(&db, id), ["新設炉"]);
+        assert!(aliases(&db).is_empty());
+    }
+
+    /// 手で取り込んだ語彙に別名と同じ名前があれば、その名前は語として復活し、別名ではなくなる。
+    #[test]
+    fn importing_an_alias_name_makes_it_a_topic_again() {
+        use crate::topics::{Facet, Topic};
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        let mut topics = db.topics().unwrap();
+        topics.push(Topic {
+            name: "新設炉".into(),
+            facet: Facet::Reactor,
+        });
+        db.replace_topics(&topics).unwrap();
+        assert!(aliases(&db).is_empty());
+        let id =
+            digest_with_topics(&db, serde_json::json!(["新設炉"]), serde_json::json!([])).unwrap();
+        assert_eq!(linked_topics(&db, id), ["新設炉"]);
     }
 
     #[test]

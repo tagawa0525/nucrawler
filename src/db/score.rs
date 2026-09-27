@@ -22,6 +22,15 @@ pub fn score_stage(key: ScoreKey) -> String {
     )
 }
 
+/// 採点を待つ記事の範囲。
+#[derive(Debug, Clone, Copy)]
+pub enum ScoreScope<'a> {
+    /// この時刻以降に公開（公開日時が無ければ取得）された記事
+    Since(chrono::DateTime<chrono::Utc>),
+    /// 指定した記事（公開の時期は問わない）
+    Articles(&'a [i64]),
+}
+
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreInput {
@@ -34,15 +43,20 @@ pub struct ScoreInput {
 
 impl Db {
     /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
-    /// `cutoff` 以降の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
+    /// `scope` の範囲の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
     /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_score(
         &self,
         key: ScoreKey,
-        cutoff: chrono::DateTime<chrono::Utc>,
+        scope: ScoreScope<'_>,
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
+        // 使わない方の条件は NULL にして常に真にする
+        let (cutoff, ids) = match scope {
+            ScoreScope::Since(cutoff) => (Some(timestamp(cutoff)), None),
+            ScoreScope::Articles(ids) => (None, Some(serde_json::to_string(ids)?)),
+        };
         let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
                -- 利用者が持っていない会員資格を必要とする digest は見せない
@@ -68,7 +82,8 @@ impl Db {
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
-               AND coalesce(a.published_at, a.fetched_at) >= ?2
+               AND (?2 IS NULL OR coalesce(a.published_at, a.fetched_at) >= ?2)
+               AND (?11 IS NULL OR a.id IN (SELECT value FROM json_each(?11)))
                AND NOT EXISTS (
                  SELECT 1 FROM scores AS s
                  WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
@@ -85,7 +100,7 @@ impl Db {
         let rows = stmt.query_map(
             rusqlite::params![
                 key.user_id,
-                timestamp(cutoff),
+                cutoff,
                 key.profile_hash,
                 key.backend,
                 key.model,
@@ -94,6 +109,7 @@ impl Db {
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 score_stage(key),
                 key.prompt_version,
+                ids,
             ],
             |r| {
                 Ok((
@@ -157,11 +173,16 @@ mod tests {
     use crate::db::test_support::*;
 
     fn score_ids(db: &Db, key: ScoreKey, now: &str) -> Vec<i64> {
-        db.pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
-            .unwrap()
-            .into_iter()
-            .map(|s| s.article_id)
-            .collect()
+        db.pending_score(
+            key,
+            ScoreScope::Since(t("2026-09-10T00:00:00Z")),
+            t(now),
+            10,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|s| s.article_id)
+        .collect()
     }
 
     #[test]
@@ -185,7 +206,12 @@ mod tests {
         add_digest(&db, old, "sonnet", "期間外", true, "2026-09-26T02:00:00Z");
 
         let pending = db
-            .pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .pending_score(
+                key,
+                ScoreScope::Since(t("2026-09-10T00:00:00Z")),
+                t(now),
+                10,
+            )
             .unwrap();
         assert_eq!(
             pending,
@@ -229,6 +255,32 @@ mod tests {
             db.query_strings("SELECT prompt_version || ':' || score FROM scores ORDER BY id")
                 .unwrap(),
             ["1:80", "2:60"]
+        );
+    }
+
+    /// 候補のプロファイルの評価では、公開の時期によらず、指定した記事だけを採点する。
+    #[test]
+    fn pending_score_can_be_limited_to_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let old = page_article(&db, "https://e.com/old", "2026-01-01T00:00:00.000Z");
+        add_digest(&db, old, "sonnet", "古い", true, "2026-01-01T01:00:00Z");
+        let other = page_article(&db, "https://e.com/other", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, other, "sonnet", "対象外", true, "2026-09-26T01:00:00Z");
+        fn ids(db: &Db, key: ScoreKey, scope: ScoreScope<'_>, now: &str) -> Vec<i64> {
+            db.pending_score(key, scope, t(now), 10)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.article_id)
+                .collect()
+        }
+        assert_eq!(ids(&db, key, ScoreScope::Articles(&[old]), now), [old]);
+        assert!(ids(&db, key, ScoreScope::Articles(&[]), now).is_empty());
+        // 期間で絞れば古い記事は入らない
+        assert_eq!(
+            ids(&db, key, ScoreScope::Since(t("2026-09-10T00:00:00Z")), now),
+            [other]
         );
     }
 

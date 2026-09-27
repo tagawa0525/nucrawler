@@ -1,14 +1,17 @@
 //! 採点ステージ：利用者のプロファイルをもとに、要約済みの記事を数件ずつ LLM で採点する。
 //! プロファイルのハッシュと採点のプロンプトの版ごとに記録するので、どちらかを変えれば自動的に採点し直しになる。
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{DbError, ScoreKey, StageKey, score_stage};
+use crate::db::{DbError, ScoreKey, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
+use crate::profile::Profile;
 use crate::prompt;
 
 pub const STAGE: &str = "score";
@@ -17,6 +20,18 @@ pub const STAGE: &str = "score";
 pub enum ScoreStageError {
     #[error("database error")]
     Db(#[from] DbError),
+}
+
+/// 採点の対象。
+#[derive(Debug, Clone, Copy)]
+pub enum ScoreTarget<'a> {
+    /// crawl の採点：保存済みのプロファイルで、`backlog_days` の範囲のまだ採点していない記事
+    Saved,
+    /// `eval --profile`：渡したプロファイルで、指定した記事のうちまだ採点していないもの
+    Candidate {
+        profile: &'a Profile,
+        articles: &'a [i64],
+    },
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -40,13 +55,27 @@ pub async fn score_articles<L: Llm>(
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
+    target: ScoreTarget<'_>,
     now: DateTime<Utc>,
 ) -> Result<ScoreSummary, ScoreStageError> {
     let mut summary = ScoreSummary::default();
-    let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
-        tracing::warn!("no profile yet; run `nucrawler profile import FILE` to enable scoring");
-        summary.no_profile = true;
-        return Ok(summary);
+    let (profile, profile_hash, scope) = match target {
+        ScoreTarget::Saved => {
+            let Some((profile, hash)) = db.load_profile(user_id)? else {
+                tracing::warn!(
+                    "no profile yet; run `nucrawler profile import FILE` to enable scoring"
+                );
+                summary.no_profile = true;
+                return Ok(summary);
+            };
+            let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+            (Cow::Owned(profile), hash, ScoreScope::Since(cutoff))
+        }
+        ScoreTarget::Candidate { profile, articles } => (
+            Cow::Borrowed(profile),
+            crate::profile::hash(profile),
+            ScoreScope::Articles(articles),
+        ),
     };
     let backend = llm.backend();
     let model = llm_cfg.score_model.as_str();
@@ -64,7 +93,6 @@ pub async fn score_articles<L: Llm>(
         backend,
         model,
     };
-    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let system = prompt::score::system_prompt(&profile);
     let schema = prompt::score::schema();
     loop {
@@ -77,7 +105,7 @@ pub async fn score_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_score(key, cutoff, now, llm_cfg.score_batch_size)?;
+        let batch = db.pending_score(key, scope, now, llm_cfg.score_batch_size)?;
         if batch.is_empty() {
             break;
         }
@@ -246,6 +274,7 @@ mod tests {
             &cfg(batch),
             &PipelineConfig::default(),
             owner,
+            ScoreTarget::Saved,
             now(),
         )
         .await
@@ -287,6 +316,45 @@ mod tests {
             db.query_strings("SELECT stage FROM llm_calls").unwrap(),
             ["score", "score"]
         );
+    }
+
+    /// 候補のプロファイルは保存せず、その hash で指定した記事だけを採点する。
+    #[tokio::test]
+    async fn scores_given_articles_with_a_candidate_profile() {
+        let (db, owner, ids) = setup(3);
+        let mut candidate =
+            crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        candidate.interests[0].topic = "候補の分野".into();
+        let candidate_hash = crate::profile::hash(&candidate);
+        let llm = FakeLlm::new([ok(&[(ids[2], 60)])]);
+        let summary = score_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
+            &cfg(5),
+            &PipelineConfig::default(),
+            owner,
+            ScoreTarget::Candidate {
+                profile: &candidate,
+                articles: &[ids[2]],
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert!(llm.requests()[0].system.contains("候補の分野"));
+        assert_eq!(
+            db.query_strings("SELECT profile_hash || ':' || score FROM scores")
+                .unwrap(),
+            [format!("{candidate_hash}:60")]
+        );
+        // 保存済みのプロファイルは変えない
+        let (saved, _) = db.load_profile(owner).unwrap().unwrap();
+        assert_ne!(saved.interests[0].topic, "候補の分野");
     }
 
     #[tokio::test]

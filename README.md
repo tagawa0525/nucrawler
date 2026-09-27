@@ -88,7 +88,7 @@ nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] [--limit N] [語]...
-nucrawler eval [--all]
+nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
@@ -104,6 +104,10 @@ nucrawler eval [--all]
   （プロファイル・モデル・プロンプトの版）ごとに、採点済みの割合、AUC（正例が負例より高い点になっている組の
   割合。0.5 なら当て推量と同じ）、点数帯ごとの正例・負例の数を出す。既定は今のプロファイルと版のキーだけで、
   `--all` で過去のキーも並べる
+- `eval --profile FILE` は、候補のプロファイル（`profile import` と同じ形式）で、正解の付いた記事を採点してから、
+  今のプロファイルと並べて表示する。候補は取り込まず、その採点は候補のプロファイルのものとして残るので、一覧には
+  影響しない（候補を取り込めばそのまま使われ、同じ候補で再実行しても採点済みの記事では LLM を呼ばない）。
+  ロックと LLM の呼び出しの上限は `redo` と同じ
 - `search` は Web の検索画面（下記）と同じ条件で記事を探し、1 行 1 件（公開日時・点数・見出し・URL）で出す。
   閲覧としては記録しない
 - `topics` は要約に付けるトピックの語彙を扱う。要約では語彙から選び、当てはまる語が無いときだけ

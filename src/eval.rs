@@ -30,14 +30,17 @@ pub fn band(score: u8) -> u8 {
     (score.min(99) / 10) * 10
 }
 
-/// 評価の表示。`current` は現行のプロファイルの hash と score のプロンプトの版で、`all` が偽なら
-/// そのキーだけを出す。
+/// 評価の表示。`current` は現行のプロファイルの hash、`candidate` は候補のプロファイルの hash、
+/// `version` は今の score のプロンプトの版。`all` が偽なら、今の版の現行と候補のキーだけを出す。
 pub fn render(
     labels: &[Label],
     scores: &[LabeledScore],
-    current: Option<(&str, i64)>,
+    current: Option<&str>,
+    candidate: Option<&str>,
+    version: i64,
     all: bool,
 ) -> String {
+    let current = current.map(|hash| (hash, version));
     let mut out = String::new();
     let count = |kind| labels.iter().filter(|l| l.kind == kind).count();
     let (up, bookmark) = (count(SignalKind::Up), count(SignalKind::Bookmark));
@@ -57,12 +60,19 @@ pub fn render(
     let is_current = |k: &EvalKey| {
         current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
     };
+    // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
+    let is_candidate = |k: &EvalKey| {
+        k.prompt_version == version
+            && candidate.is_some_and(|hash| k.profile_hash == hash)
+            && !is_current(k)
+    };
     let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
-    keys.sort_by_key(|k| (!is_current(k), *k));
+    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), *k));
     keys.dedup();
     if !all {
-        keys.retain(|k| is_current(k));
-        if keys.is_empty() {
+        keys.retain(|k| is_current(k) || is_candidate(k));
+        // 候補だけ採点済みでも、比べる相手が無いことを示す
+        if !keys.iter().any(|k| is_current(k)) {
             out.push('\n');
             if current.is_none() {
                 let _ = writeln!(
@@ -79,27 +89,31 @@ pub fn render(
     }
     for key in keys {
         out.push('\n');
-        render_key(&mut out, key, is_current(key), labels, scores);
+        let role = if is_current(key) {
+            "  (current)"
+        } else if is_candidate(key) {
+            "  (candidate)"
+        } else {
+            ""
+        };
+        render_key(&mut out, key, role, labels, scores);
     }
     out
 }
 
-/// 1 つのキーの結果：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
+/// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
 fn render_key(
     out: &mut String,
     key: &EvalKey,
-    current: bool,
+    role: &str,
     labels: &[Label],
     scores: &[LabeledScore],
 ) {
     let hash: String = key.profile_hash.chars().take(8).collect();
     let _ = writeln!(
         out,
-        "profile {hash}  {}/{}  prompt v{}{}",
-        key.backend,
-        key.model,
-        key.prompt_version,
-        if current { "  (current)" } else { "" }
+        "profile {hash}  {}/{}  prompt v{}{role}",
+        key.backend, key.model, key.prompt_version,
     );
     // ラベルと突き合わせた (点数, 正例か, 反応より後に採点したか)
     let matched: Vec<(u8, bool, bool)> = scores
@@ -221,7 +235,7 @@ mod tests {
             scored(&current, 3, 40, before),
             scored(&old, 1, 10, before),
         ];
-        let out = render(&labels, &scores, Some(("0123456789abcdef", 1)), false);
+        let out = render(&labels, &scores, Some("0123456789abcdef"), None, 1, false);
         assert!(
             out.starts_with(
                 "labels: 2 positive (up 1, bookmark 1), 1 negative (down 0, dismiss 1)\n"
@@ -240,7 +254,7 @@ mod tests {
         assert!(out.contains("40-49       0     1"), "{out}");
         // 既定では現行のキーだけ
         assert!(!out.contains("fedcba98"), "{out}");
-        let all = render(&labels, &scores, Some(("0123456789abcdef", 1)), true);
+        let all = render(&labels, &scores, Some("0123456789abcdef"), None, 1, true);
         assert!(
             all.contains("profile fedcba98  claude-cli/sonnet  prompt v1\n"),
             "{all}"
@@ -255,17 +269,79 @@ mod tests {
         let v2 = key("h", 2);
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
-        let out = render(&labels, &scores, Some(("h", 2)), false);
+        let out = render(&labels, &scores, Some("h"), None, 2, false);
         assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
     #[test]
+    fn shows_the_candidate_next_to_the_current_key() {
+        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let current = key("aaaaaaaaaaaa", 2);
+        let candidate = key("bbbbbbbbbbbb", 2);
+        let other = key("cccccccccccc", 2);
+        let at = "2026-09-26T00:00:00.000Z";
+        let scores = [
+            scored(&current, 1, 40, at),
+            scored(&current, 2, 60, at),
+            scored(&candidate, 1, 90, at),
+            scored(&candidate, 2, 10, at),
+            scored(&other, 1, 50, at),
+        ];
+        let out = render(
+            &labels,
+            &scores,
+            Some("aaaaaaaaaaaa"),
+            Some("bbbbbbbbbbbb"),
+            2,
+            false,
+        );
+        let current_at = out.find("profile aaaaaaaa").unwrap();
+        let candidate_at = out.find("profile bbbbbbbb").unwrap();
+        assert!(current_at < candidate_at, "{out}");
+        assert!(out.contains("prompt v2  (candidate)"), "{out}");
+        assert!(out.contains("scored 2/2  AUC 0.00"), "{out}");
+        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(!out.contains("cccccccc"), "{out}");
+    }
+
+    /// 候補だけ採点済みでも、現行のキーの採点が無いことを示す（比べる相手が黙って消えないように）。
+    #[test]
+    fn says_when_only_the_candidate_has_scores() {
+        let labels = [label(1, SignalKind::Up)];
+        let candidate = key("bbbbbbbbbbbb", 2);
+        let scores = [scored(&candidate, 1, 90, "2026-09-26T00:00:00.000Z")];
+        let out = render(
+            &labels,
+            &scores,
+            Some("aaaaaaaaaaaa"),
+            Some("bbbbbbbbbbbb"),
+            2,
+            false,
+        );
+        assert!(out.contains("no scores for the current profile"), "{out}");
+        assert!(out.contains("(candidate)"), "{out}");
+    }
+
+    /// プロファイルをまだ取り込んでいなくても、候補の結果は出す。
+    #[test]
+    fn shows_the_candidate_without_a_saved_profile() {
+        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let candidate = key("bbbbbbbbbbbb", 2);
+        let at = "2026-09-26T00:00:00.000Z";
+        let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
+        let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false);
+        assert!(out.contains("no profile"), "{out}");
+        assert!(out.contains("prompt v2  (candidate)"), "{out}");
+        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+    }
+
+    #[test]
     fn says_when_the_current_key_has_no_scores() {
         let labels = [label(1, SignalKind::Up)];
-        let out = render(&labels, &[], Some(("h", 1)), false);
+        let out = render(&labels, &[], Some("h"), None, 1, false);
         assert!(out.contains("no scores for the current profile"), "{out}");
-        let out = render(&[], &[], None, false);
+        let out = render(&[], &[], None, None, 1, false);
         assert!(out.starts_with("labels: 0 positive"), "{out}");
         assert!(out.contains("no profile"), "{out}");
     }

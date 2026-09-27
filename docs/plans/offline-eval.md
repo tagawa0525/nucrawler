@@ -64,14 +64,44 @@
 
 ## 3b `eval --profile FILE`：候補のプロファイルで採点して比べる（LLM を呼ぶ）
 
-3a の後に、別の詳細計画で扱う。
+### 前提
 
 - 版 1 の score のプロンプトは直近 20 件の反応の見出しを含んでいた。そのため、ラベル付きの記事を候補のプロファイルで採点すると、ラベルそのものがシグナルとして LLM に渡り、評価が甘くなる（漏れ）。
-- 2026-09-27、利用者と相談して、全体計画 4 の「score のプロンプトから直近の反応を外し、版を 2 に上げる」を 3b より前に行うことにした（PR `feat/score-without-signals`）。
+- 2026-09-27、利用者と相談して、全体計画 4 の「score のプロンプトから直近の反応を外し、版を 2 に上げる」を 3b より前に行った（#88）。
   - `profile suggest`（4）ができるまでの間は、反応が採点に効かない。当時のラベルは 10 件で、影響は小さい。
   - これ以降の採点は漏れが無いので、eval の注記は版 1 のキーにだけ出す。
+
+### 使い方
+
+`nucrawler eval --profile FILE [--max-llm-calls N]`
+
+- 候補のプロファイル（`profile import` と同じ TOML）で、ラベルの付いた記事のうち、まだその候補で採点していないものを採点する。
+- そのあと、現行のキーと候補のキーを並べて表示する。
+- 候補の点数は候補の profile_hash で `scores` に保存する。
+  - 一覧は現行の hash で引くので、表示には影響しない。
+  - 候補を `profile import` すれば、その点数がそのまま使われる。
+  - 同じ候補で再実行しても、採点済みの記事は LLM を呼ばない。
+- ロック・クォータ・シグナルの扱いは `redo` と同じ（`src/cmd/redo.rs`）。
+
+### 実装
+
+- 採点の対象を表す `ScoreTarget` を `src/pipeline/score.rs` に置き、`score_articles` が受け取る。
+  - `Saved`：crawl の採点。保存済みのプロファイルで、`backlog_days` の範囲のまだ採点していない記事。今の挙動そのもの。
+  - `Candidate { profile, articles }`：`eval --profile`。渡したプロファイルで、指定した記事だけ（期間は問わない）。
+- `Db::pending_score` は、期間の代わりに記事の集合でも絞れるようにする（`ScoreScope::Since(cutoff)` / `ScoreScope::Articles(&[i64])`）。
+  - 記事の集合は `json_each` で渡す（`REDO_FILTER` と同じ）。
+- `run::eval_profile(env, config, profile, articles)` がステージを 1 回流し、`RunReport` を返す。
+- `src/cmd/eval.rs` にロック・LLM・クォータを用意する処理を置く。表示は 3a の `render` に候補の hash を渡して、現行と候補の 2 つのキーを出す。
+
+### テスト（RED を先に）
+
+- `pending_score` を記事の集合で絞ると、期間外の記事も対象になり、集合の外は対象にならない。
+- `score_articles` に `Candidate` を渡すと、渡したプロファイルの hash で保存し、指定した記事だけを採点する。
+- `render` に候補を渡すと、現行と候補の 2 つのキーを出し、候補に `(candidate)` と付ける。
+- CLI の `--profile` と `--max-llm-calls` の解釈。
 
 ## 検証
 
 - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`
 - 本番 DB の写しで `nucrawler eval` と `nucrawler eval --all` を実行し、ラベル 10 件の内訳、カバー率、AUC、漏れの件数が出ることを確かめる。
+- 3b：本番 DB の写しで `eval --profile examples/profile.toml` を実行し、LLM の呼び出しがラベルの件数に見合う回数で済み、現行と候補が並んで出ることを確かめる。

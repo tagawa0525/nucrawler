@@ -31,7 +31,7 @@ pub enum ParseError {
     CrawlUsage { stages: String },
     #[error("usage: nucrawler serve [--addr IP:PORT]")]
     ServeUsage,
-    #[error("usage: nucrawler eval [--all]")]
+    #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
     EvalUsage,
 }
 
@@ -81,7 +81,7 @@ commands:
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
-  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all]）
+  eval      採点が 👍・ブックマーク・👎・見送りとどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
   help      このヘルプを表示
 ";
 
@@ -287,14 +287,34 @@ pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, ParseError> {
 pub struct EvalArgs {
     /// 現行のキーだけでなく、過去のプロファイル・プロンプトの版の採点も並べる
     pub all: bool,
+    /// 候補のプロファイル。ラベルの付いた記事をこれで採点してから、現行と並べる
+    pub profile: Option<PathBuf>,
+    /// 候補で採点するときの LLM の呼び出しの上限
+    pub max_llm_calls: Option<u32>,
 }
 
 pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
-    match args {
-        [] => Ok(EvalArgs { all: false }),
-        [flag] if flag == "--all" => Ok(EvalArgs { all: true }),
-        _ => Err(ParseError::EvalUsage),
+    let mut it = args.iter();
+    let mut parsed = EvalArgs::default();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--all" => parsed.all = true,
+            "--profile" => {
+                let file = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
+                parsed.profile = Some(PathBuf::from(file));
+            }
+            "--max-llm-calls" => {
+                let n = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
+                parsed.max_llm_calls = Some(n.parse().map_err(|_| ParseError::EvalUsage)?);
+            }
+            _ => return Err(ParseError::EvalUsage),
+        }
     }
+    // 上限は候補で採点するときだけ意味がある
+    if parsed.max_llm_calls.is_some() && parsed.profile.is_none() {
+        return Err(ParseError::EvalUsage);
+    }
+    Ok(parsed)
 }
 
 /// `profile` サブコマンドの引数。
@@ -408,15 +428,41 @@ mod tests {
 
     #[test]
     fn parses_eval_args() {
-        assert_eq!(parse_eval_args(&[]).unwrap(), EvalArgs { all: false });
+        assert_eq!(parse_eval_args(&[]).unwrap(), EvalArgs::default());
         assert_eq!(
             parse_eval_args(&args(&["--all"])).unwrap(),
-            EvalArgs { all: true }
+            EvalArgs {
+                all: true,
+                ..EvalArgs::default()
+            }
         );
-        assert!(matches!(
-            parse_eval_args(&args(&["--bogus"])),
-            Err(ParseError::EvalUsage)
-        ));
+        assert_eq!(
+            parse_eval_args(&args(&[
+                "--profile",
+                "p.toml",
+                "--max-llm-calls",
+                "3",
+                "--all"
+            ]))
+            .unwrap(),
+            EvalArgs {
+                all: true,
+                profile: Some("p.toml".into()),
+                max_llm_calls: Some(3),
+            }
+        );
+        for bad in [
+            &["--bogus"][..],
+            &["--profile"],
+            &["--max-llm-calls", "x"],
+            // 上限は候補で採点するときだけ意味がある
+            &["--max-llm-calls", "3"],
+        ] {
+            assert!(
+                matches!(parse_eval_args(&args(bad)), Err(ParseError::EvalUsage)),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

@@ -55,9 +55,40 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .translation p { line-height: 1.7; }
 ";
 
+/// ソースの ID から画面に出す名前へ（`Source::display_name`）。
+pub type SourceLabels = std::collections::BTreeMap<String, String>;
+
+/// どのページにも共通の表示の材料。
+#[derive(Debug, Clone, Copy)]
+pub struct Page<'a> {
+    pub warnings: &'a [Warning],
+    pub labels: &'a SourceLabels,
+}
+
+impl Default for Page<'_> {
+    fn default() -> Self {
+        static NONE: SourceLabels = SourceLabels::new();
+        Self {
+            warnings: &[],
+            labels: &NONE,
+        }
+    }
+}
+
+impl Page<'_> {
+    /// ソースの表示名（設定に無い ID はそのまま）。
+    fn source<'s>(&'s self, id: &'s str) -> &'s str {
+        self.labels.get(id).map_or(id, String::as_str)
+    }
+}
+
 /// 全ページ共通の外枠（スマホ向けの 1 カラム、警告のバナー）。
-pub fn layout(title: &str, warnings: &[Warning], body: &str) -> String {
-    let banners: String = warnings.iter().map(warning_banner).collect();
+pub fn layout(title: &str, page: &Page, body: &str) -> String {
+    let banners: String = page
+        .warnings
+        .iter()
+        .map(|w| warning_banner(w, page))
+        .collect();
     format!(
         "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -67,15 +98,15 @@ pub fn layout(title: &str, warnings: &[Warning], body: &str) -> String {
     )
 }
 
-fn warning_banner(w: &Warning) -> String {
+fn warning_banner(w: &Warning, page: &Page) -> String {
     match w {
         Warning::SourceFailing {
             source_id,
             error,
             at,
         } => format!(
-            "<div class=\"warn\">⚠ ソース {} の取得に失敗しています（{}）：{}</div>",
-            escape(source_id),
+            "<div class=\"warn\">⚠ {} の取得に失敗しています（{}）：{}</div>",
+            escape(page.source(source_id)),
             crate::jst::format_local(at),
             escape(error)
         ),
@@ -101,12 +132,7 @@ fn warning_banner(w: &Warning) -> String {
     }
 }
 
-pub fn list_page(
-    new: &[ListItem],
-    earlier: &[ListItem],
-    show_all: bool,
-    warnings: &[Warning],
-) -> String {
+pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &Page) -> String {
     let mut body = String::from("<h1>nucrawler</h1>");
     let toggle = if show_all {
         "<a href=\"/\">おすすめだけ表示</a>"
@@ -118,15 +144,15 @@ pub fn list_page(
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
     }
-    body.extend(new.iter().map(card));
+    body.extend(new.iter().map(|i| card(i, page)));
     if !earlier.is_empty() {
         body.push_str("<h2>過去の未読</h2>");
-        body.extend(earlier.iter().map(card));
+        body.extend(earlier.iter().map(|i| card(i, page)));
     }
-    layout("一覧", warnings, &body)
+    layout("一覧", page, &body)
 }
 
-fn card(i: &ListItem) -> String {
+fn card(i: &ListItem, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
     let score = i
         .score
@@ -153,7 +179,7 @@ fn card(i: &ListItem) -> String {
         read = if i.read { " read" } else { "" },
         id = i.article_id,
         title = escape(title),
-        source = escape(&i.source_id),
+        source = escape(page.source(&i.source_id)),
         at = crate::jst::format_local(&i.at),
     )
 }
@@ -176,7 +202,7 @@ pub struct DetailView {
     pub translation: Option<i64>,
 }
 
-pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) -> String {
+pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -195,7 +221,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) ->
     );
     body.push_str(&format!(
         "<p class=\"meta\">{} ・{} ・<a href=\"{}\">原文</a>{}</p>",
-        escape(&i.source_id),
+        escape(page.source(&i.source_id)),
         crate::jst::format_local(&i.at),
         escape(&i.url),
         if i.locked_by.is_empty() {
@@ -247,7 +273,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) ->
         body.push_str("</p>");
     }
     body.push_str(&translation_section(d, view));
-    layout(&title, warnings, &body)
+    layout(&title, page, &body)
 }
 
 fn feedback_forms(id: i64, current: Option<crate::db::Feedback>) -> String {

@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0002_membership_code_check.sql"),
     include_str!("migrations/0003_last_seen.sql"),
     include_str!("migrations/0004_visit_boundary.sql"),
+    include_str!("migrations/0005_retry_pdf_extracts.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

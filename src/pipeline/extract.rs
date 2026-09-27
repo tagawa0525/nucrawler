@@ -59,13 +59,8 @@ pub async fn extract_pages(
             model: "",
         };
         match extract_one(fetcher, &page.url, selector).await {
-            Ok(text) => {
-                db.insert_content(
-                    page.article_id,
-                    ContentKind::Body,
-                    ContentOrigin::Page,
-                    &text,
-                )?;
+            Ok((text, origin)) => {
+                db.insert_content(page.article_id, ContentKind::Body, origin, &text)?;
                 db.clear_stage_failure(key)?;
                 summary.extracted += 1;
             }
@@ -95,8 +90,12 @@ enum PageFailure {
     },
     #[error(transparent)]
     Http(#[from] HttpError),
-    #[error("PDF is not supported yet ({content_type})")]
-    Pdf { content_type: String },
+    #[error("failed to read the PDF")]
+    Pdf(#[source] pdf_extract::OutputError),
+    #[error("the PDF reader crashed")]
+    PdfPanicked,
+    #[error("the PDF has no text (a scanned image?)")]
+    PdfNoText,
     #[error(transparent)]
     Extract(#[from] ExtractError),
     #[error("no article text found")]
@@ -107,7 +106,8 @@ impl PageFailure {
     /// 再試行しても結果が変わらない失敗。
     fn is_permanent(&self) -> bool {
         match self {
-            Self::InvalidUrl { .. } | Self::Pdf { .. } => true,
+            // 同じ PDF は何度読んでも同じ結果になる（スキャン画像の読み取りは今後の課題）
+            Self::InvalidUrl { .. } | Self::Pdf(_) | Self::PdfPanicked | Self::PdfNoText => true,
             Self::Http(HttpError::DisallowedByRobots { .. } | HttpError::BodyTooLarge { .. }) => {
                 true
             }
@@ -121,11 +121,12 @@ impl PageFailure {
     }
 }
 
+/// 記事ページ（HTML か PDF）の本文と、その取り出し方。
 async fn extract_one(
     fetcher: &Fetcher,
     url: &str,
     selector: Option<&str>,
-) -> Result<String, PageFailure> {
+) -> Result<(String, ContentOrigin), PageFailure> {
     let parsed = Url::parse(url).map_err(|source| PageFailure::InvalidUrl {
         url: url.to_string(),
         source,
@@ -134,12 +135,31 @@ async fn extract_one(
     let content_type = page.content_type.as_deref().unwrap_or_default();
     // Content-Type が当てにならないサーバもあるので、中身の署名でも判定する。
     if content_type.to_ascii_lowercase().contains("pdf") || page.body.starts_with(b"%PDF-") {
-        return Err(PageFailure::Pdf {
-            content_type: content_type.to_string(),
-        });
+        return Ok((pdf_text(page.body).await?, ContentOrigin::Pdf));
     }
     let html = text::decode_html(&page.body, page.content_type.as_deref());
-    extract::extract_text(&html, page.url.as_str(), selector)?.ok_or(PageFailure::NoText)
+    let text =
+        extract::extract_text(&html, page.url.as_str(), selector)?.ok_or(PageFailure::NoText)?;
+    Ok((text, ContentOrigin::Page))
+}
+
+/// PDF の文字（行ごとに前後の空白を除き、空行は捨てる）。読み取りは重いので別スレッドで行う。
+async fn pdf_text(body: Vec<u8>) -> Result<String, PageFailure> {
+    let raw = tokio::task::spawn_blocking(move || pdf_extract::extract_text_from_mem(&body))
+        .await
+        // 壊れた PDF で pdf-extract が panic することがある
+        .map_err(|_| PageFailure::PdfPanicked)?
+        .map_err(PageFailure::Pdf)?;
+    let text = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        return Err(PageFailure::PdfNoText);
+    }
+    Ok(text)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use super::Halt;
 use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{DbError, ScoreKey, ScoreScope, StageKey, score_stage};
+use crate::db::{DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
 use crate::profile::Profile;
@@ -94,7 +94,7 @@ pub async fn score_articles<L: Llm>(
         model,
     };
     let system = prompt::score::system_prompt(&profile);
-    let schema = prompt::score::schema();
+    let schema = prompt::score::schema(&profile);
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -145,7 +145,7 @@ pub async fn score_articles<L: Llm>(
                 break;
             }
         };
-        let parsed = match prompt::score::parse(&response.output, &ids) {
+        let parsed = match prompt::score::parse(&response.output, &ids, &profile) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let message = errors::error_chain(&e);
@@ -155,12 +155,22 @@ pub async fn score_articles<L: Llm>(
                 continue;
             }
         };
-        for (article_id, score, reason) in &parsed.items {
-            let Some(input) = batch.iter().find(|b| b.article_id == *article_id) else {
+        for item in &parsed.items {
+            let Some(input) = batch.iter().find(|b| b.article_id == item.id) else {
                 continue;
             };
-            db.insert_score(key, input.artifact_id, *score, Some(reason), now)?;
-            db.clear_stage_failure(failure_key(*article_id))?;
+            db.insert_score_with_matches(
+                key,
+                input.artifact_id,
+                item.score,
+                Some(&item.reason),
+                ScoreMatches {
+                    interests: &item.matched,
+                    excludes: &item.excluded,
+                },
+                now,
+            )?;
+            db.clear_stage_failure(failure_key(item.id))?;
             summary.scored += 1;
         }
         summary.failed += record_failures(
@@ -251,7 +261,9 @@ mod tests {
     fn ok(scores: &[(i64, u8)]) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
             output: serde_json::json!({"items": scores.iter().map(|(id, s)| {
-                serde_json::json!({"id": id, "score": s, "reason": "理由"})
+                serde_json::json!({
+                    "id": id, "score": s, "reason": "理由", "matched": ["燃料"], "excluded": [],
+                })
             }).collect::<Vec<_>>()}),
             rate_limit: None,
         })
@@ -291,7 +303,12 @@ mod tests {
         assert_eq!((summary.scored, summary.failed, summary.calls), (3, 0, 2));
         let reqs = llm.requests();
         assert_eq!(reqs[0].model, "sonnet");
-        assert_eq!(reqs[0].schema, crate::prompt::score::schema());
+        assert_eq!(
+            reqs[0].schema,
+            crate::prompt::score::schema(
+                &crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap()
+            )
+        );
         assert!(
             reqs[0].system.contains("規制・審査"),
             "profile in system prompt"
@@ -315,6 +332,14 @@ mod tests {
         assert_eq!(
             db.query_strings("SELECT stage FROM llm_calls").unwrap(),
             ["score", "score"]
+        );
+        // 当たった分野も採点と一緒に残す
+        assert_eq!(
+            db.query_i64(
+                "SELECT count(*) FROM score_matches WHERE kind = 'interest' AND topic = '燃料'"
+            )
+            .unwrap(),
+            3
         );
     }
 

@@ -413,7 +413,9 @@ mod tests {
 
     fn score_ok(id: i64) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            output: serde_json::json!({"items": [{"id": id, "score": 80, "reason": "理由"}]}),
+            output: serde_json::json!({"items": [{
+                "id": id, "score": 80, "reason": "理由", "matched": ["燃料"], "excluded": [],
+            }]}),
             rate_limit: None,
         })
     }
@@ -529,7 +531,12 @@ mod tests {
         .await;
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].schema, crate::prompt::score::schema());
+        assert_eq!(
+            reqs[0].schema,
+            crate::prompt::score::schema(
+                &crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap()
+            )
+        );
         assert_eq!(report, RunReport::default());
     }
 

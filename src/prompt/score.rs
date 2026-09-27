@@ -9,7 +9,8 @@ use crate::prompt::escape_data;
 /// `pipeline.backlog_days` の範囲の記事が採点し直しになる。
 /// 版 1 は直近の反応の見出しを system prompt に入れていた。版 2 で外し、点数をプロファイルと記事だけで
 /// 決めるようにした（同じ記事・プロファイルなら採点の時期によらない。反応はプロファイルの見直しで効かせる）。
-pub const PROMPT_VERSION: i64 = 2;
+/// 版 3 で、当たった関心分野と推薦しない話題（`matched`・`excluded`）を返させるようにした。
+pub const PROMPT_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScoreError {
@@ -17,11 +18,22 @@ pub enum ScoreError {
     Malformed(String),
 }
 
+/// 採点 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scored {
+    pub id: i64,
+    pub score: u8,
+    pub reason: String,
+    /// 当たった関心分野（プロファイルの interest の topic）
+    pub matched: Vec<String>,
+    /// 当たった推薦しない話題（プロファイルの exclude）
+    pub excluded: Vec<String>,
+}
+
 /// 応答の検証結果。
 #[derive(Debug, PartialEq)]
 pub struct Parsed {
-    /// (記事 id, 点数, 理由)
-    pub items: Vec<(i64, u8, String)>,
+    pub items: Vec<Scored>,
     /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事
     pub missing: Vec<i64>,
 }
@@ -48,10 +60,27 @@ pub fn system_prompt(profile: &Profile) -> String {
             profile.exclude.join("、")
         ));
     }
+    s.push_str(
+        "\n# 出力\n\
+         - score：0〜100 の点数。reason：理由を 1 文で\n\
+         - matched：この記事が当たった関心分野。上の関心分野の名前をそのまま使う。当たらなければ空の配列\n\
+         - excluded：この記事が当たった推薦しない話題。上の名前をそのまま使う。当たらなければ空の配列\n",
+    );
     s
 }
 
-pub fn schema() -> serde_json::Value {
+/// 出力の JSON Schema。当たった分野と話題は、プロファイルの語だけから選ばせる。
+pub fn schema(profile: &Profile) -> serde_json::Value {
+    let terms = |terms: Vec<&str>| {
+        if terms.is_empty() {
+            // 空の enum は JSON Schema として不正なので、要素を持たせない
+            serde_json::json!({"type": "array", "maxItems": 0})
+        } else {
+            serde_json::json!({"type": "array", "items": {"type": "string", "enum": terms}})
+        }
+    };
+    let matched = terms(profile.interests.iter().map(|i| i.topic.as_str()).collect());
+    let excluded = terms(profile.exclude.iter().map(String::as_str).collect());
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -63,8 +92,10 @@ pub fn schema() -> serde_json::Value {
                         "id": {"type": "integer"},
                         "score": {"type": "integer", "minimum": 0, "maximum": 100},
                         "reason": {"type": "string"},
+                        "matched": matched,
+                        "excluded": excluded,
                     },
-                    "required": ["id", "score", "reason"],
+                    "required": ["id", "score", "reason", "matched", "excluded"],
                     "additionalProperties": false,
                 },
             },
@@ -96,9 +127,15 @@ struct Item {
     id: i64,
     score: i64,
     reason: String,
+    matched: Vec<String>,
+    excluded: Vec<String>,
 }
 
-pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, ScoreError> {
+pub fn parse(
+    output: &serde_json::Value,
+    requested: &[i64],
+    profile: &Profile,
+) -> Result<Parsed, ScoreError> {
     let top = output
         .as_object()
         .ok_or_else(|| ScoreError::Malformed("the output is not an object".into()))?;
@@ -111,7 +148,7 @@ pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, Sc
         .get("items")
         .and_then(|v| v.as_array())
         .ok_or_else(|| ScoreError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<(i64, u8, String)> = Vec::new();
+    let mut found: Vec<Scored> = Vec::new();
     for item in items {
         let id = item["id"]
             .as_i64()
@@ -131,19 +168,51 @@ pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, Sc
             tracing::warn!(id, score = checked.score, "ignoring score outside 0..=100");
             continue;
         };
-        if found.iter().all(|(seen, _, _)| *seen != checked.id) {
-            found.push((checked.id, score, checked.reason));
+        // プロファイルに無い語はスキーマ違反と同じに扱う（捨てて再試行に回す）
+        let known = |terms: &[String], allowed: &mut dyn Iterator<Item = &str>| {
+            let allowed: Vec<&str> = allowed.collect();
+            terms.iter().all(|t| allowed.contains(&t.as_str()))
+        };
+        if !known(
+            &checked.matched,
+            &mut profile.interests.iter().map(|i| i.topic.as_str()),
+        ) || !known(
+            &checked.excluded,
+            &mut profile.exclude.iter().map(String::as_str),
+        ) {
+            tracing::warn!(id, "ignoring score whose matches are not in the profile");
+            continue;
+        }
+        if found.iter().all(|seen| seen.id != checked.id) {
+            found.push(Scored {
+                id: checked.id,
+                score,
+                reason: checked.reason,
+                matched: dedup(checked.matched),
+                excluded: dedup(checked.excluded),
+            });
         }
     }
     let missing = requested
         .iter()
         .copied()
-        .filter(|id| found.iter().all(|(seen, _, _)| seen != id))
+        .filter(|id| found.iter().all(|seen| seen.id != *id))
         .collect();
     Ok(Parsed {
         items: found,
         missing,
     })
+}
+
+/// 順を保って重複を除く（同じ語を 2 度返されても 1 つとして残す）。
+fn dedup(terms: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in terms {
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -190,16 +259,89 @@ mod tests {
 
     #[test]
     fn schema_bounds_scores_and_forbids_extras() {
-        let s = schema();
+        let s = schema(&profile());
         let item = &s["properties"]["items"]["items"];
         assert_eq!(s["additionalProperties"], false);
         assert_eq!(item["additionalProperties"], false);
         assert_eq!(item["properties"]["score"]["minimum"], 0);
         assert_eq!(item["properties"]["score"]["maximum"], 100);
+    }
+
+    /// 当たった分野と除外は、プロファイルの語だけから選ばせる。
+    #[test]
+    fn schema_limits_matches_to_the_profile() {
+        let p = profile();
+        let s = schema(&p);
+        let item = &s["properties"]["items"]["items"];
+        let topics: Vec<&str> = p.interests.iter().map(|i| i.topic.as_str()).collect();
+        assert_eq!(
+            item["properties"]["matched"]["items"]["enum"],
+            serde_json::json!(topics)
+        );
+        assert_eq!(
+            item["properties"]["excluded"]["items"]["enum"],
+            serde_json::json!(p.exclude)
+        );
         assert_eq!(
             item["required"],
-            serde_json::json!(["id", "score", "reason"])
+            serde_json::json!(["id", "score", "reason", "matched", "excluded"])
         );
+        // 語が無ければ空の enum にせず、要素を持たせない
+        let empty = schema(&Profile {
+            interests: vec![],
+            exclude: vec![],
+        });
+        let item = &empty["properties"]["items"]["items"];
+        assert_eq!(item["properties"]["matched"]["maxItems"], 0);
+        assert_eq!(item["properties"]["excluded"]["maxItems"], 0);
+    }
+
+    #[test]
+    fn system_prompt_explains_matches() {
+        let s = system_prompt(&profile());
+        assert!(s.contains("matched") && s.contains("excluded"), "{s}");
+    }
+
+    #[test]
+    fn parse_keeps_matches_and_drops_unknown_ones() {
+        let output = serde_json::json!({"items": [
+            {"id": 1, "score": 80, "reason": "r", "matched": ["規制・審査", "燃料"], "excluded": []},
+            {"id": 2, "score": 5, "reason": "r", "matched": [], "excluded": ["核融合"]},
+            // プロファイルに無い語は、スキーマ違反として捨てる（再試行に回す）
+            {"id": 3, "score": 50, "reason": "r", "matched": ["宇宙"], "excluded": []},
+        ]});
+        let parsed = parse(&output, &[1, 2, 3], &profile()).unwrap();
+        assert_eq!(
+            parsed.items,
+            [
+                Scored {
+                    id: 1,
+                    score: 80,
+                    reason: "r".into(),
+                    matched: vec!["規制・審査".into(), "燃料".into()],
+                    excluded: vec![],
+                },
+                Scored {
+                    id: 2,
+                    score: 5,
+                    reason: "r".into(),
+                    matched: vec![],
+                    excluded: vec!["核融合".into()],
+                },
+            ]
+        );
+        assert_eq!(parsed.missing, [3]);
+    }
+
+    /// 同じ語を 2 度返されても 1 つとして残す（保存の主キーが重複を許さないため）。
+    #[test]
+    fn parse_deduplicates_matches() {
+        let output = serde_json::json!({"items": [
+            {"id": 1, "score": 80, "reason": "r", "matched": ["燃料", "燃料"], "excluded": ["核融合", "核融合"]},
+        ]});
+        let parsed = parse(&output, &[1], &profile()).unwrap();
+        assert_eq!(parsed.items[0].matched, ["燃料"]);
+        assert_eq!(parsed.items[0].excluded, ["核融合"]);
     }
 
     #[test]
@@ -233,20 +375,25 @@ mod tests {
     #[test]
     fn parse_validates_items_and_reports_missing() {
         let output = serde_json::json!({"items": [
-            {"id": 1, "score": 80, "reason": "規制に直結"},
-            {"id": 2, "score": 101, "reason": "範囲外"},
-            {"id": 3, "score": 50, "reason": "r", "extra": 1},
-            {"id": 99, "score": 10, "reason": "依頼していない"},
+            {"id": 1, "score": 80, "reason": "規制に直結", "matched": ["規制・審査"], "excluded": []},
+            {"id": 2, "score": 101, "reason": "範囲外", "matched": [], "excluded": []},
+            {"id": 3, "score": 50, "reason": "r", "matched": [], "excluded": [], "extra": 1},
+            {"id": 99, "score": 10, "reason": "依頼していない", "matched": [], "excluded": []},
         ]});
-        let parsed = parse(&output, &[1, 2, 3, 4]).unwrap();
-        assert_eq!(parsed.items, [(1, 80, "規制に直結".to_string())]);
+        let parsed = parse(&output, &[1, 2, 3, 4], &profile()).unwrap();
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(
+            (parsed.items[0].id, parsed.items[0].score),
+            (1, 80),
+            "{parsed:?}"
+        );
         assert_eq!(parsed.missing, [2, 3, 4]);
         for bad in [
             serde_json::json!({"items": [], "x": 1}),
             serde_json::json!({"items": "x"}),
-            serde_json::json!({"items": [{"score": 1, "reason": "no id"}]}),
+            serde_json::json!({"items": [{"score": 1, "reason": "no id", "matched": [], "excluded": []}]}),
         ] {
-            assert!(parse(&bad, &[1]).is_err(), "{bad}");
+            assert!(parse(&bad, &[1], &profile()).is_err(), "{bad}");
         }
     }
 }

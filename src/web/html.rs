@@ -62,6 +62,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .btn.off { border-color: #b3261e; background: #fbe7e6; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
+.wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
 .actions form { display: inline; }
 .actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
   border: 1px solid #bbb; background: #fff; }
@@ -336,7 +337,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         q = text(
             "q",
             &p.q,
-            " type=\"search\" placeholder=\"語（空白で区切るとすべてを含む）\""
+            " class=\"wide\" type=\"search\" placeholder=\"語（空白で区切るとすべてを含む）\""
         ),
         since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
         until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
@@ -816,6 +817,16 @@ mod tests {
             !html.contains("件"),
             "no results section without results: {html}"
         );
+    }
+
+    /// 検索語の欄は画面の幅いっぱいに広げる。
+    #[test]
+    fn search_page_widens_the_query_field() {
+        let html = search_page(&Params::default(), None, &[], None, &Page::default());
+        let at = html.find(r#"<input name="q""#).expect(&html);
+        let input = &html[at..at + html[at..].find('>').unwrap()];
+        assert!(input.contains(r#"class="wide""#), "{input}");
+        assert!(html.contains(".wide { width: 100%;"), "{html}");
     }
 
     /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。

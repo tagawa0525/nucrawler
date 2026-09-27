@@ -82,17 +82,29 @@ pub(crate) async fn suggest(
         println!("no changes suggested");
         return Ok(());
     };
-    let write = |path: &Path| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        file.write_all(profile::to_toml(&suggestion.profile).as_bytes())
-    };
-    write(out).map_err(|source| Error::WriteFile {
+    write_new(out, &profile::to_toml(&suggestion.profile)).map_err(|source| Error::WriteFile {
         path: out.to_path_buf(),
         source,
     })?;
     print!("{text}");
     Ok(())
+}
+
+/// 新しいファイルとして書く。書き込みに失敗したら、作ったファイルを消す（書きかけのファイルが
+/// 残ると、同じパスで再実行できなくなるため）。
+fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    if written.is_err() {
+        drop(file);
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(path = %path.display(), "cannot remove the partial file: {e}");
+        }
+    }
+    written
 }

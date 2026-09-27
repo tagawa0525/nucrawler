@@ -85,7 +85,7 @@ nucrawler status
 nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
 nucrawler mcp
-nucrawler profile import FILE | nucrawler profile export
+nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N]
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
@@ -104,6 +104,10 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
   （プロファイル・モデル・プロンプトの版）ごとに、採点済みの割合、AUC（正例が負例より高い点になっている組の
   割合。0.5 なら当て推量と同じ）、点数帯ごとの正例・負例の数を出す。既定は今のプロファイルと版のキーだけで、
   `--all` で過去のキーも並べる
+- `profile suggest --out FILE` は、👍・ブックマーク・👎・見送りの反応を根拠に、LLM に関心プロファイルの更新案を作らせる。
+  今のプロファイルとの差分（Rust で計算したもの）と、変更ごとの根拠を表示し、案を FILE に書く（既にあるファイルは
+  上書きしない）。案は取り込まないので、`eval --profile FILE` で今のプロファイルと比べてから `profile import FILE` する。
+  反応が無いことは関心が無い根拠にしない（表示されなかった記事には反応できないため）。LLM の呼び出しは 1 回
 - `eval --profile FILE` は、候補のプロファイル（`profile import` と同じ形式）で、正解の付いた記事を採点してから、
   今のプロファイルと並べて表示する。候補は取り込まず、その採点は候補のプロファイルのものとして残るので、一覧には
   影響しない（候補を取り込めばそのまま使われ、同じ候補で再実行しても採点済みの記事では LLM を呼ばない）。
@@ -154,7 +158,7 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
   指摘は 1 つの記事に何件でも送れ、送った指摘とその対応状況は同じ欄の上に小さく並ぶ
 - 👍・ブックマークは関心、👎・見ないは不要の反応として記録し、`nucrawler eval` で採点の当たり具合を
   測る正解に使う（ブックマークを外しても、した反応は残る）。採点そのものは関心プロファイルだけで決まるので、
-  反応を推薦に効かせるにはプロファイルを見直す
+  反応を推薦に効かせるにはプロファイルを見直す（`profile suggest` で案を作れる）
 - 取得に失敗しているソースや、LLM の失敗（認証切れなど）は画面の上部に出る
 - 検索（`/search`、一覧上部の 🔍）では、一覧で隠す記事や期間外の記事も探せる。条件はすべて AND で、
   既定は新しい順（点数順も選べる）。件数の上限は `web.list_limit`

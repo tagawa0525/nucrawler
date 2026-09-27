@@ -43,7 +43,6 @@ pub async fn digest_articles<L: Llm>(
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let schema = digest::schema();
     let mut summary = DigestSummary::default();
     loop {
         if cancel.is_requested() {
@@ -78,6 +77,10 @@ pub async fn digest_articles<L: Llm>(
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
         let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
+        // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
+        let vocab = db.topics()?;
+        let system = digest::system_prompt(&vocab);
+        let schema = digest::schema(&vocab);
         let outcome = call_recorded(
             db,
             llm,
@@ -86,7 +89,7 @@ pub async fn digest_articles<L: Llm>(
                 stage: STAGE,
                 n_items: batch.len(),
                 req: LlmRequest {
-                    system: digest::system_prompt(),
+                    system: &system,
                     prompt: &prompt,
                     schema: &schema,
                     model,
@@ -120,7 +123,7 @@ pub async fn digest_articles<L: Llm>(
                 break;
             }
         };
-        let parsed = match digest::parse(&response.output, &ids) {
+        let parsed = match digest::parse(&response.output, &ids, &vocab) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let message = errors::error_chain(&e);
@@ -216,7 +219,8 @@ mod tests {
     fn item(id: i64) -> serde_json::Value {
         serde_json::json!({
             "id": id, "title_ja": format!("題{id}"), "summary_ja": "要約",
-            "points_ja": ["点"], "implications_ja": "", "lwr_relevant": true, "topics": ["規制"],
+            "points_ja": ["点"], "implications_ja": "", "lwr_relevant": true,
+            "topics": ["規制・審査"], "new_topics": [],
         })
     }
 
@@ -250,6 +254,44 @@ mod tests {
         .unwrap()
     }
 
+    /// 提案された語は語彙に加わって要約に付き、次のバッチからは語彙として選べる。
+    #[tokio::test]
+    async fn proposed_topics_join_the_vocabulary_for_later_batches() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 2);
+        let mut proposal = item(ids[0]);
+        proposal["new_topics"] =
+            serde_json::json!([{"name": "データセンター需要", "facet": "分野"}]);
+        let first = Ok(LlmResponse {
+            output: serde_json::json!({"items": [proposal]}),
+            rate_limit: None,
+        });
+        let llm = FakeLlm::new([first, ok(&ids[1..], 0.1)]);
+        let summary = run(&db, &llm, &mut quota(10), 1).await;
+        assert_eq!(summary.digested, 2);
+        let reqs = llm.requests();
+        assert!(!reqs[0].system.contains("データセンター需要"));
+        assert!(
+            reqs[1].system.contains("データセンター需要"),
+            "{}",
+            reqs[1].system
+        );
+        assert_eq!(
+            db.query_strings(
+                "SELECT a.article_id || ':' || t.name FROM artifact_topics AS at
+                 JOIN artifacts AS a ON a.id = at.artifact_id
+                 JOIN topics AS t ON t.id = at.topic_id
+                 ORDER BY a.article_id, t.id"
+            )
+            .unwrap(),
+            [
+                format!("{}:規制・審査", ids[0]),
+                format!("{}:データセンター需要", ids[0]),
+                format!("{}:規制・審査", ids[1]),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn digests_in_batches_and_records_calls() {
         let db = Db::open_in_memory().unwrap();
@@ -269,8 +311,9 @@ mod tests {
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0].model, "sonnet");
-        assert_eq!(reqs[0].schema, crate::digest::schema());
-        assert_eq!(reqs[0].system, crate::digest::system_prompt());
+        let vocab = db.topics().unwrap();
+        assert_eq!(reqs[0].schema, crate::digest::schema(&vocab));
+        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab));
         assert!(
             reqs[0]
                 .prompt
@@ -286,7 +329,7 @@ mod tests {
                 "SELECT backend || '|' || model || '|' || prompt_version FROM artifacts LIMIT 1"
             )
             .unwrap(),
-            ["fake|sonnet|1"]
+            ["fake|sonnet|2"]
         );
         assert_eq!(
             db.query_strings(

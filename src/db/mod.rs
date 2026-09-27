@@ -30,6 +30,9 @@ pub enum DbError {
     /// 要約に付いているトピックは語彙から消せない
     #[error("topics in use cannot be removed: {}", .0.join(", "))]
     TopicsInUse(Vec<String>),
+    /// 要約のトピックが語彙に無く、新しい語として提案もされていない
+    #[error("unknown topic {0:?}")]
+    UnknownTopic(String),
 }
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
@@ -42,6 +45,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0005_retry_pdf_extracts.sql"),
     include_str!("migrations/0006_search.sql"),
     include_str!("migrations/0007_topics.sql"),
+    include_str!("migrations/0008_topic_proposals.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1840,7 +1844,49 @@ fn write_artifact(
             [id, a.article_id, content_id],
         )?;
     }
+    if a.kind == ArtifactKind::Digest {
+        link_digest_topics(tx, id, a.payload, now)?;
+    }
     Ok(id)
+}
+
+/// 要約の `new_topics` を語彙に加え、`topics` の語を付与として書く。語彙に無い語があれば失敗する
+/// （呼び出し側のトランザクションごと取り消される）。
+fn link_digest_topics(
+    tx: &Connection,
+    artifact_id: i64,
+    payload: &serde_json::Value,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    use rusqlite::OptionalExtension;
+    let new_topics: Vec<crate::topics::Topic> = match payload.get("new_topics") {
+        Some(v) => serde_json::from_value(v.clone())?,
+        None => Vec::new(),
+    };
+    for t in &new_topics {
+        tx.execute(
+            "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (name) DO NOTHING",
+            [&t.name, t.facet.as_str(), &timestamp(now)],
+        )?;
+    }
+    let names: Vec<String> = match payload.get("topics") {
+        Some(v) => serde_json::from_value(v.clone())?,
+        None => Vec::new(),
+    };
+    for name in names {
+        let topic_id: Option<i64> = tx
+            .query_row("SELECT id FROM topics WHERE name = ?1", [&name], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let topic_id = topic_id.ok_or(DbError::UnknownTopic(name))?;
+        tx.execute(
+            "INSERT OR IGNORE INTO artifact_topics (artifact_id, topic_id) VALUES (?1, ?2)",
+            [artifact_id, topic_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// 重複判定用に URL を正規化する：fragment と追跡用のクエリ（utm_*、fbclid、gclid）を除く。
@@ -2857,7 +2903,7 @@ mod tests {
         let gated = insert_content(&db, a, Some(aesj));
         let payload = serde_json::json!({
             "title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["t"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
         });
         db.insert_artifact(
             &NewArtifact {
@@ -2933,7 +2979,7 @@ mod tests {
         let gated = insert_content(&db, a, Some(aesj));
         let payload = serde_json::json!({
             "title_ja": "会員限定の見出し", "summary_ja": "s", "points_ja": ["p"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["t"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
         });
         db.insert_artifact(
             &NewArtifact {
@@ -3724,7 +3770,7 @@ mod tests {
             .unwrap();
         let gated = insert_content(&db, a, Some(aesj));
         let payload = serde_json::json!({"title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["t"]});
+            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"]});
         db.insert_artifact(
             &NewArtifact {
                 article_id: a,
@@ -3890,7 +3936,7 @@ mod tests {
             .unwrap();
         let gated = db.conn().last_insert_rowid();
         let payload = serde_json::json!({"title_ja": "限定要約の題", "summary_ja": "s", "points_ja": ["p"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["t"]});
+            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"]});
         db.insert_artifact(
             &NewArtifact {
                 article_id: a,
@@ -4085,6 +4131,128 @@ mod tests {
             .collect();
         let err = db.replace_topics(&without).unwrap_err();
         assert!(matches!(err, DbError::TopicsInUse(_)), "{err}");
+    }
+
+    fn digest_with_topics(
+        db: &Db,
+        topics: serde_json::Value,
+        new: serde_json::Value,
+    ) -> Result<i64, DbError> {
+        let a = db
+            .insert_article(&article(&format!(
+                "https://e.com/{}",
+                db.query_i64("SELECT count(*) FROM articles").unwrap()
+            )))
+            .unwrap()
+            .unwrap();
+        let c = db
+            .insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let payload = serde_json::json!({"title_ja": "題", "summary_ja": "s", "topics": topics, "new_topics": new});
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 2,
+                payload: &payload,
+                inputs: &[c],
+            },
+            t("2026-09-27T00:00:00Z"),
+        )
+    }
+
+    fn linked_topics(db: &Db, artifact_id: i64) -> Vec<String> {
+        db.query_strings(&format!(
+            "SELECT t.name FROM artifact_topics AS at JOIN topics AS t ON t.id = at.topic_id
+             WHERE at.artifact_id = {artifact_id} ORDER BY t.id"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn insert_digest_links_topics_and_adds_proposed_ones() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        let before = db.topics().unwrap().len();
+        let id = digest_with_topics(
+            &db,
+            serde_json::json!(["燃料", "データセンター需要"]),
+            serde_json::json!([{"name": "データセンター需要", "facet": "分野"}]),
+        )
+        .unwrap();
+        assert_eq!(linked_topics(&db, id), ["燃料", "データセンター需要"]);
+        let topics = db.topics().unwrap();
+        assert_eq!(topics.len(), before + 1);
+        assert_eq!(
+            topics.last().unwrap(),
+            &crate::topics::Topic {
+                name: "データセンター需要".into(),
+                facet: Facet::Field
+            }
+        );
+        // 提案された語は追加の時刻を持つ（初期語彙は持たない）
+        assert_eq!(
+            db.query_strings("SELECT name FROM topics WHERE added_at = '2026-09-27T00:00:00.000Z'")
+                .unwrap(),
+            ["データセンター需要"]
+        );
+        // 同じ語を別の要約が提案しても、語彙は増えず同じ語に付く
+        let again = digest_with_topics(
+            &db,
+            serde_json::json!(["データセンター需要"]),
+            serde_json::json!([{"name": "データセンター需要", "facet": "炉型"}]),
+        )
+        .unwrap();
+        assert_eq!(linked_topics(&db, again), ["データセンター需要"]);
+        assert_eq!(db.topics().unwrap().len(), before + 1);
+    }
+
+    #[test]
+    fn insert_digest_rejects_unknown_topics_without_writing() {
+        let db = Db::open_in_memory().unwrap();
+        let err = digest_with_topics(
+            &db,
+            serde_json::json!(["燃料", "新設炉"]),
+            serde_json::json!([]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, DbError::UnknownTopic(name) if name == "新設炉"),
+            "{err}"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM artifacts").unwrap(), 0);
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM artifact_topics")
+                .unwrap(),
+            0
+        );
+    }
+
+    /// 語彙の表を作ってから要約の保存が付与を書くまでの間に作られた要約も、付与を移す。
+    #[test]
+    fn migration_links_digest_topics_saved_before_linking() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..7] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"topics\": [\"燃料\", \"新設炉\"]}', '2026-09-27T00:00:00Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(linked_topics(&db, 1), ["燃料"]);
     }
 
     #[test]

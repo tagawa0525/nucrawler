@@ -1,12 +1,14 @@
 //! 要約ステージ：digest の無い記事を数件ずつ LLM に渡し、応答を検証して成果物として保存する。
 //! 呼び出しの前にクォータを確かめ、上限に達したら残りは次回に回す。
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey};
+use crate::db::{ArtifactKind, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::{digest, errors, glossary};
 
@@ -44,6 +46,23 @@ pub async fn digest_articles<L: Llm>(
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let mut summary = DigestSummary::default();
+    // 訳語集の変更による作り直しは、先に対象を決めてバッチに分けて要約する
+    let mut outdated = match target {
+        Target::Redo(spec) if spec.glossary => Some(outdated_digests(
+            db,
+            RedoKey {
+                user_id: spec.user_id,
+                profile_hash: spec.profile_hash.as_deref(),
+                backend,
+                model,
+                prompt_version: digest::PROMPT_VERSION,
+            },
+            &spec.filter,
+            llm_cfg,
+            now,
+        )?),
+        _ => None,
+    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -55,11 +74,15 @@ pub async fn digest_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = match target {
-            Target::Pending { .. } => {
+        let batch = match (&mut outdated, target) {
+            (Some(queue), _) => {
+                let n = llm_cfg.digest_batch_size.min(queue.len());
+                queue.drain(..n).collect()
+            }
+            (None, Target::Pending { .. }) => {
                 db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?
             }
-            Target::Redo(spec) => db.redo_digest(
+            (None, Target::Redo(spec)) => db.redo_digest(
                 RedoKey {
                     user_id: spec.user_id,
                     profile_hash: spec.profile_hash.as_deref(),
@@ -168,6 +191,27 @@ pub async fn digest_articles<L: Llm>(
         summary.failed += parsed.missing.len();
     }
     Ok(summary)
+}
+
+/// このモデルの最新の要約が、記事に当たる訳語の変更より前に作られた記事。時点は要約するときと
+/// 同じく、その記事の部分のプロンプトで決める（切り詰めた本文の外の語で作り直しを繰り返さないように）。
+fn outdated_digests(
+    db: &Db,
+    key: RedoKey,
+    filter: &crate::db::RedoFilter,
+    llm_cfg: &LlmConfig,
+    now: DateTime<Utc>,
+) -> Result<VecDeque<DigestInput>, DbError> {
+    let entries = db.glossary_entries()?;
+    Ok(db
+        .redo_digest_existing(key, filter, now)?
+        .into_iter()
+        .filter(|(input, made_with)| {
+            let own = digest::build_prompt(std::slice::from_ref(input), llm_cfg.max_input_chars);
+            glossary::relevant(&entries, &own).glossary_at > *made_with
+        })
+        .map(|(input, _)| input)
+        .collect())
 }
 
 #[cfg(test)]

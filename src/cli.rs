@@ -22,7 +22,7 @@ pub enum ParseError {
     SearchUsage,
     #[error(
         "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
-         [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
+         [--min-score N] [--ids 1,2,3] [--glossary] [--max-llm-calls N]"
     )]
     RedoUsage,
     #[error(
@@ -205,8 +205,14 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
     let mut model = None;
     let mut filter = crate::db::RedoFilter::default();
     let mut max_llm_calls = None;
+    let mut glossary = false;
     let mut it = rest.iter();
     while let Some(opt) = it.next() {
+        // 値を取らないオプション
+        if opt == "--glossary" {
+            glossary = true;
+            continue;
+        }
         let value = option_value(&mut it).ok_or_else(usage)?;
         match opt.as_str() {
             "--model" => model = Some(value.clone()),
@@ -233,7 +239,7 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
         kind,
         model: model.ok_or_else(usage)?,
         filter,
-        glossary: false,
+        glossary,
         max_llm_calls,
     })
 }

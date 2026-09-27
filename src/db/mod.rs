@@ -2138,22 +2138,93 @@ impl Db {
     /// 訳語集の変更による作り直しの候補。このモデルの要約の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn redo_digest_existing(
         &self,
-        _key: RedoKey,
-        _filter: &RedoFilter,
-        _now: chrono::DateTime<chrono::Utc>,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(DigestInput, Option<String>)>, DbError> {
-        todo!()
+        let sql = format!(
+            "SELECT a.id, a.source_id, a.title, a.lang, latest.glossary_at
+             FROM articles AS a
+             JOIN artifacts AS latest ON latest.id = (
+               SELECT r.id FROM artifacts AS r
+               WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
+                 AND r.model = :model AND r.prompt_version = :version
+               ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+             WHERE {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(
+                &*redo_params(key, "digest", filter, now, usize::MAX)?,
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<(i64, String, String, String, Option<String>)>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, source_id, title, lang, glossary_at)| {
+                let input = DigestInput {
+                    article_id,
+                    source_id,
+                    title,
+                    lang,
+                    contents: self.public_contents(article_id, ContentSet::All)?,
+                };
+                Ok((input, glossary_at))
+            })
+            .collect()
     }
 
     /// 条件に合い、このキーの和訳がある英語の記事と、その最新の版を作ったときの訳語集の時点を
     /// 新しい順に返す。訳語集の変更による作り直しの候補。
     pub fn redo_translate_existing(
         &self,
-        _key: RedoKey,
-        _filter: &RedoFilter,
-        _now: chrono::DateTime<chrono::Utc>,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(TranslateInput, Option<String>)>, DbError> {
-        todo!()
+        let sql = format!(
+            "SELECT a.id, a.title, latest.glossary_at
+             FROM articles AS a
+             JOIN artifacts AS latest ON latest.id = (
+               SELECT r.id FROM artifacts AS r
+               WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
+                 AND r.model = :model AND r.prompt_version = :version
+               ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+             WHERE a.lang = 'en'
+               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(
+                &*redo_params(key, "translate", filter, now, usize::MAX)?,
+                |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?)),
+            )?
+            .collect::<Result<Vec<(i64, String, Option<String>)>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, title, glossary_at)| {
+                let input = TranslateInput {
+                    article_id,
+                    title,
+                    contents: self.public_contents(article_id, ContentSet::Body)?,
+                };
+                Ok((input, glossary_at))
+            })
+            .collect()
     }
 
     /// 条件に合い、公開の本文（body/fulltext）がある英語の記事のうち、このキーの和訳がまだ無い

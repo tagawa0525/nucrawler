@@ -455,6 +455,8 @@ async fn translation_request(
 
 #[derive(serde::Deserialize)]
 struct TermReportForm {
+    // 欄が無いときも空と同じく検証で 400 にする（無いと取り出しの段階で 422 になる）
+    #[serde(default)]
     found: String,
     #[serde(default)]
     wanted: String,

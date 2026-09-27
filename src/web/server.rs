@@ -10,7 +10,9 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, NewReport, ReportFilter, ReportStatus, SignalKind};
+use crate::db::{
+    Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -59,7 +61,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/articles/{id}/translation-request",
             post(translation_request),
         )
-        .route("/articles/{id}/term-report", post(term_report))
+        .route("/articles/{id}/report", post(add_report))
         .route("/settings", get(settings))
         .route("/glossary", get(glossary).post(add_glossary_term))
         .route("/glossary/{id}", post(update_glossary_term))
@@ -470,7 +472,9 @@ async fn translation_request(
 }
 
 #[derive(serde::Deserialize)]
-struct TermReportForm {
+struct ReportForm {
+    #[serde(default)]
+    kind: String,
     // 欄が無いときも空と同じく検証で 400 にする（無いと取り出しの段階で 422 になる）
     #[serde(default)]
     found: String,
@@ -478,35 +482,50 @@ struct TermReportForm {
     wanted: String,
     #[serde(default)]
     source: String,
+    /// 訳語の指摘ではメモ、ほかの種類では内容
     #[serde(default)]
     note: String,
     /// 和訳を読んでいたなら `translation`（戻る先）
     view: Option<String>,
 }
 
-/// 訳語の指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。
-async fn term_report(
+/// 指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。訳語の指摘は気になった訳が、
+/// ほかの種類は内容が必須。
+async fn add_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<TermReportForm>,
+    Form(form): Form<ReportForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
+    let kind = ReportKind::parse(&form.kind).ok_or(AppError::BadRequest(
+        "kind must be term, translation, digest, topic, body or other",
+    ))?;
     let filled = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
-    let found = filled(&form.found).ok_or(AppError::BadRequest("found must not be empty"))?;
-    let (wanted, source, note) = (
+    let (found, wanted, source, note) = (
+        filled(&form.found),
         filled(&form.wanted),
         filled(&form.source),
         filled(&form.note),
     );
+    if kind == ReportKind::Term && found.is_none() {
+        return Err(AppError::BadRequest("found must not be empty"));
+    }
+    if kind != ReportKind::Term && note.is_none() {
+        return Err(AppError::BadRequest("note must not be empty"));
+    }
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        let report = NewReport::Term {
-            found: &found,
-            wanted: wanted.as_deref(),
-            source: source.as_deref(),
-            note: note.as_deref(),
+        let report = match (kind, found.as_deref(), note.as_deref()) {
+            (ReportKind::Term, Some(found), note) => NewReport::Term {
+                found,
+                wanted: wanted.as_deref(),
+                source: source.as_deref(),
+                note,
+            },
+            (kind, _, Some(body)) => NewReport::Other { kind, body },
+            _ => unreachable!("required fields are checked above"),
         };
         Ok(db.add_report(user, id, &report, Utc::now())?)
     })
@@ -517,7 +536,7 @@ async fn term_report(
         ""
     };
     Ok(Redirect::to(&format!(
-        "/articles/{id}?{view}reported=1#term-report"
+        "/articles/{id}?{view}reported=1#reports"
     )))
 }
 
@@ -649,37 +668,44 @@ async fn delete_glossary_term(
     Ok(Redirect::to("/glossary"))
 }
 
-/// 受付箱の絞り込み。無ければ受付中、`all` ならすべて。
-fn report_filter(value: Option<&str>) -> Result<Option<ReportStatus>, AppError> {
-    match value {
-        None => Ok(Some(ReportStatus::Pending)),
-        Some("all") => Ok(None),
-        Some(s) => ReportStatus::parse(s).map(Some).ok_or(AppError::BadRequest(
-            "status must be pending, added, existing, rejected or all",
-        )),
-    }
+/// 受付箱の絞り込み。状況が無ければ受付中、`all` ならすべて。種類が無ければすべて。
+fn report_filter(status: Option<&str>, kind: Option<&str>) -> Result<ReportFilter, AppError> {
+    let status = match status {
+        None => Some(ReportStatus::Pending),
+        Some("all") => None,
+        Some(s) => Some(ReportStatus::parse(s).ok_or(AppError::BadRequest(
+            "status must be pending, added, existing, done, rejected or all",
+        ))?),
+    };
+    let kind = kind
+        .map(|k| {
+            ReportKind::parse(k).ok_or(AppError::BadRequest(
+                "kind must be term, translation, digest, topic, body or other",
+            ))
+        })
+        .transpose()?;
+    Ok(ReportFilter {
+        status,
+        kind,
+        article_id: None,
+    })
 }
 
 #[derive(serde::Deserialize)]
 struct ReportsParams {
     status: Option<String>,
+    kind: Option<String>,
 }
 
 async fn reports(
     State(state): State<AppState>,
     Query(params): Query<ReportsParams>,
 ) -> Result<Html<String>, AppError> {
-    let filter = report_filter(params.status.as_deref())?;
+    let filter = report_filter(params.status.as_deref(), params.kind.as_deref())?;
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        let reports = db.reports(
-            user,
-            &ReportFilter {
-                status: filter,
-                ..ReportFilter::default()
-            },
-        )?;
+        let reports = db.reports(user, &filter)?;
         let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
         let warnings = warnings(db)?;
@@ -688,14 +714,7 @@ async fn reports(
             labels: &labels,
         };
         Ok(html::reports_page(
-            &reports,
-            &counts,
-            &ReportFilter {
-                status: filter,
-                ..ReportFilter::default()
-            },
-            &terms,
-            &page,
+            &reports, &counts, &filter, &terms, &page,
         ))
     })
     .await?;
@@ -712,10 +731,12 @@ struct ResolveReportForm {
     #[serde(default)]
     reply: String,
     /// 戻る先の絞り込み
-    back: Option<String>,
+    back_status: Option<String>,
+    back_kind: Option<String>,
 }
 
-/// 指摘の対応状況を変え、受付箱の同じ絞り込みへ戻る。
+/// 指摘の対応状況を変え、受付箱の同じ絞り込みへ戻る。付けられる状況は種類で決まり、
+/// 訳語を結び付けられるのは訳語の指摘だけ。
 async fn resolve_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -724,7 +745,7 @@ async fn resolve_report(
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
     let status = ReportStatus::parse(&form.status).ok_or(AppError::BadRequest(
-        "status must be pending, added, existing or rejected",
+        "status must be pending, added, existing, done or rejected",
     ))?;
     let term_id = match form.term_id.trim() {
         "" => None,
@@ -737,20 +758,26 @@ async fn resolve_report(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     // 戻る先が読めなければ既定（受付中）に戻す
-    let back = report_filter(form.back.as_deref()).unwrap_or(Some(ReportStatus::Pending));
-    let found = with_db(&state, move |db| {
-        if let Some(term_id) = term_id
-            && !db.glossary_entries()?.iter().any(|e| e.id == term_id)
-        {
-            return Err(AppError::BadRequest("unknown term_id"));
+    let back =
+        report_filter(form.back_status.as_deref(), form.back_kind.as_deref()).unwrap_or_default();
+    with_db(&state, move |db| {
+        let kind = db.report_kind(id)?.ok_or(AppError::NotFound)?;
+        if !ReportStatus::for_kind(kind).contains(&status) {
+            return Err(AppError::BadRequest("the status does not fit the report"));
         }
-        Ok(db.resolve_report(id, status, term_id, reply.as_deref(), Utc::now())?)
+        if let Some(term_id) = term_id {
+            if kind != ReportKind::Term {
+                return Err(AppError::BadRequest("only term reports link a term"));
+            }
+            if !db.glossary_entries()?.iter().any(|e| e.id == term_id) {
+                return Err(AppError::BadRequest("unknown term_id"));
+            }
+        }
+        db.resolve_report(id, status, term_id, reply.as_deref(), Utc::now())?;
+        Ok(())
     })
     .await?;
-    if !found {
-        return Err(AppError::NotFound);
-    }
-    Ok(Redirect::to(&html::reports_href(back)))
+    Ok(Redirect::to(&html::reports_href(&back)))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {

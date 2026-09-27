@@ -193,6 +193,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0012_term_reports.sql"),
     include_str!("migrations/0013_glossary_changes.sql"),
     include_str!("migrations/0014_report_status.sql"),
+    include_str!("migrations/0015_report_kinds.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1681,26 +1682,109 @@ impl Db {
         Ok(id)
     }
 
-    /// 訳語の指摘を受付箱に入れる。
+    /// 指摘を受付箱に入れる。
     pub fn add_report(
         &self,
-        _user_id: i64,
-        _article_id: i64,
-        _report: &NewReport<'_>,
-        _now: chrono::DateTime<chrono::Utc>,
+        user_id: i64,
+        article_id: i64,
+        report: &NewReport<'_>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        todo!()
+        let (kind, found, wanted, source, note) = match *report {
+            NewReport::Term {
+                found,
+                wanted,
+                source,
+                note,
+            } => (ReportKind::Term, Some(found), wanted, source, note),
+            NewReport::Other { kind, body } => (kind, None, None, None, Some(body)),
+        };
+        self.conn.execute(
+            "INSERT INTO reports
+               (user_id, article_id, kind, found, wanted, source, note, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                user_id,
+                article_id,
+                kind.as_str(),
+                found,
+                wanted,
+                source,
+                note,
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
     }
 
     /// 受付箱（新しい順）。記事の見出しは、利用者 `user_id` が閲覧できる最新の要約から取る
     /// （無ければ原題）。
-    pub fn reports(&self, _user_id: i64, _filter: &ReportFilter) -> Result<Vec<Report>, DbError> {
-        todo!()
+    pub fn reports(&self, user_id: i64, filter: &ReportFilter) -> Result<Vec<Report>, DbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT r.id, r.article_id,
+                    coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
+                                          WHERE d.article_id = a.id AND d.kind = 'digest'
+                                            AND {viewable}
+                                          ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
+                             a.title),
+                    r.kind, r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
+                    r.reply, r.reported_at, r.resolved_at
+             FROM reports AS r
+             JOIN articles AS a ON a.id = r.article_id
+             LEFT JOIN glossary_terms AS t ON t.id = r.term_id
+             WHERE (:status IS NULL OR r.status = :status)
+               AND (:kind IS NULL OR r.kind = :kind)
+               AND (:article IS NULL OR r.article_id = :article)
+             ORDER BY r.reported_at DESC, r.id DESC",
+            viewable = viewable("d")
+        ))?;
+        let mut rows = stmt.query(rusqlite::named_params! {
+            ":user": user_id,
+            ":status": filter.status.map(ReportStatus::as_str),
+            ":kind": filter.kind.map(ReportKind::as_str),
+            ":article": filter.article_id,
+        })?;
+        let mut reports = Vec::new();
+        while let Some(r) = rows.next()? {
+            let kind: String = r.get(3)?;
+            let status: String = r.get(8)?;
+            let term = match (r.get::<_, Option<i64>>(9)?, r.get::<_, Option<String>>(10)?) {
+                (Some(id), Some(target)) => Some((id, target)),
+                _ => None,
+            };
+            reports.push(Report {
+                id: r.get(0)?,
+                article_id: r.get(1)?,
+                article_title: r.get(2)?,
+                kind: ReportKind::parse(&kind)
+                    .ok_or_else(|| DbError::UnexpectedValue(format!("report kind {kind:?}")))?,
+                found: r.get(4)?,
+                wanted: r.get(5)?,
+                source: r.get(6)?,
+                note: r.get(7)?,
+                status: ReportStatus::parse(&status)
+                    .ok_or_else(|| DbError::UnexpectedValue(format!("report status {status:?}")))?,
+                term,
+                reply: r.get(11)?,
+                reported_at: r.get(12)?,
+                resolved_at: r.get(13)?,
+            });
+        }
+        Ok(reports)
     }
 
     /// 指摘の種類。無ければ None。
-    pub fn report_kind(&self, _id: i64) -> Result<Option<ReportKind>, DbError> {
-        todo!()
+    pub fn report_kind(&self, id: i64) -> Result<Option<ReportKind>, DbError> {
+        use rusqlite::OptionalExtension;
+        let kind: Option<String> = self
+            .conn
+            .query_row("SELECT kind FROM reports WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        kind.map(|k| {
+            ReportKind::parse(&k)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("report kind {k:?}")))
+        })
+        .transpose()
     }
 
     /// 対応状況ごとの件数（`ReportStatus::ALL` の順。0 件も含む）。
@@ -1709,7 +1793,7 @@ impl Db {
             .into_iter()
             .map(|status| {
                 let n = self.conn.query_row(
-                    "SELECT count(*) FROM term_reports WHERE status = ?1",
+                    "SELECT count(*) FROM reports WHERE status = ?1",
                     [status.as_str()],
                     |r| r.get(0),
                 )?;
@@ -1730,7 +1814,7 @@ impl Db {
     ) -> Result<bool, DbError> {
         // 対応日時は状況を変えたときだけ進める（ひとことや訳語だけの修正では変えない）
         Ok(self.conn.execute(
-            "UPDATE term_reports
+            "UPDATE reports
              SET resolved_at = CASE WHEN ?2 = 'pending' THEN NULL
                                     WHEN status = ?2 THEN resolved_at
                                     ELSE ?5 END,

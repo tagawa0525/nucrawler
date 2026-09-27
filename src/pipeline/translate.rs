@@ -96,7 +96,8 @@ pub async fn translate_articles<L: Llm>(
             model,
         };
         let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
-        let system = translate::system_prompt(&glossary::relevant(db.glossary()?, &prompt));
+        let system =
+            translate::system_prompt(&glossary::relevant(&db.glossary_entries()?, &prompt).terms);
         let outcome = call_recorded(
             db,
             llm,
@@ -155,6 +156,7 @@ pub async fn translate_articles<L: Llm>(
                 prompt_version: translate::PROMPT_VERSION,
                 payload: &serde_json::json!({ "body_ja": body_ja }),
                 inputs: &inputs,
+                glossary_at: None,
             },
             now,
         )?;
@@ -223,6 +225,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &payload,
                     inputs: &[c],
+                    glossary_at: None,
                 },
                 now(),
             )
@@ -307,6 +310,38 @@ mod tests {
     }
 
     const EDG_LINE: &str = "emergency diesel generator / EDG → 非常用ディーゼル発電機（EDG）";
+
+    /// 和訳には、記事に当たった訳語の時点を残す。当たる語が無ければ残さない。
+    #[tokio::test]
+    async fn translation_records_the_glossary_time() {
+        let (db, owner) = setup();
+        let with_edg = article(&db, 0, 10);
+        let without = article(&db, 1, 10);
+        mention_edg(&db, with_edg);
+        let term = crate::glossary::Term {
+            sources: vec!["emergency diesel generator".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: None,
+            note: None,
+        };
+        db.add_glossary_term(&term, now()).unwrap();
+        for id in [with_edg, without] {
+            db.request_translation(owner, id, now()).unwrap();
+        }
+        let llm = FakeLlm::new([ok("和訳"), ok("和訳")]);
+        run(&db, owner, &llm, &mut quota(10), true).await;
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT article_id || '|' || coalesce(glossary_at, '-') FROM artifacts
+                 WHERE kind = 'translation' ORDER BY article_id"
+            ))
+            .unwrap(),
+            [
+                format!("{with_edg}|{}", crate::db::timestamp(now())),
+                format!("{without}|-")
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn system_prompt_carries_only_glossary_terms_in_the_articles() {

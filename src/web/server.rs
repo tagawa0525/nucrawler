@@ -648,7 +648,7 @@ async fn delete_comment(
 async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
-        let terms = db.glossary()?.len();
+        let terms = db.glossary_entries()?.len();
         let pending = db
             .report_counts()?
             .into_iter()
@@ -943,6 +943,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &payload,
                     inputs: &[body],
+                    glossary_at: None,
                 },
                 chrono::Utc::now(),
             )
@@ -1005,6 +1006,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &serde_json::json!({"body_ja": "和訳の本文"}),
                 inputs: &[body],
+                glossary_at: None,
             },
             chrono::Utc::now(),
         )

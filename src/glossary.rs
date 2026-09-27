@@ -11,22 +11,34 @@ pub struct Term {
     pub note: Option<String>,
 }
 
-/// 画面で扱う訳語集の 1 項目。`changed_at` は訳語か原語を最後に変えた時刻（初期値のままなら None）。
+/// DB にある訳語集の 1 項目と、変えた時刻。`term_changed_at` は訳・略語・メモを変えた時刻、
+/// `sources_added_at` は `term.sources` と同じ並びで各原語を加えた時刻（初期値の語はどれも None）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub id: i64,
     pub term: Term,
-    pub changed_at: Option<String>,
+    pub term_changed_at: Option<String>,
+    pub sources_added_at: Vec<Option<String>>,
+}
+
+impl Entry {
+    /// 訳語か原語を最後に変えた時刻（初期値のままなら None）。
+    pub fn changed_at(&self) -> Option<&str> {
+        todo!()
+    }
+}
+
+/// 記事に当たった訳語と、その時点。`glossary_at` は当たった訳語のうち最も新しく変えた時刻で、
+/// 訳・略語・メモを変えた時刻と、記事に出てきた原語を加えた時刻から決める（無ければ None）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relevant {
+    pub terms: Vec<Term>,
+    pub glossary_at: Option<String>,
 }
 
 /// 原語のどれかが `text` に出てくる語だけを残す。
-pub fn relevant(terms: Vec<Term>, text: &str) -> Vec<Term> {
-    let text = normalize_spaces(text);
-    let folded = text.to_ascii_lowercase();
-    terms
-        .into_iter()
-        .filter(|t| t.sources.iter().any(|s| mentions(&text, &folded, s)))
-        .collect()
+pub fn relevant(_entries: &[Entry], _text: &str) -> Relevant {
+    todo!()
 }
 
 /// 改行や連続した空白を 1 つの空白にする（原文の折り返しで語が分かれても当てるため）。
@@ -140,19 +152,58 @@ mod tests {
         assert!(!s.contains("統一する"), "{s}");
     }
 
+    /// 変えた時刻を持たない（初期値の）項目。
+    fn entry(term: Term) -> Entry {
+        let sources_added_at = vec![None; term.sources.len()];
+        Entry {
+            id: 1,
+            term,
+            term_changed_at: None,
+            sources_added_at,
+        }
+    }
+
     fn sources_found(sources: &[&str], text: &str) -> bool {
-        !relevant(vec![term(sources, "訳", None, None)], text).is_empty()
+        !relevant(&[entry(term(sources, "訳", None, None))], text)
+            .terms
+            .is_empty()
     }
 
     #[test]
     fn keeps_only_terms_whose_source_appears() {
-        let terms = vec![
-            term(&["scram"], "スクラム", None, None),
-            term(&["spent fuel", "used fuel"], "使用済燃料", None, None),
+        let entries = [
+            entry(term(&["scram"], "スクラム", None, None)),
+            entry(term(&["spent fuel", "used fuel"], "使用済燃料", None, None)),
         ];
-        let kept = relevant(terms, "Used fuel is stored on site.");
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].target, "使用済燃料");
+        let kept = relevant(&entries, "Used fuel is stored on site.");
+        assert_eq!(kept.terms.len(), 1);
+        assert_eq!(kept.terms[0].target, "使用済燃料");
+        assert_eq!(kept.glossary_at, None);
+    }
+
+    /// 時点は当たった訳語の変えた時刻と、記事に出てきた原語を加えた時刻のうち最も新しいもの。
+    /// 記事に出てこない原語を加えても、その記事の時点は変わらない。
+    #[test]
+    fn glossary_at_is_the_latest_change_among_what_matched() {
+        let mut fuel = entry(term(&["spent fuel", "used fuel"], "使用済燃料", None, None));
+        fuel.sources_added_at = vec![None, Some("2026-09-27T02:00:00.000Z".into())];
+        let mut scram = entry(term(&["scram"], "スクラム", None, None));
+        scram.term_changed_at = Some("2026-09-27T01:00:00.000Z".into());
+        let entries = [fuel, scram];
+        let at = |text| relevant(&entries, text).glossary_at;
+        assert_eq!(at("spent fuel"), None);
+        assert_eq!(at("used fuel").as_deref(), Some("2026-09-27T02:00:00.000Z"));
+        assert_eq!(
+            at("spent fuel and a scram").as_deref(),
+            Some("2026-09-27T01:00:00.000Z")
+        );
+        assert_eq!(
+            at("used fuel and a scram").as_deref(),
+            Some("2026-09-27T02:00:00.000Z")
+        );
+        assert_eq!(at("nothing"), None);
+        assert_eq!(entries[0].changed_at(), Some("2026-09-27T02:00:00.000Z"));
+        assert_eq!(entries[1].changed_at(), Some("2026-09-27T01:00:00.000Z"));
     }
 
     /// 語は大文字小文字を問わないが、大文字だけの略語は大文字のときだけ当てる。

@@ -217,6 +217,7 @@ mod tests {
                         prompt_version: 1,
                         payload: &payload,
                         inputs: &[c],
+                        glossary_at: None,
                     },
                     now(),
                 )

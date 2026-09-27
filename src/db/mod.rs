@@ -365,6 +365,8 @@ pub struct NewArtifact<'a> {
     pub prompt_version: i64,
     pub payload: &'a serde_json::Value,
     pub inputs: &'a [i64],
+    /// 使った訳語集の時点（[`crate::glossary::Relevant::glossary_at`]）
+    pub glossary_at: Option<&'a str>,
 }
 
 /// 要約の入力にする記事と、その公開の本文の部分。
@@ -1148,15 +1150,6 @@ impl Db {
     }
 
     /// 訳語集（登録順）。原語も登録順に並べる。
-    pub fn glossary(&self) -> Result<Vec<crate::glossary::Term>, DbError> {
-        Ok(self
-            .glossary_entries()?
-            .into_iter()
-            .map(|e| e.term)
-            .collect())
-    }
-
-    /// 画面に出す訳語集（登録順）。
     pub fn glossary_entries(&self) -> Result<Vec<crate::glossary::Entry>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.target, t.abbr, t.note, t.changed_at, s.source, s.added_at
@@ -1172,21 +1165,19 @@ impl Db {
             match entries.last_mut() {
                 Some(entry) if entry.id == id => {
                     entry.term.sources.push(source);
-                    entry.changed_at = entry.changed_at.take().max(added_at);
+                    entry.sources_added_at.push(added_at);
                 }
-                _ => {
-                    let changed_at: Option<String> = r.get(4)?;
-                    entries.push(crate::glossary::Entry {
-                        id,
-                        term: crate::glossary::Term {
-                            sources: vec![source],
-                            target: r.get(1)?,
-                            abbr: r.get(2)?,
-                            note: r.get(3)?,
-                        },
-                        changed_at: changed_at.max(added_at),
-                    });
-                }
+                _ => entries.push(crate::glossary::Entry {
+                    id,
+                    term: crate::glossary::Term {
+                        sources: vec![source],
+                        target: r.get(1)?,
+                        abbr: r.get(2)?,
+                        note: r.get(3)?,
+                    },
+                    term_changed_at: r.get(4)?,
+                    sources_added_at: vec![added_at],
+                }),
             }
         }
         Ok(entries)
@@ -3561,6 +3552,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &payload,
                     inputs: &[lead, body],
+                    glossary_at: None,
                 },
                 t("2026-09-27T00:00:00Z"),
             )
@@ -3603,6 +3595,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &payload,
                     inputs: &[gated],
+                    glossary_at: None,
                 },
                 t("2026-09-27T00:00:00Z"),
             )
@@ -3677,6 +3670,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &payload,
                     inputs: &[],
+                    glossary_at: None,
                 },
                 t("2026-09-27T00:00:00Z"),
             )
@@ -3748,6 +3742,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[c],
+                glossary_at: None,
             },
             t(now),
         )
@@ -3861,6 +3856,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[c],
+                glossary_at: None,
             },
             t(at),
         )
@@ -3954,6 +3950,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[gated],
+                glossary_at: None,
             },
             t("2026-09-26T01:00:00Z"),
         )
@@ -4030,6 +4027,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[gated],
+                glossary_at: None,
             },
             t("2026-09-26T02:00:00Z"),
         )
@@ -4241,6 +4239,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[body],
+                glossary_at: None,
             },
             t(now),
         )
@@ -4346,6 +4345,7 @@ mod tests {
             prompt_version: 1,
             payload: &payload,
             inputs,
+            glossary_at: None,
         };
         // 失敗したら（入力が空）依頼も完了にならない
         assert!(db.insert_translation(&translation(&[]), t(now)).is_err());
@@ -4397,6 +4397,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[body],
+                glossary_at: None,
             },
             t(now),
         )
@@ -4441,6 +4442,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[body],
+                glossary_at: None,
             },
             t("2026-09-27T01:00:00Z"),
         )
@@ -4628,6 +4630,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[body],
+                glossary_at: None,
             },
             t("2026-09-27T00:00:00Z"),
         )
@@ -4820,6 +4823,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[gated],
+                glossary_at: None,
             },
             t("2026-09-26T09:00:00Z"),
         )
@@ -4937,6 +4941,7 @@ mod tests {
                     "topics": topics, "new_topics": new,
                 }),
                 inputs: &[c],
+                glossary_at: None,
             },
             t(at),
         )
@@ -5127,6 +5132,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &serde_json::json!({ "body_ja": body_ja }),
                 inputs: &[c],
+                glossary_at: None,
             },
             t("2026-09-26T03:00:00Z"),
         )
@@ -5244,6 +5250,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &payload,
                 inputs: &[gated],
+                glossary_at: None,
             },
             t("2026-09-26T00:00:00Z"),
         )
@@ -5391,7 +5398,12 @@ mod tests {
     #[test]
     fn migration_seeds_glossary_with_sources_and_abbreviations() {
         let db = Db::open_in_memory().unwrap();
-        let glossary = db.glossary().unwrap();
+        let glossary: Vec<_> = db
+            .glossary_entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.term)
+            .collect();
         let nrc = glossary
             .iter()
             .find(|t| t.target == "米国原子力規制委員会")
@@ -5431,7 +5443,7 @@ mod tests {
             db.glossary_entries()
                 .unwrap()
                 .iter()
-                .all(|e| e.changed_at.is_none())
+                .all(|e| e.changed_at().is_none())
         );
         let term = glossary_term(
             &["emergency diesel generator", "EDG"],
@@ -5444,10 +5456,15 @@ mod tests {
         let entry = glossary_entry(&db, id);
         assert_eq!(entry.term, term);
         assert_eq!(
-            entry.changed_at.as_deref(),
+            entry.changed_at(),
             Some(timestamp(t("2026-09-27T00:00:00Z")).as_str())
         );
-        assert!(db.glossary().unwrap().contains(&term));
+        assert!(
+            db.glossary_entries()
+                .unwrap()
+                .iter()
+                .any(|e| e.term == term)
+        );
     }
 
     /// 置き換えでは、残した原語はそのまま、足した原語は加え、無くした原語は消す。
@@ -5470,12 +5487,12 @@ mod tests {
         assert!(db.update_glossary_term(id, &updated, later).unwrap());
         let entry = glossary_entry(&db, id);
         assert_eq!(entry.term, updated);
-        assert_eq!(entry.changed_at.as_deref(), Some(timestamp(later).as_str()));
+        assert_eq!(entry.changed_at(), Some(timestamp(later).as_str()));
         // 同じ内容で保存しても変更にならない
         let even_later = later + chrono::Duration::hours(1);
         assert!(db.update_glossary_term(id, &updated, even_later).unwrap());
         assert_eq!(
-            glossary_entry(&db, id).changed_at.as_deref(),
+            glossary_entry(&db, id).changed_at(),
             Some(timestamp(later).as_str())
         );
         assert!(!db.update_glossary_term(9999, &updated, later).unwrap());
@@ -6021,6 +6038,7 @@ mod tests {
                 prompt_version: 2,
                 payload: &payload,
                 inputs: &[c],
+                glossary_at: None,
             },
             t("2026-09-27T00:00:00Z"),
         )
@@ -6237,6 +6255,7 @@ mod tests {
                 prompt_version: 2,
                 payload: &payload,
                 inputs: &[c],
+                glossary_at: None,
             },
             t("2026-09-27T01:00:00Z"),
         )

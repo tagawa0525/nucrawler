@@ -408,6 +408,7 @@ mod tests {
                     prompt_version: 1,
                     payload: &digest_payload(s.title_ja, s.summary_ja, s.lwr_relevant),
                     inputs: &[body],
+                    glossary_at: None,
                 },
                 now(),
             )
@@ -664,6 +665,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &serde_json::json!({"body_ja": body_ja}),
                 inputs: &[full],
+                glossary_at: None,
             },
             now(),
         )
@@ -740,6 +742,7 @@ mod tests {
                 prompt_version: 1,
                 payload: &digest_payload("会員版", "会員の要約", true),
                 inputs: &[member_content],
+                glossary_at: None,
             },
             now() + Duration::hours(1),
         )

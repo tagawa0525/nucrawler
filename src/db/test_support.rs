@@ -42,6 +42,15 @@ pub(super) fn insert_content(db: &Db, article_id: i64, membership: Option<i64>) 
     db.conn().last_insert_rowid()
 }
 
+/// 成果物の記事 id を使って入力を紐付ける。
+pub(super) fn link_input(db: &Db, artifact_id: i64, content_id: i64) -> rusqlite::Result<usize> {
+    db.conn().execute(
+        "INSERT INTO artifact_inputs (artifact_id, article_id, content_id)
+         SELECT id, article_id, ?2 FROM artifacts WHERE id = ?1",
+        [artifact_id, content_id],
+    )
+}
+
 pub(super) fn access_of(db: &Db, artifact_id: i64) -> Vec<i64> {
     let mut stmt = db
         .conn()

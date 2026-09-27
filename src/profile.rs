@@ -115,7 +115,9 @@ pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
             });
             continue;
         };
-        if old.note != new.note {
+        // 空の note は無いのと同じ（suggest の案は空の note を無しにする）
+        let blank = |n: &Option<String>| n.as_deref().is_none_or(|n| n.trim().is_empty());
+        if old.note != new.note && !(blank(&old.note) && blank(&new.note)) {
             changes.push(Change::Note {
                 topic: new.topic.clone(),
                 from: old.note,

@@ -163,7 +163,8 @@ source_state(source_id PK, last_success_at, last_error)
 ## 依存 crate
 
 - 使うもの：tokio、reqwest（rustls）、axum、rusqlite（bundled）、serde、serde_json、toml、feed-rs、encoding_rs（Shift_JIS）、scraper、dom_smoothie、texting_robots、chrono、thiserror（モジュールごとのエラー型）、tracing と tracing-subscriber（ログは stderr）
-- 後から追加するもの：rmcp（MCP）、pdf-extract（PDF）、CDP クライアント（Chromium）
+- 後から追加したもの：rmcp（MCP）、pdf-extract（PDF）
+- 後から追加するもの：CDP クライアント（Chromium）
 - 使わないもの：clap、テンプレートエンジン、wiremock（代わりにローカルの axum を使う）、anyhow
 
 ## PR の順序
@@ -193,7 +194,7 @@ source_state(source_id PK, last_success_at, last_error)
 
 15. 🔶 HTML の一覧ページ（NRA、JAEA、電力各社、東京電力はブラウザ UA）と PDF（pdf-extract、スキャン画像のときは Claude に直接読ませる）
     - 残り：スキャン画像の PDF を Claude に読ませる（今は文字の無い PDF として断念する）
-    - 東京電力も既定の UA で取得している。ソースごとの UA の設定は無い
+    - 東京電力のブラウザ UA は要件から外した。既定の UA で取得できており、ソースごとの UA の設定は無い
 16. ✅ JAIF
 17. 論文系（事前フィルタ、Crossref、arXiv、OSTI）
 18. ✅ RSS 出力と JSON API（出力は Atom フィードにした）

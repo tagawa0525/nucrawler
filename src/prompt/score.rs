@@ -333,6 +333,17 @@ mod tests {
         assert_eq!(parsed.missing, [3]);
     }
 
+    /// 同じ語を 2 度返されても 1 つとして残す（保存の主キーが重複を許さないため）。
+    #[test]
+    fn parse_deduplicates_matches() {
+        let output = serde_json::json!({"items": [
+            {"id": 1, "score": 80, "reason": "r", "matched": ["燃料", "燃料"], "excluded": ["核融合", "核融合"]},
+        ]});
+        let parsed = parse(&output, &[1], &profile()).unwrap();
+        assert_eq!(parsed.items[0].matched, ["燃料"]);
+        assert_eq!(parsed.items[0].excluded, ["核融合"]);
+    }
+
     #[test]
     fn prompt_lists_digests_and_neutralizes_tags() {
         let prompt = build_prompt(&[ScoreInput {

@@ -24,9 +24,11 @@ pub fn score_stage(key: ScoreKey) -> String {
 
 /// 採点を待つ記事の範囲。
 #[derive(Debug, Clone, Copy)]
-pub enum ScoreScope {
+pub enum ScoreScope<'a> {
     /// この時刻以降に公開（公開日時が無ければ取得）された記事
     Since(chrono::DateTime<chrono::Utc>),
+    /// 指定した記事（公開の時期は問わない）
+    Articles(&'a [i64]),
 }
 
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
@@ -46,11 +48,14 @@ impl Db {
     pub fn pending_score(
         &self,
         key: ScoreKey,
-        scope: ScoreScope,
+        scope: ScoreScope<'_>,
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
-        let ScoreScope::Since(cutoff) = scope;
+        let cutoff = match scope {
+            ScoreScope::Since(cutoff) => cutoff,
+            ScoreScope::Articles(ids) => todo!("{ids:?}"),
+        };
         let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
                -- 利用者が持っていない会員資格を必要とする digest は見せない
@@ -247,6 +252,32 @@ mod tests {
             db.query_strings("SELECT prompt_version || ':' || score FROM scores ORDER BY id")
                 .unwrap(),
             ["1:80", "2:60"]
+        );
+    }
+
+    /// 候補のプロファイルの評価では、公開の時期によらず、指定した記事だけを採点する。
+    #[test]
+    fn pending_score_can_be_limited_to_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let old = page_article(&db, "https://e.com/old", "2026-01-01T00:00:00.000Z");
+        add_digest(&db, old, "sonnet", "古い", true, "2026-01-01T01:00:00Z");
+        let other = page_article(&db, "https://e.com/other", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, other, "sonnet", "対象外", true, "2026-09-26T01:00:00Z");
+        fn ids(db: &Db, key: ScoreKey, scope: ScoreScope<'_>, now: &str) -> Vec<i64> {
+            db.pending_score(key, scope, t(now), 10)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.article_id)
+                .collect()
+        }
+        assert_eq!(ids(&db, key, ScoreScope::Articles(&[old]), now), [old]);
+        assert!(ids(&db, key, ScoreScope::Articles(&[]), now).is_empty());
+        // 期間で絞れば古い記事は入らない
+        assert_eq!(
+            ids(&db, key, ScoreScope::Since(t("2026-09-10T00:00:00Z")), now),
+            [other]
         );
     }
 

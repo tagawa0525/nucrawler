@@ -303,6 +303,7 @@ fn eval(data: Option<PathBuf>, args: EvalArgs) -> Result<(), Error> {
             &db.eval_labels(owner)?,
             &db.eval_scores(owner)?,
             current,
+            None,
             args.all
         )
     );

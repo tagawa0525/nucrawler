@@ -9,6 +9,7 @@ use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{DbError, ScoreKey, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
+use crate::profile::Profile;
 use crate::prompt;
 
 pub const STAGE: &str = "score";
@@ -21,9 +22,14 @@ pub enum ScoreStageError {
 
 /// 採点の対象。
 #[derive(Debug, Clone, Copy)]
-pub enum ScoreTarget {
+pub enum ScoreTarget<'a> {
     /// crawl の採点：保存済みのプロファイルで、`backlog_days` の範囲のまだ採点していない記事
     Saved,
+    /// `eval --profile`：渡したプロファイルで、指定した記事のうちまだ採点していないもの
+    Candidate {
+        profile: &'a Profile,
+        articles: &'a [i64],
+    },
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -47,11 +53,13 @@ pub async fn score_articles<L: Llm>(
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     user_id: i64,
-    target: ScoreTarget,
+    target: ScoreTarget<'_>,
     now: DateTime<Utc>,
 ) -> Result<ScoreSummary, ScoreStageError> {
     let mut summary = ScoreSummary::default();
-    let ScoreTarget::Saved = target;
+    if let ScoreTarget::Candidate { profile, articles } = target {
+        todo!("{profile:?} {articles:?}")
+    }
     let Some((profile, profile_hash)) = db.load_profile(user_id)? else {
         tracing::warn!("no profile yet; run `nucrawler profile import FILE` to enable scoring");
         summary.no_profile = true;
@@ -298,6 +306,45 @@ mod tests {
             db.query_strings("SELECT stage FROM llm_calls").unwrap(),
             ["score", "score"]
         );
+    }
+
+    /// 候補のプロファイルは保存せず、その hash で指定した記事だけを採点する。
+    #[tokio::test]
+    async fn scores_given_articles_with_a_candidate_profile() {
+        let (db, owner, ids) = setup(3);
+        let mut candidate =
+            crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        candidate.interests[0].topic = "候補の分野".into();
+        let candidate_hash = crate::profile::hash(&candidate);
+        let llm = FakeLlm::new([ok(&[(ids[2], 60)])]);
+        let summary = score_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
+            &cfg(5),
+            &PipelineConfig::default(),
+            owner,
+            ScoreTarget::Candidate {
+                profile: &candidate,
+                articles: &[ids[2]],
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert!(llm.requests()[0].system.contains("候補の分野"));
+        assert_eq!(
+            db.query_strings("SELECT profile_hash || ':' || score FROM scores")
+                .unwrap(),
+            [format!("{candidate_hash}:60")]
+        );
+        // 保存済みのプロファイルは変えない
+        let (saved, _) = db.load_profile(owner).unwrap().unwrap();
+        assert_ne!(saved.interests[0].topic, "候補の分野");
     }
 
     #[tokio::test]

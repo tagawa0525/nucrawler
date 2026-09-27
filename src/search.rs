@@ -1,7 +1,7 @@
 //! 検索の入口（Web・JSON API・CLI・MCP）で共通の、入力の解釈：検索語の分け方と、
 //! 日付（日本時間の年月か年月日）の範囲。
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
@@ -10,18 +10,41 @@ pub enum SearchError {
 }
 
 /// 検索語を空白（全角の空白を含む）で分ける。
-pub fn parse_terms(_q: &str) -> Vec<String> {
-    Vec::new()
+pub fn parse_terms(q: &str) -> Vec<String> {
+    q.split(char::is_whitespace)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// `since`：その日（年月ならその月の 1 日）の日本時間 0 時。この時刻以降に絞る。
-pub fn since(_value: &str) -> Result<DateTime<Utc>, SearchError> {
-    Ok(DateTime::UNIX_EPOCH)
+pub fn since(value: &str) -> Result<DateTime<Utc>, SearchError> {
+    let (start, _) = period("since", value)?;
+    Ok(start)
 }
 
 /// `until`：その日（年月ならその月）の終わり。翌日（翌月 1 日）の日本時間 0 時を返し、この時刻より前に絞る。
-pub fn until(_value: &str) -> Result<DateTime<Utc>, SearchError> {
-    Ok(DateTime::UNIX_EPOCH)
+pub fn until(value: &str) -> Result<DateTime<Utc>, SearchError> {
+    let (_, end) = period("until", value)?;
+    Ok(end)
+}
+
+/// 年月日ならその日、年月ならその月の、日本時間での始まりと終わり（終わりは含まない）。
+fn period(name: &'static str, value: &str) -> Result<(DateTime<Utc>, DateTime<Utc>), SearchError> {
+    let invalid = || SearchError::InvalidDate {
+        name,
+        value: value.to_string(),
+    };
+    let (first, next) = if let Ok(day) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        (day, day.succ_opt())
+    } else {
+        let month =
+            NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d").map_err(|_| invalid())?;
+        (month, month.checked_add_months(chrono::Months::new(1)))
+    };
+    let start = crate::jst::midnight(first).ok_or_else(invalid)?;
+    let end = next.and_then(crate::jst::midnight).ok_or_else(invalid)?;
+    Ok((start, end))
 }
 
 #[cfg(test)]

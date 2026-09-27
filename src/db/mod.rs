@@ -452,10 +452,83 @@ enum ItemScope<'a> {
         min_score: u8,
         limit: usize,
     },
-    Search {
-        terms: &'a [String],
-        limit: usize,
-    },
+    Search(&'a SearchQuery<'a>),
+}
+
+/// 検索の条件を、`query_items` の SQL に足す条件とその名前付きパラメータにしたもの。
+/// `items` は記事（`a`）の条件、`rows` は組み立てた行（`rows`、点数 `s`）の条件で、どちらも `AND` で始まる。
+#[derive(Default)]
+struct SearchFilters {
+    items: String,
+    rows: String,
+    params: Vec<(String, Box<dyn rusqlite::ToSql>)>,
+}
+
+impl SearchFilters {
+    fn new(q: &SearchQuery) -> Self {
+        let mut f = Self::default();
+        for (i, term) in q.terms.iter().enumerate() {
+            let param = format!(":t{i}");
+            f.items
+                .push_str(&format!(" AND {}", search_term_filter(term, &param)));
+            let value = if is_indexable(term) {
+                fts_phrase(term)
+            } else {
+                like_pattern(term)
+            };
+            f.params.push((param, Box::new(value)));
+        }
+        if let Some(until) = q.until {
+            f.items
+                .push_str(" AND coalesce(a.published_at, a.fetched_at) < :until");
+            f.params.push((":until".into(), Box::new(timestamp(until))));
+        }
+        if !q.sources.is_empty() {
+            f.items
+                .push_str(" AND a.source_id IN (SELECT value FROM json_each(:sources))");
+            let sources = serde_json::to_string(&q.sources).expect("strings serialize");
+            f.params.push((":sources".into(), Box::new(sources)));
+        }
+        if let Some(lang) = q.lang {
+            f.items.push_str(" AND a.lang = :lang");
+            f.params.push((":lang".into(), Box::new(lang_code(lang))));
+        }
+        // 語は別名でもよい（統合先の語で判定する）。語彙に無い名前は何にも一致しない
+        for (i, topic) in q.topics.iter().enumerate() {
+            let param = format!(":topic{i}");
+            f.rows.push_str(&format!(
+                " AND EXISTS (
+                   SELECT 1 FROM artifact_topics AS at
+                   WHERE at.artifact_id = rows.digest_id
+                     AND at.topic_id IN (
+                       SELECT id FROM topics WHERE name = {param}
+                       UNION ALL
+                       SELECT topic_id FROM topic_aliases WHERE alias = {param}))"
+            ));
+            f.params.push((param, Box::new(topic.clone())));
+        }
+        if q.translated {
+            f.rows.push_str(" AND rows.has_translation = 1");
+        }
+        if q.liked {
+            f.rows.push_str(" AND rows.feedback = 'up'");
+        }
+        if q.unread {
+            f.rows.push_str(" AND rows.read = 0");
+        }
+        if let Some(min) = q.min_score {
+            f.rows.push_str(" AND s.score >= :min_score");
+            f.params.push((":min_score".into(), Box::new(min)));
+        }
+        f
+    }
+}
+
+fn lang_code(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "en",
+        Lang::Ja => "ja",
+    }
 }
 
 /// trigram の索引で引ける語の最短の文字数。これより短い語は本文を走査する。
@@ -579,10 +652,7 @@ impl Db {
     /// URL を正規化して登録する。既に同じ URL があれば `None`。
     pub fn insert_article(&self, a: &NewArticle) -> Result<Option<i64>, DbError> {
         let url = normalize_url(a.url)?;
-        let lang = match a.lang {
-            Lang::En => "en",
-            Lang::Ja => "ja",
-        };
+        let lang = lang_code(a.lang);
         let inserted = self.conn.execute(
             &format!(
                 "INSERT INTO articles (source_id, url, title, lang, published_at, fetched_at)
@@ -1590,14 +1660,7 @@ impl Db {
 
     /// 検索。一覧で隠す記事も含め、新しい順。
     pub fn search_articles(&self, q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
-        self.query_items(
-            q.user_id,
-            q.profile_hash,
-            ItemScope::Search {
-                terms: &q.terms,
-                limit: q.limit,
-            },
-        )
+        self.query_items(q.user_id, q.profile_hash, ItemScope::Search(q))
     }
 
     /// 詳細画面の内容。記事が無ければ None。
@@ -1686,38 +1749,37 @@ impl Db {
         profile_hash: Option<&str>,
         scope: ItemScope,
     ) -> Result<Vec<ListItem>, DbError> {
-        let (id, since, show_all, min_score, limit, terms) = match scope {
-            ItemScope::One(id) => (Some(id), None, true, 0, 1, &[][..]),
+        const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
+        const NEWEST: &str = "rows.at DESC, rows.id DESC";
+        let (id, since, show_all, min_score, limit, order) = match scope {
+            ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
             ItemScope::List {
                 since,
                 show_all,
                 min_score,
                 limit,
-            } => (None, Some(since), show_all, min_score, limit, &[][..]),
-            ItemScope::Search { terms, limit } => (None, None, true, 0, limit, terms),
+            } => (None, Some(since), show_all, min_score, limit, BY_SCORE),
+            ItemScope::Search(q) => (
+                None,
+                q.since,
+                q.hide_below.is_none(),
+                q.hide_below.unwrap_or(0),
+                q.limit,
+                match q.order {
+                    SearchOrder::Newest => NEWEST,
+                    SearchOrder::Score => BY_SCORE,
+                },
+            ),
         };
-        let term_params: Vec<(String, String)> = terms
-            .iter()
-            .enumerate()
-            .map(|(i, term)| {
-                let value = if is_indexable(term) {
-                    fts_phrase(term)
-                } else {
-                    like_pattern(term)
-                };
-                (format!(":t{i}"), value)
-            })
-            .collect();
-        let term_filter: String = terms
-            .iter()
-            .zip(&term_params)
-            .map(|(term, (param, _))| format!(" AND {}", search_term_filter(term, param)))
-            .collect();
-        // 検索は語で探すので、点数ではなく新しい順に並べる
-        let order = match scope {
-            ItemScope::Search { .. } => "rows.at DESC, rows.id DESC",
-            _ => "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC",
+        let filters = match scope {
+            ItemScope::Search(q) => SearchFilters::new(q),
+            _ => SearchFilters::default(),
         };
+        let SearchFilters {
+            items: items_filter,
+            rows: rows_filter,
+            params: filter_params,
+        } = &filters;
         let sql = format!(
             "WITH items AS (
                SELECT a.id, a.source_id, a.url, a.title, a.lang,
@@ -1728,7 +1790,7 @@ impl Db {
                FROM articles AS a
                WHERE (:id IS NULL OR a.id = :id)
                  AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
-                 {term_filter}
+                 {items_filter}
              ),
              rows AS (
                SELECT i.*, d.title_ja, d.summary_ja,
@@ -1771,8 +1833,9 @@ impl Db {
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
-             WHERE :all = 1
-                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min)
+             WHERE (:all = 1
+                OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min))
+               {rows_filter}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
@@ -1791,9 +1854,9 @@ impl Db {
             (":limit", &limit),
         ];
         params.extend(
-            term_params
+            filter_params
                 .iter()
-                .map(|(name, value)| (name.as_str(), value as &dyn rusqlite::ToSql)),
+                .map(|(name, value)| (name.as_str(), value.as_ref())),
         );
         let rows = stmt.query_map(params.as_slice(), |r| {
             let feedback: Option<String> = r.get(13)?;
@@ -4076,7 +4139,8 @@ mod tests {
                 article_id,
                 kind: ArtifactKind::Digest,
                 backend: "claude-cli",
-                model: "sonnet",
+                // 同じ記事に版を重ねられるよう、作った時刻ごとに別のモデルとして登録する
+                model: at,
                 prompt_version: 2,
                 payload: &serde_json::json!({
                     "title_ja": "題", "summary_ja": "要約", "lwr_relevant": true,

@@ -75,14 +75,25 @@ async fn main() -> ExitCode {
     init_tracing();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e @ Error::Interrupted) => {
-            tracing::warn!("{e}");
-            ExitCode::from(130)
-        }
         Err(e) => {
-            tracing::error!("{}", errors::error_chain(&e));
-            ExitCode::FAILURE
+            let code = exit_code(&e);
+            if code == 1 {
+                tracing::error!("{}", errors::error_chain(&e));
+            } else {
+                tracing::warn!("{e}");
+            }
+            ExitCode::from(code)
         }
+    }
+}
+
+/// 失敗の終了コード。中断は 130、別の crawl が実行中なら EX_TEMPFAIL（75。systemd の unit では
+/// `SuccessExitStatus` で失敗扱いにしない）、それ以外は 1。
+fn exit_code(e: &Error) -> u8 {
+    match e {
+        Error::Interrupted => 130,
+        Error::Lock(LockError::Held { .. }) => 75,
+        _ => 1,
     }
 }
 
@@ -167,7 +178,14 @@ async fn crawl(
     };
     let (config, sources) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let _lock = lock::acquire(&data)?;
+    let _lock = match lock::acquire(&data) {
+        Err(LockError::Held { .. }) if args.wait_lock => {
+            tracing::info!("waiting for another crawl to finish");
+            // まだ他のタスクを始めていないので、ここでスレッドをブロックしてよい
+            lock::acquire_waiting(&data)?
+        }
+        lock => lock?,
+    };
     let db = Db::open(&data.join("nucrawler.db"))?;
     let fetcher = Fetcher::from_config(&config.http)?;
     let cancel = Cancel::default();
@@ -529,4 +547,21 @@ async fn sources_check(dir: Option<PathBuf>, id: Option<&str>) -> Result<(), Err
         return Err(Error::SourcesFailed(failed));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// timer から起動した実行が、実行中の別の crawl とぶつかったときは「一時的に実行できない」
+    /// （EX_TEMPFAIL）にし、systemd の unit で失敗扱いにしないようにする。
+    #[test]
+    fn lock_held_is_temporary_failure() {
+        let held = Error::Lock(LockError::Held {
+            path: PathBuf::from("/tmp/crawl.lock"),
+        });
+        assert_eq!(exit_code(&held), 75);
+        assert_eq!(exit_code(&Error::Interrupted), 130);
+        assert_eq!(exit_code(&Error::NoProfile), 1);
+    }
 }

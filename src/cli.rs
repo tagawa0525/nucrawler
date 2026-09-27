@@ -18,7 +18,7 @@ pub enum ParseError {
     )]
     RedoUsage,
     #[error(
-        "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N]  (stages: {stages})"
+        "usage: nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N] [--wait-lock]  (stages: {stages})"
     )]
     CrawlUsage { stages: String },
     #[error("usage: nucrawler serve [--addr IP:PORT]")]
@@ -113,6 +113,8 @@ pub struct CrawlArgs {
     pub max_llm_calls: Option<u32>,
     /// 和訳の依頼だけを処理する（15 分ごとの timer 用）
     pub requests_only: bool,
+    /// 別の crawl が実行中なら、終わるのを待ってから始める（timer 用。指定しなければ終了コード 75 で終わる）
+    pub wait_lock: bool,
 }
 
 pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
@@ -138,6 +140,10 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
             }
             "--requests-only" => {
                 parsed.requests_only = true;
+                continue;
+            }
+            "--wait-lock" => {
+                parsed.wait_lock = true;
                 continue;
             }
             _ => return Err(usage()),
@@ -377,6 +383,7 @@ mod tests {
                 only: None,
                 max_llm_calls: None,
                 requests_only: false,
+                wait_lock: false,
             }
         );
         assert_eq!(
@@ -386,6 +393,7 @@ mod tests {
                 only: Some(Stage::Fetch),
                 max_llm_calls: None,
                 requests_only: false,
+                wait_lock: false,
             }
         );
     }
@@ -401,6 +409,13 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_wait_lock() {
+        assert!(!parse_crawl_args(&[]).unwrap().wait_lock);
+        let parsed = parse_crawl_args(&args(&["--wait-lock", "--requests-only"])).unwrap();
+        assert!(parsed.wait_lock && parsed.requests_only);
     }
 
     #[test]

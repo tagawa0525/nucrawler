@@ -22,6 +22,23 @@ pub struct Lock {
 
 /// `dir/crawl.lock` の排他ロックを待たずに取る。既に取られていれば `Held`。
 pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
+    let (path, file) = open(dir)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Lock { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
+        Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
+    }
+}
+
+/// `dir/crawl.lock` の排他ロックを、取れるまで待って取る（スレッドをブロックする）。
+pub fn acquire_waiting(dir: &Path) -> Result<Lock, LockError> {
+    let (path, file) = open(dir)?;
+    file.lock()
+        .map_err(|source| LockError::Io { path, source })?;
+    Ok(Lock { _file: file })
+}
+
+fn open(dir: &Path) -> Result<(PathBuf, File), LockError> {
     let path = dir.join("crawl.lock");
     let file = File::options()
         .create(true)
@@ -32,11 +49,7 @@ pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
             path: path.clone(),
             source,
         })?;
-    match file.try_lock() {
-        Ok(()) => Ok(Lock { _file: file }),
-        Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
-        Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
-    }
+    Ok((path, file))
 }
 
 #[cfg(test)]
@@ -69,6 +82,24 @@ mod tests {
                 Err(e) => panic!("{e}"),
             }
         }
+    }
+
+    /// timer から起動した実行は、実行中の別の crawl が終わるのを待ってから始める。
+    #[test]
+    fn acquire_waiting_blocks_until_released() {
+        let dir = temp_dir("lock-wait");
+        let first = acquire(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let dir = dir.clone();
+            std::thread::spawn(move || tx.send(acquire_waiting(&dir).map(drop)).unwrap())
+        };
+        let short = std::time::Duration::from_millis(200);
+        assert!(rx.recv_timeout(short).is_err(), "must wait while held");
+        drop(first);
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(got.is_ok(), "{got:?}");
+        waiter.join().unwrap();
     }
 
     #[test]

@@ -90,6 +90,14 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, TopicsError> {
                 t.name
             )));
         }
+        if let Some(at) = &t.added_at
+            && chrono::DateTime::parse_from_rfc3339(at).is_err()
+        {
+            return Err(TopicsError::Invalid(format!(
+                "added_at of {:?} must be an RFC 3339 time, got {at:?}",
+                t.name
+            )));
+        }
     }
     Ok(topics)
 }

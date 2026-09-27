@@ -855,12 +855,12 @@ impl Db {
     /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
     pub fn vocabulary(&self) -> Result<Vec<crate::topics::Entry>, DbError> {
         Ok(self
-            .topics()?
+            .topic_usage()?
             .into_iter()
-            .map(|t| crate::topics::Entry {
-                name: t.name,
-                facet: t.facet,
-                added_at: None,
+            .map(|u| crate::topics::Entry {
+                name: u.name,
+                facet: u.facet,
+                added_at: u.added_at,
             })
             .collect())
     }
@@ -888,10 +888,11 @@ impl Db {
             [&names],
         )?;
         for t in topics {
+            // LLM が足した語かどうか（added_at）も語彙ファイルに従う
             tx.execute(
-                "INSERT INTO topics (name, facet) VALUES (?1, ?2)
-                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet",
-                [&t.name, t.facet.as_str()],
+                "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet, added_at = excluded.added_at",
+                rusqlite::params![t.name, t.facet.as_str(), t.added_at],
             )?;
         }
         // 語として取り込んだ名前は、別名ではなくその語を指すようにする

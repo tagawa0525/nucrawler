@@ -2,7 +2,9 @@
 //! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
 //! だけ使い、無くても読める。
 
-use crate::db::{ArticleDetail, ListItem, ReportStatus, TermReport, TopicUsage, Warning};
+use crate::db::{
+    ArticleDetail, ListItem, Report, ReportFilter, ReportKind, ReportStatus, TopicUsage, Warning,
+};
 use crate::search::Params;
 
 /// HTML の特殊文字を実体参照にする。
@@ -80,7 +82,8 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
 .toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
-.report { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
+.reports { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
+.report { margin: 0.3rem 0; }
 .report label { display: block; margin: 0.4rem 0; }
 .report button { margin-top: 0.3rem; font-size: 1rem; padding: 0.3rem 0.9rem; }
 .menu { padding-left: 1.2rem; line-height: 2; }
@@ -257,50 +260,99 @@ pub fn settings_page(glossary_terms: usize, pending_reports: i64, page: &Page) -
     layout("設定", page, &body)
 }
 
-/// 受付箱。`filter` が None ならすべて。対応のフォームは開いたときだけ出す。
+/// 受付箱。状況と種類で絞り、各指摘の対応のフォームは開いたときだけ出す。
 pub fn reports_page(
-    reports: &[TermReport],
+    reports: &[Report],
     counts: &[(ReportStatus, i64)],
-    filter: Option<ReportStatus>,
+    filter: &ReportFilter,
     terms: &[crate::glossary::Entry],
     page: &Page,
 ) -> String {
-    let filter_link = |href: &str, label: String, on: bool| {
-        let class = if on { " class=\"on\"" } else { "" };
-        format!("<a{class} href=\"{href}\">{label}</a>")
+    let link = |to: ReportFilter, label: &str| {
+        let class = if to == *filter { " class=\"on\"" } else { "" };
+        format!(
+            "<a{class} href=\"{}\">{label}</a>",
+            escape(&reports_href(&to))
+        )
     };
-    let mut links: Vec<String> = counts
+    let mut statuses: Vec<String> = counts
         .iter()
         .map(|&(status, n)| {
-            filter_link(
-                &reports_href(Some(status)),
-                format!("{} {n}", status_label(status)),
-                filter == Some(status),
-            )
+            let to = ReportFilter {
+                status: Some(status),
+                ..*filter
+            };
+            link(to, &format!("{} {n}", status_label(status)))
         })
         .collect();
-    links.push(filter_link(
-        &reports_href(None),
-        "すべて".into(),
-        filter.is_none(),
+    statuses.push(link(
+        ReportFilter {
+            status: None,
+            ..*filter
+        },
+        "すべて",
     ));
-    let back = filter.map_or("all", ReportStatus::as_str);
+    let mut kinds = vec![link(
+        ReportFilter {
+            kind: None,
+            ..*filter
+        },
+        "すべての種類",
+    )];
+    kinds.extend(ReportKind::ALL.into_iter().map(|kind| {
+        link(
+            ReportFilter {
+                kind: Some(kind),
+                ..*filter
+            },
+            kind_label(kind),
+        )
+    }));
+    let back = format!(
+        "<input type=\"hidden\" name=\"back_status\" value=\"{}\">{}",
+        filter.status.map_or("all", ReportStatus::as_str),
+        filter
+            .kind
+            .map(|k| format!(
+                "<input type=\"hidden\" name=\"back_kind\" value=\"{}\">",
+                k.as_str()
+            ))
+            .unwrap_or_default()
+    );
     let mut sorted_terms: Vec<&crate::glossary::Entry> = terms.iter().collect();
     sorted_terms.sort_by(|a, b| a.term.target.cmp(&b.term.target));
     let mut body = format!(
         "<p class=\"meta\"><a href=\"/settings\">← 設定</a></p><h1>受付箱</h1>\
-         <nav class=\"filters\">{}</nav>",
-        links.join(" ")
+         <nav class=\"filters\">{}</nav><nav class=\"filters\">{}</nav>",
+        statuses.join(" "),
+        kinds.join(" ")
     );
     if reports.is_empty() {
         body.push_str("<p class=\"meta\">指摘はありません</p>");
     }
     for r in reports {
+        let headline = match r.kind {
+            ReportKind::Term => format!(
+                "<b>{}</b>{}",
+                escape(r.found.as_deref().unwrap_or_default()),
+                r.wanted
+                    .as_ref()
+                    .map(|w| format!(" → {}", escape(w)))
+                    .unwrap_or_default()
+            ),
+            kind => format!(
+                "<b>{}</b> {}",
+                kind_label(kind),
+                escape(r.note.as_deref().unwrap_or_default())
+            ),
+        };
         let mut detail = Vec::new();
         if let Some(source) = &r.source {
             detail.push(format!("原語 {}", escape(source)));
         }
-        if let Some(note) = &r.note {
+        if r.kind == ReportKind::Term
+            && let Some(note) = &r.note
+        {
             detail.push(escape(note));
         }
         let mut handling = vec![
@@ -327,9 +379,9 @@ pub fn reports_page(
         if let Some(reply) = &r.reply {
             handling.push(escape(reply));
         }
-        let statuses: String = ReportStatus::ALL
-            .into_iter()
-            .map(|status| {
+        let status_options: String = ReportStatus::for_kind(r.kind)
+            .iter()
+            .map(|&status| {
                 format!(
                     "<option value=\"{}\"{}>{}</option>",
                     status.as_str(),
@@ -338,38 +390,38 @@ pub fn reports_page(
                 )
             })
             .collect();
-        let chosen = r.term.as_ref().map(|(id, _)| *id);
-        let term_options: String = sorted_terms
-            .iter()
-            .map(|e| {
-                format!(
-                    "<option value=\"{}\"{}>{}</option>",
-                    e.id,
-                    if chosen == Some(e.id) {
-                        " selected"
-                    } else {
-                        ""
-                    },
-                    escape(&e.term.target)
-                )
-            })
-            .collect();
+        // 訳語を結び付けるのは訳語の指摘だけ
+        let term_select = if r.kind == ReportKind::Term {
+            let chosen = r.term.as_ref().map(|(id, _)| *id);
+            let options: String = sorted_terms
+                .iter()
+                .map(|e| {
+                    format!(
+                        "<option value=\"{}\"{}>{}</option>",
+                        e.id,
+                        if chosen == Some(e.id) {
+                            " selected"
+                        } else {
+                            ""
+                        },
+                        escape(&e.term.target)
+                    )
+                })
+                .collect();
+            format!(
+                "<label>訳語（任意）<select name=\"term_id\"><option value=\"\">なし</option>{options}</select></label>"
+            )
+        } else {
+            String::new()
+        };
         body.push_str(&format!(
-            "<div class=\"inbox\" id=\"report-{id}\"><p><b>{found}</b>{wanted}</p>{detail}\
+            "<div class=\"inbox\" id=\"report-{id}\"><p>{headline}</p>{detail}\
              <p class=\"meta\">{handling}</p>\
-             <details><summary>対応</summary><form method=\"post\" action=\"/reports/{id}\">\
-             <input type=\"hidden\" name=\"back\" value=\"{back}\">\
-             <label>状況<select name=\"status\">{statuses}</select></label>\
-             <label>訳語（任意）<select name=\"term_id\"><option value=\"\">なし</option>{term_options}</select></label>\
+             <details><summary>対応</summary><form method=\"post\" action=\"/reports/{id}\">{back}\
+             <label>状況<select name=\"status\">{status_options}</select></label>{term_select}\
              <label>ひとこと（任意）<input class=\"wide\" name=\"reply\" value=\"{reply}\"></label>\
              <button>保存</button></form></details></div>",
             id = r.id,
-            found = escape(&r.found),
-            wanted = r
-                .wanted
-                .as_ref()
-                .map(|w| format!(" → {}", escape(w)))
-                .unwrap_or_default(),
             detail = if detail.is_empty() {
                 String::new()
             } else {
@@ -382,12 +434,32 @@ pub fn reports_page(
     layout("受付箱", page, &body)
 }
 
-/// 受付箱の絞り込み。受付中が既定なので `/reports`、すべては `status=all`。
-pub(crate) fn reports_href(filter: Option<ReportStatus>) -> String {
-    match filter {
-        Some(ReportStatus::Pending) => "/reports".into(),
-        Some(status) => format!("/reports?status={}", status.as_str()),
-        None => "/reports?status=all".into(),
+/// 受付箱の絞り込みの URL（エスケープ前）。受付中が既定なので状況は省き、すべては `status=all`。
+pub(crate) fn reports_href(filter: &ReportFilter) -> String {
+    let mut query = Vec::new();
+    match filter.status {
+        Some(ReportStatus::Pending) => {}
+        Some(status) => query.push(format!("status={}", status.as_str())),
+        None => query.push("status=all".into()),
+    }
+    if let Some(kind) = filter.kind {
+        query.push(format!("kind={}", kind.as_str()));
+    }
+    if query.is_empty() {
+        "/reports".into()
+    } else {
+        format!("/reports?{}", query.join("&"))
+    }
+}
+
+fn kind_label(kind: ReportKind) -> &'static str {
+    match kind {
+        ReportKind::Term => "訳語",
+        ReportKind::Translation => "和訳の誤り",
+        ReportKind::Digest => "要約の誤り",
+        ReportKind::Topic => "トピック",
+        ReportKind::Body => "本文の取得漏れ",
+        ReportKind::Other => "その他",
     }
 }
 
@@ -396,6 +468,7 @@ fn status_label(status: ReportStatus) -> &'static str {
         ReportStatus::Pending => "受付中",
         ReportStatus::Added => "追加済",
         ReportStatus::Existing => "登録済",
+        ReportStatus::Done => "対応済",
         ReportStatus::Rejected => "却下",
     }
 }
@@ -833,12 +906,7 @@ pub struct DetailView {
     pub reported: bool,
 }
 
-pub fn detail_page(
-    d: &ArticleDetail,
-    reports: &[TermReport],
-    view: DetailView,
-    page: &Page,
-) -> String {
+pub fn detail_page(d: &ArticleDetail, reports: &[Report], view: DetailView, page: &Page) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -909,51 +977,83 @@ pub fn detail_page(
         body.push_str("</p>");
     }
     body.push_str(&translation_section(d, view));
-    if !d.digests.is_empty() || !d.translations.is_empty() {
-        body.push_str(&term_report_form(id, reports, view));
-    }
+    let has_japanese = !d.digests.is_empty() || !d.translations.is_empty();
+    body.push_str(&report_section(id, reports, has_japanese, view));
     layout(&title, page, &body)
 }
 
-/// 訳語の指摘。畳んでおき、開いたときだけフォームを出す（読む画面の密度を上げない）。
-/// これまでの指摘は対応状況とともに小さく並べる。
-fn term_report_form(id: i64, reports: &[TermReport], view: DetailView) -> String {
+/// 指摘の欄。これまでの指摘を対応状況とともに小さく並べ、訳語の指摘とその他の指摘の
+/// フォームは畳んでおく（読む画面の密度を上げない）。訳語の指摘は日本語（要約か和訳）があるときだけ。
+fn report_section(id: i64, reports: &[Report], has_japanese: bool, view: DetailView) -> String {
     let field = |name: &str, label: &str, extra: &str| {
         format!("<label>{label}<input class=\"wide\" name=\"{name}\"{extra}></label>")
     };
-    let history: String = reports
-        .iter()
-        .map(|r| {
+    let back = if view.show_translation {
+        "<input type=\"hidden\" name=\"view\" value=\"translation\">"
+    } else {
+        ""
+    };
+    let mut out = String::from("<section class=\"reports\" id=\"reports\">");
+    if view.reported {
+        out.push_str("<p class=\"meta\">指摘を受け付けました</p>");
+    }
+    for r in reports {
+        out.push_str(&format!(
+            "<p class=\"meta\">{}（{}）</p>",
+            report_summary(r),
+            status_label(r.status)
+        ));
+    }
+    if has_japanese {
+        out.push_str(&format!(
+            "<details class=\"report\" id=\"term-report\"><summary>訳語の指摘</summary>\
+             <form method=\"post\" action=\"/articles/{id}/report\">\
+             <input type=\"hidden\" name=\"kind\" value=\"term\">{back}{}{}{}\
+             <label>メモ（任意）<textarea class=\"wide\" name=\"note\" rows=\"2\"></textarea></label>\
+             <button>送る</button></form></details>",
+            field("found", "気になった訳", " required"),
+            field("wanted", "希望する訳（任意）", ""),
+            field("source", "原語（任意）", ""),
+        ));
+    }
+    let kinds: String = ReportKind::ALL
+        .into_iter()
+        .filter(|&k| k != ReportKind::Term)
+        .map(|k| {
             format!(
-                "<p class=\"meta\">{}{}（{}）</p>",
-                escape(&r.found),
-                r.wanted
-                    .as_ref()
-                    .map(|w| format!(" → {}", escape(w)))
-                    .unwrap_or_default(),
-                status_label(r.status)
+                "<option value=\"{}\">{}</option>",
+                k.as_str(),
+                kind_label(k)
             )
         })
         .collect();
-    format!(
-        "{}{history}<details class=\"report\" id=\"term-report\"><summary>訳語の指摘</summary>\
-         <form method=\"post\" action=\"/articles/{id}/term-report\">{}{}{}{}\
-         <label>メモ（任意）<textarea class=\"wide\" name=\"note\" rows=\"2\"></textarea></label>\
-         <button>送る</button></form></details>",
-        if view.reported {
-            "<p class=\"meta\">訳語の指摘を受け付けました</p>"
-        } else {
-            ""
-        },
-        if view.show_translation {
-            "<input type=\"hidden\" name=\"view\" value=\"translation\">"
-        } else {
-            ""
-        },
-        field("found", "気になった訳", " required"),
-        field("wanted", "希望する訳（任意）", ""),
-        field("source", "原語（任意）", ""),
-    )
+    out.push_str(&format!(
+        "<details class=\"report\" id=\"other-report\"><summary>その他の指摘</summary>\
+         <form method=\"post\" action=\"/articles/{id}/report\">{back}\
+         <label>種類<select name=\"kind\">{kinds}</select></label>\
+         <label>内容<textarea class=\"wide\" name=\"note\" rows=\"3\" required></textarea></label>\
+         <button>送る</button></form></details></section>"
+    ));
+    out
+}
+
+/// 指摘の要旨（エスケープ済み）。訳語は「気になった訳 → 希望する訳」、ほかは「種類：内容」。
+fn report_summary(r: &Report) -> String {
+    match r.kind {
+        ReportKind::Term => format!(
+            "{}{}",
+            escape(r.found.as_deref().unwrap_or_default()),
+            r.wanted
+                .as_ref()
+                .map(|w| format!(" → {}", escape(w)))
+                .unwrap_or_default()
+        ),
+        kind => format!(
+            "{}：{}",
+            kind_label(kind),
+            escape(r.note.as_deref().unwrap_or_default())
+        ),
+    }
 }
 
 /// 👍/👎 とブックマーク。ブックマーク済みなら、同じボタンで外す。
@@ -1666,12 +1766,8 @@ mod tests {
         let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
         assert!(
             html.contains(
-                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary>"#
+                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary><form method="post" action="/articles/7/report"><input type="hidden" name="kind" value="term">"#
             ),
-            "{html}"
-        );
-        assert!(
-            html.contains(r#"<form method="post" action="/articles/7/term-report">"#),
             "{html}"
         );
         assert!(html.contains(r#"name="found" required"#), "{html}");
@@ -1690,20 +1786,46 @@ mod tests {
             ..DetailView::default()
         };
         let html = detail_page(&detail(), &[], view, &Page::default());
-        assert!(
-            html.contains(r#"<input type="hidden" name="view" value="translation">"#),
-            "{html}"
+        assert_eq!(
+            html.matches(r#"<input type="hidden" name="view" value="translation">"#)
+                .count(),
+            2,
+            "both forms return to the translation: {html}"
         );
-        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+        assert!(html.contains("指摘を受け付けました"), "{html}");
     }
 
-    /// 要約も和訳も無ければ、指摘する訳が無い。
+    /// 訳語以外の指摘は種類を選んで内容を書く。これも畳んでおく。
+    #[test]
+    fn detail_page_offers_a_folded_report_of_other_kinds() {
+        let html = detail_page(&detail(), &[], DetailView::default(), &Page::default());
+        assert!(
+            html.contains(
+                r#"<details class="report" id="other-report"><summary>その他の指摘</summary><form method="post" action="/articles/7/report">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<select name="kind"><option value="translation">和訳の誤り</option><option value="digest">要約の誤り</option><option value="topic">トピック</option><option value="body">本文の取得漏れ</option><option value="other">その他</option></select>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<textarea class="wide" name="note" rows="3" required></textarea>"#),
+            "{html}"
+        );
+    }
+
+    /// 要約も和訳も無ければ、指摘する訳が無い。ほかの指摘はできる。
     #[test]
     fn detail_page_without_japanese_has_no_term_report() {
         let mut d = detail();
         d.digests.clear();
         let html = detail_page(&d, &[], DetailView::default(), &Page::default());
         assert!(!html.contains("term-report"), "{html}");
+        // 本文の取得漏れなどは、要約が無くても指摘できる
+        assert!(html.contains(r#"id="other-report""#), "{html}");
     }
 
     #[test]
@@ -1716,12 +1838,13 @@ mod tests {
         assert!(html.contains("受付中 3 件"), "{html}");
     }
 
-    fn term_report(id: i64, status: ReportStatus) -> TermReport {
-        TermReport {
+    fn term_report(id: i64, status: ReportStatus) -> Report {
+        Report {
             id,
             article_id: 7,
             article_title: "見出し<A>".into(),
-            found: "給油停止".into(),
+            kind: ReportKind::Term,
+            found: Some("給油停止".into()),
             wanted: Some("燃料取替停止".into()),
             source: Some("refueling outage".into()),
             note: None,
@@ -1744,6 +1867,7 @@ mod tests {
             (ReportStatus::Pending, 1),
             (ReportStatus::Added, 1),
             (ReportStatus::Existing, 0),
+            (ReportStatus::Done, 0),
             (ReportStatus::Rejected, 0),
         ];
         let terms = [entry(
@@ -1755,7 +1879,7 @@ mod tests {
         let html = reports_page(
             &[term_report(1, ReportStatus::Pending), added],
             &counts,
-            None,
+            &ReportFilter::default(),
             &terms,
             &Page::default(),
         );
@@ -1767,8 +1891,12 @@ mod tests {
             r#"<a href="/reports">受付中 1</a>"#,
             r#"<a href="/reports?status=added">追加済 1</a>"#,
             r#"<a href="/reports?status=existing">登録済 0</a>"#,
+            r#"<a href="/reports?status=done">対応済 0</a>"#,
             r#"<a href="/reports?status=rejected">却下 0</a>"#,
             r#"<a class="on" href="/reports?status=all">すべて</a>"#,
+            r#"<a class="on" href="/reports?status=all">すべての種類</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=term">訳語</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=digest">要約の誤り</a>"#,
         ] {
             assert!(html.contains(link), "{link}: {html}");
         }
@@ -1792,7 +1920,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<input type="hidden" name="back" value="all">"#),
+            html.contains(r#"<input type="hidden" name="back_status" value="all">"#),
             "{html}"
         );
         assert!(
@@ -1803,6 +1931,60 @@ mod tests {
             html.contains(r#"<option value="1" selected>燃料取替停止（定期検査）</option>"#),
             "{html}"
         );
+    }
+
+    fn other_report(id: i64, kind: ReportKind) -> Report {
+        Report {
+            kind,
+            found: None,
+            wanted: None,
+            source: None,
+            note: Some("数値が<違う>".into()),
+            ..term_report(id, ReportStatus::Pending)
+        }
+    }
+
+    /// 訳語以外の指摘は種類と内容を出し、対応は受付中・対応済・却下から選ぶ（訳語は結び付けない）。
+    /// 絞り込みは状況と種類を互いに引き継ぐ。
+    #[test]
+    fn reports_page_shows_other_kinds_and_keeps_both_filters() {
+        let counts: Vec<_> = ReportStatus::ALL.into_iter().map(|s| (s, 0)).collect();
+        let filter = ReportFilter {
+            status: Some(ReportStatus::Pending),
+            kind: Some(ReportKind::Digest),
+            ..ReportFilter::default()
+        };
+        let html = reports_page(
+            &[other_report(3, ReportKind::Digest)],
+            &counts,
+            &filter,
+            &[],
+            &Page::default(),
+        );
+        assert!(
+            html.contains("<b>要約の誤り</b> 数値が&lt;違う&gt;"),
+            "{html}"
+        );
+        let form = &html[html.find(r#"action="/reports/3""#).unwrap()..];
+        assert!(
+            form.contains(
+                r#"<select name="status"><option value="pending" selected>受付中</option><option value="done">対応済</option><option value="rejected">却下</option></select>"#
+            ),
+            "{form}"
+        );
+        assert!(!form.contains(r#"name="term_id""#), "{form}");
+        assert!(
+            form.contains(r#"<input type="hidden" name="back_kind" value="digest">"#),
+            "{form}"
+        );
+        for link in [
+            r#"<a class="on" href="/reports?kind=digest">受付中 0</a>"#,
+            r#"<a href="/reports?status=all&amp;kind=digest">すべて</a>"#,
+            r#"<a href="/reports">すべての種類</a>"#,
+            r#"<a class="on" href="/reports?kind=digest">要約の誤り</a>"#,
+        ] {
+            assert!(html.contains(link), "{link}: {html}");
+        }
     }
 
     /// 詳細では、その記事への指摘と対応状況を小さく並べる。
@@ -1816,6 +1998,16 @@ mod tests {
         );
         assert!(
             html.contains(r#"<p class="meta">給油停止 → 燃料取替停止（却下）</p>"#),
+            "{html}"
+        );
+        let html = detail_page(
+            &detail(),
+            &[other_report(2, ReportKind::Body)],
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<p class="meta">本文の取得漏れ：数値が&lt;違う&gt;（受付中）</p>"#),
             "{html}"
         );
     }

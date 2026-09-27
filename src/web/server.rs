@@ -10,7 +10,9 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, NewTermReport, ReportStatus, SignalKind};
+use crate::db::{
+    Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -59,7 +61,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/articles/{id}/translation-request",
             post(translation_request),
         )
-        .route("/articles/{id}/term-report", post(term_report))
+        .route("/articles/{id}/report", post(add_report))
         .route("/settings", get(settings))
         .route("/glossary", get(glossary).post(add_glossary_term))
         .route("/glossary/{id}", post(update_glossary_term))
@@ -360,7 +362,13 @@ async fn detail(
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
-        let reports = db.term_reports(user, None, Some(id))?;
+        let reports = db.reports(
+            user,
+            &ReportFilter {
+                article_id: Some(id),
+                ..ReportFilter::default()
+            },
+        )?;
         // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
         // 採点に渡す直近の反応が偏る）
         let opened = if view.show_translation {
@@ -464,7 +472,9 @@ async fn translation_request(
 }
 
 #[derive(serde::Deserialize)]
-struct TermReportForm {
+struct ReportForm {
+    #[serde(default)]
+    kind: String,
     // 欄が無いときも空と同じく検証で 400 にする（無いと取り出しの段階で 422 になる）
     #[serde(default)]
     found: String,
@@ -472,37 +482,52 @@ struct TermReportForm {
     wanted: String,
     #[serde(default)]
     source: String,
+    /// 訳語の指摘ではメモ、ほかの種類では内容
     #[serde(default)]
     note: String,
     /// 和訳を読んでいたなら `translation`（戻る先）
     view: Option<String>,
 }
 
-/// 訳語の指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。
-async fn term_report(
+/// 指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。訳語の指摘は気になった訳が、
+/// ほかの種類は内容が必須。
+async fn add_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<TermReportForm>,
+    Form(form): Form<ReportForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
+    let kind = ReportKind::parse(&form.kind).ok_or(AppError::BadRequest(
+        "kind must be term, translation, digest, topic, body or other",
+    ))?;
     let filled = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
-    let found = filled(&form.found).ok_or(AppError::BadRequest("found must not be empty"))?;
-    let (wanted, source, note) = (
+    let (found, wanted, source, note) = (
+        filled(&form.found),
         filled(&form.wanted),
         filled(&form.source),
         filled(&form.note),
     );
+    if kind == ReportKind::Term && found.is_none() {
+        return Err(AppError::BadRequest("found must not be empty"));
+    }
+    if kind != ReportKind::Term && note.is_none() {
+        return Err(AppError::BadRequest("note must not be empty"));
+    }
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        let report = NewTermReport {
-            found: &found,
-            wanted: wanted.as_deref(),
-            source: source.as_deref(),
-            note: note.as_deref(),
+        let report = match (kind, found.as_deref(), note.as_deref()) {
+            (ReportKind::Term, Some(found), note) => NewReport::Term {
+                found,
+                wanted: wanted.as_deref(),
+                source: source.as_deref(),
+                note,
+            },
+            (kind, _, Some(body)) => NewReport::Other { kind, body },
+            _ => unreachable!("required fields are checked above"),
         };
-        Ok(db.report_term(user, id, &report, Utc::now())?)
+        Ok(db.add_report(user, id, &report, Utc::now())?)
     })
     .await?;
     let view = if form.view.as_deref() == Some("translation") {
@@ -511,7 +536,7 @@ async fn term_report(
         ""
     };
     Ok(Redirect::to(&format!(
-        "/articles/{id}?{view}reported=1#term-report"
+        "/articles/{id}?{view}reported=1#reports"
     )))
 }
 
@@ -520,7 +545,7 @@ async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppErro
     let page = with_db(&state, move |db| {
         let terms = db.glossary()?.len();
         let pending = db
-            .term_report_counts()?
+            .report_counts()?
             .into_iter()
             .find_map(|(status, n)| (status == ReportStatus::Pending).then_some(n))
             .unwrap_or(0);
@@ -643,46 +668,61 @@ async fn delete_glossary_term(
     Ok(Redirect::to("/glossary"))
 }
 
-/// 受付箱の絞り込み。無ければ受付中、`all` ならすべて。
-fn report_filter(value: Option<&str>) -> Result<Option<ReportStatus>, AppError> {
-    match value {
-        None => Ok(Some(ReportStatus::Pending)),
-        Some("all") => Ok(None),
-        Some(s) => ReportStatus::parse(s).map(Some).ok_or(AppError::BadRequest(
-            "status must be pending, added, existing, rejected or all",
-        )),
-    }
+/// 受付箱の絞り込み。状況が無ければ受付中、`all` ならすべて。種類が無ければすべて。
+fn report_filter(status: Option<&str>, kind: Option<&str>) -> Result<ReportFilter, AppError> {
+    let status = match status {
+        None => Some(ReportStatus::Pending),
+        Some("all") => None,
+        Some(s) => Some(ReportStatus::parse(s).ok_or(AppError::BadRequest(
+            "status must be pending, added, existing, done, rejected or all",
+        ))?),
+    };
+    let kind = kind
+        .map(|k| {
+            ReportKind::parse(k).ok_or(AppError::BadRequest(
+                "kind must be term, translation, digest, topic, body or other",
+            ))
+        })
+        .transpose()?;
+    Ok(ReportFilter {
+        status,
+        kind,
+        article_id: None,
+    })
 }
 
 #[derive(serde::Deserialize)]
 struct ReportsParams {
     status: Option<String>,
+    kind: Option<String>,
 }
 
 async fn reports(
     State(state): State<AppState>,
     Query(params): Query<ReportsParams>,
 ) -> Result<Html<String>, AppError> {
-    let filter = report_filter(params.status.as_deref())?;
+    let filter = report_filter(params.status.as_deref(), params.kind.as_deref())?;
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
-        let reports = db.term_reports(user, filter, None)?;
-        let counts = db.term_report_counts()?;
+        let reports = db.reports(user, &filter)?;
+        let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::reports_page(&reports, &counts, filter, &terms, &page))
+        Ok(html::reports_page(
+            &reports, &counts, &filter, &terms, &page,
+        ))
     })
     .await?;
     Ok(Html(page))
 }
 
 #[derive(serde::Deserialize)]
-struct ReportForm {
+struct ResolveReportForm {
     #[serde(default)]
     status: String,
     /// 結び付ける訳語の id（空なら無し）
@@ -691,19 +731,21 @@ struct ReportForm {
     #[serde(default)]
     reply: String,
     /// 戻る先の絞り込み
-    back: Option<String>,
+    back_status: Option<String>,
+    back_kind: Option<String>,
 }
 
-/// 指摘の対応状況を変え、受付箱の同じ絞り込みへ戻る。
+/// 指摘の対応状況を変え、受付箱の同じ絞り込みへ戻る。付けられる状況は種類で決まり、
+/// 訳語を結び付けられるのは訳語の指摘だけ。
 async fn resolve_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<ReportForm>,
+    Form(form): Form<ResolveReportForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
     let status = ReportStatus::parse(&form.status).ok_or(AppError::BadRequest(
-        "status must be pending, added, existing or rejected",
+        "status must be pending, added, existing, done or rejected",
     ))?;
     let term_id = match form.term_id.trim() {
         "" => None,
@@ -716,20 +758,26 @@ async fn resolve_report(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     // 戻る先が読めなければ既定（受付中）に戻す
-    let back = report_filter(form.back.as_deref()).unwrap_or(Some(ReportStatus::Pending));
-    let found = with_db(&state, move |db| {
-        if let Some(term_id) = term_id
-            && !db.glossary_entries()?.iter().any(|e| e.id == term_id)
-        {
-            return Err(AppError::BadRequest("unknown term_id"));
+    let back =
+        report_filter(form.back_status.as_deref(), form.back_kind.as_deref()).unwrap_or_default();
+    with_db(&state, move |db| {
+        let kind = db.report_kind(id)?.ok_or(AppError::NotFound)?;
+        if !ReportStatus::for_kind(kind).contains(&status) {
+            return Err(AppError::BadRequest("the status does not fit the report"));
         }
-        Ok(db.resolve_term_report(id, status, term_id, reply.as_deref(), Utc::now())?)
+        if let Some(term_id) = term_id {
+            if kind != ReportKind::Term {
+                return Err(AppError::BadRequest("only term reports link a term"));
+            }
+            if !db.glossary_entries()?.iter().any(|e| e.id == term_id) {
+                return Err(AppError::BadRequest("unknown term_id"));
+            }
+        }
+        db.resolve_report(id, status, term_id, reply.as_deref(), Utc::now())?;
+        Ok(())
     })
     .await?;
-    if !found {
-        return Err(AppError::NotFound);
-    }
-    Ok(Redirect::to(&html::reports_href(back)))
+    Ok(Redirect::to(&html::reports_href(&back)))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {
@@ -1357,60 +1405,102 @@ mod tests {
         assert!(html.contains("和訳待ち"), "{html}");
     }
 
-    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面に戻る。
+    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面の指摘の欄に戻る。
     #[tokio::test]
     async fn term_report_is_recorded_and_returns_to_detail() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let path = format!("/articles/{id}/term-report");
+        let path = format!("/articles/{id}/report");
         let res = server
             .post(
                 &path,
-                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
             )
             .await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation&reported=1#term-report")
+            format!("/articles/{id}?view=translation&reported=1#reports")
         );
         assert_eq!(
             server.count(&format!(
-                "SELECT count(*) FROM term_reports
-                 WHERE article_id = {id} AND found = '給油停止' AND wanted IS NULL
+                "SELECT count(*) FROM reports
+                 WHERE article_id = {id} AND kind = 'term' AND found = '給油停止' AND wanted IS NULL
                    AND source = 'refueling outage' AND note IS NULL AND resolved_at IS NULL"
             )),
             1
         );
-        let res = server.post(&path, "found=x").await;
+        let res = server.post(&path, "kind=term&found=x").await;
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?reported=1#term-report")
+            format!("/articles/{id}?reported=1#reports")
         );
         let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
-        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+        assert!(html.contains("指摘を受け付けました"), "{html}");
 
         // 気になった訳は必須（欄が無くても空でも同じ）
-        assert_eq!(server.post(&path, "wanted=a").await.status().as_u16(), 400);
         assert_eq!(
             server
-                .post(&path, "found=+&wanted=a")
+                .post(&path, "kind=term&wanted=a")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server
+                .post(&path, "kind=term&found=+&wanted=a")
                 .await
                 .status()
                 .as_u16(),
             400
         );
         let res = server
-            .form(&path, "found=x")
+            .form(&path, "kind=term&found=x")
             .header("origin", "https://evil.example")
             .send()
             .await
             .unwrap();
         assert_eq!(res.status().as_u16(), 403);
-        let res = server.post("/articles/999/term-report", "found=x").await;
+        let res = server
+            .post("/articles/999/report", "kind=term&found=x")
+            .await;
         assert_eq!(res.status().as_u16(), 404);
-        assert_eq!(server.count("SELECT count(*) FROM term_reports"), 2);
+        assert_eq!(server.count("SELECT count(*) FROM reports"), 2);
+    }
+
+    /// 訳語以外の指摘は種類と内容だけを記録し、内容は必須。
+    #[tokio::test]
+    async fn other_reports_are_recorded_with_their_kind() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let path = format!("/articles/{id}/report");
+        let res = server
+            .post(
+                &path,
+                "kind=body&note=+%E5%BE%8C%E5%8D%8A%E3%81%8C%E7%84%A1%E3%81%84+&found=x",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.strings("SELECT kind || '|' || note || '|' || (found IS NULL) FROM reports"),
+            ["body|後半が無い|1"]
+        );
+        for body in [
+            "kind=body&note=+",
+            "kind=body",
+            "kind=bogus&note=x",
+            "note=x",
+        ] {
+            assert_eq!(
+                server.post(&path, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
+        assert_eq!(server.count("SELECT count(*) FROM reports"), 1);
     }
 
     #[tokio::test]
@@ -1527,11 +1617,11 @@ mod tests {
         let server = Server::start(db).await;
         server
             .post(
-                &format!("/articles/{id}/term-report"),
-                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+                &format!("/articles/{id}/report"),
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
             )
             .await;
-        let report = server.count("SELECT id FROM term_reports");
+        let report = server.count("SELECT id FROM reports");
         let (_, html) = server.get("/settings").await;
         assert!(html.contains("受付中 1 件"), "{html}");
         let (status, html) = server.get("/reports").await;
@@ -1544,14 +1634,14 @@ mod tests {
         let res = server
             .post(
                 &format!("/reports/{report}"),
-                "status=added&term_id=1&reply=&back=pending",
+                "status=added&term_id=1&reply=&back_status=pending",
             )
             .await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"].to_str().unwrap(), "/reports");
         assert_eq!(
             server.count(
-                "SELECT count(*) FROM term_reports
+                "SELECT count(*) FROM reports
                  WHERE status = 'added' AND term_id = 1 AND reply IS NULL AND resolved_at IS NOT NULL"
             ),
             1
@@ -1566,7 +1656,7 @@ mod tests {
         let res = server
             .post(
                 &format!("/reports/{report}"),
-                "status=rejected&term_id=&back=all",
+                "status=rejected&term_id=&back_status=all",
             )
             .await;
         assert_eq!(
@@ -1575,15 +1665,72 @@ mod tests {
         );
     }
 
+    /// 訳語以外の指摘は対応済にでき、訳語集の状況や訳語は付けられない。種類で絞れる。
+    #[tokio::test]
+    async fn other_reports_are_resolved_as_done_and_filtered_by_kind() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let article = format!("/articles/{id}/report");
+        server
+            .post(
+                &article,
+                "kind=topic&note=%E3%83%88%E3%83%94%E3%83%83%E3%82%AF%E9%81%95%E3%81%84",
+            )
+            .await;
+        server
+            .post(
+                &article,
+                "kind=term&found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+            )
+            .await;
+        let (status, html) = server.get("/reports?status=all&kind=topic").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("トピック違い") && !html.contains("給油停止"),
+            "{html}"
+        );
+        assert_eq!(server.get("/reports?kind=bogus").await.0, 400);
+
+        let topic = server.count("SELECT id FROM reports WHERE kind = 'topic'");
+        let path = format!("/reports/{topic}");
+        for body in ["status=added", "status=existing", "status=done&term_id=1"] {
+            assert_eq!(
+                server.post(&path, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
+        let res = server
+            .post(&path, "status=done&back_status=all&back_kind=topic")
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            "/reports?status=all&kind=topic"
+        );
+        assert_eq!(
+            server.count(
+                "SELECT count(*) FROM reports WHERE status = 'done' AND resolved_at IS NOT NULL"
+            ),
+            1
+        );
+        let term = server.count("SELECT id FROM reports WHERE kind = 'term'");
+        let res = server
+            .post(&format!("/reports/{term}"), "status=done")
+            .await;
+        assert_eq!(res.status().as_u16(), 400);
+    }
+
     #[tokio::test]
     async fn reports_reject_invalid_requests() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         server
-            .post(&format!("/articles/{id}/term-report"), "found=x")
+            .post(&format!("/articles/{id}/report"), "kind=term&found=x")
             .await;
-        let path = format!("/reports/{}", server.count("SELECT id FROM term_reports"));
+        let path = format!("/reports/{}", server.count("SELECT id FROM reports"));
         assert_eq!(server.get("/reports?status=bogus").await.0, 400);
         assert_eq!(
             server.post(&path, "status=bogus").await.status().as_u16(),
@@ -1614,7 +1761,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status().as_u16(), 403);
         assert_eq!(
-            server.count("SELECT count(*) FROM term_reports WHERE status = 'pending'"),
+            server.count("SELECT count(*) FROM reports WHERE status = 'pending'"),
             1
         );
     }

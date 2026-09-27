@@ -407,4 +407,35 @@ mod tests {
         assert!(matches(&f, &candidate("https://e/x/1", "原子力", None)));
         assert!(!matches(&f, &candidate("https://e/x/1", "料金", None)));
     }
+
+    /// 除く語はタイトルだけを見る。取り込む条件が空でも、一致しても、除く語が優先する。
+    #[test]
+    fn titles_with_excluded_words_are_skipped() {
+        let only_excludes = Filter {
+            title_excludes: vec!["週報".into()],
+            ..Filter::default()
+        };
+        assert!(!matches(
+            &only_excludes,
+            &candidate("https://e/a", "原子力機構週報（9/12～9/18）", None)
+        ));
+        assert!(matches(
+            &only_excludes,
+            &candidate("https://e/a", "研究成果", Some("詳しくは週報で"))
+        ));
+
+        let both = Filter {
+            keywords: vec!["原子力".into()],
+            url_contains: vec!["/atom/".into()],
+            title_excludes: vec!["週報".into()],
+        };
+        assert!(!matches(
+            &both,
+            &candidate("https://e/atom/1", "原子力週報", None)
+        ));
+        assert!(matches(
+            &both,
+            &candidate("https://e/x/1", "原子力の話", None)
+        ));
+    }
 }

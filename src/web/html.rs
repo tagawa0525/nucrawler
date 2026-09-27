@@ -859,6 +859,13 @@ mod tests {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
         assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
+        // 検索とブックマークの間に、いいねした記事へのボタンを置く
+        let search = html.find(r#"href="/search""#).unwrap();
+        let liked = html
+            .find(r#"<a class="btn" href="/search?liked=1" aria-label="いいね" title="いいね">👍</a>"#)
+            .expect(&html);
+        let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
+        assert!(search < liked && liked < bookmarked, "{html}");
     }
 
     /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。

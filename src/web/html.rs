@@ -509,6 +509,12 @@ fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     } else {
         format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
     };
+    let liked = if i.feedback == Some(crate::db::Feedback::Up) {
+        " 👍"
+    } else {
+        ""
+    };
+    let bookmarked = if i.bookmarked { " 🔖" } else { "" };
     let translation = if i.has_translation {
         " ・和訳あり"
     } else if i.translation_requested {
@@ -522,7 +528,7 @@ fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{lock}{translation}</div>{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)

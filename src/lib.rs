@@ -8,6 +8,7 @@ pub mod extract;
 pub mod http;
 pub mod jst;
 pub mod llm;
+pub mod mcp;
 pub mod pipeline;
 pub mod profile;
 pub mod prompt;

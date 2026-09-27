@@ -84,6 +84,7 @@ nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--
 nucrawler status
 nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
+nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
 ```
 
@@ -104,6 +105,42 @@ nucrawler profile import FILE | nucrawler profile export
   - `/feed.xml`：Atom フィード（新しい順。和訳タイトル・要約・詳細ページと原文へのリンク）
   - `/api/articles`：記事の一覧（`?all=1` で「すべて表示」と同じ記事）
   - `/api/articles/{id}`：記事 1 件（最新の要約と、あれば最新の全文和訳）
+
+## MCP
+
+`nucrawler mcp` は MCP の stdio サーバーで、Claude Code などから記事を検索・参照できる。
+stdio で起動できるのはこのマシンの利用者だけなので、オーナーとして閲覧判定する。
+ツールは読み取り専用で、LLM を呼んだり DB に書いたり（和訳の依頼、👍/👎、既読の記録）はしない。
+
+- `search_articles`：記事の検索。引数はどれも省略できる
+  - `keyword`：原題・和訳のタイトル・要約に含む語
+  - `since` / `until`：日本時間の日付（`YYYY-MM-DD`、`until` はその日を含む）。既定は Web UI と同じ直近 `web.list_days` 日
+  - `source`：ソースの ID
+  - `min_score`：最低点（既定は `web.min_score`）
+  - `include_hidden`：Web UI の「すべて表示」と同じく、👎・閾値未満・未採点・軽水炉と無関係の記事も含める
+  - `limit`：最大件数（既定は `web.list_limit`）
+- `get_article`：記事 1 件（`id`）の元記事の URL、最新の要約、全文和訳があればその本文
+
+Claude Code に登録する例（ユーザー全体で使う）：
+
+```sh
+claude mcp add --scope user nucrawler -- nucrawler mcp
+```
+
+プロジェクトの `.mcp.json` に書く場合：
+
+```json
+{
+  "mcpServers": {
+    "nucrawler": {
+      "command": "nucrawler",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+設定や DB の場所を変えているときは、`args` の `mcp` の前に `--config-dir DIR` や `--data-dir DIR` を置く。
 
 ## 設定
 

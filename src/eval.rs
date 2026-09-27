@@ -125,7 +125,7 @@ fn render_key(
         labels.len()
     );
     let late = matched.iter().filter(|m| m.2).count();
-    if late > 0 {
+    if key.prompt_version == 1 && late > 0 {
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,

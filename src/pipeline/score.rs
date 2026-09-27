@@ -1,4 +1,4 @@
-//! 採点ステージ：利用者のプロファイルと最近の反応をもとに、要約済みの記事を数件ずつ LLM で採点する。
+//! 採点ステージ：利用者のプロファイルをもとに、要約済みの記事を数件ずつ LLM で採点する。
 //! プロファイルのハッシュと採点のプロンプトの版ごとに記録するので、どちらかを変えれば自動的に採点し直しになる。
 
 use chrono::{DateTime, Utc};
@@ -12,9 +12,6 @@ use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
 
 pub const STAGE: &str = "score";
-
-/// 採点の参考にする直近の反応の件数
-const SIGNALS: usize = 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScoreStageError {
@@ -68,7 +65,7 @@ pub async fn score_articles<L: Llm>(
         model,
     };
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let system = prompt::score::system_prompt(&profile, &db.recent_signals(user_id, SIGNALS)?);
+    let system = prompt::score::system_prompt(&profile);
     let schema = prompt::score::schema();
     loop {
         if cancel.is_requested() {
@@ -256,7 +253,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scores_digests_with_profile_and_signals() {
+    async fn scores_digests_with_profile_only() {
         let (db, owner, ids) = setup(3);
         db.record_event(owner, ids[2], SignalKind::Down, now())
             .unwrap();

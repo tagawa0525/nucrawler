@@ -66,17 +66,17 @@ pub struct LlmConfig {
 impl LlmConfig {
     /// 0 だと処理が黙って何もしなくなる値を拒否する。
     pub fn validate(&self) -> Result<(), String> {
-        for (name, value) in [
-            ("digest_batch_size", self.digest_batch_size as u64),
-            ("max_input_chars", self.max_input_chars as u64),
-            ("score_batch_size", self.score_batch_size as u64),
+        for (name, is_zero) in [
+            ("digest_batch_size", self.digest_batch_size == 0),
+            ("max_input_chars", self.max_input_chars == 0),
+            ("score_batch_size", self.score_batch_size == 0),
             (
                 "translate_max_input_chars",
-                self.translate_max_input_chars as u64,
+                self.translate_max_input_chars == 0,
             ),
-            ("timeout_secs", self.timeout_secs),
+            ("timeout_secs", self.timeout_secs == 0),
         ] {
-            if value == 0 {
+            if is_zero {
                 return Err(format!("llm.{name} must be at least 1"));
             }
         }

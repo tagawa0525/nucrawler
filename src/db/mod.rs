@@ -20,7 +20,7 @@ pub enum DbError {
     #[error("invalid database schema version {0}")]
     InvalidSchemaVersion(i64),
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
-    SchemaTooNew { found: i64, supported: i64 },
+    SchemaTooNew { found: i64, supported: usize },
     /// CHECK 制約で防いでいるはずの値が入っていた
     #[error("unexpected value in the database: {0}")]
     UnexpectedValue(String),
@@ -1727,17 +1727,17 @@ fn schema_version(conn: &Connection) -> Result<i64, DbError> {
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let found = schema_version(&tx)?;
-    let supported = MIGRATIONS.len() as i64;
-    if found < 0 {
-        return Err(DbError::InvalidSchemaVersion(found));
-    }
-    if found > supported {
-        return Err(DbError::SchemaTooNew { found, supported });
-    }
-    for sql in &MIGRATIONS[found as usize..] {
+    let applied = usize::try_from(found).map_err(|_| DbError::InvalidSchemaVersion(found))?;
+    let pending = MIGRATIONS.get(applied..).ok_or(DbError::SchemaTooNew {
+        found,
+        supported: MIGRATIONS.len(),
+    })?;
+    let mut version = found;
+    for sql in pending {
         tx.execute_batch(sql)?;
+        version += 1;
     }
-    tx.pragma_update(None, "user_version", supported)?;
+    tx.pragma_update(None, "user_version", version)?;
     tx.commit()?;
     Ok(())
 }

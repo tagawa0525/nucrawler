@@ -290,7 +290,11 @@ pub struct EvalArgs {
 }
 
 pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
-    todo!("{args:?}")
+    match args {
+        [] => Ok(EvalArgs { all: false }),
+        [flag] if flag == "--all" => Ok(EvalArgs { all: true }),
+        _ => Err(ParseError::EvalUsage),
+    }
 }
 
 /// `profile` サブコマンドの引数。

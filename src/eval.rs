@@ -1,18 +1,33 @@
 //! `eval`：明示的な反応を正解ラベルにして、採点のキーごとに点数が正例と負例をどれだけ分けているかを表示する。
 
-use crate::db::{Label, LabeledScore};
+use std::fmt::Write as _;
+
+use crate::db::{EvalKey, Label, LabeledScore, SignalKind};
 
 /// 正例・負例のどちらかがこれより少なければ、指標は参考値と注記する
 const FEW_LABELS: usize = 5;
 
 /// 正例と負例の組のうち、正例の点数が高い割合（同点は半分と数える）。どちらかが空なら `None`。
 pub fn auc(positive: &[u8], negative: &[u8]) -> Option<f64> {
-    todo!("{positive:?} {negative:?} {FEW_LABELS}")
+    if positive.is_empty() || negative.is_empty() {
+        return None;
+    }
+    // 同点を半分と数えるため、2 倍で数える
+    let twice: usize = positive
+        .iter()
+        .flat_map(|p| negative.iter().map(move |n| p.cmp(n)))
+        .map(|o| match o {
+            std::cmp::Ordering::Greater => 2,
+            std::cmp::Ordering::Equal => 1,
+            std::cmp::Ordering::Less => 0,
+        })
+        .sum();
+    Some(twice as f64 / (2 * positive.len() * negative.len()) as f64)
 }
 
 /// 10 点刻みの点数帯の下限。100 点は 90 帯に入れる。
 pub fn band(score: u8) -> u8 {
-    todo!("{score}")
+    (score.min(99) / 10) * 10
 }
 
 /// 評価の表示。`current` は現行のプロファイルの hash と score のプロンプトの版で、`all` が偽なら
@@ -23,13 +38,124 @@ pub fn render(
     current: Option<(&str, i64)>,
     all: bool,
 ) -> String {
-    todo!("{labels:?} {scores:?} {current:?} {all}")
+    let mut out = String::new();
+    let count = |kind| labels.iter().filter(|l| l.kind == kind).count();
+    let (up, bookmark) = (count(SignalKind::Up), count(SignalKind::Bookmark));
+    let (down, dismiss) = (count(SignalKind::Down), count(SignalKind::Dismiss));
+    let _ = writeln!(
+        out,
+        "labels: {} positive (up {up}, bookmark {bookmark}), {} negative (down {down}, dismiss {dismiss})",
+        up + bookmark,
+        down + dismiss
+    );
+    if up + bookmark < FEW_LABELS || down + dismiss < FEW_LABELS {
+        let _ = writeln!(
+            out,
+            "note: fewer than {FEW_LABELS} positive or negative labels; treat the numbers as rough"
+        );
+    }
+    let is_current = |k: &EvalKey| {
+        current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
+    };
+    let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
+    keys.sort_by_key(|k| (!is_current(k), *k));
+    keys.dedup();
+    if !all {
+        keys.retain(|k| is_current(k));
+        if keys.is_empty() {
+            out.push('\n');
+            if current.is_none() {
+                let _ = writeln!(
+                    out,
+                    "no profile; import one with `nucrawler profile import FILE`"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "no scores for the current profile and prompt version (see --all)"
+                );
+            }
+        }
+    }
+    for key in keys {
+        out.push('\n');
+        render_key(&mut out, key, is_current(key), labels, scores);
+    }
+    out
+}
+
+/// 1 つのキーの結果：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
+fn render_key(
+    out: &mut String,
+    key: &EvalKey,
+    current: bool,
+    labels: &[Label],
+    scores: &[LabeledScore],
+) {
+    let hash: String = key.profile_hash.chars().take(8).collect();
+    let _ = writeln!(
+        out,
+        "profile {hash}  {}/{}  prompt v{}{}",
+        key.backend,
+        key.model,
+        key.prompt_version,
+        if current { "  (current)" } else { "" }
+    );
+    // ラベルと突き合わせた (点数, 正例か, 反応より後に採点したか)
+    let matched: Vec<(u8, bool, bool)> = scores
+        .iter()
+        .filter(|s| &s.key == key)
+        .filter_map(|s| {
+            let label = labels.iter().find(|l| l.article_id == s.article_id)?;
+            Some((s.score, label.positive(), s.scored_at > label.at))
+        })
+        .collect();
+    let pick = |positive: bool| -> Vec<u8> {
+        matched
+            .iter()
+            .filter(|m| m.1 == positive)
+            .map(|m| m.0)
+            .collect()
+    };
+    let auc = auc(&pick(true), &pick(false)).map_or_else(|| "-".to_string(), |a| format!("{a:.2}"));
+    let _ = writeln!(
+        out,
+        "  scored {}/{}  AUC {auc}",
+        matched.len(),
+        labels.len()
+    );
+    let late = matched.iter().filter(|m| m.2).count();
+    if late > 0 {
+        // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
+        let _ = writeln!(
+            out,
+            "  note: {late} scored after the reaction; the article's own title may have been a signal, so AUC may be high"
+        );
+    }
+    let _ = writeln!(out, "  {:<8}{:>5}{:>6}", "score", "pos", "neg");
+    for b in (0..10).rev().map(|i| i * 10) {
+        let in_band = |positive: bool| {
+            matched
+                .iter()
+                .filter(|m| band(m.0) == b && m.1 == positive)
+                .count()
+        };
+        let (pos, neg) = (in_band(true), in_band(false));
+        if pos + neg == 0 {
+            continue;
+        }
+        let label = if b == 90 {
+            "90-100".to_string()
+        } else {
+            format!("{b}-{}", b + 9)
+        };
+        let _ = writeln!(out, "  {label:<8}{pos:>5}{neg:>6}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{EvalKey, SignalKind};
 
     #[test]
     fn auc_is_the_share_of_correctly_ordered_pairs() {

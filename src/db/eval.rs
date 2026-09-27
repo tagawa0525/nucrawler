@@ -38,16 +38,77 @@ pub struct LabeledScore {
     pub scored_at: String,
 }
 
+/// 正解ラベルに使う明示的な反応の種類（SQL の IN 句）
+const EXPLICIT: &str = "('up', 'down', 'bookmark', 'dismiss')";
+
 impl Db {
     /// 利用者の反応から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
-        todo!("{user_id}")
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT e.article_id, e.kind, e.created_at FROM events AS e
+             WHERE e.user_id = ?1 AND e.kind IN {EXPLICIT}
+               AND NOT EXISTS (
+                 SELECT 1 FROM events AS f
+                 WHERE f.user_id = e.user_id AND f.article_id = e.article_id
+                   AND f.kind IN {EXPLICIT}
+                   AND (f.created_at > e.created_at
+                        OR (f.created_at = e.created_at AND f.id > e.id)))
+             ORDER BY e.article_id"
+        ))?;
+        let rows = stmt.query_map([user_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (article_id, kind, at) = row?;
+            Ok(Label {
+                article_id,
+                kind: SignalKind::parse(&kind)?,
+                at,
+            })
+        })
+        .collect()
     }
 
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う
     /// （キー・article_id 順）。
     pub fn eval_scores(&self, user_id: i64) -> Result<Vec<LabeledScore>, DbError> {
-        todo!("{user_id}")
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH labeled AS (
+               SELECT DISTINCT article_id FROM events
+               WHERE user_id = ?1 AND kind IN {EXPLICIT}),
+             ranked AS (
+               SELECT s.profile_hash, s.backend, s.model, s.prompt_version, r.article_id,
+                      s.score, s.created_at,
+                      row_number() OVER (
+                        PARTITION BY s.profile_hash, s.backend, s.model, s.prompt_version,
+                                     r.article_id
+                        ORDER BY r.created_at DESC, r.id DESC) AS rn
+               FROM scores AS s
+               JOIN artifacts AS r ON r.id = s.artifact_id
+               JOIN labeled AS l ON l.article_id = r.article_id
+               WHERE s.user_id = ?1)
+             SELECT profile_hash, backend, model, prompt_version, article_id, score, created_at
+             FROM ranked WHERE rn = 1
+             ORDER BY profile_hash, backend, model, prompt_version, article_id"
+        ))?;
+        let rows = stmt.query_map([user_id], |r| {
+            Ok(LabeledScore {
+                key: EvalKey {
+                    profile_hash: r.get(0)?,
+                    backend: r.get(1)?,
+                    model: r.get(2)?,
+                    prompt_version: r.get(3)?,
+                },
+                article_id: r.get(4)?,
+                score: r.get(5)?,
+                scored_at: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 }
 

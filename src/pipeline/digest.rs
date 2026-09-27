@@ -596,6 +596,46 @@ mod tests {
         assert_nothing_recorded(&db);
     }
 
+    /// 応答と止める指示が同時に届いたら、応答を捨てずに保存してから止める。
+    struct AnswerWithCancel(Cancel);
+
+    impl Llm for AnswerWithCancel {
+        fn backend(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+            self.0.request();
+            ok(&[1, 2], 0.1)
+        }
+    }
+
+    #[tokio::test]
+    async fn response_arriving_with_cancel_is_kept() {
+        // 同時に準備できたときの選び方が偶然に左右されないことを、繰り返して確かめる
+        for _ in 0..20 {
+            let db = Db::open_in_memory().unwrap();
+            articles(&db, 2);
+            let cancel = Cancel::default();
+            let summary = digest_articles(
+                &db,
+                &AnswerWithCancel(cancel.clone()),
+                &mut quota(10),
+                &llm_cfg(5),
+                &PipelineConfig::default(),
+                &Target::Pending {
+                    requests_only: false,
+                },
+                now(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert_eq!(summary.digested, 2, "{summary:?}");
+            assert!(summary.cancelled, "{summary:?}");
+        }
+    }
+
     #[tokio::test]
     async fn stops_when_cancelled() {
         let db = Db::open_in_memory().unwrap();

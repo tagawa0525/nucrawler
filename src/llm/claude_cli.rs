@@ -453,6 +453,36 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    /// タイムアウトや中断で止めるときは、claude が起動した子プロセスも残さない。
+    #[tokio::test]
+    async fn stopping_kills_the_whole_process_group() {
+        let (script, dir) = fake_claude(
+            "cli-group",
+            "sleep 600 &\necho $! > \"$(dirname \"$0\")/grandchild\"\ncat >/dev/null\nsleep 5",
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_millis(500),
+        };
+        let schema = serde_json::json!({});
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        assert!(matches!(err, LlmError::Timeout { .. }), "{err}");
+        let pid = std::fs::read_to_string(dir.join("grandchild")).unwrap();
+        let stat = format!("/proc/{}/stat", pid.trim());
+        let alive = || {
+            std::fs::read_to_string(&stat)
+                .ok()
+                .and_then(|s| s.rsplit(')').next().map(|r| r.trim_start().to_string()))
+                .is_some_and(|rest| !rest.starts_with('Z'))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "grandchild {} is still running", pid.trim());
+    }
+
     #[tokio::test]
     async fn missing_command_is_spawn_error() {
         let cli = ClaudeCli {

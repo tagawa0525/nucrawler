@@ -7,8 +7,9 @@ use super::Halt;
 use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use crate::config::LlmConfig;
 use crate::db::DbError;
+use crate::errors;
 use crate::llm::{Llm, LlmRequest};
-use crate::{errors, tidy};
+use crate::prompt;
 
 pub const STAGE: &str = "tidy";
 
@@ -54,8 +55,8 @@ pub async fn tidy_topics<L: Llm>(
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);
     }
-    let prompt = tidy::build_prompt(&usage);
-    let schema = tidy::schema(&usage);
+    let prompt = prompt::tidy::build_prompt(&usage);
+    let schema = prompt::tidy::schema(&usage);
     let outcome = call_recorded(
         db,
         llm,
@@ -64,7 +65,7 @@ pub async fn tidy_topics<L: Llm>(
             stage: STAGE,
             n_items: proposed,
             req: LlmRequest {
-                system: tidy::system_prompt(),
+                system: prompt::tidy::system_prompt(),
                 prompt: &prompt,
                 schema: &schema,
                 model: &cfg.tidy_model,
@@ -88,7 +89,7 @@ pub async fn tidy_topics<L: Llm>(
     };
     summary.calls += 1;
     // 形の崩れた応答は捨てて、次の整理の機会を待つ（統合しなくても要約や検索は困らない）
-    let merges = match tidy::parse(&response.output, &usage) {
+    let merges = match prompt::tidy::parse(&response.output, &usage) {
         Ok(merges) => merges,
         Err(e) => {
             tracing::warn!("tidy output rejected: {}", errors::error_chain(&e));
@@ -205,9 +206,9 @@ mod tests {
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].model, "sonnet");
-        assert_eq!(reqs[0].system, crate::tidy::system_prompt());
-        assert_eq!(reqs[0].prompt, crate::tidy::build_prompt(&before));
-        assert_eq!(reqs[0].schema, crate::tidy::schema(&before));
+        assert_eq!(reqs[0].system, crate::prompt::tidy::system_prompt());
+        assert_eq!(reqs[0].prompt, crate::prompt::tidy::build_prompt(&before));
+        assert_eq!(reqs[0].schema, crate::prompt::tidy::schema(&before));
         let names = topic_names(&db);
         assert!(!names.contains(&"新設炉".to_string()));
         assert!(names.contains(&"データセンター需要".to_string()));

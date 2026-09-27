@@ -10,7 +10,8 @@ use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
-use crate::{digest, errors, glossary};
+use crate::prompt;
+use crate::{errors, glossary};
 
 pub const STAGE: &str = "digest";
 
@@ -55,7 +56,7 @@ pub async fn digest_articles<L: Llm>(
                 profile_hash: spec.profile_hash.as_deref(),
                 backend,
                 model,
-                prompt_version: digest::PROMPT_VERSION,
+                prompt_version: prompt::digest::PROMPT_VERSION,
             },
             &spec.filter,
             llm_cfg,
@@ -88,7 +89,7 @@ pub async fn digest_articles<L: Llm>(
                     profile_hash: spec.profile_hash.as_deref(),
                     backend,
                     model,
-                    prompt_version: digest::PROMPT_VERSION,
+                    prompt_version: prompt::digest::PROMPT_VERSION,
                 },
                 &spec.filter,
                 now,
@@ -99,12 +100,13 @@ pub async fn digest_articles<L: Llm>(
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
-        let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
+        let prompt = prompt::digest::build_prompt(&batch, llm_cfg.max_input_chars);
         // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
         let vocab = db.topics()?;
         let entries = db.glossary_entries()?;
-        let system = digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
-        let schema = digest::schema(&vocab);
+        let system =
+            prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
+        let schema = prompt::digest::schema(&vocab);
         let outcome = call_recorded(
             db,
             llm,
@@ -145,7 +147,7 @@ pub async fn digest_articles<L: Llm>(
                 break;
             }
         };
-        let parsed = match digest::parse(&response.output, &ids, &vocab) {
+        let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let message = errors::error_chain(&e);
@@ -162,7 +164,8 @@ pub async fn digest_articles<L: Llm>(
                 .unwrap_or_default();
             // 時点はバッチ全体ではなく、その記事の部分に当たった訳語から決める
             let glossary_at = input.and_then(|b| {
-                let own = digest::build_prompt(std::slice::from_ref(b), llm_cfg.max_input_chars);
+                let own =
+                    prompt::digest::build_prompt(std::slice::from_ref(b), llm_cfg.max_input_chars);
                 glossary::relevant(&entries, &own).glossary_at
             });
             db.insert_artifact(
@@ -171,7 +174,7 @@ pub async fn digest_articles<L: Llm>(
                     kind: ArtifactKind::Digest,
                     backend,
                     model,
-                    prompt_version: digest::PROMPT_VERSION,
+                    prompt_version: prompt::digest::PROMPT_VERSION,
                     payload,
                     inputs: &inputs,
                     glossary_at: glossary_at.as_deref(),
@@ -201,7 +204,8 @@ fn outdated_digests(
         .redo_digest_existing(key, filter, now)?
         .into_iter()
         .filter(|(input, made_with)| {
-            let own = digest::build_prompt(std::slice::from_ref(input), llm_cfg.max_input_chars);
+            let own =
+                prompt::digest::build_prompt(std::slice::from_ref(input), llm_cfg.max_input_chars);
             glossary::relevant(&entries, &own).glossary_at > *made_with
         })
         .map(|(input, _)| input)
@@ -426,8 +430,11 @@ mod tests {
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0].model, "sonnet");
         let vocab = db.topics().unwrap();
-        assert_eq!(reqs[0].schema, crate::digest::schema(&vocab));
-        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab, &[]));
+        assert_eq!(reqs[0].schema, crate::prompt::digest::schema(&vocab));
+        assert_eq!(
+            reqs[0].system,
+            crate::prompt::digest::system_prompt(&vocab, &[])
+        );
         assert!(
             reqs[0]
                 .prompt

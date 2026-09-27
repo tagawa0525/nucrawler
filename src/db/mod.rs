@@ -461,6 +461,18 @@ fn fts_phrase(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
+/// 別名 `alias` の要約に付いている語の名前（語彙の登録順の JSON 配列）。統合を反映するので、
+/// payload の `topics`（LLM が出した名前のまま）ではなくこちらを見せる。
+fn linked_topics(alias: &str) -> String {
+    format!(
+        "(SELECT json_group_array(name) FROM (
+           SELECT t.name FROM artifact_topics AS at
+           JOIN topics AS t ON t.id = at.topic_id
+           WHERE at.artifact_id = {alias}.id
+           ORDER BY t.id))"
+    )
+}
+
 /// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
 fn viewable(alias: &str) -> String {
     format!(
@@ -1028,7 +1040,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
                -- 利用者が持っていない会員資格を必要とする digest は見せない
                SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
@@ -1049,7 +1061,7 @@ impl Db {
                         OR (w.created_at = v.created_at AND w.id > v.id)))
              )
              SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
-                    json_extract(l.payload, '$.topics')
+                    {linked}
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
@@ -1065,7 +1077,8 @@ impl Db {
                    AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
-        )?;
+            linked = linked_topics("l"),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 key.user_id,
@@ -1516,6 +1529,7 @@ impl Db {
     }
 
     /// 利用者が閲覧できる版を新しい順に。
+    /// 要約の payload の `topics` は、統合を反映した付与の名前に差し替える。
     fn versions(
         &self,
         user_id: i64,
@@ -1523,11 +1537,13 @@ impl Db {
         kind: ArtifactKind,
     ) -> Result<Vec<ArtifactVersion>, DbError> {
         let sql = format!(
-            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload
+            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload,
+                    {linked}
              FROM artifacts AS r
-             WHERE r.article_id = :article AND r.kind = :kind AND {}
+             WHERE r.article_id = :article AND r.kind = :kind AND {viewable}
              ORDER BY r.created_at DESC, r.id DESC",
-            viewable("r")
+            linked = linked_topics("r"),
+            viewable = viewable("r"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
@@ -1544,18 +1560,23 @@ impl Db {
                     r.get(3)?,
                     r.get(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             },
         )?;
         rows.map(|row| {
-            let (id, backend, model, prompt_version, created_at, payload) = row?;
+            let (id, backend, model, prompt_version, created_at, payload, topics) = row?;
+            let mut payload: serde_json::Value = serde_json::from_str(&payload)?;
+            if kind == ArtifactKind::Digest {
+                payload["topics"] = serde_json::from_str(&topics)?;
+            }
             Ok(ArtifactVersion {
                 id,
                 backend,
                 model,
                 prompt_version,
                 created_at,
-                payload: serde_json::from_str(&payload)?,
+                payload,
             })
         })
         .collect()

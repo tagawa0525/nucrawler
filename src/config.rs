@@ -268,6 +268,11 @@ pub struct HtmlList {
     /// （年度ごとに URL が変わる一覧を、入口のページから探すときに使う）
     #[serde(default)]
     pub follow: Option<String>,
+    /// 日付の要素の CSS セレクタ。リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の
+    /// 中で最初に一致する要素の文字列から、年・月・日の順の数字を読む（例 2026年9月18日、2026/09/07）。
+    /// 読めなければ `date_in_url`、それも無ければ取得日時で扱う
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 /// URL のファイル名に含まれる日付の形式（最初に現れる、その桁数の数字の並び）。
@@ -354,6 +359,9 @@ fn validate_list(s: &Source) -> Result<(), String> {
             }
             if let Some(follow) = &list.follow {
                 check("follow", follow)?;
+            }
+            if let Some(date) = &list.date {
+                check("date", date)?;
             }
             Ok(())
         }
@@ -700,13 +708,14 @@ mod tests {
         let ok = parse_sources(
             &source_toml(
                 "html_list",
-                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\" }\n",
+                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\", date = \"dt\" }\n",
             ),
             p(),
         )
         .unwrap();
         let list = ok.sources[0].list.as_ref().unwrap();
         assert_eq!(list.date_in_url, Some(UrlDate::Yymmdd));
+        assert_eq!(list.date.as_deref(), Some("dt"));
         for (text, reason) in [
             (source_toml("html_list", ""), "[source.list]"),
             (
@@ -720,6 +729,10 @@ mod tests {
             (
                 source_toml("html_list", "list = { link = \"a\", follow = \"[\" }\n"),
                 "list.follow",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"a\", date = \"[\" }\n"),
+                "list.date",
             ),
         ] {
             let err = parse_sources(&text, p()).unwrap_err();

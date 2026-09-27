@@ -12,6 +12,7 @@ pub fn parse(list: &HtmlList, html: &str, base: &Url) -> Result<Vec<Candidate>, 
     let doc = Html::parse_document(html);
     let link = selector(&list.link)?;
     let skip = list.title_skip.as_deref().map(selector).transpose()?;
+    let date = list.date.as_deref().map(selector).transpose()?;
     let mut items = Vec::new();
     for a in doc.select(&link) {
         let Some(url) = page_link(a, base) else {
@@ -22,8 +23,12 @@ pub fn parse(list: &HtmlList, html: &str, base: &Url) -> Result<Vec<Candidate>, 
             tracing::debug!(%url, "skipping link without text");
             continue;
         }
+        let published_at = date
+            .as_ref()
+            .and_then(|d| date_in_item(a, &link, d))
+            .or_else(|| list.date_in_url.and_then(|f| date_in_url(&url, f)));
         items.push(Candidate {
-            published_at: list.date_in_url.and_then(|f| date_in_url(&url, f)),
+            published_at,
             url: url.into(),
             title,
             summary: None,
@@ -107,6 +112,43 @@ fn title(a: ElementRef, skip: Option<&Selector>) -> String {
         .join(" ")
 }
 
+/// リンク `a` を含む項目の中の、`date` に一致する最初の要素が表す日付（日本時間の 0 時）。
+/// 項目は、`a` の祖先を内側からたどり、ほかのリンク（`link` に一致する要素）を含む手前まで。
+/// 項目に日付の要素が無いときや読めないときは None（隣の項目の日付を使わない）。
+fn date_in_item(a: ElementRef, link: &Selector, date: &Selector) -> Option<DateTime<Utc>> {
+    fn matching<'a>(scope: ElementRef<'a>, sel: &Selector) -> impl Iterator<Item = ElementRef<'a>> {
+        scope
+            .descendants()
+            .filter_map(ElementRef::wrap)
+            .filter(move |el| sel.matches(el))
+    }
+    for scope in a.ancestors().filter_map(ElementRef::wrap) {
+        if matching(scope, link).nth(1).is_some() {
+            return None;
+        }
+        if let Some(el) = matching(scope, date).next() {
+            let text = el.text().collect::<String>();
+            let parsed = date_in_text(&text);
+            if parsed.is_none() {
+                tracing::debug!(text = text.trim(), "skipping unreadable date");
+            }
+            return parsed;
+        }
+    }
+    None
+}
+
+/// 文字列の中の、年（4 桁）・月・日の順に並ぶ最初の数字（日本時間の 0 時）。
+fn date_in_text(text: &str) -> Option<DateTime<Utc>> {
+    let mut runs = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty());
+    let year = runs.find(|run| run.len() == 4)?.parse().ok()?;
+    let month = runs.next()?.parse().ok()?;
+    let day = runs.next()?.parse().ok()?;
+    crate::jst::midnight(NaiveDate::from_ymd_opt(year, month, day)?)
+}
+
 /// URL のファイル名に含まれる日付（日本時間の 0 時）。見つからなければ None。
 fn date_in_url(url: &Url, format: UrlDate) -> Option<DateTime<Utc>> {
     let name = url.path_segments()?.next_back()?;
@@ -147,6 +189,7 @@ mod tests {
             date_in_url: None,
             title_skip: None,
             follow: None,
+            date: None,
         }
     }
 
@@ -223,6 +266,78 @@ mod tests {
         assert_eq!(items.len(), 3, "{items:#?}");
         assert_eq!(items[1].title, "役員人事");
         assert_eq!(items[0].published_at, jst_midnight(2026, 8, 28));
+    }
+
+    /// 規制委の一覧は日付を dt に書く。URL の数字（元の募集の日付など）は公表日ではない。
+    #[test]
+    fn nra_links_with_date_from_the_list() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".news__date".into()),
+                ..list("dl.news__list dd.news__title a")
+            },
+            include_str!("../../tests/fixtures/nra_news.html"),
+            &base("https://www.nra.go.jp/news/index.html"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4, "{items:#?}");
+        assert_eq!(
+            items[1].url,
+            "https://www.nra.go.jp/news_only/20260917_ILC.html"
+        );
+        assert_eq!(
+            items[1].title,
+            "国際原子力機関(IAEA)と共同で実施した分析機関間比較(ILC2024)の報告書の公表"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 9, 18));
+        // URL は 20230918 を含むが、公表日は 2026 年 9 月 15 日
+        assert_eq!(items[2].published_at, jst_midnight(2026, 9, 15));
+    }
+
+    /// 原子力機構のトップの新着は種類ごとに印が付く。プレス発表だけを、dt の日付で取る。
+    #[test]
+    fn jaea_press_links_with_date_from_the_list() {
+        let items = parse(
+            &HtmlList {
+                date: Some("dt".into()),
+                ..list(r#"li[data-info-category="newsPress"] dd a"#)
+            },
+            include_str!("../../tests/fixtures/jaea_top.html"),
+            &base("https://www.jaea.go.jp/"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4, "{items:#?}");
+        assert!(
+            items.iter().all(|c| c.url.contains("/02/press2026/")),
+            "{items:#?}"
+        );
+        assert_eq!(items[0].title, "原子力機構週報（9/12～9/18）");
+        assert_eq!(items[0].published_at, jst_midnight(2026, 9, 18));
+        assert_eq!(items[3].published_at, jst_midnight(2026, 8, 7));
+    }
+
+    /// 日付は、リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の中から探す。
+    /// 項目に日付が無いときや読めないときは、隣の項目の日付を使わずに None にする。
+    #[test]
+    fn dates_come_only_from_the_item_of_the_link() {
+        let html = r#"<ul>
+            <li><span class="d">2026/09/07：</span><p><a href="/a.html">A</a></p></li>
+            <li><a href="/b.html">B</a></li>
+            <li><span class="d">日付未定</span><a href="/c.html">C</a></li>
+        </ul>"#;
+        let items = parse(
+            &HtmlList {
+                date: Some(".d".into()),
+                ..list("li a")
+            },
+            html,
+            &base("https://e.example/"),
+        )
+        .unwrap();
+        assert_eq!(
+            items.iter().map(|c| c.published_at).collect::<Vec<_>>(),
+            [jst_midnight(2026, 9, 7), None, None]
+        );
     }
 
     /// ページ内の見出しへのリンクは記事ではない。記事の URL からはフラグメントを除く。

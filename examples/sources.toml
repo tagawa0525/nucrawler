@@ -9,7 +9,10 @@
 #           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
 # list:     html_list の一覧ページの読み方
 #           link        記事へのリンク（a 要素）の CSS セレクタ
-#           date_in_url リンク先のファイル名の日付（yyyymmdd | yymmdd）。省略時は取得日時
+#           date        項目の日付の要素の CSS セレクタ（例 2026年9月18日、2026/09/07）。リンクを含み、
+#                       ほかのリンクを含まないまとまりの中から探す
+#           date_in_url リンク先のファイル名の日付（yyyymmdd | yymmdd）。date も date_in_url も
+#                       無いか読めなければ取得日時
 #           title_skip  見出しから除く要素の CSS セレクタ（会社名のラベルなど）
 #           follow      一覧の前にたどるリンクの CSS セレクタ（年度ごとに URL が変わる一覧など）
 
@@ -42,6 +45,17 @@ kind = "feed"
 url = "https://www.iaea.org/feeds/topnews"
 lang = "en"
 category = "regulator"
+
+# 新着履歴は月ごとのページで、index.html はその月の分。日付は URL ではなく一覧の dt から取る
+[[source]]
+id = "nra"
+name = "原子力規制委員会"
+label = "規制委"
+kind = "html_list"
+url = "https://www.nra.go.jp/news/index.html"
+lang = "ja"
+category = "regulator"
+list = { link = "dl.news__list dd.news__title a", date = ".news__date" }
 
 # --- 業界 ---
 
@@ -102,6 +116,17 @@ kind = "feed"
 url = "https://www.aesj.net/feed"
 lang = "ja"
 category = "research"
+
+# トップの新着のうちプレス発表（研究開発成果、事故・トラブル、週報など）。URL は日付を含まない
+[[source]]
+id = "jaea"
+name = "日本原子力研究開発機構"
+label = "JAEA"
+kind = "html_list"
+url = "https://www.jaea.go.jp/"
+lang = "ja"
+category = "research"
+list = { link = 'li[data-info-category="newsPress"] dd a', date = "dt" }
 
 # --- 電力会社（原子力専用フィードは無いので絞り込む） ---
 

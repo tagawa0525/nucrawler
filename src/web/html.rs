@@ -188,8 +188,9 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         ..view
     };
     let mut body = format!(
-        "<nav class=\"bar\">{}{}{}{}</nav>",
+        "<nav class=\"bar\">{}{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
+        button("/search?liked=1", "いいね", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
         button(
             &all_toggle.href(),
@@ -508,6 +509,12 @@ fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     } else {
         format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
     };
+    let liked = if i.feedback == Some(crate::db::Feedback::Up) {
+        " 👍"
+    } else {
+        ""
+    };
+    let bookmarked = if i.bookmarked { " 🔖" } else { "" };
     let translation = if i.has_translation {
         " ・和訳あり"
     } else if i.translation_requested {
@@ -521,7 +528,7 @@ fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{lock}{translation}</div>{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
@@ -859,6 +866,13 @@ mod tests {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
         assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
+        // 検索とブックマークの間に、いいねした記事へのボタンを置く
+        let search = html.find(r#"href="/search""#).unwrap();
+        let liked = html
+            .find(r#"<a class="btn" href="/search?liked=1" aria-label="いいね" title="いいね">👍</a>"#)
+            .expect(&html);
+        let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
+        assert!(search < liked && liked < bookmarked, "{html}");
     }
 
     /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。
@@ -1157,6 +1171,22 @@ mod tests {
         // digest が無ければ原題を出す
         assert!(html.contains("Title 3"));
         assert!(html.contains(r#"href="/?all=1""#), "toggle to show all");
+    }
+
+    /// カードのソース・日付の横に、いいねとブックマークの印を出す。
+    #[test]
+    fn card_marks_liked_and_bookmarked_articles() {
+        let mut marked = item(1, "2026-09-27T05:00:00.000Z");
+        marked.feedback = Some(Feedback::Up);
+        marked.bookmarked = true;
+        let html = card(&marked, false, &Page::default());
+        assert!(html.contains(" 👍 🔖</div>"), "{html}");
+        let mut disliked = item(2, "2026-09-27T05:00:00.000Z");
+        disliked.feedback = Some(Feedback::Down);
+        for i in [item(3, "2026-09-27T05:00:00.000Z"), disliked] {
+            let html = card(&i, false, &Page::default());
+            assert!(!html.contains('👍') && !html.contains('🔖'), "{html}");
+        }
     }
 
     fn detail() -> ArticleDetail {

@@ -13,11 +13,13 @@ pub struct ScoreKey<'a> {
 }
 
 /// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
-/// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
-/// プロンプトの版は含めない（digest の失敗と同じ扱い）ので、古い版で断念した記事は、
-/// 版を上げても再試行しない。
+/// モデルで、利用者・プロファイル・プロンプトの版を持たないので、ステージ名にそれらを含めて範囲を
+/// 区別する。古い版で断念した記事も、版を上げれば採点し直す（プロンプトが変われば成功しうる）。
 pub fn score_stage(key: ScoreKey) -> String {
-    format!("score:{}:{}", key.user_id, key.profile_hash)
+    format!(
+        "score:{}:{}:v{}",
+        key.user_id, key.profile_hash, key.prompt_version
+    )
 }
 
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
@@ -296,6 +298,34 @@ mod tests {
             ..key
         };
         assert_eq!(score_ids(&db, other_profile, now), [a]);
+    }
+
+    /// 古い版のプロンプトで断念した記事も、版を上げれば採点し直す（プロンプトが変われば成功しうる）。
+    #[test]
+    fn score_failures_are_scoped_to_prompt_version() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let now = "2026-09-27T00:00:00Z";
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: &score_stage(key),
+                backend: key.backend,
+                model: key.model,
+            },
+            "bad output",
+            t(now),
+            true,
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let next = ScoreKey {
+            prompt_version: key.prompt_version + 1,
+            ..key
+        };
+        assert_eq!(score_ids(&db, next, now), [a]);
     }
 
     #[test]

@@ -125,7 +125,7 @@ fn render_key(
         labels.len()
     );
     let late = matched.iter().filter(|m| m.2).count();
-    if late > 0 {
+    if key.prompt_version == 1 && late > 0 {
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,
@@ -246,6 +246,18 @@ mod tests {
             "{all}"
         );
         assert!(all.contains("scored 1/3  AUC -"), "{all}");
+    }
+
+    /// 反応の見出しをプロンプトに入れていたのは版 1 だけなので、それ以降の版には注記しない。
+    #[test]
+    fn notes_late_scores_only_for_prompt_v1() {
+        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let v2 = key("h", 2);
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
+        let out = render(&labels, &scores, Some(("h", 2)), false);
+        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(!out.contains("after the reaction"), "{out}");
     }
 
     #[test]

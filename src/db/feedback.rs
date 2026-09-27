@@ -1,9 +1,8 @@
-//! 既読・不要・ブックマークなどの操作と、採点に使う信号。
+//! 既読・不要・ブックマークなどの利用者の行動。明示的な反応は評価（`eval`）の正解ラベルになる。
 
 use super::*;
 
-/// 利用者の行動。推薦への効き方は、不要が 👎 ≫ 見ない、関心が
-/// 詳細を開いた ＜ 和訳を開いた・ブックマーク ≪ 👍。
+/// 利用者の行動。👍・ブックマークは関心、👎・見ないは不要の明示的な反応。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalKind {
     OpenDetail,
@@ -40,13 +39,6 @@ impl SignalKind {
             other => return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}"))),
         })
     }
-}
-
-/// 採点の参考にする直近の行動と、その記事の見出し。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Signal {
-    pub kind: SignalKind,
-    pub title_ja: String,
 }
 
 /// 利用者の最新の 👍/👎。
@@ -107,40 +99,6 @@ impl Db {
         )?;
         Ok(())
     }
-
-    /// 直近の行動を新しい順に最大 `limit` 件。digest の無い記事の行動は含めない。
-    pub fn recent_signals(&self, user_id: i64, limit: usize) -> Result<Vec<Signal>, DbError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT kind, title_ja FROM (
-               SELECT e.id, e.created_at, e.kind,
-                      (SELECT r.title_ja FROM artifacts AS r
-                       WHERE r.article_id = e.article_id AND r.kind = 'digest'
-                         -- 利用者が閲覧できない（会員限定の）digest の見出しは使わない
-                         AND NOT EXISTS (
-                           SELECT 1 FROM artifact_access AS aa
-                           WHERE aa.artifact_id = r.id
-                             AND aa.membership_id NOT IN (
-                               SELECT membership_id FROM user_memberships
-                               WHERE user_id = ?1))
-                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS title_ja
-               FROM events AS e WHERE e.user_id = ?1)
-             WHERE title_ja IS NOT NULL
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![user_id, i64::try_from(limit).unwrap_or(i64::MAX)],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        )?;
-        rows.map(|row| {
-            let (kind, title_ja) = row?;
-            Ok(Signal {
-                kind: SignalKind::parse(&kind)?,
-                title_ja,
-            })
-        })
-        .collect()
-    }
 }
 
 #[cfg(test)]
@@ -148,92 +106,14 @@ mod tests {
     use super::*;
     use crate::db::test_support::*;
 
-    /// 見出しは、利用者が閲覧できる digest からだけ取る。
-    #[test]
-    fn recent_signals_use_viewable_digests_only() {
-        let db = Db::open_in_memory().unwrap();
-        let owner = db.owner_id().unwrap();
-        let aesj: i64 = db
-            .conn()
-            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
-        add_digest(
-            &db,
-            a,
-            "sonnet",
-            "公開の見出し",
-            true,
-            "2026-09-26T01:00:00Z",
-        );
-        let gated = insert_content(&db, a, Some(aesj));
-        let payload = serde_json::json!({
-            "title_ja": "会員限定の見出し", "summary_ja": "s", "points_ja": ["p"],
-            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
-        });
-        db.insert_artifact(
-            &NewArtifact {
-                article_id: a,
-                kind: ArtifactKind::Digest,
-                backend: "claude-cli",
-                model: "opus",
-                prompt_version: 1,
-                payload: &payload,
-                inputs: &[gated],
-                glossary_at: None,
-            },
-            t("2026-09-26T02:00:00Z"),
-        )
-        .unwrap();
-        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T01:00:00Z"))
-            .unwrap();
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap()[0].title_ja,
-            "公開の見出し"
-        );
-    }
-
-    #[test]
-    fn recent_signals_are_newest_first_with_titles() {
-        let db = Db::open_in_memory().unwrap();
-        let owner = db.owner_id().unwrap();
-        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
-        add_digest(&db, a, "sonnet", "記事A", true, "2026-09-26T01:00:00Z");
-        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
-        add_digest(&db, b, "sonnet", "記事B", true, "2026-09-26T01:00:00Z");
-        let no_digest = page_article(&db, "https://e.com/c", "2026-09-26T00:00:00.000Z");
-        db.record_event(owner, a, SignalKind::OpenDetail, t("2026-09-27T01:00:00Z"))
-            .unwrap();
-        db.record_event(owner, b, SignalKind::Down, t("2026-09-27T02:00:00Z"))
-            .unwrap();
-        db.record_event(owner, no_digest, SignalKind::Up, t("2026-09-27T03:00:00Z"))
-            .unwrap();
-        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T04:00:00Z"))
-            .unwrap();
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap(),
-            [
-                Signal {
-                    kind: SignalKind::Up,
-                    title_ja: "記事A".into()
-                },
-                Signal {
-                    kind: SignalKind::Down,
-                    title_ja: "記事B".into()
-                },
-                Signal {
-                    kind: SignalKind::OpenDetail,
-                    title_ja: "記事A".into()
-                },
-            ]
-        );
-        assert_eq!(db.recent_signals(owner, 1).unwrap().len(), 1);
+    /// 残っている行動の種類（新しい順）
+    fn events(db: &Db) -> Vec<String> {
+        db.query_strings("SELECT kind FROM events ORDER BY created_at DESC, id DESC")
+            .unwrap()
     }
 
     /// 一覧でブックマークした記事は、外すまでブックマークとして残る。
-    /// ブックマークした行動は、外しても採点の手がかりとして残る。
+    /// ブックマークした行動は、外しても評価のラベルとして残る。
     #[test]
     fn bookmark_marks_items_until_removed_and_keeps_the_signal() {
         let db = Db::open_in_memory().unwrap();
@@ -264,16 +144,10 @@ mod tests {
 
         db.unbookmark(owner, a).unwrap();
         assert!(!bookmarked(&db));
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap(),
-            [Signal {
-                kind: SignalKind::Bookmark,
-                title_ja: "題".into()
-            }]
-        );
+        assert_eq!(events(&db), ["bookmark"]);
     }
 
-    /// 「見ない」にした記事は 👎 と同じく一覧の既定から隠れ、弱い不要として採点に渡る。
+    /// 「見ない」にした記事は 👎 と同じく一覧の既定から隠れ、行動として残る。
     #[test]
     fn dismissed_articles_are_hidden_by_default_and_become_signals() {
         let db = Db::open_in_memory().unwrap();
@@ -312,16 +186,10 @@ mod tests {
             ),
             [kept]
         );
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap(),
-            [Signal {
-                kind: SignalKind::Dismiss,
-                title_ja: "題".into()
-            }]
-        );
+        assert_eq!(events(&db), ["dismiss"]);
     }
 
-    /// 誤って振り分けたときの取り消しは、その行動が無かったことにする（採点にも渡さない）。
+    /// 誤って振り分けたときの取り消しは、その行動が無かったことにする（評価のラベルにも使わない）。
     #[test]
     fn undo_removes_the_latest_event_and_the_bookmark() {
         let db = Db::open_in_memory().unwrap();
@@ -355,13 +223,7 @@ mod tests {
         assert_eq!(ids, [a, b]);
         assert!(!items[0].bookmarked);
         // 取り消したものだけが消え、ほかの行動は残る
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap(),
-            [Signal {
-                kind: SignalKind::OpenDetail,
-                title_ja: "題".into()
-            }]
-        );
+        assert_eq!(events(&db), ["open_detail"]);
     }
 
     /// 取り消すのは、取り消す行動で付いたブックマークだけ。それより前からのブックマークは残す。
@@ -382,13 +244,7 @@ mod tests {
             .unwrap();
         db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
         assert!(db.search_articles(&search_query(&db)).unwrap()[0].bookmarked);
-        assert_eq!(
-            db.recent_signals(owner, 10).unwrap(),
-            [Signal {
-                kind: SignalKind::Bookmark,
-                title_ja: "題".into()
-            }]
-        );
+        assert_eq!(events(&db), ["bookmark"]);
     }
 
     /// 同じ時刻（ミリ秒）の行動が重なっても、取り消すのはその行動で付いたブックマークだけ。

@@ -2623,12 +2623,17 @@ fn schema_version(conn: &Connection) -> Result<i64, DbError> {
 /// 同時に開いたプロセス同士で二重に適用しないよう、IMMEDIATE トランザクションで
 /// 書き込みロックを取ってから版を読み、未適用分をまとめて適用する。
 fn migrate(conn: &mut Connection) -> Result<(), DbError> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+/// `migrations` のうち未適用のものを 1 つのトランザクションで適用する。
+fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<(), DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let found = schema_version(&tx)?;
     let applied = usize::try_from(found).map_err(|_| DbError::InvalidSchemaVersion(found))?;
-    let pending = MIGRATIONS.get(applied..).ok_or(DbError::SchemaTooNew {
+    let pending = migrations.get(applied..).ok_or(DbError::SchemaTooNew {
         found,
-        supported: MIGRATIONS.len(),
+        supported: migrations.len(),
     })?;
     let mut version = found;
     for sql in pending {

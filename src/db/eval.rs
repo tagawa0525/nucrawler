@@ -41,21 +41,40 @@ pub struct LabeledScore {
 /// 正解ラベルに使う明示的な反応の種類（SQL の IN 句）
 const EXPLICIT: &str = "('up', 'down', 'bookmark', 'dismiss')";
 
+/// 利用者（`:user`）の記事ごとの正解ラベル：残っている明示的な反応のうち最後のもの。
+fn labels() -> String {
+    format!(
+        "SELECT e.id, e.article_id, e.kind, e.created_at FROM events AS e
+         WHERE e.user_id = :user AND e.kind IN {EXPLICIT}
+           AND NOT EXISTS (
+             SELECT 1 FROM events AS f
+             WHERE f.user_id = e.user_id AND f.article_id = e.article_id
+               AND f.kind IN {EXPLICIT}
+               AND (f.created_at > e.created_at
+                    OR (f.created_at = e.created_at AND f.id > e.id)))"
+    )
+}
+
+/// プロファイルの見直しの根拠：ラベルの付いた記事の見出しとトピック。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence {
+    pub article_id: i64,
+    /// 関心（up・bookmark）なら真、不要（down・dismiss）なら偽
+    pub positive: bool,
+    pub title_ja: String,
+    pub topics: Vec<String>,
+    /// ラベルを決めた反応の時刻
+    pub at: String,
+}
+
 impl Db {
     /// 利用者の反応から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT e.article_id, e.kind, e.created_at FROM events AS e
-             WHERE e.user_id = ?1 AND e.kind IN {EXPLICIT}
-               AND NOT EXISTS (
-                 SELECT 1 FROM events AS f
-                 WHERE f.user_id = e.user_id AND f.article_id = e.article_id
-                   AND f.kind IN {EXPLICIT}
-                   AND (f.created_at > e.created_at
-                        OR (f.created_at = e.created_at AND f.id > e.id)))
-             ORDER BY e.article_id"
+            "SELECT article_id, kind, created_at FROM ({labels}) ORDER BY article_id",
+            labels = labels(),
         ))?;
-        let rows = stmt.query_map([user_id], |r| {
+        let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -67,6 +86,48 @@ impl Db {
             Ok(Label {
                 article_id,
                 kind: SignalKind::parse(&kind)?,
+                at,
+            })
+        })
+        .collect()
+    }
+
+    /// ラベルの付いた記事に、利用者が閲覧できる最新の digest の見出しとトピックを付けて、反応の
+    /// 新しい順に返す。digest の無い記事は含めない。
+    pub fn label_evidence(&self, user_id: i64) -> Result<Vec<Evidence>, DbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH labels AS ({labels}),
+             digests AS (
+               SELECT l.id AS event_id, l.article_id, l.kind, l.created_at,
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = l.article_id AND r.kind = 'digest' AND {viewable}
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+               FROM labels AS l)
+             SELECT d.article_id, d.kind, d.created_at, r.title_ja, {topics}
+             FROM digests AS d
+             JOIN artifacts AS r ON r.id = d.digest_id
+             ORDER BY d.created_at DESC, d.event_id DESC",
+            labels = labels(),
+            viewable = super::read::viewable("r"),
+            topics = super::read::linked_topics("r"),
+        ))?;
+        let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (article_id, kind, at, title_ja, topics) = row?;
+            let kind = SignalKind::parse(&kind)?;
+            Ok(Evidence {
+                article_id,
+                positive: matches!(kind, SignalKind::Up | SignalKind::Bookmark),
+                title_ja,
+                topics: serde_json::from_str(&topics)?,
                 at,
             })
         })
@@ -163,6 +224,117 @@ mod tests {
                 (d, true, "2026-09-27T00:00:00.000Z"),
             ]
         );
+    }
+
+    #[test]
+    fn evidence_carries_the_latest_digest_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "haiku", "古い見出し", true, "2026-09-26T01:00:00Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "新しい見出し",
+            true,
+            "2026-09-26T02:00:00Z",
+        );
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            b,
+            "sonnet",
+            "見送った記事",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        // digest の無い記事は根拠にできない
+        let bare = page_article(&db, "https://e.com/bare", "2026-09-26T00:00:00.000Z");
+        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
+        event(a, SignalKind::Up, "2026-09-27T00:00:00Z");
+        event(b, SignalKind::Dismiss, "2026-09-27T01:00:00Z");
+        event(bare, SignalKind::Up, "2026-09-27T02:00:00Z");
+
+        let evidence = db.label_evidence(owner).unwrap();
+        assert_eq!(
+            evidence,
+            [
+                Evidence {
+                    article_id: b,
+                    positive: false,
+                    title_ja: "見送った記事".into(),
+                    topics: vec!["規制・審査".into()],
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                },
+                Evidence {
+                    article_id: a,
+                    positive: true,
+                    title_ja: "新しい見出し".into(),
+                    topics: vec!["規制・審査".into()],
+                    at: "2026-09-27T00:00:00.000Z".into(),
+                },
+            ]
+        );
+    }
+
+    /// 会員限定の本文から作った digest は、会員でない利用者の根拠にしない（見出しを LLM に渡すため）。
+    #[test]
+    fn evidence_skips_digests_the_user_cannot_view() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let gated_digest = |article_id: i64, title: &str, at: &str| {
+            let gated = insert_content(&db, article_id, Some(aesj));
+            let payload = serde_json::json!({
+                "title_ja": title, "summary_ja": "s", "points_ja": ["p"],
+                "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
+            });
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id,
+                    kind: ArtifactKind::Digest,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &payload,
+                    inputs: &[gated],
+                    glossary_at: None,
+                },
+                t(at),
+            )
+            .unwrap();
+        };
+        // 公開の digest より新しい会員限定の digest があっても、公開の方を使う
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(
+            &db,
+            a,
+            "sonnet",
+            "公開の見出し",
+            true,
+            "2026-09-26T01:00:00Z",
+        );
+        gated_digest(a, "会員限定の見出し", "2026-09-26T02:00:00Z");
+        // 会員限定の digest しか無い記事は根拠にしない
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        gated_digest(b, "会員限定だけ", "2026-09-26T01:00:00Z");
+        for article in [a, b] {
+            db.record_event(owner, article, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
+        let titles: Vec<String> = db
+            .label_evidence(owner)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.title_ja)
+            .collect();
+        assert_eq!(titles, ["公開の見出し"]);
     }
 
     #[test]

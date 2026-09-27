@@ -30,9 +30,28 @@ pub struct Interest {
     pub note: Option<String>,
 }
 
-/// TOML を読み、値を検証する（重みは 0〜1、topic は空でなく重複しない）。
+/// TOML を読み、値を検証する（`validate`）。
 pub fn parse(text: &str) -> Result<Profile, ProfileError> {
     let profile: Profile = toml::from_str(text)?;
+    validate(&profile)?;
+    Ok(profile)
+}
+
+/// 値を検証する（重みは 0〜1、topic と exclude は空でなく重複しない、どの文字列も制御文字を含まない）。
+pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
+    // 案は LLM が作って端末に表示するので、エスケープシーケンスや改行を通さない
+    let texts = profile
+        .interests
+        .iter()
+        .flat_map(|i| std::iter::once(&i.topic).chain(i.note.as_ref()))
+        .chain(&profile.exclude);
+    for text in texts {
+        if text.chars().any(char::is_control) {
+            return Err(ProfileError::Invalid(format!(
+                "{text:?} must not contain control characters"
+            )));
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     for i in &profile.interests {
         if i.topic.trim().is_empty() {
@@ -53,11 +72,122 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
             )));
         }
     }
-    Ok(profile)
+    let mut excluded = std::collections::HashSet::new();
+    for e in &profile.exclude {
+        if e.trim().is_empty() {
+            return Err(ProfileError::Invalid(
+                "exclude must not contain an empty topic".into(),
+            ));
+        }
+        if !excluded.insert(e.as_str()) {
+            return Err(ProfileError::Invalid(format!("duplicate exclude {e:?}")));
+        }
+    }
+    Ok(())
 }
 
 pub fn to_toml(profile: &Profile) -> String {
     toml::to_string(profile).expect("a profile is plain data")
+}
+
+/// 現行のプロファイルから案への変更の 1 つ。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Change {
+    Added {
+        topic: String,
+        weight: f64,
+        note: Option<String>,
+    },
+    Removed {
+        topic: String,
+    },
+    Weight {
+        topic: String,
+        from: f64,
+        to: f64,
+    },
+    Note {
+        topic: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
+    ExcludeAdded(String),
+    ExcludeRemoved(String),
+}
+
+/// 現行（`from`）と案（`to`）の差分。分野は案の順、削除は現行の順、除外は追加・削除の順に並べる。
+pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
+    let find = |p: &'_ Profile, topic: &str| p.interests.iter().find(|i| i.topic == topic).cloned();
+    let mut changes = Vec::new();
+    for new in &to.interests {
+        let Some(old) = find(from, &new.topic) else {
+            changes.push(Change::Added {
+                topic: new.topic.clone(),
+                weight: new.weight,
+                note: new.note.clone(),
+            });
+            continue;
+        };
+        // 空の note は無いのと同じ（suggest の案は空の note を無しにする）
+        let blank = |n: &Option<String>| n.as_deref().is_none_or(|n| n.trim().is_empty());
+        if old.note != new.note && !(blank(&old.note) && blank(&new.note)) {
+            changes.push(Change::Note {
+                topic: new.topic.clone(),
+                from: old.note,
+                to: new.note.clone(),
+            });
+        }
+        if old.weight != new.weight {
+            changes.push(Change::Weight {
+                topic: new.topic.clone(),
+                from: old.weight,
+                to: new.weight,
+            });
+        }
+    }
+    for old in &from.interests {
+        if find(to, &old.topic).is_none() {
+            changes.push(Change::Removed {
+                topic: old.topic.clone(),
+            });
+        }
+    }
+    for e in &to.exclude {
+        if !from.exclude.contains(e) {
+            changes.push(Change::ExcludeAdded(e.clone()));
+        }
+    }
+    for e in &from.exclude {
+        if !to.exclude.contains(e) {
+            changes.push(Change::ExcludeRemoved(e.clone()));
+        }
+    }
+    changes
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let note = |n: &Option<String>| n.clone().unwrap_or_else(|| "(none)".into());
+        match self {
+            Self::Added {
+                topic,
+                weight,
+                note: None,
+            } => write!(f, "add {topic} (weight {weight:?})"),
+            Self::Added {
+                topic,
+                weight,
+                note: Some(note),
+            } => write!(f, "add {topic} (weight {weight:?}, note {note})"),
+            Self::Removed { topic } => write!(f, "remove {topic}"),
+            Self::Weight { topic, from, to } => write!(f, "weight {topic}: {from:?} → {to:?}"),
+            Self::Note { topic, from, to } => {
+                write!(f, "note {topic}: {} → {}", note(from), note(to))
+            }
+            Self::ExcludeAdded(e) => write!(f, "exclude + {e}"),
+            Self::ExcludeRemoved(e) => write!(f, "exclude - {e}"),
+        }
+    }
 }
 
 /// 内容から決まるハッシュ（16 進 16 桁）。採点はこの値ごとに記録するので、内容が変われば
@@ -75,6 +205,87 @@ pub fn hash(profile: &Profile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interest(topic: &str, weight: f64, note: Option<&str>) -> Interest {
+        Interest {
+            topic: topic.into(),
+            weight,
+            note: note.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn diff_lists_every_kind_of_change() {
+        let from = Profile {
+            interests: vec![
+                interest("規制・審査", 1.0, Some("再稼働審査")),
+                interest("燃料", 0.9, None),
+                interest("廃止措置", 0.4, None),
+            ],
+            exclude: vec!["核兵器".into(), "核融合".into()],
+        };
+        let to = Profile {
+            interests: vec![
+                interest("規制・審査", 1.0, Some("再稼働審査、検査制度")),
+                interest("燃料", 0.7, None),
+                interest("SMR", 0.5, Some("BWRX-300")),
+            ],
+            exclude: vec!["核兵器".into(), "電力市場".into()],
+        };
+        let changes = diff(&from, &to);
+        assert_eq!(
+            changes,
+            [
+                Change::Note {
+                    topic: "規制・審査".into(),
+                    from: Some("再稼働審査".into()),
+                    to: Some("再稼働審査、検査制度".into()),
+                },
+                Change::Weight {
+                    topic: "燃料".into(),
+                    from: 0.9,
+                    to: 0.7,
+                },
+                Change::Added {
+                    topic: "SMR".into(),
+                    weight: 0.5,
+                    note: Some("BWRX-300".into()),
+                },
+                Change::Removed {
+                    topic: "廃止措置".into(),
+                },
+                Change::ExcludeAdded("電力市場".into()),
+                Change::ExcludeRemoved("核融合".into()),
+            ]
+        );
+        let text: Vec<String> = changes.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            [
+                "note 規制・審査: 再稼働審査 → 再稼働審査、検査制度",
+                "weight 燃料: 0.9 → 0.7",
+                "add SMR (weight 0.5, note BWRX-300)",
+                "remove 廃止措置",
+                "exclude + 電力市場",
+                "exclude - 核融合",
+            ]
+        );
+        assert!(diff(&from, &from).is_empty());
+    }
+
+    /// 空の note と note 無しは同じ（suggest の案は空の note を無しにする）。
+    #[test]
+    fn diff_treats_an_empty_note_as_none() {
+        let from = Profile {
+            interests: vec![interest("燃料", 0.9, Some(" "))],
+            exclude: vec![],
+        };
+        let to = Profile {
+            interests: vec![interest("燃料", 0.9, None)],
+            exclude: vec![],
+        };
+        assert!(diff(&from, &to).is_empty());
+    }
 
     fn example() -> Profile {
         parse(include_str!("../examples/profile.toml")).unwrap()
@@ -111,6 +322,18 @@ mod tests {
                 "[[interest]]\ntopic = \"a\"\nweight = 0.5\n[[interest]]\ntopic = \"a\"\nweight = 0.2\n",
                 "duplicate",
             ),
+            ("exclude = [\" \"]\n", "exclude"),
+            ("exclude = [\"核融合\", \"核融合\"]\n", "duplicate exclude"),
+            // 端末に表示するので、制御文字（改行を含む）は受け付けない
+            (
+                "[[interest]]\ntopic = \"a\\u001b[2J\"\nweight = 0.5\n",
+                "control",
+            ),
+            (
+                "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"x\\ny\"\n",
+                "control",
+            ),
+            ("exclude = [\"a\\tb\"]\n", "control"),
         ] {
             let err = parse(toml).unwrap_err();
             assert!(

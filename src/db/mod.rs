@@ -49,6 +49,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_search.sql"),
     include_str!("migrations/0007_topics.sql"),
     include_str!("migrations/0008_topic_proposals.sql"),
+    include_str!("migrations/0009_topic_aliases.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -857,6 +858,11 @@ impl Db {
                 [&t.name, t.facet.as_str()],
             )?;
         }
+        // 語として取り込んだ名前は、別名ではなくその語を指すようにする
+        tx.execute(
+            "DELETE FROM topic_aliases WHERE alias IN (SELECT value FROM json_each(?1))",
+            [&names],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -866,11 +872,44 @@ impl Db {
     /// `backend` と `model` は統合を決めた LLM（別名の記録に残す）。
     pub fn merge_topics(
         &self,
-        _merges: &[TopicMerge],
-        _backend: &str,
-        _model: &str,
-        _now: chrono::DateTime<chrono::Utc>,
+        merges: &[TopicMerge],
+        backend: &str,
+        model: &str,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        use rusqlite::OptionalExtension;
+        let tx = self.conn.unchecked_transaction()?;
+        let topic_id = |name: &str| -> Result<i64, DbError> {
+            tx.query_row("SELECT id FROM topics WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| DbError::UnknownTopic(name.to_string()))
+        };
+        for m in merges {
+            if m.from == m.into {
+                return Err(DbError::SelfMerge(m.from.clone()));
+            }
+            let from = topic_id(&m.from)?;
+            let into = topic_id(&m.into)?;
+            // 両方が付いている要約は、統合先の付与を残す
+            tx.execute(
+                "UPDATE OR IGNORE artifact_topics SET topic_id = ?2 WHERE topic_id = ?1",
+                [from, into],
+            )?;
+            tx.execute("DELETE FROM artifact_topics WHERE topic_id = ?1", [from])?;
+            tx.execute(
+                "UPDATE topic_aliases SET topic_id = ?2 WHERE topic_id = ?1",
+                [from, into],
+            )?;
+            tx.execute(
+                "INSERT INTO topic_aliases (alias, topic_id, merged_at, backend, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![m.from, into, timestamp(now), backend, model],
+            )?;
+            tx.execute("DELETE FROM topics WHERE id = ?1", [from])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1886,9 +1925,11 @@ fn link_digest_topics(
         Some(v) => serde_json::from_value(v.clone())?,
         None => Vec::new(),
     };
+    // 統合済みの語（別名）が提案されても語彙に戻さず、下で統合先に付ける
     for t in &new_topics {
         tx.execute(
-            "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+            "INSERT INTO topics (name, facet, added_at)
+             SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM topic_aliases WHERE alias = ?1)
              ON CONFLICT (name) DO NOTHING",
             [&t.name, t.facet.as_str(), &timestamp(now)],
         )?;
@@ -1899,9 +1940,14 @@ fn link_digest_topics(
     };
     for name in names {
         let topic_id: Option<i64> = tx
-            .query_row("SELECT id FROM topics WHERE name = ?1", [&name], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT id FROM topics WHERE name = ?1
+                 UNION ALL
+                 SELECT topic_id FROM topic_aliases WHERE alias = ?1
+                 LIMIT 1",
+                [&name],
+                |r| r.get(0),
+            )
             .optional()?;
         let topic_id = topic_id.ok_or(DbError::UnknownTopic(name))?;
         tx.execute(

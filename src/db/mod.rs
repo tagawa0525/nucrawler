@@ -2134,7 +2134,8 @@ impl Db {
             .collect()
     }
 
-    /// 条件に合い、このキーの要約がある記事と、その最新の版を作ったときの訳語集の時点を新しい順に返す。
+    /// 条件に合い、公開の本文があり、このキーの要約がある記事と、その最新の版を作ったときの訳語集の
+    /// 時点を新しい順に返す。
     /// 訳語集の変更による作り直しの候補。このモデルの要約の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn redo_digest_existing(
         &self,
@@ -2150,7 +2151,10 @@ impl Db {
                WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
                  AND r.model = :model AND r.prompt_version = :version
                ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
-             WHERE {REDO_NOT_BACKING_OFF}
+             WHERE EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
+               AND {REDO_NOT_BACKING_OFF}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -2185,8 +2189,8 @@ impl Db {
             .collect()
     }
 
-    /// 条件に合い、このキーの和訳がある英語の記事と、その最新の版を作ったときの訳語集の時点を
-    /// 新しい順に返す。訳語集の変更による作り直しの候補。
+    /// 条件に合い、公開の本文（body/fulltext）があり、このキーの和訳がある英語の記事と、その最新の版を
+    /// 作ったときの訳語集の時点を新しい順に返す。訳語集の変更による作り直しの候補。
     pub fn redo_translate_existing(
         &self,
         key: RedoKey,
@@ -2202,6 +2206,10 @@ impl Db {
                  AND r.model = :model AND r.prompt_version = :version
                ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
              WHERE a.lang = 'en'
+               AND EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                   AND c.access_membership_id IS NULL)
                AND {REDO_NOT_BACKING_OFF}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC

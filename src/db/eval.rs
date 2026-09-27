@@ -41,6 +41,20 @@ pub struct LabeledScore {
 /// 正解ラベルに使う明示的な反応の種類（SQL の IN 句）
 const EXPLICIT: &str = "('up', 'down', 'bookmark', 'dismiss')";
 
+/// 利用者（`:user`）の記事ごとの正解ラベル：残っている明示的な反応のうち最後のもの。
+fn labels() -> String {
+    format!(
+        "SELECT e.id, e.article_id, e.kind, e.created_at FROM events AS e
+         WHERE e.user_id = :user AND e.kind IN {EXPLICIT}
+           AND NOT EXISTS (
+             SELECT 1 FROM events AS f
+             WHERE f.user_id = e.user_id AND f.article_id = e.article_id
+               AND f.kind IN {EXPLICIT}
+               AND (f.created_at > e.created_at
+                    OR (f.created_at = e.created_at AND f.id > e.id)))"
+    )
+}
+
 /// プロファイルの見直しの根拠：ラベルの付いた記事の見出しとトピック。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
@@ -57,17 +71,10 @@ impl Db {
     /// 利用者の反応から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT e.article_id, e.kind, e.created_at FROM events AS e
-             WHERE e.user_id = ?1 AND e.kind IN {EXPLICIT}
-               AND NOT EXISTS (
-                 SELECT 1 FROM events AS f
-                 WHERE f.user_id = e.user_id AND f.article_id = e.article_id
-                   AND f.kind IN {EXPLICIT}
-                   AND (f.created_at > e.created_at
-                        OR (f.created_at = e.created_at AND f.id > e.id)))
-             ORDER BY e.article_id"
+            "SELECT article_id, kind, created_at FROM ({labels}) ORDER BY article_id",
+            labels = labels(),
         ))?;
-        let rows = stmt.query_map([user_id], |r| {
+        let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -88,7 +95,43 @@ impl Db {
     /// ラベルの付いた記事に、利用者が閲覧できる最新の digest の見出しとトピックを付けて、反応の
     /// 新しい順に返す。digest の無い記事は含めない。
     pub fn label_evidence(&self, user_id: i64) -> Result<Vec<Evidence>, DbError> {
-        todo!("{user_id}")
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH labels AS ({labels}),
+             digests AS (
+               SELECT l.id AS event_id, l.article_id, l.kind, l.created_at,
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = l.article_id AND r.kind = 'digest' AND {viewable}
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+               FROM labels AS l)
+             SELECT d.article_id, d.kind, d.created_at, r.title_ja, {topics}
+             FROM digests AS d
+             JOIN artifacts AS r ON r.id = d.digest_id
+             ORDER BY d.created_at DESC, d.event_id DESC",
+            labels = labels(),
+            viewable = super::read::viewable("r"),
+            topics = super::read::linked_topics("r"),
+        ))?;
+        let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (article_id, kind, at, title_ja, topics) = row?;
+            let kind = SignalKind::parse(&kind)?;
+            Ok(Evidence {
+                article_id,
+                positive: matches!(kind, SignalKind::Up | SignalKind::Bookmark),
+                title_ja,
+                topics: serde_json::from_str(&topics)?,
+                at,
+            })
+        })
+        .collect()
     }
 
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う

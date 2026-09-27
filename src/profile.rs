@@ -30,9 +30,15 @@ pub struct Interest {
     pub note: Option<String>,
 }
 
-/// TOML を読み、値を検証する（重みは 0〜1、topic は空でなく重複しない）。
+/// TOML を読み、値を検証する（`validate`）。
 pub fn parse(text: &str) -> Result<Profile, ProfileError> {
     let profile: Profile = toml::from_str(text)?;
+    validate(&profile)?;
+    Ok(profile)
+}
+
+/// 値を検証する（重みは 0〜1、topic は空でなく重複しない）。
+pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
     let mut seen = std::collections::HashSet::new();
     for i in &profile.interests {
         if i.topic.trim().is_empty() {
@@ -53,7 +59,7 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
             )));
         }
     }
-    Ok(profile)
+    Ok(())
 }
 
 pub fn to_toml(profile: &Profile) -> String {
@@ -86,13 +92,64 @@ pub enum Change {
 
 /// 現行（`from`）と案（`to`）の差分。分野は案の順、削除は現行の順、除外は追加・削除の順に並べる。
 pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
-    todo!("{from:?} {to:?}")
+    let find = |p: &'_ Profile, topic: &str| p.interests.iter().find(|i| i.topic == topic).cloned();
+    let mut changes = Vec::new();
+    for new in &to.interests {
+        let Some(old) = find(from, &new.topic) else {
+            changes.push(Change::Added {
+                topic: new.topic.clone(),
+                weight: new.weight,
+            });
+            continue;
+        };
+        if old.note != new.note {
+            changes.push(Change::Note {
+                topic: new.topic.clone(),
+                from: old.note,
+                to: new.note.clone(),
+            });
+        }
+        if old.weight != new.weight {
+            changes.push(Change::Weight {
+                topic: new.topic.clone(),
+                from: old.weight,
+                to: new.weight,
+            });
+        }
+    }
+    for old in &from.interests {
+        if find(to, &old.topic).is_none() {
+            changes.push(Change::Removed {
+                topic: old.topic.clone(),
+            });
+        }
+    }
+    for e in &to.exclude {
+        if !from.exclude.contains(e) {
+            changes.push(Change::ExcludeAdded(e.clone()));
+        }
+    }
+    for e in &from.exclude {
+        if !to.exclude.contains(e) {
+            changes.push(Change::ExcludeRemoved(e.clone()));
+        }
+    }
+    changes
 }
 
 impl std::fmt::Display for Change {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let _ = f;
-        todo!()
+        let note = |n: &Option<String>| n.clone().unwrap_or_else(|| "(none)".into());
+        match self {
+            Self::Added { topic, weight } => write!(f, "add {topic} (weight {weight:?})"),
+            Self::Removed { topic } => write!(f, "remove {topic}"),
+            Self::Weight { topic, from, to } => write!(f, "weight {topic}: {from:?} → {to:?}"),
+            Self::Note { topic, from, to } => {
+                write!(f, "note {topic}: {} → {}", note(from), note(to))
+            }
+            Self::ExcludeAdded(e) => write!(f, "exclude + {e}"),
+            Self::ExcludeRemoved(e) => write!(f, "exclude - {e}"),
+        }
     }
 }
 

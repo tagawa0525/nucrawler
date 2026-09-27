@@ -789,7 +789,7 @@ mod tests {
         let (status, _) = server.get("/search?sort=score").await;
         assert_eq!(status, 200);
         assert!(
-            html.contains("since must be YYYY-MM or YYYY-MM-DD"),
+            html.contains("since must be YYYY, YYYY-MM or YYYY-MM-DD"),
             "{html}"
         );
         assert!(

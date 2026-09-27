@@ -60,9 +60,9 @@ impl IntoContents for ToolError {
 pub struct SearchParams {
     /// 原題・本文・要約・和訳に含む語（大文字と小文字を区別しない）。空白で区切るとすべてを含む記事に絞る
     pub keyword: Option<String>,
-    /// この日（日本時間、YYYY-MM-DD）か月（YYYY-MM）以降に公開（無ければ取得）された記事。既定は Web UI の一覧と同じ期間（設定の web.list_days 日）
+    /// この日（日本時間、YYYY-MM-DD）・月（YYYY-MM）・年（YYYY）以降に公開（無ければ取得）された記事。既定は Web UI の一覧と同じ期間（設定の web.list_days 日）
     pub since: Option<String>,
-    /// この日（日本時間、YYYY-MM-DD）か月（YYYY-MM）までに公開（無ければ取得）された記事（その日・月を含む）
+    /// この日（日本時間、YYYY-MM-DD）・月（YYYY-MM）・年（YYYY）までに公開（無ければ取得）された記事（その日・月・年を含む）
     pub until: Option<String>,
     /// ソースの ID（sources.toml の id）
     pub source: Option<String>,

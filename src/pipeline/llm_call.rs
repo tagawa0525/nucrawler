@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::Halt;
+use super::{Cancel, Halt};
 use crate::db::{Db, DbError, LlmCall};
 use crate::errors;
 use crate::llm::{Llm, LlmError, LlmRequest, LlmResponse};
@@ -15,19 +15,42 @@ pub enum Outcome {
     /// `LlmFailed` は認証切れなど記事によらない原因かもしれないので、呼び出し側は
     /// そのバッチだけ失敗にしてステージを止める。
     Halted(Halt),
+    /// 止める指示で呼び出しをやめた。記事の失敗にも LLM の失敗にも数えず、次回続きから処理する
+    Cancelled,
+}
+
+/// 1 回の呼び出しの内容。
+pub struct Call<'a> {
+    /// `llm_calls` に記録するステージ名
+    pub stage: &'a str,
+    /// この呼び出しでまとめて処理する記事数
+    pub n_items: usize,
+    pub req: LlmRequest<'a>,
 }
 
 pub async fn call_recorded<L: Llm>(
     db: &Db,
     llm: &L,
     quota: &mut Quota,
-    stage: &str,
-    n_items: usize,
-    req: LlmRequest<'_>,
+    Call {
+        stage,
+        n_items,
+        req,
+    }: Call<'_>,
     now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<Outcome, DbError> {
     let started = std::time::Instant::now();
-    let result = llm.call(req).await;
+    // 応答を待たずに止める。呼び出しの future を捨てると子プロセスも止まる（kill_on_drop）
+    let result = tokio::select! {
+        result = llm.call(req) => result,
+        () = cancel.requested() => return Ok(Outcome::Cancelled),
+    };
+    // 止める指示と同時に子プロセスが終了させられたときも（systemd が unit の全プロセスに
+    // SIGTERM を送った場合など）、LLM の失敗ではない
+    if result.is_err() && cancel.is_requested() {
+        return Ok(Outcome::Cancelled);
+    }
     // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。
     let rate_limit = match &result {
         Ok(response) => response.rate_limit,

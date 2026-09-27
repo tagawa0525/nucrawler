@@ -13,16 +13,38 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 中断の要求。ステージは作業の切れ目ごとに確認し、要求があれば処理中の 1 件を終えて止まる。
+/// LLM の呼び出しのように長く待つ処理は、`requested` と競わせて待たずに止める。
 #[derive(Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel(Arc<CancelState>);
+
+#[derive(Default)]
+struct CancelState {
+    requested: AtomicBool,
+    notify: tokio::sync::Notify,
+}
 
 impl Cancel {
     pub fn request(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.requested.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
     }
 
     pub fn is_requested(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.requested.load(Ordering::SeqCst)
+    }
+
+    /// 中断が要求されるまで待つ。
+    pub async fn requested(&self) {
+        loop {
+            let notified = self.0.notify.notified();
+            tokio::pin!(notified);
+            // 確認より先に待ち受けを登録し、その間の要求を取りこぼさない
+            notified.as_mut().enable();
+            if self.is_requested() {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 

@@ -44,8 +44,11 @@ impl Llm for ClaudeCli {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // タイムアウトで future を捨てたときに子プロセスも止める。
+            // タイムアウトや中断で future を捨てたときに子プロセスも止める。
             .kill_on_drop(true)
+            // 端末の Ctrl-C（プロセスグループへの SIGINT）を直接受けないようにする。止めるときは
+            // nucrawler が future を捨てて止める
+            .process_group(0)
             .spawn()
             .map_err(|source| LlmError::Spawn {
                 command: self.command.display().to_string(),

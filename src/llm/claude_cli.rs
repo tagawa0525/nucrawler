@@ -82,6 +82,7 @@ impl Llm for ClaudeCli {
             Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
                 status: output.status.to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                interrupted: interrupted(output.status),
             }),
             parsed => {
                 let (output, rate_limit) = parsed?;
@@ -89,6 +90,18 @@ impl Llm for ClaudeCli {
             }
         }
     }
+}
+
+/// SIGINT・SIGTERM で終わったか。シグナルで殺された場合と、シグナルを受けて 128 + 番号で
+/// 終了した場合の両方を含む。
+fn interrupted(status: std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    let signal = status
+        .signal()
+        .or_else(|| status.code().and_then(|c| c.checked_sub(128)));
+    matches!(signal, Some(SIGINT | SIGTERM))
 }
 
 /// stream-json の出力から、構造化出力と最後の使用率を取り出す。
@@ -399,7 +412,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, LlmError::Exit { status, stderr }
+            matches!(&err, LlmError::Exit { status, stderr, .. }
                 if status.ends_with(": 1") && stderr.contains("Not logged in")),
             "{err}"
         );
@@ -418,6 +431,29 @@ mod tests {
         let err = cli.call(request(&schema)).await.unwrap_err();
         assert!(matches!(err, LlmError::Timeout { .. }), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// SIGINT・SIGTERM で終わったかどうか（止める指示によるものかの判断に使う）。
+    #[tokio::test]
+    async fn exit_tells_whether_claude_was_interrupted() {
+        for (name, body, expected) in [
+            ("cli-sigterm", "kill -TERM $$", true),
+            ("cli-exit130", "exit 130", true),
+            ("cli-exit3", "echo boom >&2\nexit 3", false),
+        ] {
+            let (script, dir) = fake_claude(name, body);
+            let cli = ClaudeCli {
+                command: script,
+                cwd: dir.join("cwd"),
+                timeout: Duration::from_secs(10),
+            };
+            let schema = serde_json::json!({});
+            let err = cli.call(request(&schema)).await.unwrap_err();
+            assert!(
+                matches!(&err, LlmError::Exit { interrupted, .. } if *interrupted == expected),
+                "{name}: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

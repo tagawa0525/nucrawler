@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Outcome, call_recorded};
+use super::llm_call::{Call, Outcome, call_recorded};
 use super::{Cancel, Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
@@ -100,20 +100,27 @@ pub async fn translate_articles<L: Llm>(
             db,
             llm,
             quota,
-            STAGE,
-            1,
-            LlmRequest {
-                system: translate::system_prompt(),
-                prompt: &prompt,
-                schema: &schema,
-                model,
+            Call {
+                stage: STAGE,
+                n_items: 1,
+                req: LlmRequest {
+                    system: translate::system_prompt(),
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
             },
             now,
+            cancel,
         )
         .await?;
         summary.calls += 1;
         let response = match outcome {
             Outcome::Response(response) => response,
+            Outcome::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
                     db.record_stage_failure(key, message, now, false)?;

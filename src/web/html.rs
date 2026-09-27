@@ -1,5 +1,6 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。
-//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）にだけ使い、無くても読める。
+//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
+//! だけ使い、無くても読める。
 
 use crate::db::{ArticleDetail, ListItem, TopicUsage, Warning};
 use crate::search::Params;
@@ -63,6 +64,8 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
 .wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
+.cal { position: relative; display: inline-block; margin: 0 0.3rem; cursor: pointer; }
+.cal input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
 .actions form { display: inline; }
 .actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
   border: 1px solid #bbb; background: #fff; }
@@ -252,6 +255,7 @@ pub fn search_page(
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
     }
     body.push_str(&search_form(params, vocabulary, page));
+    body.push_str(CALENDAR_SCRIPT);
     if let Some(items) = results {
         if items.is_empty() {
             body.push_str("<p class=\"meta\">該当する記事はありません</p>");
@@ -328,7 +332,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
     format!(
         "<form method=\"get\" action=\"/search\">\
          <p>{q}</p>\
-         <p>期間 {since} 〜 {until}</p>\
+         <p>期間 {since}{since_cal} 〜 {until}{until_cal}</p>\
          <details{topics_open}><summary>トピック</summary>{topics}</details>\
          <details{sources_open}><summary>ソース</summary>{sources}</details>\
          <p>言語 {lang} 並び {sort}</p>\
@@ -341,6 +345,8 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         ),
         since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
         until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
+        since_cal = calendar("since"),
+        until_cal = calendar("until"),
         topics_open = open(!p.topics.is_empty()),
         sources_open = open(!p.sources.is_empty()),
         lang = select(
@@ -364,6 +370,30 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         ),
     )
 }
+
+/// 期間の欄の横の 📅。日付の入力を透明にして絵文字に重ね、押すとカレンダーが開く
+/// （`CALENDAR_SCRIPT`）。名前を持たないので送られず、選んだ日付は `name` の欄へ入る。
+fn calendar(name: &str) -> String {
+    format!(
+        "<label class=\"cal\" title=\"カレンダー\">📅<input type=\"date\" data-for=\"{name}\" tabindex=\"-1\"></label>"
+    )
+}
+
+/// 📅 のカレンダーで選んだ日付を、隣の期間の欄に入れる。欄は月だけの指定もできるよう文字の
+/// 入力のまま残す。欄が日付ならその日から開く。
+const CALENDAR_SCRIPT: &str = r#"<script>
+document.querySelectorAll("input[data-for]").forEach((cal) => {
+  const text = cal.form.elements[cal.dataset.for];
+  cal.addEventListener("click", () => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text.value)) cal.value = text.value;
+    // タップで開くブラウザもあるが、PC の Chrome などは欄を押しただけでは開かない
+    if (cal.showPicker) cal.showPicker();
+  });
+  cal.addEventListener("change", () => {
+    if (cal.value) text.value = cal.value;
+  });
+});
+</script>"#;
 
 /// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ

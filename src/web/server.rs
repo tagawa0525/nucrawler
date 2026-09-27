@@ -175,13 +175,17 @@ async fn list(
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
-        let (new, earlier) = html::split_sections(items, boundary.as_deref());
+        let (new, earlier) = html::split_sections(items, boundary.as_deref(), false);
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::list_page(&new, &earlier, show_all, &page))
+        let view = html::ListView {
+            all: show_all,
+            read: false,
+        };
+        Ok(html::list_page(&new, &earlier, view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -844,6 +848,17 @@ mod tests {
         // 未採点の記事は既定の一覧には出ない
         let (_, html) = server.get("/").await;
         assert!(!html.contains("見出しA"), "{html}");
+    }
+
+    /// `read=1` を受け取り、切り替えのリンクに反映する。
+    #[tokio::test]
+    async fn list_reads_the_read_toggle() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let (status, html) = server.get("/?all=1&read=1").await;
+        assert_eq!(status, 200);
+        assert!(html.contains("過去の既読を隠す"), "{html}");
+        assert!(html.contains(r#"href="/?all=1""#), "{html}");
+        assert!(html.contains(r#"href="/?read=1""#), "{html}");
     }
 
     #[tokio::test]

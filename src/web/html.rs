@@ -24,6 +24,7 @@ pub fn escape(s: &str) -> String {
 pub fn split_sections(
     items: Vec<ListItem>,
     boundary: Option<&str>,
+    _include_read: bool,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
     let Some(boundary) = boundary else {
         return (items, Vec::new());
@@ -133,7 +134,17 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
     }
 }
 
-pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &Page) -> String {
+/// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
+#[derive(Clone, Copy, Default)]
+pub struct ListView {
+    /// 👎・低い点・未採点の記事も出す
+    pub all: bool,
+    /// 過去の欄に既読の記事も出す
+    pub read: bool,
+}
+
+pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
+    let show_all = view.all;
     let mut body = String::from("<h1>nucrawler</h1>");
     let toggle = if show_all {
         "<a href=\"/\">おすすめだけ表示</a>"
@@ -622,8 +633,48 @@ mod tests {
 
     #[test]
     fn list_page_links_to_search() {
-        let html = list_page(&[], &[], false, &Page::default());
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
+    }
+
+    /// 切り替えのリンクは、もう一方の切り替えの状態を引き継ぐ。
+    #[test]
+    fn list_page_toggles_keep_the_other_view() {
+        let links = |all, read| {
+            let html = list_page(&[], &[], ListView { all, read }, &Page::default());
+            let mut hrefs: Vec<_> = html
+                .match_indices(r#"href="/"#)
+                .map(|(at, _)| {
+                    let rest = &html[at + 6..];
+                    rest[..rest.find('"').unwrap()].to_string()
+                })
+                .filter(|h| h != "/search")
+                .collect();
+            hrefs.sort();
+            hrefs
+        };
+        assert_eq!(links(false, false), ["/?all=1", "/?read=1"]);
+        assert_eq!(links(true, false), ["/", "/?all=1&amp;read=1"]);
+        assert_eq!(links(false, true), ["/", "/?all=1&amp;read=1"]);
+        assert_eq!(links(true, true), ["/?all=1", "/?read=1"]);
+    }
+
+    #[test]
+    fn list_page_names_the_earlier_section_by_whether_read_is_shown() {
+        let mut read = item(2, "2026-09-26T00:00:00.000Z");
+        read.read = true;
+        let earlier = [read];
+        let html = list_page(&[], &earlier, ListView::default(), &Page::default());
+        assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
+        assert!(html.contains("過去の既読も表示"), "{html}");
+        let view = ListView {
+            all: false,
+            read: true,
+        };
+        let html = list_page(&[], &earlier, view, &Page::default());
+        assert!(html.contains("<h2>過去の記事</h2>"), "{html}");
+        assert!(html.contains("過去の既読を隠す"), "{html}");
+        assert!(html.contains(r#"class="card read""#), "{html}");
     }
 
     #[test]
@@ -643,14 +694,22 @@ mod tests {
             item(2, "2026-09-26T00:00:00.000Z"),
             read,
         ];
-        let (new, earlier) = split_sections(items.clone(), Some("2026-09-27T00:00:00.000Z"));
+        let boundary = Some("2026-09-27T00:00:00.000Z");
+        let (new, earlier) = split_sections(items.clone(), boundary, false);
         assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
         // 前回より前の記事は、未読のものだけを残す
         assert_eq!(
             earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
             [2]
         );
-        let (new, earlier) = split_sections(items, None);
+        // 既読も出すなら、前回より前の記事をすべて残す
+        let (new, earlier) = split_sections(items.clone(), boundary, true);
+        assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
+            [2, 3]
+        );
+        let (new, earlier) = split_sections(items, None, false);
         assert_eq!(new.len(), 3);
         assert!(earlier.is_empty());
     }
@@ -742,7 +801,7 @@ mod tests {
         let html = list_page(
             &[kyuden, item(2, "2026-09-27T05:00:00.000Z")],
             &[],
-            false,
+            ListView::default(),
             &page,
         );
         assert!(!html.contains("kyuden"), "{html}");
@@ -769,7 +828,7 @@ mod tests {
         let html = list_page(
             &[blank_ja, blank_both.clone()],
             &[],
-            false,
+            ListView::default(),
             &Page::default(),
         );
         assert!(html.contains(">Title 1</a>"), "{html}");
@@ -800,7 +859,7 @@ mod tests {
         let html = list_page(
             &[item(1, "2026-09-27T05:00:00.000Z")],
             &[locked, untitled],
-            false,
+            ListView::default(),
             &Page::default(),
         );
         assert!(html.contains("前回から"));

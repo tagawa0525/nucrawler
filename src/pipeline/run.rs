@@ -287,12 +287,18 @@ pub async fn suggest_profile<L: Llm>(
     let now = (env.clock)();
     let summary =
         suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
-    let _ = &summary.halted;
-    report_halt(summary.halted.clone(), &mut report.llm_failure);
+    // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
+    let reason = match &summary.halted {
+        Some(Halt::Quota(stop)) => stop.to_string(),
+        Some(Halt::UsageLimit { .. }) => "the subscription usage limit was reached".into(),
+        Some(Halt::LlmFailed(message)) => message.clone(),
+        None => "interrupted".into(),
+    };
+    report_halt(summary.halted, &mut report.llm_failure);
     report.cancelled = summary.cancelled || env.cancel.is_requested();
     let suggested = match summary.suggestion {
         Some(s) => Suggested::Profile(s),
-        None => todo!(),
+        None => Suggested::NotAsked(reason),
     };
     Ok((report, suggested))
 }

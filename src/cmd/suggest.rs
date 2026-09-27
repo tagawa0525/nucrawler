@@ -39,7 +39,12 @@ pub(crate) async fn suggest(
     let (current, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
     let evidence = db.label_evidence(owner)?;
     if evidence.is_empty() {
-        return Err(Error::NoLabels);
+        // 反応はあっても、どの記事にも閲覧できる要約が無ければ根拠にできない
+        return Err(if db.eval_labels(owner)?.is_empty() {
+            Error::NoLabels
+        } else {
+            Error::NoEvidence
+        });
     }
     let positive = evidence.iter().filter(|e| e.positive).count();
     if positive < FEW_LABELS || evidence.len() - positive < FEW_LABELS {

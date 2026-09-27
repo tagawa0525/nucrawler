@@ -21,12 +21,23 @@ pub fn render(current: &Profile, suggestion: &Suggestion, out: &str) -> Option<S
             let _ = writeln!(text, "  {}: {}", r.change, r.evidence);
         }
     }
+    let file = shell_quote(out);
     let _ = writeln!(
         text,
-        "\nwrote {out}. compare it with `nucrawler eval --profile {out}`, \
-         then `nucrawler profile import {out}` to adopt it"
+        "\nwrote {out}. compare it with `nucrawler eval --profile {file}`, \
+         then `nucrawler profile import {file}` to adopt it"
     );
     Some(text)
+}
+
+/// 貼り付けてそのまま実行できるよう、POSIX シェル向けに引用する。安全な文字だけならそのまま。
+fn shell_quote(path: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_-./".contains(c);
+    if !path.is_empty() && path.chars().all(safe) {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
 }
 
 #[cfg(test)]

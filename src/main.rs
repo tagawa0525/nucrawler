@@ -56,6 +56,10 @@ enum Error {
     NoProfile,
     #[error("no reactions yet; 👍, bookmark, 👎 or dismiss articles in the web UI first")]
     NoLabels,
+    #[error(
+        "no reacted article has a digest you can view, so there is nothing to base a suggestion on"
+    )]
+    NoEvidence,
     #[error("{0} already exists; choose a new file for the suggestion")]
     OutputExists(PathBuf),
     #[error("failed to write {path}")]

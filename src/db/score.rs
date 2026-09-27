@@ -13,11 +13,13 @@ pub struct ScoreKey<'a> {
 }
 
 /// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
-/// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
-/// プロンプトの版は含めない（digest の失敗と同じ扱い）ので、古い版で断念した記事は、
-/// 版を上げても再試行しない。
+/// モデルで、利用者・プロファイル・プロンプトの版を持たないので、ステージ名にそれらを含めて範囲を
+/// 区別する。古い版で断念した記事も、版を上げれば採点し直す（プロンプトが変われば成功しうる）。
 pub fn score_stage(key: ScoreKey) -> String {
-    format!("score:{}:{}", key.user_id, key.profile_hash)
+    format!(
+        "score:{}:{}:v{}",
+        key.user_id, key.profile_hash, key.prompt_version
+    )
 }
 
 /// 採点に渡す記事（その利用者が閲覧できる最新の digest）。

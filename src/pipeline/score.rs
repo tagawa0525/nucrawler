@@ -312,7 +312,7 @@ mod tests {
             profile_hash: &hash,
             backend: "fake",
             model: "sonnet",
-            prompt_version: 1,
+            prompt_version: crate::prompt::score::PROMPT_VERSION,
         });
         assert_eq!(
             db.query_strings("SELECT stage FROM stage_errors").unwrap(),

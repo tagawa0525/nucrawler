@@ -498,6 +498,75 @@ mod tests {
         );
     }
 
+    /// 取得に失敗中のソースは、取得失敗の警告だけを出す（途絶えはその結果なので重ねない）。
+    #[test]
+    fn failing_sources_are_not_also_reported_as_stale() {
+        let db = Db::open_in_memory().unwrap();
+        for day in 1..=10 {
+            db.insert_article(&NewArticle {
+                source_id: "down",
+                published_at: Some(&format!("2026-09-{day:02}T03:00:00.000Z")),
+                ..article(&format!("https://e.com/{day}"))
+            })
+            .unwrap();
+        }
+        let counts = FetchCounts {
+            total: 5,
+            matched: 5,
+            ..FetchCounts::default()
+        };
+        db.record_source_success("down", &counts, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_source_failure("down", "HTTP 503").unwrap();
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
+        assert!(
+            matches!(&warnings[..], [Warning::SourceFailing { .. }]),
+            "{warnings:?}"
+        );
+    }
+
+    /// 期間は日付で区切る。最新の日から 60 日前の日は、時刻によらず含める。
+    #[test]
+    fn stale_window_starts_at_a_calendar_day() {
+        let db = Db::open_in_memory().unwrap();
+        let publish = |at: &str| {
+            db.insert_article(&NewArticle {
+                source_id: "s",
+                published_at: Some(at),
+                ..article(&format!("https://e.com/{at}"))
+            })
+            .unwrap();
+        };
+        // 60 日前（07-12）の早い時刻の 1 件と、その後ほぼ 5 日おきの 4 件。最新は 09-10 の遅い時刻
+        publish("2026-07-12T01:00:00.000Z");
+        for day in ["2026-08-22", "2026-08-27", "2026-09-01", "2026-09-05"] {
+            publish(&format!("{day}T12:00:00.000Z"));
+        }
+        publish("2026-09-10T23:00:00.000Z");
+        let counts = FetchCounts {
+            total: 5,
+            matched: 5,
+            ..FetchCounts::default()
+        };
+        db.record_source_success("s", &counts, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 07-12 を含めて初めて間隔が 5 個（41, 5, 5, 4, 5 日。中央値 5 日、閾値 15 日）そろい、
+        // 17 日の途絶えを警告できる
+        let warnings = db
+            .warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            warnings,
+            [Warning::SourceStale {
+                source_id: "s".into(),
+                idle_days: 17,
+                typical_gap_days: 5,
+            }]
+        );
+    }
+
     /// 一覧が 0 件のソースは、その警告だけを出す（新着の途絶えは同じ原因の結果なので重ねない）。
     #[test]
     fn empty_sources_are_not_also_reported_as_stale() {

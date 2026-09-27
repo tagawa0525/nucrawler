@@ -283,6 +283,9 @@ mod tests {
             s["required"],
             serde_json::json!(["interests", "exclude", "reasons"])
         );
+        let reason = &s["properties"]["reasons"]["items"]["properties"];
+        assert_eq!(reason["change"]["minLength"], 1);
+        assert_eq!(reason["evidence"]["minLength"], 1);
     }
 
     #[test]
@@ -336,6 +339,17 @@ mod tests {
         assert!(matches!(parse(&duplicate), Err(SuggestError::Invalid(_))));
         let extra = serde_json::json!({"interests": [], "exclude": [], "reasons": [], "x": 1});
         assert!(matches!(parse(&extra), Err(SuggestError::Malformed(_))));
+        // 空の根拠は根拠にならない
+        for (change, evidence) in [("", "b"), ("a", " ")] {
+            let reason = serde_json::json!({
+                "interests": [], "exclude": [],
+                "reasons": [{"change": change, "evidence": evidence}],
+            });
+            assert!(
+                matches!(parse(&reason), Err(SuggestError::Malformed(_))),
+                "{change:?} {evidence:?}"
+            );
+        }
         // 根拠の文も端末に表示するので、制御文字（改行を含む）は受け付けない
         for (change, evidence) in [("a\u{1b}[2J", "b"), ("a", "b\nc")] {
             let reason = serde_json::json!({

@@ -121,6 +121,7 @@ mod tests {
             out.contains("nucrawler eval --profile 'my profile'\\''s.toml'"),
             "{out}"
         );
+        assert!(out.contains("wrote 'my profile'\\''s.toml'."), "{out}");
         let plain = render(&profile(0.9), &suggestion, "dir/new-1.toml")
             .unwrap()
             .unwrap();

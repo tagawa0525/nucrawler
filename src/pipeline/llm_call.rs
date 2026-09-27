@@ -93,6 +93,45 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::quota::QuotaConfig;
 
+    /// 端末の Ctrl-C は claude にも届くので、claude が落ちたことの方が、nucrawler が止める指示を
+    /// 受け取るより先に分かることがある。その場合も失敗として記録しない。
+    #[tokio::test]
+    async fn failure_just_before_the_stop_arrives_is_not_recorded() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([Err(crate::llm::LlmError::Exit {
+            status: "signal: 2 (SIGINT)".into(),
+            stderr: String::new(),
+        })]);
+        let cancel = Cancel::default();
+        let requester = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            requester.request();
+        });
+        let schema = serde_json::json!({});
+        let outcome = call_recorded(
+            &db,
+            &llm,
+            &mut Quota::new(QuotaConfig::default(), None, None),
+            Call {
+                stage: "digest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            },
+            Utc::now(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Cancelled));
+        assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
+    }
+
     /// 既に止める指示が出ていれば、LLM を呼ばない（claude を起動しない）。
     #[tokio::test]
     async fn does_not_call_after_cancel() {

@@ -21,7 +21,13 @@ let
   );
 
   crawlService = description: args: {
-    Unit.Description = description;
+    Unit = {
+      Description = description;
+      # 設定の反映（home-manager switch）で止めたり起動したりしない。oneshot なので起動すると
+      # 巡回が終わるまで反映が待たされ（LLM を使うと数十分）、実行中の巡回も中断される。
+      # 新しい定義は次に timer で起動したときから使われる
+      X-SwitchMethod = "keep-old";
+    };
     Service = {
       Type = "oneshot";
       ExecStart = lib.concatStringsSep " " (

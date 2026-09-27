@@ -10,6 +10,8 @@ pub struct SourceOverview {
     pub last_success_at: Option<String>,
     pub last_error: Option<String>,
     pub last_error_at: Option<String>,
+    /// 最後に成功した取得の件数
+    pub last_run: Option<FetchCounts>,
 }
 
 /// 抽出待ちの記事。
@@ -127,6 +129,7 @@ impl Db {
                 last_success_at: r.get(2)?,
                 last_error: r.get(3)?,
                 last_error_at: r.get(4)?,
+                last_run: None,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -214,7 +217,15 @@ mod tests {
             })
             .unwrap();
         }
-        db.record_source_success("a", &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+        let run = |total, new| FetchCounts {
+            total,
+            matched: total,
+            new,
+            duplicate: total - new,
+        };
+        db.record_source_success("a", &run(5, 2), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_source_success("a", &run(4, 0), t("2026-09-27T06:00:00Z"))
             .unwrap();
         db.record_source_failure("b", "HTTP 403").unwrap();
         let ov = db.source_overview().unwrap();
@@ -224,6 +235,8 @@ mod tests {
             .collect();
         assert_eq!(ids, [("a", 2), ("b", 0)]);
         assert!(ov[0].last_success_at.is_some());
+        assert_eq!(ov[0].last_run, Some(run(4, 0)), "the latest run");
         assert_eq!(ov[1].last_error.as_deref(), Some("HTTP 403"));
+        assert_eq!(ov[1].last_run, None);
     }
 }

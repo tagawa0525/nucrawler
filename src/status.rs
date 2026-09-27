@@ -50,6 +50,7 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
 mod tests {
     use super::*;
     use crate::config::{Category, Filter, Lang, SourceKind};
+    use crate::db::FetchCounts;
 
     fn src(id: &str, enabled: bool) -> Source {
         Source {
@@ -74,6 +75,7 @@ mod tests {
             last_success_at: ok.map(Into::into),
             last_error: err.map(|e| e.0.into()),
             last_error_at: err.map(|e| e.1.into()),
+            last_run: None,
         }
     }
 
@@ -82,7 +84,15 @@ mod tests {
         let sources = [src("wnn", true), src("nei", false), src("new", true)];
         let overview = [
             ov("nei", 0, None, Some(("HTTP 403", "2026-09-26T00:00:00Z"))),
-            ov("wnn", 48, Some("2026-09-26T01:00:00.000Z"), None),
+            SourceOverview {
+                last_run: Some(FetchCounts {
+                    total: 25,
+                    matched: 3,
+                    new: 1,
+                    duplicate: 2,
+                }),
+                ..ov("wnn", 48, Some("2026-09-26T01:00:00.000Z"), None)
+            },
             ov("gone", 7, Some("2026-09-01T00:00:00Z"), None),
         ];
         let out = render(&sources, &overview);
@@ -95,13 +105,17 @@ mod tests {
             wnn.contains("48") && wnn.contains("2026-09-26 10:00"),
             "{wnn}"
         );
+        assert!(wnn.contains("last fetch 25/3 (new 1, dup 2)"), "{wnn}");
         let nei = lines[pos("nei")];
         assert!(
             nei.contains("disabled") && nei.contains("HTTP 403"),
             "{nei}"
         );
         let new = lines[pos("new")];
-        assert!(new.contains("never"), "{new}");
+        assert!(
+            new.contains("never") && !new.contains("last fetch"),
+            "{new}"
+        );
         let gone = lines[pos("gone")];
         assert!(gone.contains("not in config"), "{gone}");
     }

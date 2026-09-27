@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, NewTermReport, SignalKind};
+use crate::db::{Db, DbError, ListQuery, NewTermReport, ReportStatus, SignalKind};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -64,6 +64,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/glossary", get(glossary).post(add_glossary_term))
         .route("/glossary/{id}", post(update_glossary_term))
         .route("/glossary/{id}/delete", post(delete_glossary_term))
+        .route("/reports", get(reports))
+        .route("/reports/{id}", post(resolve_report))
         .with_state(state)
 }
 
@@ -358,6 +360,7 @@ async fn detail(
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
+        let reports = db.term_reports(user, None, Some(id))?;
         // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
         // 採点に渡す直近の反応が偏る）
         let opened = if view.show_translation {
@@ -374,7 +377,7 @@ async fn detail(
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::detail_page(&detail, view, &page))
+        Ok(html::detail_page(&detail, &reports, view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -516,12 +519,17 @@ async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppErro
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let terms = db.glossary()?.len();
+        let pending = db
+            .term_report_counts()?
+            .into_iter()
+            .find_map(|(status, n)| (status == ReportStatus::Pending).then_some(n))
+            .unwrap_or(0);
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
             labels: &labels,
         };
-        Ok(html::settings_page(terms, &page))
+        Ok(html::settings_page(terms, pending, &page))
     })
     .await?;
     Ok(Html(page))
@@ -633,6 +641,95 @@ async fn delete_glossary_term(
         return Err(AppError::NotFound);
     }
     Ok(Redirect::to("/glossary"))
+}
+
+/// 受付箱の絞り込み。無ければ受付中、`all` ならすべて。
+fn report_filter(value: Option<&str>) -> Result<Option<ReportStatus>, AppError> {
+    match value {
+        None => Ok(Some(ReportStatus::Pending)),
+        Some("all") => Ok(None),
+        Some(s) => ReportStatus::parse(s).map(Some).ok_or(AppError::BadRequest(
+            "status must be pending, added, existing, rejected or all",
+        )),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ReportsParams {
+    status: Option<String>,
+}
+
+async fn reports(
+    State(state): State<AppState>,
+    Query(params): Query<ReportsParams>,
+) -> Result<Html<String>, AppError> {
+    let filter = report_filter(params.status.as_deref())?;
+    let labels = state.labels.clone();
+    let page = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        let reports = db.term_reports(user, filter, None)?;
+        let counts = db.term_report_counts()?;
+        let terms = db.glossary_entries()?;
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        Ok(html::reports_page(&reports, &counts, filter, &terms, &page))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+#[derive(serde::Deserialize)]
+struct ReportForm {
+    #[serde(default)]
+    status: String,
+    /// 結び付ける訳語の id（空なら無し）
+    #[serde(default)]
+    term_id: String,
+    #[serde(default)]
+    reply: String,
+    /// 戻る先の絞り込み
+    back: Option<String>,
+}
+
+/// 指摘の対応状況を変え、受付箱の同じ絞り込みへ戻る。
+async fn resolve_report(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<ReportForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let status = ReportStatus::parse(&form.status).ok_or(AppError::BadRequest(
+        "status must be pending, added, existing or rejected",
+    ))?;
+    let term_id = match form.term_id.trim() {
+        "" => None,
+        s => Some(
+            s.parse::<i64>()
+                .map_err(|_| AppError::BadRequest("term_id must be a number"))?,
+        ),
+    };
+    let reply = Some(form.reply.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // 戻る先が読めなければ既定（受付中）に戻す
+    let back = report_filter(form.back.as_deref()).unwrap_or(Some(ReportStatus::Pending));
+    let found = with_db(&state, move |db| {
+        if let Some(term_id) = term_id
+            && !db.glossary_entries()?.iter().any(|e| e.id == term_id)
+        {
+            return Err(AppError::BadRequest("unknown term_id"));
+        }
+        Ok(db.resolve_term_report(id, status, term_id, reply.as_deref(), Utc::now())?)
+    })
+    .await?;
+    if !found {
+        return Err(AppError::NotFound);
+    }
+    Ok(Redirect::to(&html::reports_href(back)))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {
@@ -1419,6 +1516,106 @@ mod tests {
         assert_eq!(
             server.count("SELECT count(*) FROM glossary_sources"),
             before
+        );
+    }
+
+    /// 受付箱は既定で受付中だけを出し、対応すると受付中から外れて記事の詳細に状況が出る。
+    #[tokio::test]
+    async fn reports_are_listed_and_resolved() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        server
+            .post(
+                &format!("/articles/{id}/term-report"),
+                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2",
+            )
+            .await;
+        let report = server.count("SELECT id FROM term_reports");
+        let (_, html) = server.get("/settings").await;
+        assert!(html.contains("受付中 1 件"), "{html}");
+        let (status, html) = server.get("/reports").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("給油停止") && html.contains("見出しA"),
+            "{html}"
+        );
+
+        let res = server
+            .post(
+                &format!("/reports/{report}"),
+                "status=added&term_id=1&reply=&back=pending",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"].to_str().unwrap(), "/reports");
+        assert_eq!(
+            server.count(
+                "SELECT count(*) FROM term_reports
+                 WHERE status = 'added' AND term_id = 1 AND reply IS NULL AND resolved_at IS NOT NULL"
+            ),
+            1
+        );
+        let (_, html) = server.get("/reports").await;
+        assert!(!html.contains("給油停止"), "{html}");
+        let (_, html) = server.get("/reports?status=all").await;
+        assert!(html.contains("給油停止"), "{html}");
+        let (_, html) = server.get(&format!("/articles/{id}")).await;
+        assert!(html.contains("給油停止（追加済）"), "{html}");
+
+        let res = server
+            .post(
+                &format!("/reports/{report}"),
+                "status=rejected&term_id=&back=all",
+            )
+            .await;
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            "/reports?status=all"
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_reject_invalid_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{id}/term-report"), "found=x")
+            .await;
+        let path = format!("/reports/{}", server.count("SELECT id FROM term_reports"));
+        assert_eq!(server.get("/reports?status=bogus").await.0, 400);
+        assert_eq!(
+            server.post(&path, "status=bogus").await.status().as_u16(),
+            400
+        );
+        assert_eq!(server.post(&path, "term_id=1").await.status().as_u16(), 400);
+        assert_eq!(
+            server
+                .post(&path, "status=added&term_id=x")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server
+                .post("/reports/999", "status=added")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+        let res = server
+            .form(&path, "status=added")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(
+            server.count("SELECT count(*) FROM term_reports WHERE status = 'pending'"),
+            1
         );
     }
 

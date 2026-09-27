@@ -50,6 +50,59 @@ pub struct NewTermReport<'a> {
     pub note: Option<&'a str>,
 }
 
+/// 訳語の指摘の対応状況。受付中から変えた時刻を対応日時にする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportStatus {
+    /// まだ対応していない
+    Pending,
+    /// 訳語集に反映した
+    Added,
+    /// 訳語集にあったのに、その訳が使われていなかった
+    Existing,
+    /// 今の訳のままでよい
+    Rejected,
+}
+
+impl ReportStatus {
+    pub const ALL: [ReportStatus; 4] = [
+        ReportStatus::Pending,
+        ReportStatus::Added,
+        ReportStatus::Existing,
+        ReportStatus::Rejected,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReportStatus::Pending => "pending",
+            ReportStatus::Added => "added",
+            ReportStatus::Existing => "existing",
+            ReportStatus::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|x| x.as_str() == s)
+    }
+}
+
+/// 受付箱の 1 件。`term` は結び付けた訳語（id と訳）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermReport {
+    pub id: i64,
+    pub article_id: i64,
+    /// 最新の要約の見出し（無ければ原題）
+    pub article_title: String,
+    pub found: String,
+    pub wanted: Option<String>,
+    pub source: Option<String>,
+    pub note: Option<String>,
+    pub status: ReportStatus,
+    pub term: Option<(i64, String)>,
+    pub reply: Option<String>,
+    pub reported_at: String,
+    pub resolved_at: Option<String>,
+}
+
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[
@@ -66,6 +119,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0011_glossary.sql"),
     include_str!("migrations/0012_term_reports.sql"),
     include_str!("migrations/0013_glossary_changes.sql"),
+    include_str!("migrations/0014_report_status.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1577,6 +1631,107 @@ impl Db {
             ],
         )?;
         Ok(())
+    }
+
+    /// 受付箱（新しい順）。`status` と `article_id` で絞る。記事の見出しは、利用者 `user_id` が
+    /// 閲覧できる最新の要約から取る（無ければ原題）。
+    pub fn term_reports(
+        &self,
+        user_id: i64,
+        status: Option<ReportStatus>,
+        article_id: Option<i64>,
+    ) -> Result<Vec<TermReport>, DbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT r.id, r.article_id,
+                    coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
+                                          WHERE d.article_id = a.id AND d.kind = 'digest'
+                                            AND {viewable}
+                                          ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
+                             a.title),
+                    r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
+                    r.reply, r.reported_at, r.resolved_at
+             FROM term_reports AS r
+             JOIN articles AS a ON a.id = r.article_id
+             LEFT JOIN glossary_terms AS t ON t.id = r.term_id
+             WHERE (:status IS NULL OR r.status = :status)
+               AND (:article IS NULL OR r.article_id = :article)
+             ORDER BY r.reported_at DESC, r.id DESC",
+            viewable = viewable("d")
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {
+                ":user": user_id,
+                ":status": status.map(ReportStatus::as_str),
+                ":article": article_id,
+            },
+            |r| {
+                let term = match (r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?) {
+                    (Some(id), Some(target)) => Some((id, target)),
+                    _ => None,
+                };
+                Ok((
+                    r.get::<_, String>(7)?,
+                    TermReport {
+                        id: r.get(0)?,
+                        article_id: r.get(1)?,
+                        article_title: r.get(2)?,
+                        found: r.get(3)?,
+                        wanted: r.get(4)?,
+                        source: r.get(5)?,
+                        note: r.get(6)?,
+                        status: ReportStatus::Pending,
+                        term,
+                        reply: r.get(10)?,
+                        reported_at: r.get(11)?,
+                        resolved_at: r.get(12)?,
+                    },
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (status, report) = row?;
+            let status = ReportStatus::parse(&status)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("report status {status:?}")))?;
+            Ok(TermReport { status, ..report })
+        })
+        .collect()
+    }
+
+    /// 対応状況ごとの件数（`ReportStatus::ALL` の順。0 件も含む）。
+    pub fn term_report_counts(&self) -> Result<Vec<(ReportStatus, i64)>, DbError> {
+        ReportStatus::ALL
+            .into_iter()
+            .map(|status| {
+                let n = self.conn.query_row(
+                    "SELECT count(*) FROM term_reports WHERE status = ?1",
+                    [status.as_str()],
+                    |r| r.get(0),
+                )?;
+                Ok((status, n))
+            })
+            .collect()
+    }
+
+    /// 指摘の対応状況を変える。無ければ false。対応日時は状況が変わったときだけ `now` にし、
+    /// 受付中に戻せば消す。
+    pub fn resolve_term_report(
+        &self,
+        id: i64,
+        status: ReportStatus,
+        term_id: Option<i64>,
+        reply: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        // 対応日時は状況を変えたときだけ進める（ひとことや訳語だけの修正では変えない）
+        Ok(self.conn.execute(
+            "UPDATE term_reports
+             SET resolved_at = CASE WHEN ?2 = 'pending' THEN NULL
+                                    WHEN status = ?2 THEN resolved_at
+                                    ELSE ?5 END,
+                 status = ?2, term_id = ?3, reply = ?4
+             WHERE id = ?1",
+            rusqlite::params![id, status.as_str(), term_id, reply, timestamp(now)],
+        )? > 0)
     }
 
     /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、
@@ -5027,6 +5182,185 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    fn report(db: &Db, article_id: i64, found: &str, at: &str) {
+        let owner = db.owner_id().unwrap();
+        let report = NewTermReport {
+            found,
+            wanted: Some("燃料取替停止"),
+            source: None,
+            note: None,
+        };
+        db.report_term(owner, article_id, &report, t(at)).unwrap();
+    }
+
+    /// 指摘は受付中で入り、新しい順に並ぶ。見出しは要約が無ければ原題。
+    #[test]
+    fn term_reports_start_pending_and_are_listed_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let b = db
+            .insert_article(&article("https://e.com/b"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        report(&db, b, "燃料補給停止", "2026-09-27T01:00:00Z");
+        let reports = db.term_reports(db.owner_id().unwrap(), None, None).unwrap();
+        let found: Vec<&str> = reports.iter().map(|r| r.found.as_str()).collect();
+        assert_eq!(found, ["燃料補給停止", "給油停止"]);
+        let r = &reports[1];
+        assert_eq!(r.article_id, a);
+        assert_eq!(r.article_title, "t");
+        assert_eq!(r.wanted.as_deref(), Some("燃料取替停止"));
+        assert_eq!(r.status, ReportStatus::Pending);
+        assert_eq!(r.reported_at, "2026-09-27T00:00:00.000Z");
+        assert_eq!(
+            (r.resolved_at.as_deref(), &r.term, &r.reply),
+            (None, &None, &None)
+        );
+        assert_eq!(
+            db.term_reports(db.owner_id().unwrap(), None, Some(a))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.term_report_counts().unwrap(),
+            [
+                (ReportStatus::Pending, 2),
+                (ReportStatus::Added, 0),
+                (ReportStatus::Existing, 0),
+                (ReportStatus::Rejected, 0),
+            ]
+        );
+    }
+
+    /// 対応すると状況・訳語・ひとことと対応日時を残し、受付中に戻すと対応日時を消す。
+    /// 結び付けた訳語を消しても指摘は残る。
+    #[test]
+    fn term_reports_are_resolved_and_can_be_reopened() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let id = db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].id;
+        let term = db
+            .add_glossary_term(
+                &glossary_term(&["refuelling outage"], "燃料取替停止（英綴り）", None),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        assert!(
+            db.resolve_term_report(
+                id,
+                ReportStatus::Added,
+                Some(term),
+                Some("英綴りを追加"),
+                t("2026-09-27T02:00:00Z")
+            )
+            .unwrap()
+        );
+        let r = &db
+            .term_reports(db.owner_id().unwrap(), Some(ReportStatus::Added), None)
+            .unwrap()[0];
+        assert_eq!(r.term, Some((term, "燃料取替停止（英綴り）".to_string())));
+        assert_eq!(r.reply.as_deref(), Some("英綴りを追加"));
+        assert_eq!(r.resolved_at.as_deref(), Some("2026-09-27T02:00:00.000Z"));
+        assert!(
+            db.term_reports(db.owner_id().unwrap(), Some(ReportStatus::Pending), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.delete_glossary_term(term).unwrap();
+        assert_eq!(
+            db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].term,
+            None
+        );
+
+        assert!(
+            db.resolve_term_report(
+                id,
+                ReportStatus::Pending,
+                None,
+                None,
+                t("2026-09-27T03:00:00Z")
+            )
+            .unwrap()
+        );
+        let r = &db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0];
+        assert_eq!(
+            (r.status, r.resolved_at.as_deref()),
+            (ReportStatus::Pending, None)
+        );
+        assert!(
+            !db.resolve_term_report(
+                9999,
+                ReportStatus::Rejected,
+                None,
+                None,
+                t("2026-09-27T03:00:00Z")
+            )
+            .unwrap()
+        );
+    }
+
+    /// 受付箱の見出しには、利用者が閲覧できない（会員限定の本文から作った）要約を使わない。
+    #[test]
+    fn term_reports_do_not_show_titles_of_digests_the_viewer_cannot_see() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let gated = insert_content(&db, a, Some(m));
+        let digest = insert_artifact(&db, a, "m");
+        link_input(&db, digest, gated).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE artifacts SET payload = '{\"title_ja\": \"会員限定の見出し\"}' WHERE id = ?1",
+                [digest],
+            )
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.term_reports(owner, None, None).unwrap()[0].article_title,
+            "t"
+        );
+    }
+
+    /// 対応日時は状況を変えたときだけ進み、ひとことや訳語だけを直しても変わらない。
+    #[test]
+    fn term_report_resolution_time_moves_only_with_the_status() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        let id = db.term_reports(owner, None, None).unwrap()[0].id;
+        let resolve = |status, reply, at| {
+            db.resolve_term_report(id, status, None, Some(reply), t(at))
+                .unwrap();
+            db.term_reports(owner, None, None).unwrap()[0]
+                .resolved_at
+                .clone()
+        };
+        let first = resolve(ReportStatus::Added, "a", "2026-09-27T01:00:00Z");
+        assert_eq!(first.as_deref(), Some("2026-09-27T01:00:00.000Z"));
+        let same = resolve(ReportStatus::Added, "b", "2026-09-27T02:00:00Z");
+        assert_eq!(same, first);
+        let changed = resolve(ReportStatus::Rejected, "c", "2026-09-27T03:00:00Z");
+        assert_eq!(changed.as_deref(), Some("2026-09-27T03:00:00.000Z"));
     }
 
     /// 同じ原語（大文字小文字の違いを含む）を別の訳語に結び付けられない。

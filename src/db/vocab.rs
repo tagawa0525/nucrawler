@@ -303,6 +303,19 @@ impl Db {
         })
         .transpose()
     }
+
+    /// ユーザーの今のプロファイルのハッシュ。プロファイルが無ければ `None`。
+    pub fn profile_hash(&self, user_id: i64) -> Result<Option<String>, DbError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hash FROM profiles WHERE user_id = ?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
 }
 
 /// 訳語・略語・原語が、`id` 以外の訳語のものと重なっていないか確かめる。
@@ -403,6 +416,18 @@ mod tests {
         assert_eq!(loaded.exclude.last().map(String::as_str), Some("医療"));
         assert_ne!(new_hash, hash);
         assert_eq!(db.query_i64("SELECT count(*) FROM profiles").unwrap(), 1);
+    }
+
+    #[test]
+    fn reads_only_the_profile_hash() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        assert_eq!(db.profile_hash(owner).unwrap(), None);
+        let p = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(owner, &p, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let (_, hash) = db.load_profile(owner).unwrap().unwrap();
+        assert_eq!(db.profile_hash(owner).unwrap(), Some(hash));
     }
 
     fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Entry> {

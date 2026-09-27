@@ -45,7 +45,7 @@ pub(crate) async fn redo(
     let target = Target::Redo(pipeline::RedoSpec {
         filter: args.filter,
         user_id: owner,
-        profile_hash: db.load_profile(owner)?.map(|(_, hash)| hash),
+        profile_hash: db.profile_hash(owner)?,
         glossary: args.glossary,
     });
     let mut llm_failure = None;

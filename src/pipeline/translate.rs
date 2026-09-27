@@ -46,7 +46,7 @@ pub async fn translate_articles<L: Llm>(
 ) -> Result<TranslateSummary, TranslateStageError> {
     let backend = llm.backend();
     let model = llm_cfg.translate_model.as_str();
-    let profile_hash = db.load_profile(user_id)?.map(|(_, hash)| hash);
+    let profile_hash = db.profile_hash(user_id)?;
     let query = TranslateQuery {
         user_id,
         profile_hash: profile_hash.as_deref(),

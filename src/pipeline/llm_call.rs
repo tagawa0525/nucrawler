@@ -1,10 +1,10 @@
 //! LLM ステージ共通の 1 回の呼び出し：呼んで、`llm_calls` に記録し、使用率をクォータに反映し、
-//! 失敗を「止める理由」に振り分ける。
+//! 失敗を「止める理由」に振り分ける。記事ごとの失敗の記録もここにまとめる。
 
 use chrono::{DateTime, Utc};
 
 use super::{Cancel, Halt};
-use crate::db::{Db, DbError, LlmCall};
+use crate::db::{Db, DbError, LlmCall, StageKey};
 use crate::errors;
 use crate::llm::{Llm, LlmError, LlmRequest, LlmResponse};
 use crate::quota::Quota;
@@ -25,6 +25,24 @@ pub struct LlmStage<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
+}
+
+/// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。
+pub const MISSING: &str = "missing or invalid in the llm output";
+
+/// 各記事の失敗を記録し、記録した件数を返す（記事は再試行に回る）。
+pub fn record_failures<'k>(
+    db: &Db,
+    keys: impl IntoIterator<Item = StageKey<'k>>,
+    message: &str,
+    now: DateTime<Utc>,
+) -> Result<usize, DbError> {
+    let mut n = 0;
+    for key in keys {
+        db.record_stage_failure(key, message, now, false)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// 呼び出しが失敗したとき、それが止める指示によるものかを見極めるために待つ時間。

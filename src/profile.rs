@@ -258,6 +258,20 @@ mod tests {
         assert!(diff(&from, &from).is_empty());
     }
 
+    /// 空の note と note 無しは同じ（suggest の案は空の note を無しにする）。
+    #[test]
+    fn diff_treats_an_empty_note_as_none() {
+        let from = Profile {
+            interests: vec![interest("燃料", 0.9, Some(" "))],
+            exclude: vec![],
+        };
+        let to = Profile {
+            interests: vec![interest("燃料", 0.9, None)],
+            exclude: vec![],
+        };
+        assert!(diff(&from, &to).is_empty());
+    }
+
     fn example() -> Profile {
         parse(include_str!("../examples/profile.toml")).unwrap()
     }

@@ -20,16 +20,16 @@ pub fn render(
     if changes.is_empty() {
         return Ok(None);
     }
-    let _ = NoReasons;
+    if suggestion.reasons.is_empty() {
+        return Err(NoReasons);
+    }
     let mut text = String::from("changes:\n");
     for change in &changes {
         let _ = writeln!(text, "  {change}");
     }
-    if !suggestion.reasons.is_empty() {
-        text.push_str("reasons:\n");
-        for r in &suggestion.reasons {
-            let _ = writeln!(text, "  {}: {}", r.change, r.evidence);
-        }
+    text.push_str("reasons:\n");
+    for r in &suggestion.reasons {
+        let _ = writeln!(text, "  {}: {}", r.change, r.evidence);
     }
     let file = shell_quote(out);
     let _ = writeln!(

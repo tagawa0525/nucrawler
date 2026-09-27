@@ -1,5 +1,6 @@
 //! `sources check`：各ソースを実際に取得して解析し、件数と先頭の数件を表示する。DB には書かない。
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use url::Url;
@@ -95,7 +96,8 @@ pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, Source
     Ok(Stats { total, matched })
 }
 
-/// 一覧ページは記事ページと同じく robots.txt に従って取得する。
+/// 一覧ページは記事ページと同じく robots.txt に従って取得する。`also` のページは一覧に続けて
+/// 同じ読み方で読み、同じ URL の記事は最初の 1 件だけにする。
 async fn fetch_html_list(
     fetcher: &Fetcher,
     url: &Url,
@@ -108,7 +110,19 @@ async fn fetch_html_list(
         page = fetcher.get_page(&next).await?;
     }
     let html = text::decode_html(&page.body, page.content_type.as_deref());
-    Ok(html_list::parse(list, &html, &page.url)?)
+    let mut items = html_list::parse(list, &html, &page.url)?;
+    for also in &list.also {
+        let url = Url::parse(also).map_err(|source| SourceFailure::InvalidUrl {
+            url: also.clone(),
+            source,
+        })?;
+        let page = fetcher.get_page(&url).await?;
+        let html = text::decode_html(&page.body, page.content_type.as_deref());
+        items.extend(html_list::parse(list, &html, &page.url)?);
+    }
+    let mut seen = HashSet::new();
+    items.retain(|c| seen.insert(c.url.clone()));
+    Ok(items)
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。

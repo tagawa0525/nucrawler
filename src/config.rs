@@ -273,6 +273,11 @@ pub struct HtmlList {
     /// 読めなければ `date_in_url`、それも無ければ取得日時で扱う
     #[serde(default)]
     pub date: Option<String>,
+    /// 一覧に続けて同じ読み方で読むほかのページの URL（`follow` はたどらない）。一覧にも載る記事は
+    /// 一覧の側の 1 件だけにする。月ごとに切り替わる一覧の取りこぼしを、月をまたいで最新の数件を
+    /// 載せるページ（トップの新着など）で補うときに使う
+    #[serde(default)]
+    pub also: Vec<String>,
 }
 
 /// URL のファイル名に含まれる日付の形式（最初に現れる、その桁数の数字の並び）。
@@ -362,6 +367,13 @@ fn validate_list(s: &Source) -> Result<(), String> {
             }
             if let Some(date) = &list.date {
                 check("date", date)?;
+            }
+            for url in &list.also {
+                match url::Url::parse(url) {
+                    Ok(u) if matches!(u.scheme(), "http" | "https") => {}
+                    Ok(_) => return Err(format!("invalid list.also {url:?}: not http(s)")),
+                    Err(e) => return Err(format!("invalid list.also {url:?}: {e}")),
+                }
             }
             Ok(())
         }

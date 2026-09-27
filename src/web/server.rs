@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
-use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::db::{Db, DbError, ListQuery, NewTermReport, SignalKind};
 use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
@@ -59,6 +59,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/articles/{id}/translation-request",
             post(translation_request),
         )
+        .route("/articles/{id}/term-report", post(term_report))
         .with_state(state)
 }
 
@@ -330,6 +331,7 @@ struct DetailParams {
     view: Option<String>,
     digest: Option<i64>,
     translation: Option<i64>,
+    reported: Option<String>,
 }
 
 async fn detail(
@@ -341,6 +343,7 @@ async fn detail(
         digest: params.digest,
         show_translation: params.view.as_deref() == Some("translation"),
         translation: params.translation,
+        reported: params.reported.is_some(),
     };
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -448,6 +451,58 @@ async fn translation_request(
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+#[derive(serde::Deserialize)]
+struct TermReportForm {
+    // 欄が無いときも空と同じく検証で 400 にする（無いと取り出しの段階で 422 になる）
+    #[serde(default)]
+    found: String,
+    #[serde(default)]
+    wanted: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    note: String,
+    /// 和訳を読んでいたなら `translation`（戻る先）
+    view: Option<String>,
+}
+
+/// 訳語の指摘を受付箱に入れ、読んでいた画面の指摘の欄へ戻る。
+async fn term_report(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<TermReportForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let filled = |s: &str| Some(s.trim()).filter(|s| !s.is_empty()).map(str::to_string);
+    let found = filled(&form.found).ok_or(AppError::BadRequest("found must not be empty"))?;
+    let (wanted, source, note) = (
+        filled(&form.wanted),
+        filled(&form.source),
+        filled(&form.note),
+    );
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        let report = NewTermReport {
+            found: &found,
+            wanted: wanted.as_deref(),
+            source: source.as_deref(),
+            note: note.as_deref(),
+        };
+        Ok(db.report_term(user, id, &report, Utc::now())?)
+    })
+    .await?;
+    let view = if form.view.as_deref() == Some("translation") {
+        "view=translation&"
+    } else {
+        ""
+    };
+    Ok(Redirect::to(&format!(
+        "/articles/{id}?{view}reported=1#term-report"
+    )))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {
@@ -1069,6 +1124,62 @@ mod tests {
         );
         let (_, html) = server.get(&format!("/articles/{id}")).await;
         assert!(html.contains("和訳待ち"), "{html}");
+    }
+
+    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面に戻る。
+    #[tokio::test]
+    async fn term_report_is_recorded_and_returns_to_detail() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let path = format!("/articles/{id}/term-report");
+        let res = server
+            .post(
+                &path,
+                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation&reported=1#term-report")
+        );
+        assert_eq!(
+            server.count(&format!(
+                "SELECT count(*) FROM term_reports
+                 WHERE article_id = {id} AND found = '給油停止' AND wanted IS NULL
+                   AND source = 'refueling outage' AND note IS NULL AND resolved_at IS NULL"
+            )),
+            1
+        );
+        let res = server.post(&path, "found=x").await;
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?reported=1#term-report")
+        );
+        let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
+        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+
+        // 気になった訳は必須（欄が無くても空でも同じ）
+        assert_eq!(server.post(&path, "wanted=a").await.status().as_u16(), 400);
+        assert_eq!(
+            server
+                .post(&path, "found=+&wanted=a")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        let res = server
+            .form(&path, "found=x")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let res = server.post("/articles/999/term-report", "found=x").await;
+        assert_eq!(res.status().as_u16(), 404);
+        assert_eq!(server.count("SELECT count(*) FROM term_reports"), 2);
     }
 
     /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。

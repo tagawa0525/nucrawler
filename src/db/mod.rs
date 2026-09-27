@@ -38,6 +38,15 @@ pub enum DbError {
     SelfMerge(String),
 }
 
+/// 訳語の指摘。`found` は気になった訳で、ほかは分からなければ `None`。
+#[derive(Debug, Clone, Copy)]
+pub struct NewTermReport<'a> {
+    pub found: &'a str,
+    pub wanted: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub note: Option<&'a str>,
+}
+
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
 /// 既存の要素は書き換えず、変更は新しい要素の追加で行う。
 const MIGRATIONS: &[&str] = &[
@@ -52,6 +61,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0009_topic_aliases.sql"),
     include_str!("migrations/0010_bookmarks.sql"),
     include_str!("migrations/0011_glossary.sql"),
+    include_str!("migrations/0012_term_reports.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1464,6 +1474,31 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(id)
+    }
+
+    /// 訳語の指摘を受付箱に入れる。
+    pub fn report_term(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        report: &NewTermReport<'_>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO term_reports
+               (user_id, article_id, found, wanted, source, note, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                user_id,
+                article_id,
+                report.found,
+                report.wanted,
+                report.source,
+                report.note,
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
     }
 
     /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、

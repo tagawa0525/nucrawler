@@ -80,6 +80,9 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
 .toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
+.report { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
+.report label { display: block; margin: 0.4rem 0; }
+.report button { margin-top: 0.3rem; font-size: 1rem; padding: 0.3rem 0.9rem; }
 ";
 
 /// ソースの ID から画面に出す名前へ（`Source::display_name`）。
@@ -597,6 +600,8 @@ pub struct DetailView {
     /// 全文和訳を表示する（`translation` があればその版、無ければ最新）
     pub show_translation: bool,
     pub translation: Option<i64>,
+    /// 訳語の指摘を受け付けた直後
+    pub reported: bool,
 }
 
 pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
@@ -670,7 +675,36 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
         body.push_str("</p>");
     }
     body.push_str(&translation_section(d, view));
+    if !d.digests.is_empty() || !d.translations.is_empty() {
+        body.push_str(&term_report_form(id, view));
+    }
     layout(&title, page, &body)
+}
+
+/// 訳語の指摘。畳んでおき、開いたときだけフォームを出す（読む画面の密度を上げない）。
+fn term_report_form(id: i64, view: DetailView) -> String {
+    let field = |name: &str, label: &str, extra: &str| {
+        format!("<label>{label}<input class=\"wide\" name=\"{name}\"{extra}></label>")
+    };
+    format!(
+        "{}<details class=\"report\" id=\"term-report\"><summary>訳語の指摘</summary>\
+         <form method=\"post\" action=\"/articles/{id}/term-report\">{}{}{}{}\
+         <label>メモ（任意）<textarea class=\"wide\" name=\"note\" rows=\"2\"></textarea></label>\
+         <button>送る</button></form></details>",
+        if view.reported {
+            "<p class=\"meta\">訳語の指摘を受け付けました</p>"
+        } else {
+            ""
+        },
+        if view.show_translation {
+            "<input type=\"hidden\" name=\"view\" value=\"translation\">"
+        } else {
+            ""
+        },
+        field("found", "気になった訳", " required"),
+        field("wanted", "希望する訳（任意）", ""),
+        field("source", "原語（任意）", ""),
+    )
 }
 
 /// 👍/👎 とブックマーク。ブックマーク済みなら、同じボタンで外す。
@@ -1368,5 +1402,51 @@ mod tests {
         let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
+    }
+
+    /// 訳語の指摘は畳んでおき、開いたときだけフォームを出す。和訳を読んでいれば和訳に戻る。
+    #[test]
+    fn detail_page_offers_a_folded_term_report() {
+        let html = detail_page(&detail(), DetailView::default(), &Page::default());
+        assert!(
+            html.contains(
+                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/7/term-report">"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="found" required"#), "{html}");
+        for name in ["wanted", "source", "note"] {
+            assert!(
+                html.contains(&format!(r#"name="{name}""#)),
+                "{name}: {html}"
+            );
+        }
+        assert!(!html.contains(r#"name="view""#), "{html}");
+        assert!(!html.contains("受け付けました"), "{html}");
+
+        let view = DetailView {
+            show_translation: true,
+            reported: true,
+            ..DetailView::default()
+        };
+        let html = detail_page(&detail(), view, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="view" value="translation">"#),
+            "{html}"
+        );
+        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+    }
+
+    /// 要約も和訳も無ければ、指摘する訳が無い。
+    #[test]
+    fn detail_page_without_japanese_has_no_term_report() {
+        let mut d = detail();
+        d.digests.clear();
+        let html = detail_page(&d, DetailView::default(), &Page::default());
+        assert!(!html.contains("term-report"), "{html}");
     }
 }

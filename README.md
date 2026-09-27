@@ -126,8 +126,8 @@ stdio で起動できるのはこのマシンの利用者だけなので、オ�
 ツールは読み取り専用で、LLM を呼んだり DB に書いたり（和訳の依頼、👍/👎、既読の記録）はしない。
 
 - `search_articles`：記事の検索。引数はどれも省略できる
-  - `keyword`：原題・和訳のタイトル・要約に含む語
-  - `since` / `until`：日本時間の日付（`YYYY-MM-DD`、`until` はその日を含む）。既定は Web UI と同じ直近 `web.list_days` 日
+  - `keyword`：原題・本文・要約・和訳に含む語（全文検索）。空白で区切ると、すべてを含む記事に絞る
+  - `since` / `until`：日本時間の日付か月（`YYYY-MM-DD` / `YYYY-MM`、`until` はその日・月を含む）。既定は Web UI と同じ直近 `web.list_days` 日
   - `source`：ソースの ID
   - `min_score`：最低点（既定は `web.min_score`）
   - `include_hidden`：Web UI の「すべて表示」と同じく、👎・閾値未満・未採点・軽水炉と無関係の記事も含める

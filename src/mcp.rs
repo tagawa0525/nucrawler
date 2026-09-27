@@ -17,7 +17,7 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::WebConfig;
-use crate::db::{ArtifactVersion, Db, DbError, Feedback, ListItem, ListQuery};
+use crate::db::{ArtifactVersion, Db, DbError, Feedback, ListItem, SearchOrder, SearchQuery};
 use crate::web::html::SourceLabels;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,11 +58,11 @@ impl IntoContents for ToolError {
 /// `search_articles` の引数。
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct SearchParams {
-    /// 原題・和訳のタイトル・要約のどれかに含む語（大文字と小文字を区別しない）
+    /// 原題・本文・要約・和訳に含む語（大文字と小文字を区別しない）。空白で区切るとすべてを含む記事に絞る
     pub keyword: Option<String>,
-    /// この日（日本時間、YYYY-MM-DD）以降に公開（無ければ取得）された記事。既定は Web UI の一覧と同じ期間（設定の web.list_days 日）
+    /// この日（日本時間、YYYY-MM-DD）か月（YYYY-MM）以降に公開（無ければ取得）された記事。既定は Web UI の一覧と同じ期間（設定の web.list_days 日）
     pub since: Option<String>,
-    /// この日（日本時間、YYYY-MM-DD）までに公開（無ければ取得）された記事（その日を含む）
+    /// この日（日本時間、YYYY-MM-DD）か月（YYYY-MM）までに公開（無ければ取得）された記事（その日・月を含む）
     pub until: Option<String>,
     /// ソースの ID（sources.toml の id）
     pub source: Option<String>,
@@ -241,65 +241,38 @@ fn search(
     params: SearchParams,
     now: DateTime<Utc>,
 ) -> Result<SearchResult, ToolError> {
+    let invalid = |e: crate::search::SearchError| ToolError::InvalidParams(e.to_string());
     let since = match params.since.as_deref() {
-        Some(date) => day_start("since", date)?,
+        Some(date) => crate::search::since(date).map_err(invalid)?,
         None => now - Duration::days(web.list_days.into()),
     };
     let until = params
         .until
         .as_deref()
-        .map(|date| day_start("until", date).map(|t| crate::db::timestamp(t + Duration::days(1))))
-        .transpose()?;
-    let keyword = params
-        .keyword
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .map(str::to_lowercase);
+        .map(crate::search::until)
+        .transpose()
+        .map_err(invalid)?;
     let (user, hash) = viewer(db)?;
-    // キーワードなどの条件は DB の件数制限の後では絞れないので、期間内をすべて読んでから絞る
-    let items = db.list_articles(ListQuery {
+    let items = db.search_articles(&SearchQuery {
         user_id: user,
         profile_hash: hash.as_deref(),
-        min_score: params.min_score.unwrap_or(web.min_score),
-        since,
-        show_all: params.include_hidden,
-        limit: usize::MAX,
+        terms: params
+            .keyword
+            .as_deref()
+            .map(crate::search::parse_terms)
+            .unwrap_or_default(),
+        since: Some(since),
+        until,
+        sources: params.source.into_iter().collect(),
+        min_score: params.min_score,
+        // 既定は Web UI の一覧と同じく隠す
+        hide_below: (!params.include_hidden).then(|| params.min_score.unwrap_or(web.min_score)),
+        order: SearchOrder::Score,
+        limit: params.limit.unwrap_or(web.list_limit),
+        ..SearchQuery::default()
     })?;
-    let articles = items
-        .into_iter()
-        .filter(|i| until.as_ref().is_none_or(|u| i.at < *u))
-        .filter(|i| params.source.as_ref().is_none_or(|s| i.source_id == *s))
-        .filter(|i| {
-            params
-                .min_score
-                .is_none_or(|min| i.score.is_some_and(|s| s >= min))
-        })
-        .filter(|i| keyword.as_deref().is_none_or(|k| matches_keyword(i, k)))
-        .take(params.limit.unwrap_or(web.list_limit))
-        .map(|i| summary(i, labels))
-        .collect();
+    let articles = items.into_iter().map(|i| summary(i, labels)).collect();
     Ok(SearchResult { articles })
-}
-
-/// `keyword` は小文字にしたもの。
-fn matches_keyword(item: &ListItem, keyword: &str) -> bool {
-    [
-        Some(&item.title),
-        item.title_ja.as_ref(),
-        item.summary_ja.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|text| text.to_lowercase().contains(keyword))
-}
-
-/// 日付（日本時間）のその日の 0 時。
-fn day_start(name: &str, date: &str) -> Result<DateTime<Utc>, ToolError> {
-    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .ok()
-        .and_then(crate::jst::midnight)
-        .ok_or_else(|| ToolError::InvalidParams(format!("{name} must be YYYY-MM-DD, got {date:?}")))
 }
 
 fn article(db: &Db, labels: &SourceLabels, id: i64) -> Result<ArticleOutput, ToolError> {
@@ -620,6 +593,43 @@ mod tests {
             }),
             [a]
         );
+    }
+
+    /// キーワードは本文も対象にし、空白で区切った語をすべて含む記事に絞る。月だけの期間も使える。
+    #[test]
+    fn search_keyword_covers_body_and_all_terms() {
+        let db = Db::open_in_memory().unwrap();
+        let hash = with_profile(&db);
+        let a = seed(&db, &hash, Seed::default());
+        db.insert_content(
+            a,
+            ContentKind::Body,
+            ContentOrigin::Page,
+            "蒸気発生器の伝熱管を交換した",
+        )
+        .unwrap();
+        seed(
+            &db,
+            &hash,
+            Seed {
+                url: "https://e.com/b",
+                ..Seed::default()
+            },
+        );
+        let search = |keyword: &str| {
+            ids(&run_search(
+                &db,
+                SearchParams {
+                    keyword: Some(keyword.into()),
+                    since: Some("2026-09".into()),
+                    ..SearchParams::default()
+                },
+            )
+            .unwrap())
+        };
+        assert_eq!(search("伝熱管"), [a]);
+        assert_eq!(search("伝熱管　交換"), [a]);
+        assert!(search("伝熱管 燃料棒").is_empty());
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod prompt;
 pub mod quota;
 pub mod robots;
 pub mod scoring;
+pub mod search;
 pub mod source;
 pub mod status;
 pub mod text;

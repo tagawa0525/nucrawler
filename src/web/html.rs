@@ -1,6 +1,7 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。JavaScript は使わない。
 
-use crate::db::{ArticleDetail, ListItem, Warning};
+use crate::db::{ArticleDetail, ListItem, TopicUsage, Warning};
+use crate::search::Params;
 
 /// HTML の特殊文字を実体参照にする。
 pub fn escape(s: &str) -> String {
@@ -139,7 +140,9 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &
     } else {
         "<a href=\"/?all=1\">すべて表示（👎・低い点・未採点を含む）</a>"
     };
-    body.push_str(&format!("<p class=\"meta\">{toggle}</p>"));
+    body.push_str(&format!(
+        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・{toggle}</p>"
+    ));
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
@@ -150,6 +153,132 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &
         body.extend(earlier.iter().map(|i| card(i, page)));
     }
     layout("一覧", page, &body)
+}
+
+/// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。
+/// トピックの選択肢は要約に付いている語だけを、軸ごとに付いている数の多い順に並べる。
+pub fn search_page(
+    params: &Params,
+    results: Option<&[ListItem]>,
+    vocabulary: &[TopicUsage],
+    error: Option<&str>,
+    page: &Page,
+) -> String {
+    let mut body = String::from("<h1>検索</h1><p class=\"meta\"><a href=\"/\">一覧へ</a></p>");
+    if let Some(error) = error {
+        body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
+    }
+    body.push_str(&search_form(params, vocabulary, page));
+    if let Some(items) = results {
+        if items.is_empty() {
+            body.push_str("<p class=\"meta\">該当する記事はありません</p>");
+        } else {
+            body.push_str(&format!("<h2>{} 件</h2>", items.len()));
+            body.extend(items.iter().map(|i| card(i, page)));
+        }
+    }
+    layout("検索", page, &body)
+}
+
+fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
+    let text = |name: &str, value: &str, extra: &str| {
+        format!("<input name=\"{name}\" value=\"{}\"{extra}>", escape(value))
+    };
+    let checkbox = |name: &str, value: &str, checked: bool, label: &str| {
+        format!(
+            "<label><input type=\"checkbox\" name=\"{name}\" value=\"{}\"{}> {}</label> ",
+            escape(value),
+            if checked { " checked" } else { "" },
+            escape(label)
+        )
+    };
+    let select = |name: &str, current: &str, options: &[(&str, &str)]| {
+        let options: String = options
+            .iter()
+            .map(|(value, label)| {
+                let selected = if *value == current { " selected" } else { "" };
+                format!("<option value=\"{value}\"{selected}>{label}</option>")
+            })
+            .collect();
+        format!("<select name=\"{name}\">{options}</select>")
+    };
+    // 要約に付いている語だけを、軸ごとに付いている数の多い順に（選んだ語は数によらず出す）
+    let mut topics = String::new();
+    for facet in crate::topics::Facet::ALL {
+        let mut words: Vec<&TopicUsage> = vocabulary
+            .iter()
+            .filter(|u| u.facet == facet && (u.uses > 0 || p.topics.contains(&u.name)))
+            .collect();
+        words.sort_by_key(|u| std::cmp::Reverse(u.uses));
+        if words.is_empty() {
+            continue;
+        }
+        topics.push_str(&format!("<div class=\"meta\">{}</div>", facet.as_str()));
+        for u in words {
+            let label = format!("{} ({})", u.name, u.uses);
+            topics.push_str(&checkbox(
+                "topic",
+                &u.name,
+                p.topics.contains(&u.name),
+                &label,
+            ));
+        }
+    }
+    // 語彙に無い語（統合した語の別名など）も、選んでいれば残す
+    let others: Vec<&String> = p
+        .topics
+        .iter()
+        .filter(|t| vocabulary.iter().all(|u| &u.name != *t))
+        .collect();
+    if !others.is_empty() {
+        topics.push_str("<div class=\"meta\">その他</div>");
+        for t in others {
+            topics.push_str(&checkbox("topic", t, true, t));
+        }
+    }
+    let sources: String = page
+        .labels
+        .iter()
+        .map(|(id, label)| checkbox("source", id, p.sources.contains(id), label))
+        .collect();
+    let open = |any: bool| if any { " open" } else { "" };
+    format!(
+        "<form method=\"get\" action=\"/search\">\
+         <p>{q}</p>\
+         <p>期間 {since} 〜 {until}</p>\
+         <details{topics_open}><summary>トピック</summary>{topics}</details>\
+         <details{sources_open}><summary>ソース</summary>{sources}</details>\
+         <p>言語 {lang} 並び {sort}</p>\
+         <p>{translated}{liked}{unread}最低点 {min_score}</p>\
+         <p><button type=\"submit\">検索</button></p></form>",
+        q = text(
+            "q",
+            &p.q,
+            " type=\"search\" placeholder=\"語（空白で区切るとすべてを含む）\""
+        ),
+        since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
+        until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
+        topics_open = open(!p.topics.is_empty()),
+        sources_open = open(!p.sources.is_empty()),
+        lang = select(
+            "lang",
+            &p.lang,
+            &[("", "すべて"), ("en", "英語"), ("ja", "日本語")]
+        ),
+        sort = select(
+            "sort",
+            &p.sort,
+            &[("newest", "新しい順"), ("score", "点数順")]
+        ),
+        translated = checkbox("translated", "1", p.translated, "和訳あり"),
+        liked = checkbox("liked", "1", p.liked, "👍"),
+        unread = checkbox("unread", "1", p.unread, "未読"),
+        min_score = text(
+            "min_score",
+            &p.min_score,
+            " type=\"number\" min=\"0\" max=\"100\" size=\"3\""
+        ),
+    )
 }
 
 fn card(i: &ListItem, page: &Page) -> String {
@@ -363,6 +492,138 @@ mod tests {
             translation_requested: false,
             locked_by: vec![],
         }
+    }
+
+    fn usage(name: &str, facet: crate::topics::Facet, uses: i64) -> TopicUsage {
+        TopicUsage {
+            name: name.into(),
+            facet,
+            added_at: None,
+            uses,
+        }
+    }
+
+    #[test]
+    fn search_page_keeps_the_conditions_in_the_form() {
+        use crate::topics::Facet;
+        let labels = SourceLabels::from([
+            ("nra".to_string(), "原子力規制委員会".to_string()),
+            ("wnn".to_string(), "WNN".to_string()),
+        ]);
+        let params = Params {
+            q: "炉心 \"<b>\"".into(),
+            since: "2026-09".into(),
+            topics: vec!["PWR".into()],
+            sources: vec!["nra".into()],
+            lang: "ja".into(),
+            unread: true,
+            min_score: "60".into(),
+            sort: "score".into(),
+            ..Params::default()
+        };
+        let vocabulary = [
+            usage("燃料", Facet::Field, 3),
+            usage("規制・審査", Facet::Field, 9),
+            usage("高経年化", Facet::Field, 0),
+            usage("PWR", Facet::Reactor, 2),
+        ];
+        let html = search_page(
+            &params,
+            None,
+            &vocabulary,
+            None,
+            &Page {
+                labels: &labels,
+                ..Page::default()
+            },
+        );
+        assert!(
+            html.contains(r#"<form method="get" action="/search">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="q" value="炉心 &quot;&lt;b&gt;&quot;""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="since" value="2026-09""#), "{html}");
+        // 付いている数の多い順。要約に付いていない語は出さない
+        let field = html.find("規制・審査").unwrap();
+        assert!(field < html.find("燃料").unwrap(), "{html}");
+        assert!(!html.contains("高経年化"), "{html}");
+        assert!(
+            html.contains(r#"name="topic" value="PWR" checked"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="topic" value="燃料">"#), "{html}");
+        assert!(
+            html.contains(r#"name="source" value="nra" checked"#),
+            "{html}"
+        );
+        assert!(html.contains("原子力規制委員会"), "{html}");
+        assert!(html.contains(r#"<option value="ja" selected>"#), "{html}");
+        assert!(
+            html.contains(r#"name="unread" value="1" checked"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
+        assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
+        assert!(
+            html.contains(r#"<option value="score" selected>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("件"),
+            "no results section without results: {html}"
+        );
+    }
+
+    /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。
+    #[test]
+    fn search_page_keeps_topics_outside_the_vocabulary() {
+        let params = Params {
+            topics: vec!["新設炉".into()],
+            ..Params::default()
+        };
+        let vocabulary = [usage("燃料", crate::topics::Facet::Field, 3)];
+        let html = search_page(&params, Some(&[]), &vocabulary, None, &Page::default());
+        assert!(
+            html.contains(r#"name="topic" value="新設炉" checked"#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn search_page_shows_results_errors_and_empty_results() {
+        let params = Params {
+            q: "炉心".into(),
+            ..Params::default()
+        };
+        let items = [
+            item(1, "2026-09-27T00:00:00.000Z"),
+            item(2, "2026-09-26T00:00:00.000Z"),
+        ];
+        let html = search_page(&params, Some(&items), &[], None, &Page::default());
+        assert!(html.contains("2 件"), "{html}");
+        assert!(
+            html.contains("/articles/1") && html.contains("/articles/2"),
+            "{html}"
+        );
+        let html = search_page(&params, Some(&[]), &[], None, &Page::default());
+        assert!(html.contains("該当する記事はありません"), "{html}");
+        let html = search_page(
+            &params,
+            None,
+            &[],
+            Some("since must be <YYYY-MM>"),
+            &Page::default(),
+        );
+        assert!(html.contains("since must be &lt;YYYY-MM&gt;"), "{html}");
+    }
+
+    #[test]
+    fn list_page_links_to_search() {
+        let html = list_page(&[], &[], false, &Page::default());
+        assert!(html.contains(r#"href="/search""#), "{html}");
     }
 
     #[test]

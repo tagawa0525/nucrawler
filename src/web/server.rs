@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -11,6 +11,7 @@ use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
 use crate::db::{Db, DbError, ListQuery, SignalKind};
+use crate::search::Params;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
 use crate::web::{api, feed};
 
@@ -50,6 +51,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/feed.xml", get(feed))
         .route("/api/articles", get(api_list))
         .route("/api/articles/{id}", get(api_detail))
+        .route("/search", get(search))
+        .route("/api/search", get(api_search))
         .route("/articles/{id}/feedback", post(feedback))
         .route(
             "/articles/{id}/translation-request",
@@ -88,6 +91,8 @@ enum AppError {
     BadRequest(&'static str),
     #[error("cross-site request")]
     CrossSite,
+    #[error(transparent)]
+    InvalidSearch(#[from] crate::search::SearchError),
 }
 
 impl IntoResponse for AppError {
@@ -100,7 +105,7 @@ impl IntoResponse for AppError {
                 return (status, "internal server error").into_response();
             }
             AppError::NotFound => StatusCode::NOT_FOUND,
-            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::BadRequest(_) | AppError::InvalidSearch(_) => StatusCode::BAD_REQUEST,
             AppError::CrossSite => StatusCode::FORBIDDEN,
         };
         (status, self.to_string()).into_response()
@@ -227,6 +232,64 @@ async fn api_list(
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
         let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
+        Ok(serde_json::to_string(&api::ArticleList::new(
+            &items, &labels,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
+}
+
+/// 検索画面。一覧で隠す記事も語や条件で探せる。閲覧ではないので、訪問も開いたことも記録しない。
+/// 条件の誤りは、条件を残したフォームとともに 400 で返す。
+async fn search(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let params = Params::from_query(raw.as_deref().unwrap_or(""));
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let (status, page) = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let vocabulary = db.topic_usage()?;
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
+        let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
+            Ok(_) if params.is_empty() => {
+                html::search_page(&params, None, &vocabulary, None, &page)
+            }
+            Ok(q) => {
+                let items = db.search_articles(&q)?;
+                html::search_page(&params, Some(&items), &vocabulary, None, &page)
+            }
+            Err(e) => {
+                let html =
+                    html::search_page(&params, None, &vocabulary, Some(&e.to_string()), &page);
+                return Ok((StatusCode::BAD_REQUEST, html));
+            }
+        };
+        Ok((StatusCode::OK, html))
+    })
+    .await?;
+    Ok((status, Html(page)).into_response())
+}
+
+/// 検索画面と同じ条件の検索。閲覧ではないので、訪問も開いたことも記録しない。
+async fn api_search(
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
+    let params = Params::from_query(raw.as_deref().unwrap_or(""));
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let body = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let q = params.to_query(user, hash.as_deref(), web.list_limit)?;
+        let items = db.search_articles(&q)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,
         ))?)
@@ -652,6 +715,73 @@ mod tests {
                 assert!(!id.contains(host), "{id}");
             }
         }
+    }
+
+    /// 検索画面は一覧で隠す記事も語で引ける。条件が無ければフォームだけで、閲覧としては記録しない。
+    #[tokio::test]
+    async fn search_page_finds_articles_by_terms() {
+        let db = Db::open_in_memory().unwrap();
+        let (hit, _) = seed_with(&db, "https://e.com/hit", "炉心溶融の解析", false);
+        seed(&db, "https://e.com/other", "燃料の話");
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/search").await;
+        assert_eq!(status, 200);
+        assert!(html.contains(r#"action="/search""#), "{html}");
+        assert!(!html.contains("燃料の話"), "{html}");
+
+        let (status, html) = server.get("/search?q=%E7%82%89%E5%BF%83").await;
+        assert_eq!(status, 200);
+        assert!(html.contains(&format!("/articles/{hit}")), "{html}");
+        assert!(!html.contains("燃料の話"), "{html}");
+        server.assert_no_views();
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_conditions() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let (status, html) = server.get("/search?since=2026%2F09").await;
+        assert_eq!(status, 400);
+        // 並びは条件に数えないが、誤りは誤りとして返す
+        let (status, _) = server.get("/search?sort=old").await;
+        assert_eq!(status, 400);
+        let (status, _) = server.get("/search?sort=score").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("since must be YYYY-MM or YYYY-MM-DD"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"action="/search""#),
+            "the form stays usable: {html}"
+        );
+        let (status, body) = server.get("/api/search?lang=fr").await;
+        assert_eq!(status, 400);
+        assert!(body.contains("lang must be en or ja"), "{body}");
+    }
+
+    /// API の検索は検索画面と同じ条件で、トピックやソースを繰り返し指定できる。
+    #[tokio::test]
+    async fn api_search_uses_the_same_conditions() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, _) = seed(&db, "https://e.com/a", "題A");
+        seed(&db, "https://e.com/b", "題B");
+        let server = Server::start(db).await;
+        let (status, json) = server
+            .get_json("/api/search?q=%E9%A1%8CA&topic=%E8%A6%8F%E5%88%B6%E3%83%BB%E5%AF%A9%E6%9F%BB&source=none&source=wnn")
+            .await;
+        assert_eq!(status, 200);
+        let ids: Vec<i64> = json["articles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [a], "{json}");
+        let (_, json) = server
+            .get_json("/api/search?topic=%E7%87%83%E6%96%99")
+            .await;
+        assert!(json["articles"].as_array().unwrap().is_empty(), "{json}");
+        server.assert_no_views();
     }
 
     /// API の一覧は既定では Web と同じ記事を出し、`all=1` ですべてを出す。閲覧としては記録しない。

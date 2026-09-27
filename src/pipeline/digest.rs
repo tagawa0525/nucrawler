@@ -525,6 +525,7 @@ mod tests {
             Err(LlmError::Exit {
                 status: "exit status: 143".into(),
                 stderr: String::new(),
+                interrupted: true,
             })
         }
     }

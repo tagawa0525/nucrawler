@@ -109,6 +109,7 @@ mod tests {
         let llm = FakeLlm::new([Err(crate::llm::LlmError::Exit {
             status: "signal: 2 (SIGINT)".into(),
             stderr: String::new(),
+            interrupted: true,
         })]);
         let cancel = Cancel::default();
         let requester = cancel.clone();
@@ -138,6 +139,48 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, Outcome::Cancelled));
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
+    }
+
+    /// 止める指示と重なっても、シグナルで終わったのでない失敗（利用上限など）は記録する。
+    /// 利用上限の使用率を失うと、次回すぐに呼んでしまう。
+    #[tokio::test]
+    async fn other_failures_near_a_stop_are_recorded() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([Err(crate::llm::LlmError::RateLimited {
+            resets_at: Some(1),
+            rate_limit: None,
+        })]);
+        let cancel = Cancel::default();
+        let requester = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            requester.request();
+        });
+        let schema = serde_json::json!({});
+        let outcome = call_recorded(
+            &db,
+            &llm,
+            &mut Quota::new(QuotaConfig::default(), None, None),
+            Call {
+                stage: "digest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            },
+            Utc::now(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(outcome, Outcome::Halted(Halt::UsageLimit { .. })),
+            "the usage limit must not be mistaken for a stop"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 1);
     }
 
     /// 既に止める指示が出ていれば、LLM を呼ばない（claude を起動しない）。

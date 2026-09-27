@@ -420,6 +420,29 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    /// SIGINT・SIGTERM で終わったかどうか（止める指示によるものかの判断に使う）。
+    #[tokio::test]
+    async fn exit_tells_whether_claude_was_interrupted() {
+        for (name, body, expected) in [
+            ("cli-sigterm", "kill -TERM $$", true),
+            ("cli-exit130", "exit 130", true),
+            ("cli-exit3", "echo boom >&2\nexit 3", false),
+        ] {
+            let (script, dir) = fake_claude(name, body);
+            let cli = ClaudeCli {
+                command: script,
+                cwd: dir.join("cwd"),
+                timeout: Duration::from_secs(10),
+            };
+            let schema = serde_json::json!({});
+            let err = cli.call(request(&schema)).await.unwrap_err();
+            assert!(
+                matches!(&err, LlmError::Exit { interrupted, .. } if *interrupted == expected),
+                "{name}: {err:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn missing_command_is_spawn_error() {
         let cli = ClaudeCli {

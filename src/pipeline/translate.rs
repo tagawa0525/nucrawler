@@ -461,6 +461,80 @@ mod tests {
         assert_eq!(summary.failed, 1);
     }
 
+    /// 訳語集が変わった後に作られていない和訳だけを、同じモデルで新しい版として作り直す。
+    /// 作り直した版は時点が新しいので、もう一度実行しても対象にならない。
+    #[tokio::test]
+    async fn redo_glossary_retranslates_only_outdated_translations() {
+        let (db, owner) = setup();
+        let with_edg = article(&db, 0, 90);
+        let without = article(&db, 1, 90);
+        mention_edg(&db, with_edg);
+        run(
+            &db,
+            owner,
+            &FakeLlm::new([ok("初訳"), ok("初訳")]),
+            &mut quota(10),
+            false,
+        )
+        .await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["emergency diesel generator".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: None,
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        let llm = FakeLlm::new([ok("再訳")]);
+        let summary = redo_glossary(&db, owner, &llm, later).await;
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert!(llm.requests()[0].system.contains("非常用ディーゼル発電機"));
+        assert_eq!(
+            db.query_strings(
+                "SELECT article_id || '|' || json_extract(payload, '$.body_ja') || '|'
+                        || coalesce(glossary_at, '-')
+                 FROM artifacts WHERE kind = 'translation' ORDER BY id"
+            )
+            .unwrap(),
+            [
+                format!("{with_edg}|初訳|-"),
+                format!("{without}|初訳|-"),
+                format!("{with_edg}|再訳|{}", crate::db::timestamp(later)),
+            ]
+        );
+        let again = redo_glossary(&db, owner, &FakeLlm::new([]), later).await;
+        assert_eq!(again.calls, 0);
+    }
+
+    async fn redo_glossary(
+        db: &Db,
+        owner: i64,
+        llm: &FakeLlm,
+        now: DateTime<Utc>,
+    ) -> TranslateSummary {
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: owner,
+            profile_hash: None,
+            glossary: true,
+        });
+        translate_articles(
+            LlmStage {
+                db,
+                llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
+            &LlmConfig::default(),
+            &PipelineConfig::default(),
+            owner,
+            &target,
+            now,
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn redo_translates_again_with_another_model() {
         let (db, owner) = setup();
@@ -477,6 +551,7 @@ mod tests {
             filter: crate::db::RedoFilter::default(),
             user_id: owner,
             profile_hash: None,
+            glossary: false,
         });
         let opus = LlmConfig {
             translate_model: "opus".into(),

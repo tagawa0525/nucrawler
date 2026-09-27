@@ -190,6 +190,8 @@ pub struct RedoArgs {
     pub kind: RedoKind,
     pub model: String,
     pub filter: crate::db::RedoFilter,
+    /// 訳語集が変わった後に作られていない版だけを作り直す
+    pub glossary: bool,
     pub max_llm_calls: Option<u32>,
 }
 
@@ -231,6 +233,7 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
         kind,
         model: model.ok_or_else(usage)?,
         filter,
+        glossary: false,
         max_llm_calls,
     })
 }
@@ -584,6 +587,12 @@ mod tests {
         let minimal = parse_redo_args(&args(&["translate", "--model", "opus"])).unwrap();
         assert_eq!(minimal.kind, RedoKind::Translate);
         assert_eq!(minimal.filter, crate::db::RedoFilter::default());
+        assert!(!minimal.glossary);
+        // --glossary は値を取らない
+        let glossary =
+            parse_redo_args(&args(&["translate", "--glossary", "--model", "opus"])).unwrap();
+        assert!(glossary.glossary);
+        assert_eq!(glossary.model, "opus");
     }
 
     #[test]

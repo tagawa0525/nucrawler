@@ -563,6 +563,69 @@ mod tests {
         assert_eq!(summary.halted, None);
     }
 
+    /// 訳語集が変わった後に作られていない要約だけを、同じモデルで新しい版として作り直す。
+    #[tokio::test]
+    async fn redo_glossary_rebuilds_only_outdated_digests() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 2);
+        mention_edg(&db, ids[0]);
+        run(&db, &FakeLlm::new([ok(&ids, 0.1)]), &mut quota(10), 5).await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["EDG".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: Some("EDG".into()),
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        let llm = FakeLlm::new([ok(&ids[..1], 0.1)]);
+        let summary = redo_glossary(&db, &llm, later).await;
+        assert_eq!((summary.digested, summary.calls), (1, 1));
+        let prompt = &llm.requests()[0].prompt;
+        assert!(
+            prompt.contains(&format!("<article id=\"{}\"", ids[0])),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("<article id=\"{}\"", ids[1])),
+            "{prompt}"
+        );
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT coalesce(glossary_at, '-') FROM artifacts
+                 WHERE kind = 'digest' AND article_id = {} ORDER BY id",
+                ids[0]
+            ))
+            .unwrap(),
+            ["-".to_string(), crate::db::timestamp(later)]
+        );
+        let again = redo_glossary(&db, &FakeLlm::new([]), later).await;
+        assert_eq!(again.calls, 0);
+    }
+
+    async fn redo_glossary(db: &Db, llm: &FakeLlm, now: DateTime<Utc>) -> DigestSummary {
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: db.owner_id().unwrap(),
+            profile_hash: None,
+            glossary: true,
+        });
+        digest_articles(
+            LlmStage {
+                db,
+                llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
+            &llm_cfg(5),
+            &PipelineConfig::default(),
+            &target,
+            now,
+        )
+        .await
+        .unwrap()
+    }
+
     /// 別のモデルで作り直す。同じ条件で再実行しても、作り直した記事は対象にならない（続きから）。
     #[tokio::test]
     async fn redo_rebuilds_with_another_model_and_resumes() {
@@ -577,6 +640,7 @@ mod tests {
             },
             user_id: db.owner_id().unwrap(),
             profile_hash: None,
+            glossary: false,
         });
         let opus = LlmConfig {
             digest_model: "opus".into(),

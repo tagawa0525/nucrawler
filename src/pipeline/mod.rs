@@ -75,6 +75,8 @@ pub struct RedoSpec {
     /// 点数の条件（min_score）に使う利用者とプロファイル
     pub user_id: i64,
     pub profile_hash: Option<String>,
+    /// 成果物がまだ無い記事ではなく、このモデルの最新の版が訳語集の変更より前に作られた記事を作り直す
+    pub glossary: bool,
 }
 
 /// パイプラインのステージ（実行順）。

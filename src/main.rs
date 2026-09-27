@@ -406,6 +406,7 @@ async fn redo(config: Option<PathBuf>, data: Option<PathBuf>, args: RedoArgs) ->
         filter: args.filter,
         user_id: owner,
         profile_hash: db.load_profile(owner)?.map(|(_, hash)| hash),
+        glossary: args.glossary,
     });
     let mut llm_failure = None;
     match args.kind {

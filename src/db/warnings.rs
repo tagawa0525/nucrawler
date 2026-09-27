@@ -157,53 +157,60 @@ impl Db {
         since: chrono::DateTime<chrono::Utc>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Warning>, DbError> {
-        // ソースごとに最新の記事と、そこから STALE_WINDOW_DAYS 日遡った期間だけを索引
-        // （articles_by_source_at）で読む
-        let mut stmt = self.conn.prepare(
-            "WITH latest AS (
-               SELECT st.source_id,
-                      (SELECT coalesce(a.published_at, a.fetched_at) FROM articles AS a
-                       WHERE a.source_id = st.source_id
-                       ORDER BY coalesce(a.published_at, a.fetched_at) DESC LIMIT 1) AS last
-               FROM source_state AS st
-               -- 失敗中のソースは取得失敗の警告だけを出す
-               WHERE st.last_success_at >= ?1 AND st.last_error IS NULL)
-             SELECT l.source_id, substr(coalesce(a.published_at, a.fetched_at), 1, 10) AS day
-             FROM latest AS l
-             JOIN articles AS a
-               ON a.source_id = l.source_id
-              -- 数えるのは日付なので、期間も日付で区切る（その日の早い時刻の記事も含める）
-              AND coalesce(a.published_at, a.fetched_at) >= date(l.last, ?2)
-             GROUP BY l.source_id, day
-             ORDER BY l.source_id, day",
+        // 対象のソースごとに、最新の記事の日時を索引（articles_by_source_at）で 1 件だけ読む
+        let mut latest = self.conn.prepare(
+            "SELECT st.source_id,
+                    (SELECT coalesce(a.published_at, a.fetched_at) FROM articles AS a
+                     WHERE a.source_id = st.source_id
+                     ORDER BY coalesce(a.published_at, a.fetched_at) DESC LIMIT 1)
+             FROM source_state AS st
+             -- 失敗中のソースは取得失敗の警告だけを出す
+             WHERE st.last_success_at >= ?1 AND st.last_error IS NULL
+             ORDER BY st.source_id",
         )?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![timestamp(since), format!("-{STALE_WINDOW_DAYS} days")],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )?
+        let sources = latest
+            .query_map([timestamp(since)], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
+        // 最新の日から STALE_WINDOW_DAYS 日遡った日以降の、新着のあった日（索引の範囲で読む）
+        let mut window = self.conn.prepare(
+            "SELECT DISTINCT substr(coalesce(published_at, fetched_at), 1, 10) AS day
+             FROM articles
+             WHERE source_id = ?1 AND coalesce(published_at, fetched_at) >= ?2
+             ORDER BY day",
+        )?;
+        // 公開日時は取得時に日時として解釈して書くので、読めなければ DB が壊れている
+        let unexpected = |source_id: &str, value: &str| {
+            DbError::UnexpectedValue(format!("article date {value:?} of source {source_id:?}"))
+        };
         let today = now.date_naive();
         let mut warnings = Vec::new();
-        for days in rows.chunk_by(|a, b| a.0 == b.0) {
-            // 公開日時は取得時に日時として解釈して書くので、読めなければ DB が壊れている
-            let dates = days
-                .iter()
-                .map(|(source_id, day)| {
-                    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_err(|_| {
-                        DbError::UnexpectedValue(format!(
-                            "article date {day:?} of source {source_id:?}"
-                        ))
-                    })
+        for (source_id, last) in sources {
+            let Some(last) = last else { continue };
+            let last_day = chrono::DateTime::parse_from_rfc3339(&last)
+                .map_err(|_| unexpected(&source_id, &last))?
+                .date_naive();
+            // 数えるのは日付なので、期間も日付で区切る（その日の早い時刻の記事も含める）
+            let first_day = last_day - chrono::Duration::days(STALE_WINDOW_DAYS);
+            let days = window
+                .query_map(
+                    rusqlite::params![source_id, first_day.format("%Y-%m-%d").to_string()],
+                    |r| r.get::<_, String>(0),
+                )?
+                .map(|day| {
+                    let day = day?;
+                    chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d")
+                        .map_err(|_| unexpected(&source_id, &day))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(Stale {
                 idle_days,
                 typical_gap_days,
-            }) = stale(&dates, today)
+            }) = stale(&days, today)
             {
                 warnings.push(Warning::SourceStale {
-                    source_id: days[0].0.clone(),
+                    source_id,
                     idle_days,
                     typical_gap_days,
                 });

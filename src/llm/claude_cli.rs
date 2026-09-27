@@ -82,6 +82,7 @@ impl Llm for ClaudeCli {
             Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
                 status: output.status.to_string(),
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                interrupted: interrupted(output.status),
             }),
             parsed => {
                 let (output, rate_limit) = parsed?;
@@ -89,6 +90,18 @@ impl Llm for ClaudeCli {
             }
         }
     }
+}
+
+/// SIGINT・SIGTERM で終わったか。シグナルで殺された場合と、シグナルを受けて 128 + 番号で
+/// 終了した場合の両方を含む。
+fn interrupted(status: std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    let signal = status
+        .signal()
+        .or_else(|| status.code().and_then(|c| c.checked_sub(128)));
+    matches!(signal, Some(SIGINT | SIGTERM))
 }
 
 /// stream-json の出力から、構造化出力と最後の使用率を取り出す。
@@ -399,7 +412,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, LlmError::Exit { status, stderr }
+            matches!(&err, LlmError::Exit { status, stderr, .. }
                 if status.ends_with(": 1") && stderr.contains("Not logged in")),
             "{err}"
         );

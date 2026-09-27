@@ -57,11 +57,17 @@ pub async fn call_recorded<L: Llm>(
     };
     // 止める指示と同時に claude が終了させられたとき（端末の Ctrl-C は claude にも届く）は、
     // LLM の失敗ではない。シグナルの受け取りは非同期で、claude が落ちたことの方が先に分かることが
-    // あるので、失敗したときだけ止める指示を少し待つ（本当の失敗の記録が少し遅れるだけ）
-    if result.is_err()
-        && tokio::time::timeout(STOP_GRACE, cancel.requested())
-            .await
-            .is_ok()
+    // あるので、claude が SIGINT・SIGTERM で終わったときだけ止める指示を少し待つ。利用上限などの
+    // ほかの失敗は、止める指示と重なってもそのまま記録する
+    if matches!(
+        result,
+        Err(LlmError::Exit {
+            interrupted: true,
+            ..
+        })
+    ) && tokio::time::timeout(STOP_GRACE, cancel.requested())
+        .await
+        .is_ok()
     {
         return Ok(Outcome::Cancelled);
     }

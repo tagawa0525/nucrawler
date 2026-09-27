@@ -45,7 +45,12 @@ pub enum LlmError {
     #[error("llm call timed out after {secs}s")]
     Timeout { secs: u64 },
     #[error("llm process exited with {status}: {stderr}")]
-    Exit { status: String, stderr: String },
+    Exit {
+        status: String,
+        stderr: String,
+        /// SIGINT・SIGTERM で終わった（シグナルによる終了か、終了コード 130・143）
+        interrupted: bool,
+    },
     #[error("unexpected llm output: {0}")]
     Protocol(String),
     #[error("usage limit reached (resets at {resets_at:?})")]

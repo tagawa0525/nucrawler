@@ -32,7 +32,7 @@ pub struct ScoreInput {
 
 impl Db {
     /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
-    /// `cutoff` 以降の記事で、このキーの採点がまだ無いものを新しい順に返す。
+    /// `cutoff` 以降の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
     /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_score(
         &self,
@@ -70,7 +70,7 @@ impl Db {
                AND NOT EXISTS (
                  SELECT 1 FROM scores AS s
                  WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
-                   AND s.backend = ?4 AND s.model = ?5)
+                   AND s.backend = ?4 AND s.model = ?5 AND s.prompt_version = ?10)
                AND NOT EXISTS (
                  SELECT 1 FROM stage_errors AS e
                  WHERE e.article_id = l.article_id AND e.stage = ?9
@@ -91,6 +91,7 @@ impl Db {
                 timestamp(now),
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 score_stage(key),
+                key.prompt_version,
             ],
             |r| {
                 Ok((
@@ -129,14 +130,16 @@ impl Db {
     ) -> Result<(), DbError> {
         self.conn.execute(
             "INSERT INTO scores
-               (user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, reason,
+                created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 key.user_id,
                 artifact_id,
                 key.profile_hash,
                 key.backend,
                 key.model,
+                key.prompt_version,
                 score,
                 reason,
                 timestamp(now),

@@ -105,6 +105,10 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
   書き出した語彙では LLM が足した語に `added_at` が付く。その行を消して取り込めば、人が決めた語になり統合されなくなる。
   統合した語は別名として残り（`topic_aliases` に統合した時刻と LLM を記録）、LLM が同じ名前を付けても統合先に付く。
   誤った統合は、`topics export` した語彙に統合元を足して `topics import` すれば語に戻る
+- 訳語集は要約と和訳で訳語と略語を揃えるための一覧で、DB が正本（初期値は DB を作るときに入る）。
+  1 つの訳語（略語を添えられる）に原語を複数結び付け、表記の揺れや略語をまとめて同じ訳にする。
+  LLM には、渡す記事（切り詰めた後の見出しと本文）に原語が出てくる語だけを載せる。
+  原語は語の単位で当て（複数形の s / es は当てる）、大文字だけの略語は大文字のときだけ、ほかは大文字小文字を問わない
 
 ## Web UI
 
@@ -187,6 +191,7 @@ claude mcp add --scope user nucrawler -- nucrawler mcp
 - `sources.toml`：巡回するソース。[examples/sources.toml](examples/sources.toml)
 - 関心プロファイル：[examples/profile.toml](examples/profile.toml)（`profile import` で DB に取り込む）
 - トピックの語彙：DB に初期値が入る（`topics export` / `topics import` で編集する）
+- 訳語集：DB に初期値が入る（`glossary_terms` と `glossary_sources`）
 
 home-manager のモジュールを使うときは `services.nucrawler.settings` と `sourcesFile` から生成される。
 

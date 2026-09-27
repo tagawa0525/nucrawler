@@ -72,3 +72,11 @@ INSERT INTO topics (name, facet) VALUES
     ('NRC', '組織'),
     ('NRA', '組織'),
     ('DOE', '組織');
+
+-- 語彙を入れる前の要約のうち、語彙と同じ名前のトピックは付与として移す。
+-- 語彙に無い名前（表記の揺れ）は payload に残るだけで、要約を作り直すまで付与は無い。
+INSERT OR IGNORE INTO artifact_topics (artifact_id, topic_id)
+SELECT a.id, t.id
+FROM artifacts AS a, json_each(a.payload, '$.topics') AS j
+JOIN topics AS t ON t.name = j.value
+WHERE a.kind = 'digest';

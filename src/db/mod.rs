@@ -37,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0003_last_seen.sql"),
     include_str!("migrations/0004_visit_boundary.sql"),
     include_str!("migrations/0005_retry_pdf_extracts.sql"),
+    include_str!("migrations/0006_search.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -382,8 +383,8 @@ pub enum Warning {
     LlmFailed { error: String, at: String },
 }
 
-/// `query_items` の範囲：1 件（詳細）か、条件つきの一覧。
-enum ItemScope {
+/// `query_items` の範囲：1 件（詳細）か、条件つきの一覧か、検索。
+enum ItemScope<'a> {
     One(i64),
     List {
         since: chrono::DateTime<chrono::Utc>,
@@ -391,6 +392,54 @@ enum ItemScope {
         min_score: u8,
         limit: usize,
     },
+    Search {
+        terms: &'a [String],
+        limit: usize,
+    },
+}
+
+/// trigram の索引で引ける語の最短の文字数。これより短い語は本文を走査する。
+const TRIGRAM_MIN_CHARS: usize = 3;
+
+/// 検索の語 `param`（`:t0` など）を含み、利用者（`:user`）が閲覧できる文書のある記事に絞る条件。
+/// 短い語は索引を使えないので LIKE で走査する（本文 500MB で 0.2 秒ほど）。
+fn search_term_filter(term: &str, param: &str) -> String {
+    let matches = if is_indexable(term) {
+        format!("d.text MATCH {param}")
+    } else {
+        format!("d.text LIKE {param} ESCAPE '\\'")
+    };
+    format!(
+        "a.id IN (
+           SELECT d.article_id FROM search_docs AS d
+           WHERE {matches}
+             AND (d.content_id IS NULL OR d.content_id IN (
+               SELECT c.id FROM contents AS c
+               WHERE c.access_membership_id IS NULL
+                  OR c.access_membership_id IN (
+                    SELECT membership_id FROM user_memberships WHERE user_id = :user)))
+             AND (d.artifact_id IS NULL OR d.artifact_id IN (
+               SELECT r.id FROM artifacts AS r WHERE {viewable_r})))",
+        viewable_r = viewable("r"),
+    )
+}
+
+fn is_indexable(term: &str) -> bool {
+    term.chars().count() >= TRIGRAM_MIN_CHARS
+}
+
+/// 語を、その語を含む文字列に一致する LIKE のパターンにする。`%` `_` `\` は文字どおりに扱う。
+fn like_pattern(term: &str) -> String {
+    let escaped = term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+/// 語を FTS5 のフレーズにする。構文として解釈させないよう全体を `"` で囲み、中の `"` は二重にする。
+fn fts_phrase(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
 }
 
 /// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
@@ -1312,8 +1361,15 @@ impl Db {
     }
 
     /// 検索。一覧で隠す記事も含め、新しい順。
-    pub fn search_articles(&self, _q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
-        Ok(Vec::new())
+    pub fn search_articles(&self, q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
+        self.query_items(
+            q.user_id,
+            q.profile_hash,
+            ItemScope::Search {
+                terms: &q.terms,
+                limit: q.limit,
+            },
+        )
     }
 
     /// 詳細画面の内容。記事が無ければ None。
@@ -1394,14 +1450,37 @@ impl Db {
         profile_hash: Option<&str>,
         scope: ItemScope,
     ) -> Result<Vec<ListItem>, DbError> {
-        let (id, since, show_all, min_score, limit) = match scope {
-            ItemScope::One(id) => (Some(id), None, true, 0, 1),
+        let (id, since, show_all, min_score, limit, terms) = match scope {
+            ItemScope::One(id) => (Some(id), None, true, 0, 1, &[][..]),
             ItemScope::List {
                 since,
                 show_all,
                 min_score,
                 limit,
-            } => (None, Some(since), show_all, min_score, limit),
+            } => (None, Some(since), show_all, min_score, limit, &[][..]),
+            ItemScope::Search { terms, limit } => (None, None, true, 0, limit, terms),
+        };
+        let term_params: Vec<(String, String)> = terms
+            .iter()
+            .enumerate()
+            .map(|(i, term)| {
+                let value = if is_indexable(term) {
+                    fts_phrase(term)
+                } else {
+                    like_pattern(term)
+                };
+                (format!(":t{i}"), value)
+            })
+            .collect();
+        let term_filter: String = terms
+            .iter()
+            .zip(&term_params)
+            .map(|(term, (param, _))| format!(" AND {}", search_term_filter(term, param)))
+            .collect();
+        // 検索は語で探すので、点数ではなく新しい順に並べる
+        let order = match scope {
+            ItemScope::Search { .. } => "rows.at DESC, rows.id DESC",
+            _ => "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC",
         };
         let sql = format!(
             "WITH items AS (
@@ -1413,6 +1492,7 @@ impl Db {
                FROM articles AS a
                WHERE (:id IS NULL OR a.id = :id)
                  AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
+                 {term_filter}
              ),
              rows AS (
                SELECT i.*, d.title_ja, d.summary_ja,
@@ -1457,50 +1537,55 @@ impl Db {
              -- 既定では 👎、非軽水炉、未採点、閾値未満を隠す
              WHERE :all = 1
                 OR (rows.feedback IS NOT 'down' AND rows.relevant = 1 AND s.score >= :min)
-             ORDER BY s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC
+             ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
             viewable_t = viewable("t"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::named_params! {
-                ":id": id,
-                ":since": since.map(timestamp),
-                ":user": user_id,
-                ":profile": profile_hash,
-                ":all": show_all,
-                ":min": min_score,
-                ":limit": i64::try_from(limit).unwrap_or(i64::MAX),
-            },
-            |r| {
-                let feedback: Option<String> = r.get(13)?;
-                let item = ListItem {
-                    article_id: r.get(0)?,
-                    source_id: r.get(1)?,
-                    url: r.get(2)?,
-                    title: r.get(3)?,
-                    lang: r.get(4)?,
-                    at: r.get(5)?,
-                    fetched_at: r.get(6)?,
-                    title_ja: r.get(7)?,
-                    summary_ja: r.get(8)?,
-                    lwr_relevant: r.get(9)?,
-                    score: r.get(10)?,
-                    reason: r.get(11)?,
-                    read: r.get(12)?,
-                    feedback: match feedback.as_deref() {
-                        Some("up") => Some(Feedback::Up),
-                        Some("down") => Some(Feedback::Down),
-                        _ => None,
-                    },
-                    has_translation: r.get(14)?,
-                    translation_requested: r.get(15)?,
-                    locked_by: Vec::new(),
-                };
-                Ok((item, r.get::<_, String>(16)?))
-            },
-        )?;
+        let since = since.map(timestamp);
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":id", &id),
+            (":since", &since),
+            (":user", &user_id),
+            (":profile", &profile_hash),
+            (":all", &show_all),
+            (":min", &min_score),
+            (":limit", &limit),
+        ];
+        params.extend(
+            term_params
+                .iter()
+                .map(|(name, value)| (name.as_str(), value as &dyn rusqlite::ToSql)),
+        );
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            let feedback: Option<String> = r.get(13)?;
+            let item = ListItem {
+                article_id: r.get(0)?,
+                source_id: r.get(1)?,
+                url: r.get(2)?,
+                title: r.get(3)?,
+                lang: r.get(4)?,
+                at: r.get(5)?,
+                fetched_at: r.get(6)?,
+                title_ja: r.get(7)?,
+                summary_ja: r.get(8)?,
+                lwr_relevant: r.get(9)?,
+                score: r.get(10)?,
+                reason: r.get(11)?,
+                read: r.get(12)?,
+                feedback: match feedback.as_deref() {
+                    Some("up") => Some(Feedback::Up),
+                    Some("down") => Some(Feedback::Down),
+                    _ => None,
+                },
+                has_translation: r.get(14)?,
+                translation_requested: r.get(15)?,
+                locked_by: Vec::new(),
+            };
+            Ok((item, r.get::<_, String>(16)?))
+        })?;
         rows.map(|row| {
             let (mut item, locked_by) = row?;
             item.locked_by = serde_json::from_str(&locked_by)?;

@@ -37,7 +37,7 @@ pub fn parse(text: &str) -> Result<Profile, ProfileError> {
     Ok(profile)
 }
 
-/// 値を検証する（重みは 0〜1、topic は空でなく重複しない）。
+/// 値を検証する（重みは 0〜1、topic と exclude は空でなく重複しない）。
 pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
     let mut seen = std::collections::HashSet::new();
     for i in &profile.interests {
@@ -57,6 +57,17 @@ pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
                 "weight of {:?} must be between 0 and 1, got {}",
                 i.topic, i.weight
             )));
+        }
+    }
+    let mut excluded = std::collections::HashSet::new();
+    for e in &profile.exclude {
+        if e.trim().is_empty() {
+            return Err(ProfileError::Invalid(
+                "exclude must not contain an empty topic".into(),
+            ));
+        }
+        if !excluded.insert(e.as_str()) {
+            return Err(ProfileError::Invalid(format!("duplicate exclude {e:?}")));
         }
     }
     Ok(())
@@ -100,7 +111,7 @@ pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
             changes.push(Change::Added {
                 topic: new.topic.clone(),
                 weight: new.weight,
-                note: None,
+                note: new.note.clone(),
             });
             continue;
         };
@@ -143,7 +154,16 @@ impl std::fmt::Display for Change {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let note = |n: &Option<String>| n.clone().unwrap_or_else(|| "(none)".into());
         match self {
-            Self::Added { topic, weight, .. } => write!(f, "add {topic} (weight {weight:?})"),
+            Self::Added {
+                topic,
+                weight,
+                note: None,
+            } => write!(f, "add {topic} (weight {weight:?})"),
+            Self::Added {
+                topic,
+                weight,
+                note: Some(note),
+            } => write!(f, "add {topic} (weight {weight:?}, note {note})"),
             Self::Removed { topic } => write!(f, "remove {topic}"),
             Self::Weight { topic, from, to } => write!(f, "weight {topic}: {from:?} → {to:?}"),
             Self::Note { topic, from, to } => {

@@ -143,8 +143,16 @@ pub fn until(value: &str) -> Result<DateTime<Utc>, SearchError> {
 }
 
 /// CLI の結果の 1 行：公開日時（日本時間）、点数（未採点は -）、見出し、URL。
-pub fn result_line(_item: &crate::db::ListItem) -> String {
-    String::new()
+pub fn result_line(item: &crate::db::ListItem) -> String {
+    let score = item
+        .score
+        .map_or_else(|| "-".to_string(), |s| s.to_string());
+    format!(
+        "{}  {score:>3}  {}  {}",
+        crate::jst::format_local(&item.at),
+        crate::web::html::display_title(item.title_ja.as_deref(), item),
+        item.url
+    )
 }
 
 /// 入力された値（前後の空白を除く）。空なら指定しなかったもの。

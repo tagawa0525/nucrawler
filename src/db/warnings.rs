@@ -64,11 +64,13 @@ fn stale(days: &[chrono::NaiveDate], today: chrono::NaiveDate) -> Option<Stale> 
     }
     gaps.sort_unstable();
     let n = gaps.len();
-    let typical_gap_days = (gaps[(n - 1) / 2] + gaps[n / 2]) / 2;
+    // 中央値の 2 倍。偶数個のとき半端（x.5 日）になるので、比べるときは 2 倍のまま扱う
+    let twice_median = gaps[(n - 1) / 2] + gaps[n / 2];
     let idle_days = (today - *days.last()?).num_days();
-    (idle_days > STALE_MIN_DAYS.max(STALE_RATIO * typical_gap_days)).then_some(Stale {
+    (2 * idle_days > (2 * STALE_MIN_DAYS).max(STALE_RATIO * twice_median)).then_some(Stale {
         idle_days,
-        typical_gap_days,
+        // 表示は四捨五入
+        typical_gap_days: (twice_median + 1) / 2,
     })
 }
 
@@ -184,11 +186,17 @@ impl Db {
         let today = now.date_naive();
         let mut warnings = Vec::new();
         for days in rows.chunk_by(|a, b| a.0 == b.0) {
-            // 日付として読めない値（壊れた公開日時）は数えない
-            let dates: Vec<chrono::NaiveDate> = days
+            // 公開日時は取得時に日時として解釈して書くので、読めなければ DB が壊れている
+            let dates = days
                 .iter()
-                .filter_map(|(_, day)| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok())
-                .collect();
+                .map(|(source_id, day)| {
+                    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_err(|_| {
+                        DbError::UnexpectedValue(format!(
+                            "article date {day:?} of source {source_id:?}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             if let Some(Stale {
                 idle_days,
                 typical_gap_days,

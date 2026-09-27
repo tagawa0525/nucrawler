@@ -230,6 +230,16 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     layout("一覧", page, &body)
 }
 
+/// 管理の画面への入口（一覧の ⚙ から入る）。
+pub fn settings_page(_glossary_terms: usize, _page: &Page) -> String {
+    todo!()
+}
+
+/// 訳語集。訳語ごとに畳み、開いたときだけ編集のフォームを出す。
+pub fn glossary_page(_entries: &[crate::glossary::Entry], _page: &Page) -> String {
+    todo!()
+}
+
 /// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
 /// `state` があれば切り替えとして ON（緑）/ OFF（赤）を示す。`href` はエスケープ済みで渡す。
 fn button(href: &str, name: &str, emoji: &str, state: Option<bool>) -> String {
@@ -1040,6 +1050,13 @@ mod tests {
             ),
             "{html}"
         );
+        // 管理の画面へは右端の ⚙ から入る
+        assert!(
+            html.contains(
+                r#"<a class="btn" href="/settings" aria-label="設定" title="設定">⚙</a></nav>"#
+            ),
+            "{html}"
+        );
     }
 
     /// 切り替えのリンクは、もう一方の切り替えの状態を引き継ぐ。
@@ -1448,5 +1465,78 @@ mod tests {
         d.digests.clear();
         let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(!html.contains("term-report"), "{html}");
+    }
+
+    #[test]
+    fn settings_page_leads_to_the_glossary() {
+        let html = settings_page(15, &Page::default());
+        assert!(html.contains(r#"href="/""#), "back to the list: {html}");
+        assert!(html.contains(r#"<a href="/glossary">訳語集</a>"#), "{html}");
+        assert!(html.contains("15 語"), "{html}");
+    }
+
+    fn entry(
+        id: i64,
+        sources: &[&str],
+        target: &str,
+        abbr: Option<&str>,
+    ) -> crate::glossary::Entry {
+        crate::glossary::Entry {
+            id,
+            term: crate::glossary::Term {
+                sources: sources.iter().map(|s| s.to_string()).collect(),
+                target: target.into(),
+                abbr: abbr.map(Into::into),
+                note: Some("注<記>".into()),
+            },
+            changed_at: None,
+        }
+    }
+
+    /// 訳語は原語の順に並べ、1 行目に訳語（略語）、2 行目に原語を出す。
+    /// 編集のフォームと削除は、開いたときだけ出す。
+    #[test]
+    fn glossary_page_folds_each_term_with_its_form() {
+        let entries = [
+            entry(2, &["spent fuel", "used fuel"], "使用済燃料", None),
+            entry(
+                1,
+                &["Accident tolerant fuel", "ATF"],
+                "事故耐性燃料",
+                Some("ATF"),
+            ),
+        ];
+        let html = glossary_page(&entries, &Page::default());
+        assert!(
+            html.contains(r#"href="/settings""#),
+            "back to settings: {html}"
+        );
+        assert!(
+            html.contains(r#"<details class="add"><summary>＋ 訳語を追加</summary><form method="post" action="/glossary">"#),
+            "{html}"
+        );
+        let atf = html.find(r#"id="term-1""#).unwrap();
+        let spent = html.find(r#"id="term-2""#).unwrap();
+        assert!(atf < spent, "sorted by source: {html}");
+        assert!(
+            html.contains(
+                r#"<details class="term" id="term-1"><summary><b>事故耐性燃料（ATF）</b><span class="meta">Accident tolerant fuel / ATF</span></summary>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/glossary/1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains("Accident tolerant fuel\nATF</textarea>"),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="abbr" value="ATF""#), "{html}");
+        assert!(html.contains(r#"value="注&lt;記&gt;""#), "{html}");
+        assert!(
+            html.contains(r#"<form method="post" action="/glossary/1/delete">"#),
+            "{html}"
+        );
     }
 }

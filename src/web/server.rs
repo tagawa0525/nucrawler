@@ -680,6 +680,10 @@ mod tests {
             self.state.db.lock().unwrap().query_i64(sql).unwrap()
         }
 
+        fn strings(&self, sql: &str) -> Vec<String> {
+            self.state.db.lock().unwrap().query_strings(sql).unwrap()
+        }
+
         /// 閲覧の行動（開いた記録と訪問の区切り）が 1 つも記録されていない。
         fn assert_no_views(&self) {
             assert_eq!(
@@ -1180,6 +1184,112 @@ mod tests {
         let res = server.post("/articles/999/term-report", "found=x").await;
         assert_eq!(res.status().as_u16(), 404);
         assert_eq!(server.count("SELECT count(*) FROM term_reports"), 2);
+    }
+
+    #[tokio::test]
+    async fn settings_lead_to_the_glossary() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let (status, html) = server.get("/settings").await;
+        assert_eq!(status, 200);
+        assert!(html.contains(r#"href="/glossary""#), "{html}");
+        let (status, html) = server.get("/glossary").await;
+        assert_eq!(status, 200);
+        assert!(html.contains("事故耐性燃料"), "{html}");
+    }
+
+    /// 原語は 1 行に 1 つ。空の行と、大文字小文字だけ違う重複は除く。
+    #[tokio::test]
+    async fn glossary_terms_are_added_updated_and_deleted() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let sources = "SELECT group_concat(s.source, '|') FROM glossary_sources AS s
+                       JOIN glossary_terms AS t ON t.id = s.term_id WHERE t.abbr = 'EDG'";
+        let res = server
+            .post(
+                "/glossary",
+                "target=%E9%9D%9E%E5%B8%B8%E7%94%A8DG&abbr=+EDG+&note=&sources=emergency+diesel+generator%0D%0AEDG%0D%0A+%0D%0Aedg",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        let id = server.count("SELECT id FROM glossary_terms WHERE abbr = 'EDG'");
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/glossary#term-{id}")
+        );
+        assert_eq!(server.strings(sources), ["emergency diesel generator|EDG"]);
+        assert_eq!(
+            server.count("SELECT count(*) FROM glossary_terms WHERE abbr = 'EDG' AND note IS NULL"),
+            1
+        );
+
+        let path = format!("/glossary/{id}");
+        let res = server
+            .post(
+                &path,
+                "target=%E9%9D%9E%E5%B8%B8%E7%94%A8DG&abbr=EDG&note=&sources=EDG",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(server.strings(sources), ["EDG"]);
+
+        let delete = format!("/glossary/{id}/delete");
+        let res = server.post(&delete, "").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"].to_str().unwrap(), "/glossary");
+        assert_eq!(
+            server.count("SELECT count(*) FROM glossary_terms WHERE abbr = 'EDG'"),
+            0
+        );
+        assert_eq!(server.post(&delete, "").await.status().as_u16(), 404);
+        assert_eq!(
+            server
+                .post(&path, "target=x&sources=x")
+                .await
+                .status()
+                .as_u16(),
+            404
+        );
+    }
+
+    #[tokio::test]
+    async fn glossary_rejects_invalid_or_conflicting_terms() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let before = server.count("SELECT count(*) FROM glossary_sources");
+        // 訳語と原語は必須
+        assert_eq!(
+            server
+                .post("/glossary", "target=+&sources=x")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server
+                .post("/glossary", "target=x&sources=%0D%0A+")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        assert_eq!(
+            server.post("/glossary", "target=x").await.status().as_u16(),
+            400
+        );
+        // ほかの訳語の原語は使えず、どの訳語のものかを返す
+        let res = server.post("/glossary", "target=x&sources=atf").await;
+        assert_eq!(res.status().as_u16(), 409);
+        assert!(res.text().await.unwrap().contains("事故耐性燃料"));
+        let res = server
+            .form("/glossary", "target=x&sources=x")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(
+            server.count("SELECT count(*) FROM glossary_sources"),
+            before
+        );
     }
 
     /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。

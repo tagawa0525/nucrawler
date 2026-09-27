@@ -33,6 +33,9 @@ pub enum DbError {
     /// 要約のトピックが語彙に無く、新しい語として提案もされていない
     #[error("unknown topic {0:?}")]
     UnknownTopic(String),
+    /// 訳語集の訳語・略語・原語が、ほかの訳語のものと重なった
+    #[error("{0}")]
+    GlossaryConflict(String),
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
@@ -1003,6 +1006,35 @@ impl Db {
             }
         }
         Ok(terms.into_iter().map(|(_, term)| term).collect())
+    }
+
+    /// 画面に出す訳語集（登録順）。
+    pub fn glossary_entries(&self) -> Result<Vec<crate::glossary::Entry>, DbError> {
+        todo!()
+    }
+
+    /// 訳語を加えて id を返す。原語がほかの訳語に使われていれば、何も変えずに失敗する。
+    pub fn add_glossary_term(
+        &self,
+        _term: &crate::glossary::Term,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, DbError> {
+        todo!()
+    }
+
+    /// 訳語を置き換える。無ければ false。原語がほかの訳語に使われていれば、何も変えずに失敗する。
+    pub fn update_glossary_term(
+        &self,
+        _id: i64,
+        _term: &crate::glossary::Term,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        todo!()
+    }
+
+    /// 訳語と原語を消す。無ければ false。
+    pub fn delete_glossary_term(&self, _id: i64) -> Result<bool, DbError> {
+        todo!()
     }
 
     /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
@@ -4746,6 +4778,131 @@ mod tests {
                 .iter()
                 .any(|t| t.sources.contains(&"refueling outage".to_string())),
             "{glossary:?}"
+        );
+    }
+
+    fn glossary_term(sources: &[&str], target: &str, abbr: Option<&str>) -> crate::glossary::Term {
+        crate::glossary::Term {
+            sources: sources.iter().map(|s| s.to_string()).collect(),
+            target: target.into(),
+            abbr: abbr.map(Into::into),
+            note: None,
+        }
+    }
+
+    fn glossary_entry(db: &Db, id: i64) -> crate::glossary::Entry {
+        db.glossary_entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap()
+    }
+
+    /// 初期値の語は変更した時刻を持たない。加えた語は加えた時刻を持つ。
+    #[test]
+    fn glossary_terms_are_added_with_their_time() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(
+            db.glossary_entries()
+                .unwrap()
+                .iter()
+                .all(|e| e.changed_at.is_none())
+        );
+        let term = glossary_term(
+            &["emergency diesel generator", "EDG"],
+            "非常用ディーゼル発電機",
+            Some("EDG"),
+        );
+        let id = db
+            .add_glossary_term(&term, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let entry = glossary_entry(&db, id);
+        assert_eq!(entry.term, term);
+        assert_eq!(
+            entry.changed_at.as_deref(),
+            Some(timestamp(t("2026-09-27T00:00:00Z")).as_str())
+        );
+        assert!(db.glossary().unwrap().contains(&term));
+    }
+
+    /// 置き換えでは、残した原語はそのまま、足した原語は加え、無くした原語は消す。
+    /// 変更の時刻は、訳語か原語が変わったときだけ進む。
+    #[test]
+    fn glossary_term_update_replaces_sources_and_tracks_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db
+            .add_glossary_term(
+                &glossary_term(&["spent fuel", "used fuel"], "使用済燃料", None),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        let later = t("2026-09-27T00:00:00Z") + chrono::Duration::hours(1);
+        let updated = glossary_term(&["spent fuel", "spent nuclear fuel"], "使用済燃料", None);
+        assert!(db.update_glossary_term(id, &updated, later).unwrap());
+        let entry = glossary_entry(&db, id);
+        assert_eq!(entry.term, updated);
+        assert_eq!(entry.changed_at.as_deref(), Some(timestamp(later).as_str()));
+        // 同じ内容で保存しても変更にならない
+        let even_later = later + chrono::Duration::hours(1);
+        assert!(db.update_glossary_term(id, &updated, even_later).unwrap());
+        assert_eq!(
+            glossary_entry(&db, id).changed_at.as_deref(),
+            Some(timestamp(later).as_str())
+        );
+        assert!(!db.update_glossary_term(9999, &updated, later).unwrap());
+    }
+
+    /// ほかの訳語の原語・訳語・略語と重なれば、その旨を返して何も変えない。
+    #[test]
+    fn glossary_rejects_conflicts_without_writing() {
+        let db = Db::open_in_memory().unwrap();
+        let before = db.glossary_entries().unwrap();
+        for term in [
+            glossary_term(&["new term", "atf"], "新しい語", None),
+            glossary_term(&["new term"], "事故耐性燃料", None),
+            glossary_term(&["new term"], "新しい語", Some("ATF")),
+        ] {
+            let err = db
+                .add_glossary_term(&term, t("2026-09-27T00:00:00Z"))
+                .unwrap_err();
+            assert!(matches!(err, DbError::GlossaryConflict(_)), "{err:?}");
+        }
+        let err = db
+            .add_glossary_term(
+                &glossary_term(&["new term", "ATF"], "新しい語", None),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("事故耐性燃料"), "{err}");
+        // 自分の原語はそのまま保存できる
+        let atf = before
+            .iter()
+            .find(|e| e.term.target == "事故耐性燃料")
+            .unwrap();
+        assert!(
+            db.update_glossary_term(atf.id, &atf.term, t("2026-09-27T00:00:00Z"))
+                .unwrap()
+        );
+        assert_eq!(db.glossary_entries().unwrap(), before);
+    }
+
+    #[test]
+    fn glossary_terms_can_be_deleted() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db
+            .add_glossary_term(
+                &glossary_term(&["scrams"], "スクラム回数", None),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        assert!(db.delete_glossary_term(id).unwrap());
+        assert!(!db.delete_glossary_term(id).unwrap());
+        assert_eq!(
+            db.query_i64(&format!(
+                "SELECT count(*) FROM glossary_sources WHERE term_id = {id}"
+            ))
+            .unwrap(),
+            0
         );
     }
 

@@ -23,7 +23,7 @@ PR #88 以降、点数はプロファイルだけで決まる。そこで、採�
 - migration `0021_score_matches.sql`：
   - `score_matches(score_id REFERENCES scores ON DELETE CASCADE, kind CHECK IN ('interest', 'exclude'), topic, PRIMARY KEY (score_id, kind, topic)) WITHOUT ROWID`
   - 分野での絞り込みや集計ができるよう、JSON の列ではなく行で持つ。
-- `Db::insert_score` は当たった語も受け取り、採点と同じトランザクションで書く。
+- `Db::insert_score_with_matches(key, artifact_id, score, reason, ScoreMatches { interests, excludes }, now)` が、採点と当たった語を同じトランザクションで書く。既存の `Db::insert_score` は当たった語なしで呼ぶ入口として残す（テストの呼び出しを変えないため）。
 - 採点ステージは `parse` の結果をそのまま渡す。
 
 ## 5b `feat/show-score-matches`：表示

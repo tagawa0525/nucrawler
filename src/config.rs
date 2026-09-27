@@ -308,12 +308,14 @@ pub enum Category {
     Paper,
 }
 
-/// 原子力関連に絞り込む条件。いずれかに一致したものを取り込む。空なら全件。
+/// 原子力関連に絞り込む条件。`keywords` か `url_contains` のいずれかに一致したものを取り込む
+/// （両方空なら全件）。ただし、タイトルが `title_excludes` のいずれかを含むものは除く。
 #[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Filter {
     pub keywords: Vec<String>,
     pub url_contains: Vec<String>,
+    pub title_excludes: Vec<String>,
 }
 
 pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
@@ -610,6 +612,7 @@ mod tests {
                 filter: Filter {
                     keywords: vec!["原子力".into()],
                     url_contains: vec![],
+                    title_excludes: vec![],
                 },
                 body_selector: None,
                 list: None,

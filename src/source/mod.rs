@@ -126,8 +126,16 @@ fn resolve(base: &Url, href: &str) -> Result<String, SourceError> {
         })
 }
 
-/// 絞り込み条件に一致するか。条件が空なら常に一致する。
+/// 絞り込み条件に一致するか。タイトルが除く語を含めば一致しない。
+/// 取り込む条件（keywords・url_contains）が空ならそれ以外は常に一致する。
 pub fn matches(filter: &Filter, c: &Candidate) -> bool {
+    if filter
+        .title_excludes
+        .iter()
+        .any(|w| c.title.contains(w.as_str()))
+    {
+        return false;
+    }
     if filter.keywords.is_empty() && filter.url_contains.is_empty() {
         return true;
     }
@@ -366,6 +374,7 @@ mod tests {
         let f = Filter {
             keywords: vec!["原子力".into(), "泊".into()],
             url_contains: vec![],
+            title_excludes: vec![],
         };
         assert!(matches(
             &f,
@@ -386,6 +395,7 @@ mod tests {
         let f = Filter {
             keywords: vec![],
             url_contains: vec!["/news/atom/".into()],
+            title_excludes: vec![],
         };
         assert!(matches(
             &f,
@@ -402,6 +412,7 @@ mod tests {
         let f = Filter {
             keywords: vec!["原子力".into()],
             url_contains: vec!["/atom/".into()],
+            title_excludes: vec![],
         };
         assert!(matches(&f, &candidate("https://e/atom/1", "料金", None)));
         assert!(matches(&f, &candidate("https://e/x/1", "原子力", None)));

@@ -620,6 +620,32 @@ mod tests {
         ));
     }
 
+    /// 壊れた値が最新の記事の日時になっていても、黙って判定を飛ばさない。
+    #[test]
+    fn stale_check_rejects_an_unreadable_latest_date() {
+        let db = Db::open_in_memory().unwrap();
+        // 文字列としては日付より後ろに並ぶので、最新の記事の日時として選ばれる
+        for at in ["2026-09-10T03:00:00.000Z", "not a date"] {
+            db.insert_article(&NewArticle {
+                source_id: "s",
+                published_at: Some(at),
+                ..article(&format!("https://e.com/{at}"))
+            })
+            .unwrap();
+        }
+        let counts = FetchCounts {
+            total: 5,
+            matched: 5,
+            ..FetchCounts::default()
+        };
+        db.record_source_success("s", &counts, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert!(matches!(
+            db.warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z")),
+            Err(DbError::UnexpectedValue(_))
+        ));
+    }
+
     /// 一覧が 0 件のソースは、その警告だけを出す（新着の途絶えは同じ原因の結果なので重ねない）。
     #[test]
     fn empty_sources_are_not_also_reported_as_stale() {

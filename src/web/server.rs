@@ -257,24 +257,22 @@ async fn search(
             warnings: &warnings,
             labels: &labels,
         };
-        if params.is_empty() {
-            let html = html::search_page(&params, None, &vocabulary, None, &page);
-            return Ok((StatusCode::OK, html));
-        }
-        Ok(
-            match params.to_query(user, hash.as_deref(), web.list_limit) {
-                Ok(q) => {
-                    let items = db.search_articles(&q)?;
-                    let html = html::search_page(&params, Some(&items), &vocabulary, None, &page);
-                    (StatusCode::OK, html)
-                }
-                Err(e) => {
-                    let html =
-                        html::search_page(&params, None, &vocabulary, Some(&e.to_string()), &page);
-                    (StatusCode::BAD_REQUEST, html)
-                }
-            },
-        )
+        // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
+        let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
+            Ok(_) if params.is_empty() => {
+                html::search_page(&params, None, &vocabulary, None, &page)
+            }
+            Ok(q) => {
+                let items = db.search_articles(&q)?;
+                html::search_page(&params, Some(&items), &vocabulary, None, &page)
+            }
+            Err(e) => {
+                let html =
+                    html::search_page(&params, None, &vocabulary, Some(&e.to_string()), &page);
+                return Ok((StatusCode::BAD_REQUEST, html));
+            }
+        };
+        Ok((StatusCode::OK, html))
     })
     .await?;
     Ok((status, Html(page)).into_response())

@@ -419,6 +419,35 @@ mod tests {
         assert!(!matches(&f, &candidate("https://e/x/1", "料金", None)));
     }
 
+    /// 例の jaea は、トップの新着のプレス発表から原子力機構週報だけを除く。
+    #[test]
+    fn example_jaea_skips_weekly_reports() {
+        let sources = crate::config::parse_sources(
+            include_str!("../../examples/sources.toml"),
+            std::path::Path::new("examples/sources.toml"),
+        )
+        .unwrap();
+        let jaea = sources.sources.iter().find(|s| s.id == "jaea").unwrap();
+        let candidates = html_list::parse(
+            jaea.list.as_ref().unwrap(),
+            &String::from_utf8(fixture("jaea_top.html")).unwrap(),
+            &base(&jaea.url),
+        )
+        .unwrap();
+        let titles: Vec<&str> = candidates
+            .iter()
+            .filter(|c| matches(&jaea.filter, c))
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "ウランより重い原子核が安定する仕組みを解明\u{3000}—100番元素フェルミウム252が変形した二重魔法核であることを実証—",
+                "原子力事業者防災業務計画の修正について（お知らせ）",
+            ]
+        );
+    }
+
     /// 除く語はタイトルだけを見る。取り込む条件が空でも、一致しても、除く語が優先する。
     #[test]
     fn titles_with_excluded_words_are_skipped() {

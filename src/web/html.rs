@@ -862,13 +862,43 @@ mod tests {
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
         }
-        assert!(html.contains("l / →"), "the hint names the keys: {html}");
         // 検索の結果は振り分けの対象にしない
         let p = Params::from_query("q=x");
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
             !html.contains(r#"data-id=""#) && !html.contains("<script>"),
+            "{html}"
+        );
+    }
+
+    /// 一覧の上部は見出しも説明も出さず、絵文字のボタンだけを並べる。
+    /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。
+    #[test]
+    fn list_page_shows_only_emoji_buttons_above_the_cards() {
+        let view = ListView {
+            all: true,
+            read: false,
+        };
+        let html = list_page(&[], &[], view, &Page::default());
+        assert!(!html.contains("<h1>"), "{html}");
+        for text in ["おすすめだけ表示", "過去の既読", "スワイプ", "l / →"] {
+            assert!(!html.contains(&format!(">{text}")), "{text}: {html}");
+        }
+        assert!(
+            html.contains(r#"<a class="btn" href="/search" aria-label="検索" title="検索">🔍</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn on" href="/" aria-label="すべて表示：ON" title="すべて表示：ON">🗂</a>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">📖</a>"#
+            ),
             "{html}"
         );
     }
@@ -902,14 +932,12 @@ mod tests {
         let earlier = [read];
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
-        assert!(html.contains("過去の既読も表示"), "{html}");
         let view = ListView {
             all: false,
             read: true,
         };
         let html = list_page(&[], &earlier, view, &Page::default());
         assert!(html.contains("<h2>過去の記事</h2>"), "{html}");
-        assert!(html.contains("過去の既読を隠す"), "{html}");
         assert!(html.contains(r#"class="card read""#), "{html}");
     }
 

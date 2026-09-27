@@ -708,7 +708,7 @@ mod tests {
         let ok = parse_sources(
             &source_toml(
                 "html_list",
-                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\", date = \"dt\" }\n",
+                "list = { link = \"dd > a\", date_in_url = \"yymmdd\", title_skip = \".x\", follow = \"h3 a\", date = \"dt\", also = [\"https://e.example/top\"] }\n",
             ),
             p(),
         )
@@ -716,6 +716,7 @@ mod tests {
         let list = ok.sources[0].list.as_ref().unwrap();
         assert_eq!(list.date_in_url, Some(UrlDate::Yymmdd));
         assert_eq!(list.date.as_deref(), Some("dt"));
+        assert_eq!(list.also, ["https://e.example/top"]);
         for (text, reason) in [
             (source_toml("html_list", ""), "[source.list]"),
             (
@@ -733,6 +734,17 @@ mod tests {
             (
                 source_toml("html_list", "list = { link = \"a\", date = \"[\" }\n"),
                 "list.date",
+            ),
+            (
+                source_toml("html_list", "list = { link = \"a\", also = [\"/top\"] }\n"),
+                "list.also",
+            ),
+            (
+                source_toml(
+                    "html_list",
+                    "list = { link = \"a\", also = [\"ftp://e.example/\"] }\n",
+                ),
+                "list.also",
             ),
         ] {
             let err = parse_sources(&text, p()).unwrap_err();

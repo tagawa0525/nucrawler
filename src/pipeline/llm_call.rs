@@ -19,6 +19,9 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// 呼び出しが失敗したとき、それが止める指示によるものかを見極めるために待つ時間。
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// 1 回の呼び出しの内容。
 pub struct Call<'a> {
     /// `llm_calls` に記録するステージ名
@@ -52,9 +55,14 @@ pub async fn call_recorded<L: Llm>(
         result = llm.call(req) => result,
         () = cancel.requested() => return Ok(Outcome::Cancelled),
     };
-    // 止める指示と同時に子プロセスが終了させられたときも（systemd が unit の全プロセスに
-    // SIGTERM を送った場合など）、LLM の失敗ではない
-    if result.is_err() && cancel.is_requested() {
+    // 止める指示と同時に claude が終了させられたとき（端末の Ctrl-C は claude にも届く）は、
+    // LLM の失敗ではない。シグナルの受け取りは非同期で、claude が落ちたことの方が先に分かることが
+    // あるので、失敗したときだけ止める指示を少し待つ（本当の失敗の記録が少し遅れるだけ）
+    if result.is_err()
+        && tokio::time::timeout(STOP_GRACE, cancel.requested())
+            .await
+            .is_ok()
+    {
         return Ok(Outcome::Cancelled);
     }
     // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。

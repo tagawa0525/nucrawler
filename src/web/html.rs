@@ -66,6 +66,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
 .cal { position: relative; display: inline-block; margin: 0 0.3rem; cursor: pointer; }
 .cal input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
+.cal:focus-within { outline: 2px solid #0b57a4; outline-offset: 2px; }
 .actions form { display: inline; }
 .actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
   border: 1px solid #bbb; background: #fff; }
@@ -345,8 +346,8 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
         ),
         since = text("since", &p.since, " size=\"10\" placeholder=\"2026-09\""),
         until = text("until", &p.until, " size=\"10\" placeholder=\"2026-09-30\""),
-        since_cal = calendar("since"),
-        until_cal = calendar("until"),
+        since_cal = calendar("since", "開始日"),
+        until_cal = calendar("until", "終了日"),
         topics_open = open(!p.topics.is_empty()),
         sources_open = open(!p.sources.is_empty()),
         lang = select(
@@ -373,19 +374,26 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
 
 /// 期間の欄の横の 📅。日付の入力を透明にして絵文字に重ね、押すとカレンダーが開く
 /// （`CALENDAR_SCRIPT`）。名前を持たないので送られず、選んだ日付は `name` の欄へ入る。
-fn calendar(name: &str) -> String {
+/// キーボードでも操作できるよう、日付の入力はフォーカスでき、読み上げの名前を持つ。
+fn calendar(name: &str, label: &str) -> String {
     format!(
-        "<label class=\"cal\" title=\"カレンダー\">📅<input type=\"date\" data-for=\"{name}\" tabindex=\"-1\"></label>"
+        "<label class=\"cal\" title=\"カレンダー\">📅<input type=\"date\" data-for=\"{name}\" \
+         aria-label=\"{label}をカレンダーで選ぶ\"></label>"
     )
 }
 
 /// 📅 のカレンダーで選んだ日付を、隣の期間の欄に入れる。欄は月だけの指定もできるよう文字の
-/// 入力のまま残す。欄が日付ならその日から開く。
+/// 入力のまま残す。欄が日付ならその日から、そうでなければ（月だけや空なら）今日から開く。
 const CALENDAR_SCRIPT: &str = r#"<script>
 document.querySelectorAll("input[data-for]").forEach((cal) => {
   const text = cal.form.elements[cal.dataset.for];
+  // 前に選んだ日付が残らないよう、開く前に毎回欄から合わせる
+  const sync = () => {
+    cal.value = /^\d{4}-\d{2}-\d{2}$/.test(text.value) ? text.value : "";
+  };
+  cal.addEventListener("focus", sync);
   cal.addEventListener("click", () => {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(text.value)) cal.value = text.value;
+    sync();
     // タップで開くブラウザもあるが、PC の Chrome などは欄を押しただけでは開かない
     if (cal.showPicker) cal.showPicker();
   });

@@ -1705,7 +1705,8 @@ impl Db {
             .collect()
     }
 
-    /// 指摘の対応状況を変える。無ければ false。受付中に戻せば対応日時を消す。
+    /// 指摘の対応状況を変える。無ければ false。対応日時は状況が変わったときだけ `now` にし、
+    /// 受付中に戻せば消す。
     pub fn resolve_term_report(
         &self,
         id: i64,
@@ -1714,11 +1715,15 @@ impl Db {
         reply: Option<&str>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        let resolved_at = (status != ReportStatus::Pending).then(|| timestamp(now));
+        // 対応日時は状況を変えたときだけ進める（ひとことや訳語だけの修正では変えない）
         Ok(self.conn.execute(
-            "UPDATE term_reports SET status = ?2, term_id = ?3, reply = ?4, resolved_at = ?5
+            "UPDATE term_reports
+             SET resolved_at = CASE WHEN ?2 = 'pending' THEN NULL
+                                    WHEN status = ?2 THEN resolved_at
+                                    ELSE ?5 END,
+                 status = ?2, term_id = ?3, reply = ?4
              WHERE id = ?1",
-            rusqlite::params![id, status.as_str(), term_id, reply, resolved_at],
+            rusqlite::params![id, status.as_str(), term_id, reply, timestamp(now)],
         )? > 0)
     }
 

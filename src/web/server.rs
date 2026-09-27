@@ -894,7 +894,7 @@ mod tests {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
         let (status, html) = server.get("/?all=1&read=1").await;
         assert_eq!(status, 200);
-        assert!(html.contains("過去の既読を隠す"), "{html}");
+        assert!(html.contains("過去の既読も表示：ON"), "{html}");
         assert!(html.contains(r#"href="/?all=1""#), "{html}");
         assert!(html.contains(r#"href="/?read=1""#), "{html}");
     }

@@ -55,6 +55,11 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .score { display: inline-block; min-width: 2.2rem; text-align: center; border-radius: 0.4rem;
   background: #0b57a4; color: #fff; font-weight: 700; margin-right: 0.4rem; }
 .read { opacity: 0.6; }
+.bar { display: flex; gap: 0.5rem; margin: 0.3rem 0; }
+.btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
+  background: #fff; text-decoration: none; }
+.btn.on { border-color: #2e7d32; background: #e3f1e4; }
+.btn.off { border-color: #b3261e; background: #fbe7e6; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
 .actions form { display: inline; }
@@ -174,32 +179,26 @@ impl ListView {
 }
 
 pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
-    let mut body = String::from("<h1>nucrawler</h1>");
     let all_toggle = ListView {
         all: !view.all,
         ..view
-    };
-    let all_label = if view.all {
-        "おすすめだけ表示"
-    } else {
-        "すべて表示（👎・見ない・低い点・未採点を含む）"
     };
     let read_toggle = ListView {
         read: !view.read,
         ..view
     };
-    let read_label = if view.read {
-        "過去の既読を隠す"
-    } else {
-        "過去の既読も表示"
-    };
-    body.push_str(&format!(
-        "<p class=\"meta\"><a href=\"/search\">🔍 検索</a> ・<a href=\"/search?bookmarked=1\">🔖 ブックマーク</a> ・<a href=\"{}\">{all_label}</a> ・<a href=\"{}\">{read_label}</a></p>\
-         <p class=\"meta\">右へスワイプか l / → でブックマーク、左へスワイプか h / ← で見ない\
-         （j / k・↓ / ↑ で選ぶ、u で取り消す）</p>",
-        all_toggle.href(),
-        read_toggle.href(),
-    ));
+    let mut body = format!(
+        "<nav class=\"bar\">{}{}{}{}</nav>",
+        button("/search", "検索", "🔍", None),
+        button("/search?bookmarked=1", "ブックマーク", "🔖", None),
+        button(&all_toggle.href(), "すべて表示", "🗂", Some(view.all)),
+        button(
+            &read_toggle.href(),
+            "過去の既読も表示",
+            "📖",
+            Some(view.read)
+        ),
+    );
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
@@ -215,6 +214,21 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     }
     body.push_str(SWIPE_SCRIPT);
     layout("一覧", page, &body)
+}
+
+/// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
+/// `state` があれば切り替えとして ON（緑）/ OFF（赤）を示す。`href` はエスケープ済みで渡す。
+fn button(href: &str, name: &str, emoji: &str, state: Option<bool>) -> String {
+    let (class, label) = match state {
+        None => (String::new(), name.to_string()),
+        Some(on) => {
+            let (class, state) = if on { ("on", "ON") } else { ("off", "OFF") };
+            (format!(" {class}"), format!("{name}：{state}"))
+        }
+    };
+    format!(
+        "<a class=\"btn{class}\" href=\"{href}\" aria-label=\"{label}\" title=\"{label}\">{emoji}</a>"
+    )
 }
 
 /// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。
@@ -862,13 +876,43 @@ mod tests {
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
         }
-        assert!(html.contains("l / →"), "the hint names the keys: {html}");
         // 検索の結果は振り分けの対象にしない
         let p = Params::from_query("q=x");
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
             !html.contains(r#"data-id=""#) && !html.contains("<script>"),
+            "{html}"
+        );
+    }
+
+    /// 一覧の上部は見出しも説明も出さず、絵文字のボタンだけを並べる。
+    /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。
+    #[test]
+    fn list_page_shows_only_emoji_buttons_above_the_cards() {
+        let view = ListView {
+            all: true,
+            read: false,
+        };
+        let html = list_page(&[], &[], view, &Page::default());
+        assert!(!html.contains("<h1>"), "{html}");
+        for text in ["おすすめだけ表示", "過去の既読", "スワイプ", "l / →"] {
+            assert!(!html.contains(&format!(">{text}")), "{text}: {html}");
+        }
+        assert!(
+            html.contains(r#"<a class="btn" href="/search" aria-label="検索" title="検索">🔍</a>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn on" href="/" aria-label="すべて表示：ON" title="すべて表示：ON">🗂</a>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">📖</a>"#
+            ),
             "{html}"
         );
     }
@@ -902,14 +946,12 @@ mod tests {
         let earlier = [read];
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
-        assert!(html.contains("過去の既読も表示"), "{html}");
         let view = ListView {
             all: false,
             read: true,
         };
         let html = list_page(&[], &earlier, view, &Page::default());
         assert!(html.contains("<h2>過去の記事</h2>"), "{html}");
-        assert!(html.contains("過去の既読を隠す"), "{html}");
         assert!(html.contains(r#"class="card read""#), "{html}");
     }
 

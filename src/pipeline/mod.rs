@@ -7,6 +7,7 @@ pub mod fetch;
 pub mod llm_call;
 pub mod lock;
 pub mod score;
+pub mod tidy;
 pub mod translate;
 
 use std::sync::Arc;

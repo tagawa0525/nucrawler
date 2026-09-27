@@ -354,6 +354,17 @@ pub struct SearchQuery<'a> {
     pub limit: usize,
 }
 
+/// 語彙の語と、その使われ方（語彙の整理に使う）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicUsage {
+    pub name: String,
+    pub facet: crate::topics::Facet,
+    /// 要約が提案して語彙に加えた時刻。初期語彙と `topics import` で入れた語は None
+    pub added_at: Option<String>,
+    /// この語が付いている要約の版の数
+    pub uses: i64,
+}
+
 /// 語彙の統合：`from` の語を `into` にまとめ、`from` は以後 `into` の別名として扱う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicMerge {
@@ -877,6 +888,20 @@ impl Db {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// 語彙の語と使われ方（登録順）。
+    pub fn topic_usage(&self) -> Result<Vec<TopicUsage>, DbError> {
+        Ok(Vec::new())
+    }
+
+    /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。
+    pub fn llm_succeeded_since(
+        &self,
+        _stage: &str,
+        _since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        Ok(false)
     }
 
     /// 語を統合する。要約への付与を統合先に付け替え、統合元の名前を別名として記録し、統合元を消す。
@@ -4544,6 +4569,61 @@ mod tests {
         let id =
             digest_with_topics(&db, serde_json::json!(["新設炉"]), serde_json::json!([])).unwrap();
         assert_eq!(linked_topics(&db, id), ["新設炉"]);
+    }
+
+    #[test]
+    fn topic_usage_counts_digests_and_marks_proposals() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        digest_with_topics(&db, serde_json::json!(["燃料"]), serde_json::json!([])).unwrap();
+        propose(&db, "データセンター需要");
+        digest_with_topics(
+            &db,
+            serde_json::json!(["燃料", "データセンター需要"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        let usage = db.topic_usage().unwrap();
+        assert_eq!(usage.len(), db.topics().unwrap().len());
+        let fuel = usage.iter().find(|u| u.name == "燃料").unwrap();
+        assert_eq!(
+            (fuel.facet, fuel.added_at.as_deref(), fuel.uses),
+            (Facet::Field, None, 2)
+        );
+        let dc = usage.last().unwrap();
+        assert_eq!(dc.name, "データセンター需要");
+        assert_eq!(dc.added_at.as_deref(), Some("2026-09-27T00:00:00.000Z"));
+        assert_eq!(dc.uses, 2);
+        assert_eq!(usage.iter().find(|u| u.name == "PWR").unwrap().uses, 0);
+    }
+
+    #[test]
+    fn llm_succeeded_since_ignores_failures_and_other_stages() {
+        let db = Db::open_in_memory().unwrap();
+        let call = |stage: &'static str, ok: bool| LlmCall {
+            stage,
+            backend: "fake",
+            model: "sonnet",
+            n_items: 1,
+            ok,
+            duration_ms: 1,
+            error: None,
+            rate_limit: None,
+        };
+        db.record_llm_call(&call("tidy", true), t("2026-09-20T00:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call("tidy", false), t("2026-09-26T00:00:00Z"))
+            .unwrap();
+        db.record_llm_call(&call("digest", true), t("2026-09-26T00:00:00Z"))
+            .unwrap();
+        assert!(
+            db.llm_succeeded_since("tidy", t("2026-09-20T00:00:00Z"))
+                .unwrap()
+        );
+        assert!(
+            !db.llm_succeeded_since("tidy", t("2026-09-21T00:00:00Z"))
+                .unwrap()
+        );
     }
 
     #[test]

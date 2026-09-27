@@ -18,6 +18,7 @@ pub mod scoring;
 pub mod source;
 pub mod status;
 pub mod text;
+pub mod tidy;
 pub mod topics;
 pub mod translate;
 pub mod web;

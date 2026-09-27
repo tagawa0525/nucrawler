@@ -433,4 +433,38 @@ mod tests {
             "error sending request: connection reset by peer"
         );
     }
+
+    /// 実サイトの確認。`cargo test -- --ignored jaif` で実行する。
+    #[tokio::test]
+    #[ignore = "uses the real network"]
+    async fn jaif_example_source_fetches_full_text_from_the_real_feed() {
+        let sources = crate::config::parse_sources(
+            include_str!("../examples/sources.toml"),
+            std::path::Path::new("examples/sources.toml"),
+        )
+        .unwrap();
+        let jaif = sources.sources.iter().find(|s| s.id == "jaif").unwrap();
+        let fetcher = Fetcher::new(
+            "nucrawler-test",
+            Duration::from_secs(30),
+            Duration::ZERO,
+            8 << 20,
+        )
+        .unwrap();
+        let stats = fetch_source(&fetcher, jaif).await.unwrap();
+        assert!(!stats.matched.is_empty());
+        for c in &stats.matched {
+            assert!(
+                c.url.starts_with("https://www.jaif.or.jp/journal/"),
+                "{}",
+                c.url
+            );
+            assert!(c.published_at.is_some(), "{}", c.url);
+            assert!(
+                c.content.as_deref().is_some_and(|b| !b.is_empty()),
+                "{}",
+                c.url
+            );
+        }
+    }
 }

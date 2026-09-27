@@ -4416,6 +4416,62 @@ mod tests {
         assert!(db.topics().unwrap().iter().all(|t| t.name != "新設炉"));
     }
 
+    /// 統合した語を付けた要約も、詳細・API・MCP・採点では統合先の語で見せる
+    /// （payload は LLM の出力の記録として書き換えず、読み出しを付与にそろえる）。
+    #[test]
+    fn digest_topics_are_read_from_links_after_merges() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/merged"))
+            .unwrap()
+            .unwrap();
+        let c = db
+            .insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let payload = serde_json::json!({
+            "title_ja": "題", "summary_ja": "要約", "points_ja": ["点"], "implications_ja": "",
+            "lwr_relevant": true, "topics": ["燃料", "新設炉"],
+            "new_topics": [{"name": "新設炉", "facet": "分野"}],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 2,
+                payload: &payload,
+                inputs: &[c],
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+
+        let detail = db.article_detail(owner, None, a).unwrap().unwrap();
+        assert_eq!(
+            detail.digests[0].payload["topics"],
+            serde_json::json!(["燃料", "新設・建設"]),
+            "in vocabulary order"
+        );
+        let inputs = db
+            .pending_score(
+                score_key(&db),
+                t("2026-09-10T00:00:00Z"),
+                t("2026-09-28T00:00:00Z"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(inputs[0].topics, ["燃料", "新設・建設"]);
+    }
+
     #[test]
     fn merge_topics_changes_nothing_on_failure() {
         let db = Db::open_in_memory().unwrap();

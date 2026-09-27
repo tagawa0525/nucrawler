@@ -328,6 +328,12 @@ mod tests {
             result_line(&item),
             "2026-09-26 09:00    -  Original  https://e.com/1"
         );
+        // 題名の改行やタブで 1 件が複数行に割れないようにする
+        item.title = "Line\r\none\ttwo  ".into();
+        assert_eq!(
+            result_line(&item),
+            "2026-09-26 09:00    -  Line one two  https://e.com/1"
+        );
     }
 
     #[test]

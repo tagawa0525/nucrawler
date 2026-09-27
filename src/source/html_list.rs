@@ -240,6 +240,14 @@ mod tests {
         );
     }
 
+    /// 画面に出ない要素（script など）の中身は見出しに入れない。
+    #[test]
+    fn titles_ignore_non_rendered_elements() {
+        let html = r#"<a href="/a.html">見出し<script>var x = 1;</script><style>.x{}</style><noscript>JS</noscript><template>t</template></a>"#;
+        let items = parse(&list("a"), html, &base("https://e.example/")).unwrap();
+        assert_eq!(items[0].title, "見出し");
+    }
+
     #[test]
     fn follow_without_a_match_is_error() {
         let err = follow(

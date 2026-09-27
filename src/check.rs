@@ -211,6 +211,73 @@ mod tests {
         (server, sources)
     }
 
+    /// html_list は入口のページから一覧をたどり、robots.txt に従う。
+    #[tokio::test]
+    async fn html_list_follows_and_respects_robots() {
+        let html = |body: &'static str| Route {
+            content_type: "text/html; charset=utf-8",
+            ..Route::ok(body)
+        };
+        let server = Server::start(
+            [
+                (
+                    "/robots.txt",
+                    Route::ok("User-agent: *\nDisallow: /private/\n"),
+                ),
+                (
+                    "/news/",
+                    html(r#"<h3><a href="/press/2026/">プレスリリース</a></h3>"#),
+                ),
+                (
+                    "/press/2026/",
+                    html(
+                        r#"<dl><dd><a href="pdf/20260925.pdf">原子炉の停止</a></dd>
+                           <dd><a href="pdf/20260924.pdf">役員人事</a></dd></dl>"#,
+                    ),
+                ),
+                ("/private/news/", html(r#"<dd><a href="/x.pdf">x</a></dd>"#)),
+            ]
+            .into(),
+        );
+        let list = HtmlList {
+            link: "dd a".into(),
+            date_in_url: Some(crate::config::UrlDate::Yyyymmdd),
+            title_skip: None,
+            follow: Some("h3 a".into()),
+        };
+        let source = |path: &str| Source {
+            list: Some(list.clone()),
+            ..src(
+                "japc",
+                SourceKind::HtmlList,
+                server.url(path),
+                true,
+                Filter {
+                    keywords: vec!["原子炉".into()],
+                    url_contains: vec![],
+                },
+            )
+        };
+        let stats = fetch_source(&fetcher(), &source("/news/")).await.unwrap();
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.matched.len(), 1);
+        assert_eq!(
+            stats.matched[0].url,
+            server.url("/press/2026/pdf/20260925.pdf")
+        );
+
+        let err = fetch_source(&fetcher(), &source("/private/news/"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SourceFailure::Http(HttpError::DisallowedByRobots { .. })
+            ),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn checks_enabled_sources_and_applies_filters() {
         let (server, sources) = setup();

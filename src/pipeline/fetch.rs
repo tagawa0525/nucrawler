@@ -136,6 +136,7 @@ mod tests {
                 Filter {
                     keywords: vec!["Power Reactor".into()],
                     url_contains: vec![],
+                    title_excludes: vec![],
                 },
             ),
             src("blocked", server.url("/blocked"), true, Filter::default()),

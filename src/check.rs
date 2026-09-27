@@ -205,6 +205,7 @@ mod tests {
                 Filter {
                     keywords: vec!["Power Reactor".into()],
                     url_contains: vec![],
+                    title_excludes: vec![],
                 },
             ),
             src(
@@ -271,6 +272,7 @@ mod tests {
                 Filter {
                     keywords: vec!["原子炉".into()],
                     url_contains: vec![],
+                    title_excludes: vec![],
                 },
             )
         };

@@ -7,6 +7,7 @@
 # enabled:  省略時 true
 # filter:   原子力関連に絞り込む。keywords（タイトル・概要に含む）か url_contains（URL に含む）の
 #           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
+#           title_excludes（タイトルに含む）のいずれかに一致したものは、ほかの条件によらず除く
 # list:     html_list の一覧ページの読み方
 #           link        記事へのリンク（a 要素）の CSS セレクタ
 #           date        項目の日付の要素の CSS セレクタ（例 2026年9月18日、2026/09/07）。リンクを含み、
@@ -130,6 +131,8 @@ url = "https://www.jaea.go.jp/"
 lang = "ja"
 category = "research"
 list = { link = 'li[data-info-category="newsPress"] dd a', date = "dt" }
+# 週報は個別のプレスのまとめで、URL もほかのプレスと同じ形なのでタイトルで除く
+filter = { title_excludes = ["原子力機構週報"] }
 
 # --- 電力会社（原子力専用フィードは無いので絞り込む） ---
 

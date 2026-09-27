@@ -126,8 +126,16 @@ fn resolve(base: &Url, href: &str) -> Result<String, SourceError> {
         })
 }
 
-/// 絞り込み条件に一致するか。条件が空なら常に一致する。
+/// 絞り込み条件に一致するか。タイトルが除く語を含めば一致しない。
+/// 取り込む条件（keywords・url_contains）が空ならそれ以外は常に一致する。
 pub fn matches(filter: &Filter, c: &Candidate) -> bool {
+    if filter
+        .title_excludes
+        .iter()
+        .any(|w| c.title.contains(w.as_str()))
+    {
+        return false;
+    }
     if filter.keywords.is_empty() && filter.url_contains.is_empty() {
         return true;
     }
@@ -366,6 +374,7 @@ mod tests {
         let f = Filter {
             keywords: vec!["原子力".into(), "泊".into()],
             url_contains: vec![],
+            title_excludes: vec![],
         };
         assert!(matches(
             &f,
@@ -386,6 +395,7 @@ mod tests {
         let f = Filter {
             keywords: vec![],
             url_contains: vec!["/news/atom/".into()],
+            title_excludes: vec![],
         };
         assert!(matches(
             &f,
@@ -402,9 +412,70 @@ mod tests {
         let f = Filter {
             keywords: vec!["原子力".into()],
             url_contains: vec!["/atom/".into()],
+            title_excludes: vec![],
         };
         assert!(matches(&f, &candidate("https://e/atom/1", "料金", None)));
         assert!(matches(&f, &candidate("https://e/x/1", "原子力", None)));
         assert!(!matches(&f, &candidate("https://e/x/1", "料金", None)));
+    }
+
+    /// 例の jaea は、トップの新着のプレス発表から原子力機構週報だけを除く。
+    #[test]
+    fn example_jaea_skips_weekly_reports() {
+        let sources = crate::config::parse_sources(
+            include_str!("../../examples/sources.toml"),
+            std::path::Path::new("examples/sources.toml"),
+        )
+        .unwrap();
+        let jaea = sources.sources.iter().find(|s| s.id == "jaea").unwrap();
+        let candidates = html_list::parse(
+            jaea.list.as_ref().unwrap(),
+            &String::from_utf8(fixture("jaea_top.html")).unwrap(),
+            &base(&jaea.url),
+        )
+        .unwrap();
+        let titles: Vec<&str> = candidates
+            .iter()
+            .filter(|c| matches(&jaea.filter, c))
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "ウランより重い原子核が安定する仕組みを解明\u{3000}—100番元素フェルミウム252が変形した二重魔法核であることを実証—",
+                "原子力事業者防災業務計画の修正について（お知らせ）",
+            ]
+        );
+    }
+
+    /// 除く語はタイトルだけを見る。取り込む条件が空でも、一致しても、除く語が優先する。
+    #[test]
+    fn titles_with_excluded_words_are_skipped() {
+        let only_excludes = Filter {
+            title_excludes: vec!["週報".into()],
+            ..Filter::default()
+        };
+        assert!(!matches(
+            &only_excludes,
+            &candidate("https://e/a", "原子力機構週報（9/12～9/18）", None)
+        ));
+        assert!(matches(
+            &only_excludes,
+            &candidate("https://e/a", "研究成果", Some("詳しくは週報で"))
+        ));
+
+        let both = Filter {
+            keywords: vec!["原子力".into()],
+            url_contains: vec!["/atom/".into()],
+            title_excludes: vec!["週報".into()],
+        };
+        assert!(!matches(
+            &both,
+            &candidate("https://e/atom/1", "原子力週報", None)
+        ));
+        assert!(matches(
+            &both,
+            &candidate("https://e/x/1", "原子力の話", None)
+        ));
     }
 }

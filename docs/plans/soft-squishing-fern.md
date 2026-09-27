@@ -157,7 +157,7 @@ source_state(source_id PK, last_success_at, last_error)
 | `redo translate --model M [filters]`                       | 同じく和訳をやり直す                                           |
 | `status`                                                   | 未処理件数、エラー件数、クォータの状況を表示する               |
 | `sources check [ID]`                                       | ソースごとの取得件数と先頭の数件を表示する（DB には書かない）  |
-| `serve [--addr ADDR]`                                      | Web UI を起動する（後から RSS と API も）                      |
+| `serve [--addr ADDR]`                                      | Web UI、Atom フィード、JSON API を提供する                     |
 | `profile import FILE` と `profile export`                  | プロファイルの TOML を取り込む、書き出す                       |
 
 ## 依存 crate
@@ -187,11 +187,13 @@ source_state(source_id PK, last_success_at, last_error)
 12. ✅ `feat/redo`：`redo digest` と `redo translate`
 13. ✅ `feat/web-ui`：スマホ向けの一覧・詳細、版の切り替え、フィードバック、行動の記録、和訳の依頼、警告表示
 14. ✅ `feat/deploy`：Nix flake、home-manager モジュール、systemd の user timer（取得 04/10/16/22 時、LLM 10/16/03 時、依頼 15 分ごと、`Persistent=true`）、linger の案内、README
+    - 実装では timer を、要約・採点・和訳まで行う 03/10/16 時と、取得と抽出だけ行う 22 時にした（依頼は 15 分ごと）
 
 **MVP の後**
 
 15. 🔶 HTML の一覧ページ（NRA、JAEA、電力各社、東京電力はブラウザ UA）と PDF（pdf-extract、スキャン画像のときは Claude に直接読ませる）
     - 残り：スキャン画像の PDF を Claude に読ませる（今は文字の無い PDF として断念する）
+    - 東京電力も既定の UA で取得している。ソースごとの UA の設定は無い
 16. ✅ JAIF
 17. 論文系（事前フィルタ、Crossref、arXiv、OSTI）
 18. ✅ RSS 出力と JSON API（出力は Atom フィードにした）

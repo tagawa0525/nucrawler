@@ -5615,6 +5615,33 @@ mod tests {
         );
     }
 
+    /// 取り消すのは、取り消す行動で付いたブックマークだけ。それより前からのブックマークは残す。
+    #[test]
+    fn undo_keeps_a_bookmark_made_before() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(db.search_articles(&search_query(&db)).unwrap()[0].bookmarked);
+        assert_eq!(
+            db.recent_signals(owner, 10).unwrap(),
+            [Signal {
+                kind: SignalKind::Bookmark,
+                title_ja: "題".into()
+            }]
+        );
+    }
+
     #[test]
     fn migration_keeps_existing_events_and_accepts_new_kinds() {
         let conn = Connection::open_in_memory().unwrap();

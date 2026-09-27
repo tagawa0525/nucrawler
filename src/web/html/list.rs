@@ -61,7 +61,6 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let _ = explore;
     let all_toggle = ListView {
         all: !view.all,
         ..view
@@ -101,6 +100,13 @@ pub fn list_page_with_explore(
             "<h2>過去の未読</h2>"
         });
         body.extend(earlier.iter().map(|i| card(i, true, page)));
+    }
+    if !explore.is_empty() {
+        body.push_str(
+            "<h2>確認枠</h2><p class=\"meta\">おすすめの閾値に届かなかった記事から無作為に選んでいます。\
+             関心があれば 🔖、無ければ見送ってください</p>",
+        );
+        body.extend(explore.iter().map(|i| card(i, true, page)));
     }
     body.push_str(SWIPE_SCRIPT);
     layout("一覧", page, &body)

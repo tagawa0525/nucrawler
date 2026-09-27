@@ -450,7 +450,62 @@ impl Db {
         per_day: usize,
         today: &str,
     ) -> Result<Vec<ListItem>, DbError> {
-        todo!("{q:?} {per_day} {today}")
+        if per_day == 0 {
+            return Ok(Vec::new());
+        }
+        let labeled: std::collections::HashSet<i64> = self
+            .eval_labels(q.user_id)?
+            .into_iter()
+            .map(|l| l.article_id)
+            .collect();
+        let picked_on = |day: Option<&str>| -> Result<Vec<i64>, DbError> {
+            let mut stmt = self.conn.prepare(
+                "SELECT article_id FROM explore_picks
+                 WHERE user_id = ?1 AND (?2 IS NULL OR picked_on = ?2) ORDER BY article_id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![q.user_id, day], |r| r.get(0))?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        let need = per_day.saturating_sub(picked_on(Some(today))?.len());
+        if need > 0 {
+            let ever = picked_on(None)?;
+            // 一覧の「すべて表示」と同じ条件で読み、閾値未満で反応の無い、まだ選んでいない記事に絞る
+            let candidates: Vec<i64> = self
+                .list_articles(ListQuery {
+                    show_all: true,
+                    limit: usize::MAX,
+                    ..q
+                })?
+                .into_iter()
+                .filter(|i| {
+                    i.lwr_relevant == Some(true)
+                        && i.score.is_some_and(|s| s < q.min_score)
+                        && !labeled.contains(&i.article_id)
+                        && !ever.contains(&i.article_id)
+                })
+                .map(|i| i.article_id)
+                .collect();
+            tx.execute(
+                "INSERT INTO explore_picks (user_id, article_id, picked_on)
+                 SELECT ?1, value, ?2 FROM json_each(?3) ORDER BY random() LIMIT ?4",
+                rusqlite::params![
+                    q.user_id,
+                    today,
+                    serde_json::to_string(&candidates)?,
+                    i64::try_from(need).unwrap_or(i64::MAX)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        let mut items = Vec::new();
+        for id in picked_on(Some(today))? {
+            if labeled.contains(&id) {
+                continue;
+            }
+            items.extend(self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?);
+        }
+        Ok(items)
     }
 
     /// 一覧・詳細に共通の行の組み立て。

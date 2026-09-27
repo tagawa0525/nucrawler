@@ -28,7 +28,7 @@ pub struct FetchSummary {
     pub cancelled: bool,
 }
 
-/// ソース単位の失敗は `source_state` に記録して次のソースへ進む。成功した回は件数を `fetch_runs` に
+/// ソース単位の失敗は `source_state` に記録して次のソースへ進む。成功した回は、その件数と一緒に
 /// `now` の時刻で記録する。DB のエラーは即座に返す。
 pub async fn fetch_sources(
     db: &Db,
@@ -46,14 +46,13 @@ pub async fn fetch_sources(
         match check::fetch_source(fetcher, s).await {
             Ok(stats) => {
                 let Stored { new, duplicate } = store(db, s, &stats.matched)?;
-                db.record_source_success(&s.id)?;
                 let counts = FetchCounts {
                     total: stats.total,
                     matched: stats.matched.len(),
                     new,
                     duplicate,
                 };
-                db.record_fetch_run(&s.id, &counts, now)?;
+                db.record_source_success(&s.id, &counts, now)?;
                 tracing::info!(
                     source = %s.id,
                     total = stats.total,

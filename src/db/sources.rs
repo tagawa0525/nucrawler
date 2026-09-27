@@ -41,35 +41,29 @@ pub struct SourceState {
 }
 
 impl Db {
-    /// 取得に成功した時刻を記録する。直前のエラーは消す。
-    pub fn record_source_success(&self, source_id: &str) -> Result<(), DbError> {
-        self.conn.execute(
-            &format!(
-                "INSERT INTO source_state (source_id, last_success_at) VALUES (?1, {NOW})
-                 ON CONFLICT (source_id) DO UPDATE SET
-                   last_success_at = excluded.last_success_at,
-                   last_error = NULL,
-                   last_error_at = NULL"
-            ),
-            [source_id],
-        )?;
-        Ok(())
-    }
-
-    /// 成功した取得 1 回の件数を記録する。
-    pub fn record_fetch_run(
+    /// 取得に成功したことと、その回の件数を記録する。直前のエラーは消す。
+    pub fn record_source_success(
         &self,
         source_id: &str,
         counts: &FetchCounts,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        let at = timestamp(at);
+        self.conn.execute(
+            "INSERT INTO source_state (source_id, last_success_at) VALUES (?1, ?2)
+             ON CONFLICT (source_id) DO UPDATE SET
+               last_success_at = excluded.last_success_at,
+               last_error = NULL,
+               last_error_at = NULL",
+            [source_id, &at],
+        )?;
         let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
         self.conn.execute(
             "INSERT INTO fetch_runs (source_id, fetched_at, total, matched, new, duplicate)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 source_id,
-                timestamp(at),
+                at,
                 count(counts.total),
                 count(counts.matched),
                 count(counts.new),
@@ -153,9 +147,13 @@ mod tests {
         assert!(st.last_error_at.is_some());
         assert!(st.last_success_at.is_none());
 
-        db.record_source_success("s").unwrap();
+        db.record_source_success("s", &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+            .unwrap();
         let st = db.source_state("s").unwrap().unwrap();
-        assert!(st.last_success_at.is_some());
+        assert_eq!(
+            st.last_success_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
         assert_eq!((st.last_error, st.last_error_at), (None, None));
 
         db.record_source_failure("s", "timeout").unwrap();
@@ -165,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn records_fetch_runs() {
+    fn records_fetch_counts_with_success() {
         let db = Db::open_in_memory().unwrap();
         let counts = FetchCounts {
             total: 25,
@@ -173,7 +171,7 @@ mod tests {
             new: 1,
             duplicate: 2,
         };
-        db.record_fetch_run("s", &counts, t("2026-09-27T00:00:00Z"))
+        db.record_source_success("s", &counts, t("2026-09-27T00:00:00Z"))
             .unwrap();
         assert_eq!(
             db.query_strings(
@@ -184,15 +182,24 @@ mod tests {
             .unwrap(),
             ["s|2026-09-27T00:00:00.000Z|25|3|1|2"]
         );
+    }
+
+    /// 成功と件数は一緒に記録する。件数を残せなければ成功も残さない（件数の見張りから漏れないように）。
+    #[test]
+    fn success_is_not_recorded_without_its_counts() {
+        let db = Db::open_in_memory().unwrap();
         // 絞り込みで total より増えることはない
         let bad = FetchCounts {
-            matched: 26,
-            ..counts
+            total: 2,
+            matched: 3,
+            ..FetchCounts::default()
         };
         assert!(
-            db.record_fetch_run("s", &bad, t("2026-09-27T01:00:00Z"))
+            db.record_source_success("s", &bad, t("2026-09-27T00:00:00Z"))
                 .is_err()
         );
+        assert_eq!(db.source_state("s").unwrap(), None);
+        assert_eq!(db.query_i64("SELECT count(*) FROM fetch_runs").unwrap(), 0);
     }
 
     #[test]
@@ -205,7 +212,8 @@ mod tests {
             })
             .unwrap();
         }
-        db.record_source_success("a").unwrap();
+        db.record_source_success("a", &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+            .unwrap();
         db.record_source_failure("b", "HTTP 403").unwrap();
         let ov = db.source_overview().unwrap();
         let ids: Vec<_> = ov

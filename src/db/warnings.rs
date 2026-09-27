@@ -57,9 +57,13 @@ mod tests {
     #[test]
     fn warnings_report_failing_sources_and_recent_llm_errors() {
         let db = Db::open_in_memory().unwrap();
-        db.record_source_success("ok").unwrap();
+        let ok = |id| {
+            db.record_source_success(id, &FetchCounts::default(), t("2026-09-27T00:00:00Z"))
+                .unwrap()
+        };
+        ok("ok");
         db.record_source_failure("recovered", "old").unwrap();
-        db.record_source_success("recovered").unwrap();
+        ok("recovered");
         db.record_source_failure("nei", "HTTP 403").unwrap();
         db.record_llm_call(
             &LlmCall {

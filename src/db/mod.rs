@@ -892,16 +892,44 @@ impl Db {
 
     /// 語彙の語と使われ方（登録順）。
     pub fn topic_usage(&self) -> Result<Vec<TopicUsage>, DbError> {
-        Ok(Vec::new())
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name, t.facet, t.added_at,
+                    (SELECT count(*) FROM artifact_topics AS at WHERE at.topic_id = t.id)
+             FROM topics AS t ORDER BY t.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (name, facet, added_at, uses) = row?;
+            let facet = crate::topics::Facet::parse(&facet)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("topic facet {facet:?}")))?;
+            Ok(TopicUsage {
+                name,
+                facet,
+                added_at,
+                uses,
+            })
+        })
+        .collect()
     }
 
     /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。
     pub fn llm_succeeded_since(
         &self,
-        _stage: &str,
-        _since: chrono::DateTime<chrono::Utc>,
+        stage: &str,
+        since: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        Ok(false)
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM llm_calls WHERE stage = ?1 AND ok = 1 AND at >= ?2)",
+            [stage, &timestamp(since)],
+            |r| r.get(0),
+        )?)
     }
 
     /// 語を統合する。要約への付与を統合先に付け替え、統合元の名前を別名として記録し、統合元を消す。

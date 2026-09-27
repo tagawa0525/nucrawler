@@ -15,6 +15,7 @@ use nucrawler::pipeline::fetch::{self, FetchError};
 use nucrawler::pipeline::llm_call::LlmStage;
 use nucrawler::pipeline::lock::{self, LockError};
 use nucrawler::pipeline::score::{self, ScoreStageError};
+use nucrawler::pipeline::tidy::{self, TidyStageError};
 use nucrawler::pipeline::translate::{self, TranslateStageError};
 use nucrawler::pipeline::{self, Cancel, Halt, Stage, Target};
 use nucrawler::profile::{self, ProfileError};
@@ -47,6 +48,8 @@ enum Error {
     Score(#[from] ScoreStageError),
     #[error(transparent)]
     Translate(#[from] TranslateStageError),
+    #[error(transparent)]
+    Tidy(#[from] TidyStageError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
     #[error(transparent)]
@@ -231,7 +234,7 @@ async fn crawl(
                 );
                 failed_sources += summary.failed_sources.len();
             }
-            Stage::Digest | Stage::Score | Stage::Translate if llm_blocked => {
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Tidy if llm_blocked => {
                 tracing::warn!(
                     stage = stage.name(),
                     "skipped: the llm is unavailable in this run"
@@ -314,6 +317,25 @@ async fn crawl(
                     failed = summary.failed,
                     calls = summary.calls,
                     "translate stage finished"
+                );
+                llm_blocked = report_halt(summary.halted, &mut llm_failure);
+            }
+            Stage::Tidy => {
+                let summary = tidy::tidy_topics(
+                    &db,
+                    &llm,
+                    &mut quota,
+                    &config.llm,
+                    // `--only tidy` なら、前回の整理からの間隔によらず整理する
+                    args.only == Some(Stage::Tidy),
+                    chrono::Utc::now(),
+                    &cancel,
+                )
+                .await?;
+                tracing::info!(
+                    merged = summary.merged,
+                    calls = summary.calls,
+                    "tidy stage finished"
                 );
                 llm_blocked = report_halt(summary.halted, &mut llm_failure);
             }

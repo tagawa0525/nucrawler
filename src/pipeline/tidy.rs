@@ -3,11 +3,13 @@
 
 use chrono::{DateTime, Utc};
 
+use super::llm_call::{Call, Outcome, call_recorded};
 use super::{Cancel, Halt};
 use crate::config::LlmConfig;
 use crate::db::{Db, DbError};
-use crate::llm::Llm;
+use crate::llm::{Llm, LlmRequest};
 use crate::quota::Quota;
+use crate::{errors, tidy};
 
 pub const STAGE: &str = "tidy";
 
@@ -27,15 +29,74 @@ pub struct TidySummary {
 
 /// `force` なら前回の整理からの間隔によらず整理する（`crawl --only tidy`）。
 pub async fn tidy_topics<L: Llm>(
-    _db: &Db,
-    _llm: &L,
-    _quota: &mut Quota,
-    _cfg: &LlmConfig,
-    _force: bool,
-    _now: DateTime<Utc>,
-    _cancel: &Cancel,
+    db: &Db,
+    llm: &L,
+    quota: &mut Quota,
+    cfg: &LlmConfig,
+    force: bool,
+    now: DateTime<Utc>,
+    cancel: &Cancel,
 ) -> Result<TidySummary, TidyStageError> {
-    Ok(TidySummary::default())
+    let mut summary = TidySummary::default();
+    let interval = chrono::Duration::days(i64::from(cfg.tidy_interval_days));
+    if !force && db.llm_succeeded_since(STAGE, now - interval)? {
+        return Ok(summary);
+    }
+    let usage = db.topic_usage()?;
+    let proposed = usage.iter().filter(|u| u.added_at.is_some()).count();
+    // LLM が足した語が無ければ、統合するものが無い
+    if proposed == 0 {
+        return Ok(summary);
+    }
+    if let Err(stop) = quota.permit(now) {
+        tracing::info!("tidy stops: {stop}");
+        summary.halted = Some(Halt::Quota(stop));
+        return Ok(summary);
+    }
+    let prompt = tidy::build_prompt(&usage);
+    let schema = tidy::schema(&usage);
+    let outcome = call_recorded(
+        db,
+        llm,
+        quota,
+        Call {
+            stage: STAGE,
+            n_items: proposed,
+            req: LlmRequest {
+                system: tidy::system_prompt(),
+                prompt: &prompt,
+                schema: &schema,
+                model: &cfg.tidy_model,
+            },
+        },
+        now,
+        cancel,
+    )
+    .await?;
+    let response = match outcome {
+        Outcome::Response(response) => response,
+        Outcome::Cancelled => {
+            summary.cancelled = true;
+            return Ok(summary);
+        }
+        Outcome::Halted(halt) => {
+            summary.calls += 1;
+            summary.halted = Some(halt);
+            return Ok(summary);
+        }
+    };
+    summary.calls += 1;
+    // 形の崩れた応答は捨てて、次の整理の機会を待つ（統合しなくても要約や検索は困らない）
+    let merges = match tidy::parse(&response.output, &usage) {
+        Ok(merges) => merges,
+        Err(e) => {
+            tracing::warn!("tidy output rejected: {}", errors::error_chain(&e));
+            return Ok(summary);
+        }
+    };
+    db.merge_topics(&merges, llm.backend(), &cfg.tidy_model, now)?;
+    summary.merged = merges.len();
+    Ok(summary)
 }
 
 #[cfg(test)]

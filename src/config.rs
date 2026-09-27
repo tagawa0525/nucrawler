@@ -79,6 +79,7 @@ impl LlmConfig {
                 self.translate_max_input_chars == 0,
             ),
             ("timeout_secs", self.timeout_secs == 0),
+            ("tidy_interval_days", self.tidy_interval_days == 0),
         ] {
             if is_zero {
                 return Err(format!("llm.{name} must be at least 1"));

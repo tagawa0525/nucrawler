@@ -231,6 +231,7 @@ fn profile(data: Option<PathBuf>, args: ProfileArgs) -> Result<(), Error> {
             let (saved, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
             print!("{}", profile::to_toml(&saved));
         }
+        ProfileArgs::Suggest { .. } => todo!(),
     }
     Ok(())
 }

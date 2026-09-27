@@ -8,6 +8,7 @@ pub mod llm_call;
 pub mod lock;
 pub mod run;
 pub mod score;
+pub mod suggest;
 pub mod tidy;
 pub mod translate;
 

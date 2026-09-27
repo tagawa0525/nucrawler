@@ -10,7 +10,10 @@ pub enum ParseError {
     MissingValue(&'static str),
     #[error("usage: nucrawler sources check [ID]")]
     SourcesUsage,
-    #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
+    #[error(
+        "usage: nucrawler profile import FILE | nucrawler profile export | \
+         nucrawler profile suggest --out FILE [--max-llm-calls N]"
+    )]
     ProfileUsage,
     #[error("usage: nucrawler topics import FILE | nucrawler topics export")]
     TopicsUsage,
@@ -324,6 +327,11 @@ pub enum ProfileArgs {
     Import { file: PathBuf },
     /// `profile export`（標準出力へ）
     Export,
+    /// `profile suggest --out FILE [--max-llm-calls N]`：反応を根拠に更新案を作り、`out` に書く
+    Suggest {
+        out: PathBuf,
+        max_llm_calls: Option<u32>,
+    },
 }
 
 pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
@@ -332,6 +340,7 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
             file: PathBuf::from(file),
         }),
         [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
+        [cmd, rest @ ..] if cmd == "suggest" => todo!("{rest:?}"),
         _ => Err(ParseError::ProfileUsage),
     }
 }
@@ -733,10 +742,35 @@ mod tests {
             parse_profile_args(&args(&["export"])).unwrap(),
             ProfileArgs::Export
         );
+        assert_eq!(
+            parse_profile_args(&args(&["suggest", "--out", "new.toml"])).unwrap(),
+            ProfileArgs::Suggest {
+                out: PathBuf::from("new.toml"),
+                max_llm_calls: None,
+            }
+        );
+        assert_eq!(
+            parse_profile_args(&args(&[
+                "suggest",
+                "--max-llm-calls",
+                "1",
+                "--out",
+                "n.toml"
+            ]))
+            .unwrap(),
+            ProfileArgs::Suggest {
+                out: PathBuf::from("n.toml"),
+                max_llm_calls: Some(1),
+            }
+        );
         for bad in [
             &[][..],
             &["import"][..],
             &["export", "x"][..],
+            // 案の書き出し先は必須
+            &["suggest"][..],
+            &["suggest", "--out"][..],
+            &["suggest", "--out", "a", "--bogus"][..],
             &["show"][..],
         ] {
             let err = parse_profile_args(&args(bad)).unwrap_err();

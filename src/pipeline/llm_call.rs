@@ -40,6 +40,10 @@ pub async fn call_recorded<L: Llm>(
     now: DateTime<Utc>,
     cancel: &Cancel,
 ) -> Result<Outcome, DbError> {
+    // 既に止める指示が出ていれば呼ばない（応答を優先する下の select は、先に呼び出しを始めてしまう）
+    if cancel.is_requested() {
+        return Ok(Outcome::Cancelled);
+    }
     let started = std::time::Instant::now();
     // 応答を待たずに止める。呼び出しの future を捨てると子プロセスも止まる（kill_on_drop）
     let result = tokio::select! {

@@ -46,6 +46,17 @@ url = "https://www.iaea.org/feeds/topnews"
 lang = "en"
 category = "regulator"
 
+# 新着履歴は月ごとのページで、index.html はその月の分。日付は URL ではなく一覧の dt から取る
+[[source]]
+id = "nra"
+name = "原子力規制委員会"
+label = "規制委"
+kind = "html_list"
+url = "https://www.nra.go.jp/news/index.html"
+lang = "ja"
+category = "regulator"
+list = { link = "dl.news__list dd.news__title a", date = ".news__date" }
+
 # --- 業界 ---
 
 [[source]]
@@ -105,6 +116,17 @@ kind = "feed"
 url = "https://www.aesj.net/feed"
 lang = "ja"
 category = "research"
+
+# トップの新着のうちプレス発表（研究開発成果、事故・トラブル、週報など）。URL は日付を含まない
+[[source]]
+id = "jaea"
+name = "日本原子力研究開発機構"
+label = "JAEA"
+kind = "html_list"
+url = "https://www.jaea.go.jp/"
+lang = "ja"
+category = "research"
+list = { link = 'li[data-info-category="newsPress"] dd a', date = "dt" }
 
 # --- 電力会社（原子力専用フィードは無いので絞り込む） ---
 

@@ -502,6 +502,37 @@ mod tests {
         assert!(!alive(), "grandchild {} is still running", pid.trim());
     }
 
+    /// claude が終わって回収した後は、グループに触れない（グループ ID は再利用されうるので、
+    /// 無関係なプロセスを止めかねない）。
+    #[tokio::test]
+    async fn finished_claude_group_is_left_alone() {
+        let (script, dir) = fake_claude(
+            "cli-group-done",
+            // 孫が出力のパイプを握ったままだと、終了を待ち続けてしまうので閉じておく
+            "sleep 600 >/dev/null 2>&1 &\necho $! > \"$(dirname \"$0\")/grandchild\"\necho boom >&2\nexit 3",
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+        };
+        let schema = serde_json::json!({});
+        let err = cli.call(request(&schema)).await.unwrap_err();
+        assert!(matches!(err, LlmError::Exit { .. }), "{err}");
+        let pid = std::fs::read_to_string(dir.join("grandchild")).unwrap();
+        let pid = pid.trim();
+        // シグナルの配送は非同期なので、送られていれば止まるだけの時間を置いてから確かめる
+        std::thread::sleep(Duration::from_millis(300));
+        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit(')').next().map(|r| r.trim_start().to_string()))
+            .is_some_and(|rest| !rest.starts_with('Z'));
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", pid])
+            .status();
+        assert!(alive, "the finished group must not be signalled");
+    }
+
     #[tokio::test]
     async fn missing_command_is_spawn_error() {
         let cli = ClaudeCli {

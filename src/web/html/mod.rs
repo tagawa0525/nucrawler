@@ -47,69 +47,7 @@ pub fn split_sections(
     )
 }
 
-const STYLE: &str = "
-body { font-family: system-ui, sans-serif; margin: 0; background: #f6f6f4; color: #1d1d1b; }
-main { max-width: 42rem; margin: 0 auto; padding: 0.75rem; }
-a { color: #0b57a4; }
-h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
-.card { background: #fff; border-radius: 0.6rem; padding: 0.8rem; margin: 0.6rem 0;
-  box-shadow: 0 1px 2px rgba(0,0,0,.08); }
-.card a.title { font-weight: 600; text-decoration: none; }
-.meta { color: #666; font-size: 0.8rem; margin: 0.3rem 0; }
-.score { display: inline-block; min-width: 2.2rem; text-align: center; border-radius: 0.4rem;
-  background: #0b57a4; color: #fff; font-weight: 700; margin-right: 0.4rem; }
-.read { opacity: 0.6; }
-.bar { display: flex; gap: 0.5rem; margin: 0.3rem 0; }
-.btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
-  background: #fff; text-decoration: none; }
-.btn.on { border-color: #2e7d32; background: #e3f1e4; }
-.btn.off { border-color: #b3261e; background: #fbe7e6; }
-.warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
-  font-size: 0.85rem; }
-.wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
-.cal { position: relative; display: inline-block; margin: 0 0.3rem; cursor: pointer; }
-.cal input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; }
-.cal:focus-within { outline: 2px solid #0b57a4; outline-offset: 2px; }
-.actions form { display: inline; }
-.actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
-  border: 1px solid #bbb; background: #fff; }
-.actions button.on { background: #0b57a4; color: #fff; }
-.versions a { margin-right: 0.6rem; font-size: 0.85rem; }
-.card[data-id] { touch-action: pan-y; transition: transform 0.2s; }
-.card[data-id]:focus { outline: 2px solid #0b57a4; outline-offset: 2px; }
-.card[data-dir=bookmark] { box-shadow: inset 5px 0 #2e7d32; }
-.card[data-dir=dismiss] { box-shadow: inset -5px 0 #b3261e; }
-.toast { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); background: #1d1d1b;
-  color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
-.toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
-.translation p { line-height: 1.7; }
-.comments { margin-top: 1.5rem; }
-.comment { border-left: 3px solid #ddd; padding-left: 0.6rem; margin: 0.5rem 0; }
-.comment p { margin: 0.2rem 0; }
-.comments details { font-size: 0.85rem; color: #666; }
-.comments label { display: block; margin: 0.4rem 0; }
-.comments button { margin: 0.3rem 0.5rem 0 0; font-size: 1rem; padding: 0.3rem 0.9rem; }
-.comments form { display: inline-block; }
-.comments form:first-of-type, .comment-add form { display: block; }
-.reports { margin-top: 1.5rem; font-size: 0.85rem; color: #666; }
-.report { margin: 0.3rem 0; }
-.report label { display: block; margin: 0.4rem 0; }
-.report button { margin-top: 0.3rem; font-size: 1rem; padding: 0.3rem 0.9rem; }
-.menu { padding-left: 1.2rem; line-height: 2; }
-.filters a { margin-right: 0.6rem; font-size: 0.9rem; }
-.filters a.on { font-weight: 700; text-decoration: none; color: #1d1d1b; }
-.inbox { border-bottom: 1px solid #ddd; padding: 0.4rem 0; }
-.inbox p { margin: 0.2rem 0; }
-.inbox label { display: block; margin: 0.4rem 0; font-size: 0.85rem; color: #666; }
-.inbox select { font-size: 1rem; margin-left: 0.4rem; max-width: 100%; }
-.inbox button { font-size: 1rem; padding: 0.3rem 0.9rem; }
-.term, .add { border-bottom: 1px solid #ddd; padding: 0.4rem 0; }
-.term summary .meta { display: block; margin: 0.1rem 0 0 1rem; }
-.term label, .add label { display: block; margin: 0.4rem 0; font-size: 0.85rem; color: #666; }
-.term form, .add form { display: inline-block; margin: 0.2rem 0.5rem 0.2rem 0; }
-.term form:first-of-type, .add form { display: block; }
-.term button, .add button { font-size: 1rem; padding: 0.3rem 0.9rem; }
-";
+const STYLE: &str = concat!("\n", include_str!("assets/style.css"));
 
 /// ソースの ID から画面に出す名前へ（`Source::display_name`）。
 pub type SourceLabels = std::collections::BTreeMap<String, String>;
@@ -697,158 +635,17 @@ fn calendar(name: &str, label: &str) -> String {
 
 /// 📅 のカレンダーで選んだ日付を、隣の期間の欄に入れる。欄は月だけの指定もできるよう文字の
 /// 入力のまま残す。欄が日付ならその日から、そうでなければ（月だけや空なら）今日から開く。
-const CALENDAR_SCRIPT: &str = r#"<script>
-document.querySelectorAll("input[data-for]").forEach((cal) => {
-  const text = cal.form.elements[cal.dataset.for];
-  // 前に選んだ日付が残らないよう、開く前に毎回欄から合わせる
-  const sync = () => {
-    cal.value = /^\d{4}-\d{2}-\d{2}$/.test(text.value) ? text.value : "";
-  };
-  cal.addEventListener("focus", sync);
-  cal.addEventListener("click", () => {
-    sync();
-    // タップで開くブラウザもあるが、PC の Chrome などは欄を押しただけでは開かない
-    if (cal.showPicker) cal.showPicker();
-  });
-  cal.addEventListener("change", () => {
-    if (cal.value) text.value = cal.value;
-  });
-});
-</script>"#;
+const CALENDAR_SCRIPT: &str = concat!(
+    "<script>\n",
+    include_str!("assets/calendar.js"),
+    "</script>"
+);
 
 /// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
-const SWIPE_SCRIPT: &str = r#"<script>
-(() => {
-  const post = (url, kind) => fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: "kind=" + kind,
-    redirect: "manual",
-  }).then((res) => res.ok || res.type === "opaqueredirect");
-  const toast = document.createElement("div");
-  toast.className = "toast";
-  // 振り分けの結果をスクリーンリーダーにも伝える
-  toast.setAttribute("role", "status");
-  toast.hidden = true;
-  document.body.append(toast);
-  let timer, undoLast = null;
-  const hideToast = () => { toast.hidden = true; undoLast = null; };
-  const notify = (text, undo) => {
-    clearTimeout(timer);
-    toast.textContent = text;
-    undoLast = undo || null;
-    if (undo) {
-      const button = document.createElement("button");
-      button.textContent = "元に戻す";
-      button.onclick = () => { hideToast(); undo(); };
-      toast.append(button);
-    }
-    toast.hidden = false;
-    timer = setTimeout(hideToast, 6000);
-  };
-  const reset = (card) => {
-    card.style.transform = "";
-    delete card.dataset.dir;
-    delete card.dataset.busy;
-  };
-  // 送っている間は同じカードを振り分け直さない（行動が二重に記録される）
-  const triage = async (card, kind) => {
-    if (card.dataset.busy) return;
-    card.dataset.busy = "1";
-    const id = card.dataset.id;
-    card.style.transform = `translateX(${kind === "bookmark" ? "" : "-"}110%)`;
-    if (!(await post(`/articles/${id}/feedback`, kind).catch(() => false))) {
-      reset(card);
-      notify("記録できませんでした");
-      return;
-    }
-    card.hidden = true;
-    notify(kind === "bookmark" ? "🔖 ブックマークしました" : "見ない記事にしました", async () => {
-      if (await post(`/articles/${id}/feedback/undo`, kind).catch(() => false)) {
-        reset(card);
-        card.hidden = false;
-      } else {
-        notify("取り消せませんでした");
-      }
-    });
-  };
-  const TRIAGE_KEYS = { l: "bookmark", ArrowRight: "bookmark", h: "dismiss", ArrowLeft: "dismiss" };
-  const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
-  document.addEventListener("keydown", (e) => {
-    if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
-    const cards = [...document.querySelectorAll(".card[data-id]")]
-      .filter((c) => !c.hidden && !c.dataset.busy);
-    const current = e.target.closest(".card[data-id]");
-    const at = cards.indexOf(current);
-    if (e.key in MOVE_KEYS) {
-      const next = cards[at < 0 ? 0 : Math.min(Math.max(at + MOVE_KEYS[e.key], 0), cards.length - 1)];
-      if (next) { e.preventDefault(); next.focus(); }
-    } else if (e.key in TRIAGE_KEYS && at >= 0) {
-      e.preventDefault();
-      // 振り分けたカードは隠れるので、隣のカードを選んでおく
-      const next = cards[at + 1] || cards[at - 1];
-      triage(current, TRIAGE_KEYS[e.key]);
-      if (next) next.focus();
-    } else if (e.key === "Enter" && e.target === current) {
-      current.querySelector("a.title").click();
-    } else if (e.key === "u" && undoLast) {
-      e.preventDefault();
-      const undo = undoLast;
-      hideToast();
-      undo();
-    }
-  });
-  const EDGE = 24, START = 10, COMMIT = 0.35;
-  for (const card of document.querySelectorAll(".card[data-id]")) {
-    let x0 = null, y0 = 0, dx = 0, dragging = false, moved = false;
-    card.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || card.dataset.busy) return;
-      if (e.clientX < EDGE || e.clientX > innerWidth - EDGE) return;
-      x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = false; moved = false;
-    });
-    card.addEventListener("pointermove", (e) => {
-      if (x0 === null) return;
-      dx = e.clientX - x0;
-      if (!dragging) {
-        if (Math.abs(e.clientY - y0) > Math.abs(dx)) { x0 = null; return; }
-        if (Math.abs(dx) < START) return;
-        dragging = moved = true;
-        card.setPointerCapture(e.pointerId);
-        card.style.transition = "none";
-      }
-      card.style.transform = `translateX(${dx}px)`;
-      card.dataset.dir = dx > 0 ? "bookmark" : "dismiss";
-    });
-    const end = () => {
-      const was = dragging;
-      x0 = null; dragging = false;
-      if (!was) return;
-      card.style.transition = "";
-      if (Math.abs(dx) > card.offsetWidth * COMMIT) {
-        triage(card, dx > 0 ? "bookmark" : "dismiss");
-      } else {
-        reset(card);
-      }
-    };
-    card.addEventListener("pointerup", end);
-    // ドラッグ中の取り消しだけを戻す（送信中のカードの状態は消さない）
-    card.addEventListener("pointercancel", () => {
-      const was = dragging;
-      x0 = null; dragging = false;
-      if (!was) return;
-      card.style.transition = "";
-      reset(card);
-    });
-    // スワイプの指を離したときのクリックで、記事を開かない
-    card.addEventListener("click", (e) => {
-      if (moved) { e.preventDefault(); moved = false; }
-    }, true);
-  }
-})();
-</script>"#;
+const SWIPE_SCRIPT: &str = concat!("<script>\n", include_str!("assets/swipe.js"), "</script>");
 
 /// 記事のカード。`swipe` なら一覧の振り分けの対象にする（`SWIPE_SCRIPT`）。
 fn card(i: &ListItem, swipe: bool, page: &Page) -> String {

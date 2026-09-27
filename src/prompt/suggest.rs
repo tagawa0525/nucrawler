@@ -124,8 +124,8 @@ pub fn schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "change": {"type": "string"},
-                        "evidence": {"type": "string"},
+                        "change": {"type": "string", "minLength": 1},
+                        "evidence": {"type": "string", "minLength": 1},
                     },
                     "required": ["change", "evidence"],
                     "additionalProperties": false,
@@ -179,6 +179,17 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
         exclude: output.exclude,
     };
     crate::profile::validate(&profile)?;
+    // 空の根拠は根拠にならない
+    if let Some(r) = output
+        .reasons
+        .iter()
+        .find(|r| r.change.trim().is_empty() || r.evidence.trim().is_empty())
+    {
+        return Err(SuggestError::Malformed(format!(
+            "reason {:?} has an empty change or evidence",
+            r.change
+        )));
+    }
     // 根拠の文も端末に表示するので、プロファイルと同じくエスケープシーケンスや改行を通さない
     if let Some(r) = output.reasons.iter().find(|r| {
         format!("{}{}", r.change, r.evidence)

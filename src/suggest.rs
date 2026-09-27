@@ -34,7 +34,7 @@ pub fn render(
     let file = shell_quote(out);
     let _ = writeln!(
         text,
-        "\nwrote {out}. compare it with `nucrawler eval --profile {file}`, \
+        "\nwrote {file}. compare it with `nucrawler eval --profile {file}`, \
          then `nucrawler profile import {file}` to adopt it"
     );
     Ok(Some(text))

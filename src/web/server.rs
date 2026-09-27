@@ -1933,6 +1933,14 @@ mod tests {
         let add = format!("/articles/{id}/comments");
         assert_eq!(server.post(&add, "body=+").await.status().as_u16(), 400);
         assert_eq!(server.post(&add, "public=1").await.status().as_u16(), 400);
+        // 公開は `1` のときだけ。ほかの値で公開範囲を変えさせない
+        for body in ["body=x&public=0", "body=x&public="] {
+            assert_eq!(
+                server.post(&add, body).await.status().as_u16(),
+                400,
+                "{body}"
+            );
+        }
         assert_eq!(
             server
                 .post("/articles/999/comments", "body=x")

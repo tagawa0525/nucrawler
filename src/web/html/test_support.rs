@@ -17,6 +17,8 @@ pub(super) fn item(id: i64, fetched_at: &str) -> ListItem {
         lwr_relevant: Some(true),
         score: Some(80),
         reason: Some("理由".into()),
+        matched: Vec::new(),
+        excluded: Vec::new(),
         read: false,
         feedback: None,
         has_translation: false,

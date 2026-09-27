@@ -107,6 +107,10 @@ pub struct ArticleSummary {
     pub score: Option<u8>,
     /// 点数の理由
     pub reason: Option<String>,
+    /// 点数が当たった関心分野（関心プロファイルの語）
+    pub matched: Vec<String>,
+    /// 点数が当たった推薦しない話題（関心プロファイルの語）
+    pub excluded: Vec<String>,
     /// 軽水炉に関係する
     pub lwr_relevant: Option<bool>,
     /// 最新の 👍/👎（"up" か "down"）
@@ -317,6 +321,8 @@ fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
         date: item.at,
         score: item.score,
         reason: item.reason,
+        matched: item.matched,
+        excluded: item.excluded,
         lwr_relevant: item.lwr_relevant,
         feedback: item.feedback.map(|f| {
             match f {

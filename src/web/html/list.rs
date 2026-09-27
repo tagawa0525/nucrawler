@@ -100,6 +100,19 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 /// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
 const SWIPE_SCRIPT: &str = concat!("<script>\n", include_str!("assets/swipe.js"), "</script>");
 
+/// 点数が当たったプロファイルの語（関心分野と、除外に当たった話題）。
+pub(super) fn matches(i: &ListItem) -> String {
+    let matched = i
+        .matched
+        .iter()
+        .map(|t| format!("<span class=\"match\">{}</span>", escape(t)));
+    let excluded = i
+        .excluded
+        .iter()
+        .map(|t| format!("<span class=\"match excluded\">除外 {}</span>", escape(t)));
+    matched.chain(excluded).collect()
+}
+
 /// 記事のカード。`swipe` なら一覧の振り分けの対象にする（`SWIPE_SCRIPT`）。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
@@ -130,7 +143,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
@@ -141,6 +154,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         title = escape(title),
         source = escape(page.source(&i.source_id)),
         at = crate::jst::format_local(&i.at),
+        matches = matches(i),
     )
 }
 
@@ -328,6 +342,31 @@ mod tests {
     }
 
     /// カードのソース・日付の横に、いいねとブックマークの印を出す。
+    /// 点数が当たったプロファイルの語を、点数の意味として一緒に出す。
+    #[test]
+    fn card_shows_the_terms_the_score_matched() {
+        let mut i = item(1, "2026-09-27T05:00:00.000Z");
+        i.matched = vec!["燃料".into(), "規制<審査>".into()];
+        i.excluded = vec!["核融合".into()];
+        let html = card(&i, false, &Page::default());
+        assert!(
+            html.contains(
+                "<span class=\"match\">燃料</span><span class=\"match\">規制&lt;審査&gt;</span>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"match excluded\">除外 核融合</span>"),
+            "{html}"
+        );
+        let plain = card(
+            &item(2, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(!plain.contains("class=\"match"), "{plain}");
+    }
+
     #[test]
     fn card_marks_liked_and_bookmarked_articles() {
         let mut marked = item(1, "2026-09-27T05:00:00.000Z");

@@ -51,7 +51,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     ));
     if let Some(score) = i.score {
         body.push_str(&format!(
-            "<p><span class=\"score\">{score}</span>{}</p>",
+            "<p><span class=\"score\">{score}</span>{}{}</p>",
+            super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
     }
@@ -332,6 +333,25 @@ mod tests {
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
         assert!(
             html.contains(r#"action="/articles/7/translation-request""#),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn detail_page_shows_the_terms_the_score_matched() {
+        let mut d = detail();
+        d.item.matched = vec!["燃料".into()];
+        d.item.excluded = vec!["核融合".into()];
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(
+                "<span class=\"match\">燃料</span><span class=\"match excluded\">除外 核融合</span>"
+            ),
             "{html}"
         );
     }

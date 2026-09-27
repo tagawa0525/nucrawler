@@ -33,6 +33,9 @@ pub enum DbError {
     /// 要約のトピックが語彙に無く、新しい語として提案もされていない
     #[error("unknown topic {0:?}")]
     UnknownTopic(String),
+    /// 語を自分自身に統合しようとした
+    #[error("cannot merge topic {0:?} into itself")]
+    SelfMerge(String),
 }
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
@@ -46,6 +49,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0006_search.sql"),
     include_str!("migrations/0007_topics.sql"),
     include_str!("migrations/0008_topic_proposals.sql"),
+    include_str!("migrations/0009_topic_aliases.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -350,6 +354,13 @@ pub struct SearchQuery<'a> {
     pub limit: usize,
 }
 
+/// 語彙の統合：`from` の語を `into` にまとめ、`from` は以後 `into` の別名として扱う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicMerge {
+    pub from: String,
+    pub into: String,
+}
+
 /// 成果物の 1 版。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArtifactVersion {
@@ -448,6 +459,18 @@ fn like_pattern(term: &str) -> String {
 /// 語を FTS5 のフレーズにする。構文として解釈させないよう全体を `"` で囲み、中の `"` は二重にする。
 fn fts_phrase(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+/// 別名 `alias` の要約に付いている語の名前（語彙の登録順の JSON 配列）。統合を反映するので、
+/// payload の `topics`（LLM が出した名前のまま）ではなくこちらを見せる。
+fn linked_topics(alias: &str) -> String {
+    format!(
+        "(SELECT json_group_array(name) FROM (
+           SELECT t.name FROM artifact_topics AS at
+           JOIN topics AS t ON t.id = at.topic_id
+           WHERE at.artifact_id = {alias}.id
+           ORDER BY t.id))"
+    )
 }
 
 /// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
@@ -847,6 +870,57 @@ impl Db {
                 [&t.name, t.facet.as_str()],
             )?;
         }
+        // 語として取り込んだ名前は、別名ではなくその語を指すようにする
+        tx.execute(
+            "DELETE FROM topic_aliases WHERE alias IN (SELECT value FROM json_each(?1))",
+            [&names],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 語を統合する。要約への付与を統合先に付け替え、統合元の名前を別名として記録し、統合元を消す。
+    /// 統合元を指していた別名も統合先に付け替える。どれか 1 つでも失敗したら何も変えない。
+    /// `backend` と `model` は統合を決めた LLM（別名の記録に残す）。
+    pub fn merge_topics(
+        &self,
+        merges: &[TopicMerge],
+        backend: &str,
+        model: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        use rusqlite::OptionalExtension;
+        let tx = self.conn.unchecked_transaction()?;
+        let topic_id = |name: &str| -> Result<i64, DbError> {
+            tx.query_row("SELECT id FROM topics WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| DbError::UnknownTopic(name.to_string()))
+        };
+        for m in merges {
+            if m.from == m.into {
+                return Err(DbError::SelfMerge(m.from.clone()));
+            }
+            let from = topic_id(&m.from)?;
+            let into = topic_id(&m.into)?;
+            // 両方が付いている要約は、統合先の付与を残す
+            tx.execute(
+                "UPDATE OR IGNORE artifact_topics SET topic_id = ?2 WHERE topic_id = ?1",
+                [from, into],
+            )?;
+            tx.execute("DELETE FROM artifact_topics WHERE topic_id = ?1", [from])?;
+            tx.execute(
+                "UPDATE topic_aliases SET topic_id = ?2 WHERE topic_id = ?1",
+                [from, into],
+            )?;
+            tx.execute(
+                "INSERT INTO topic_aliases (alias, topic_id, merged_at, backend, model)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![m.from, into, timestamp(now), backend, model],
+            )?;
+            tx.execute("DELETE FROM topics WHERE id = ?1", [from])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -966,7 +1040,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<ScoreInput>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "WITH viewable AS (
                -- 利用者が持っていない会員資格を必要とする digest は見せない
                SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
@@ -987,7 +1061,7 @@ impl Db {
                         OR (w.created_at = v.created_at AND w.id > v.id)))
              )
              SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
-                    json_extract(l.payload, '$.topics')
+                    {linked}
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
@@ -1003,7 +1077,8 @@ impl Db {
                    AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
-        )?;
+            linked = linked_topics("l"),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 key.user_id,
@@ -1454,6 +1529,7 @@ impl Db {
     }
 
     /// 利用者が閲覧できる版を新しい順に。
+    /// 要約の payload の `topics` は、統合を反映した付与の名前に差し替える。
     fn versions(
         &self,
         user_id: i64,
@@ -1461,11 +1537,13 @@ impl Db {
         kind: ArtifactKind,
     ) -> Result<Vec<ArtifactVersion>, DbError> {
         let sql = format!(
-            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload
+            "SELECT r.id, r.backend, r.model, r.prompt_version, r.created_at, r.payload,
+                    {linked}
              FROM artifacts AS r
-             WHERE r.article_id = :article AND r.kind = :kind AND {}
+             WHERE r.article_id = :article AND r.kind = :kind AND {viewable}
              ORDER BY r.created_at DESC, r.id DESC",
-            viewable("r")
+            linked = linked_topics("r"),
+            viewable = viewable("r"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
@@ -1482,18 +1560,23 @@ impl Db {
                     r.get(3)?,
                     r.get(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             },
         )?;
         rows.map(|row| {
-            let (id, backend, model, prompt_version, created_at, payload) = row?;
+            let (id, backend, model, prompt_version, created_at, payload, topics) = row?;
+            let mut payload: serde_json::Value = serde_json::from_str(&payload)?;
+            if kind == ArtifactKind::Digest {
+                payload["topics"] = serde_json::from_str(&topics)?;
+            }
             Ok(ArtifactVersion {
                 id,
                 backend,
                 model,
                 prompt_version,
                 created_at,
-                payload: serde_json::from_str(&payload)?,
+                payload,
             })
         })
         .collect()
@@ -1863,9 +1946,11 @@ fn link_digest_topics(
         Some(v) => serde_json::from_value(v.clone())?,
         None => Vec::new(),
     };
+    // 統合済みの語（別名）が提案されても語彙に戻さず、下で統合先に付ける
     for t in &new_topics {
         tx.execute(
-            "INSERT INTO topics (name, facet, added_at) VALUES (?1, ?2, ?3)
+            "INSERT INTO topics (name, facet, added_at)
+             SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM topic_aliases WHERE alias = ?1)
              ON CONFLICT (name) DO NOTHING",
             [&t.name, t.facet.as_str(), &timestamp(now)],
         )?;
@@ -1876,9 +1961,14 @@ fn link_digest_topics(
     };
     for name in names {
         let topic_id: Option<i64> = tx
-            .query_row("SELECT id FROM topics WHERE name = ?1", [&name], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT id FROM topics WHERE name = ?1
+                 UNION ALL
+                 SELECT topic_id FROM topic_aliases WHERE alias = ?1
+                 LIMIT 1",
+                [&name],
+                |r| r.get(0),
+            )
             .optional()?;
         let topic_id = topic_id.ok_or(DbError::UnknownTopic(name))?;
         tx.execute(
@@ -4253,6 +4343,207 @@ mod tests {
         .unwrap();
         let db = Db::init(conn).unwrap();
         assert_eq!(linked_topics(&db, 1), ["燃料"]);
+    }
+
+    fn merge(from: &str, into: &str) -> TopicMerge {
+        TopicMerge {
+            from: from.into(),
+            into: into.into(),
+        }
+    }
+
+    fn propose(db: &Db, name: &str) -> i64 {
+        digest_with_topics(
+            db,
+            serde_json::json!([name]),
+            serde_json::json!([{"name": name, "facet": "分野"}]),
+        )
+        .unwrap()
+    }
+
+    fn aliases(db: &Db) -> Vec<String> {
+        db.query_strings(
+            "SELECT a.alias || '>' || t.name || '|' || a.backend || '|' || a.model || '|' || a.merged_at
+             FROM topic_aliases AS a JOIN topics AS t ON t.id = a.topic_id ORDER BY a.alias",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_topics_moves_links_and_records_aliases() {
+        let db = Db::open_in_memory().unwrap();
+        let curated = digest_with_topics(
+            &db,
+            serde_json::json!(["新設・建設"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        let proposed = propose(&db, "新設炉");
+        let both = digest_with_topics(
+            &db,
+            serde_json::json!(["新設・建設", "新設炉"]),
+            serde_json::json!([]),
+        )
+        .unwrap();
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "claude-cli",
+            "sonnet",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        for id in [curated, proposed, both] {
+            assert_eq!(linked_topics(&db, id), ["新設・建設"], "digest {id}");
+        }
+        assert!(db.topics().unwrap().iter().all(|t| t.name != "新設炉"));
+        assert_eq!(
+            aliases(&db),
+            ["新設炉>新設・建設|claude-cli|sonnet|2026-10-04T00:00:00.000Z"]
+        );
+    }
+
+    /// 統合した語を後でさらに統合しても、古い別名は最終的な統合先を指す。
+    #[test]
+    fn merge_topics_repoints_aliases_of_the_merged_topic() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        propose(&db, "新規建設");
+        let at = t("2026-10-04T00:00:00Z");
+        db.merge_topics(&[merge("新設炉", "新規建設")], "b", "m", at)
+            .unwrap();
+        db.merge_topics(&[merge("新規建設", "新設・建設")], "b", "m", at)
+            .unwrap();
+        let targets: Vec<String> = aliases(&db)
+            .iter()
+            .map(|a| a.split('|').next().unwrap().to_string())
+            .collect();
+        assert_eq!(targets, ["新規建設>新設・建設", "新設炉>新設・建設"]);
+    }
+
+    /// 統合した語を LLM がまた付けたり提案したりしても、統合先に付き、語彙に戻らない。
+    #[test]
+    fn saved_digests_resolve_aliases() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        let again = propose(&db, "新設炉");
+        assert_eq!(linked_topics(&db, again), ["新設・建設"]);
+        assert!(db.topics().unwrap().iter().all(|t| t.name != "新設炉"));
+    }
+
+    /// 統合した語を付けた要約も、詳細・API・MCP・採点では統合先の語で見せる
+    /// （payload は LLM の出力の記録として書き換えず、読み出しを付与にそろえる）。
+    #[test]
+    fn digest_topics_are_read_from_links_after_merges() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/merged"))
+            .unwrap()
+            .unwrap();
+        let c = db
+            .insert_content(a, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let payload = serde_json::json!({
+            "title_ja": "題", "summary_ja": "要約", "points_ja": ["点"], "implications_ja": "",
+            "lwr_relevant": true, "topics": ["燃料", "新設炉"],
+            "new_topics": [{"name": "新設炉", "facet": "分野"}],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 2,
+                payload: &payload,
+                inputs: &[c],
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+
+        let detail = db.article_detail(owner, None, a).unwrap().unwrap();
+        assert_eq!(
+            detail.digests[0].payload["topics"],
+            serde_json::json!(["燃料", "新設・建設"]),
+            "in vocabulary order"
+        );
+        let inputs = db
+            .pending_score(
+                score_key(&db),
+                t("2026-09-10T00:00:00Z"),
+                t("2026-09-28T00:00:00Z"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(inputs[0].topics, ["燃料", "新設・建設"]);
+    }
+
+    #[test]
+    fn merge_topics_changes_nothing_on_failure() {
+        let db = Db::open_in_memory().unwrap();
+        let id = propose(&db, "新設炉");
+        let at = t("2026-10-04T00:00:00Z");
+        let err = db
+            .merge_topics(
+                &[merge("新設炉", "新設・建設"), merge("無い語", "燃料")],
+                "b",
+                "m",
+                at,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::UnknownTopic(name) if name == "無い語"),
+            "{err}"
+        );
+        let err = db
+            .merge_topics(&[merge("新設炉", "新設炉")], "b", "m", at)
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::SelfMerge(name) if name == "新設炉"),
+            "{err}"
+        );
+        assert_eq!(linked_topics(&db, id), ["新設炉"]);
+        assert!(aliases(&db).is_empty());
+    }
+
+    /// 手で取り込んだ語彙に別名と同じ名前があれば、その名前は語として復活し、別名ではなくなる。
+    #[test]
+    fn importing_an_alias_name_makes_it_a_topic_again() {
+        use crate::topics::{Facet, Topic};
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        db.merge_topics(
+            &[merge("新設炉", "新設・建設")],
+            "b",
+            "m",
+            t("2026-10-04T00:00:00Z"),
+        )
+        .unwrap();
+        let mut topics = db.topics().unwrap();
+        topics.push(Topic {
+            name: "新設炉".into(),
+            facet: Facet::Reactor,
+        });
+        db.replace_topics(&topics).unwrap();
+        assert!(aliases(&db).is_empty());
+        let id =
+            digest_with_topics(&db, serde_json::json!(["新設炉"]), serde_json::json!([])).unwrap();
+        assert_eq!(linked_topics(&db, id), ["新設炉"]);
     }
 
     #[test]

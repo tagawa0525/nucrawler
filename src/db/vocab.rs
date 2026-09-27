@@ -306,7 +306,15 @@ impl Db {
 
     /// ユーザーの今のプロファイルのハッシュ。プロファイルが無ければ `None`。
     pub fn profile_hash(&self, user_id: i64) -> Result<Option<String>, DbError> {
-        todo!("{user_id}")
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT hash FROM profiles WHERE user_id = ?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 }
 

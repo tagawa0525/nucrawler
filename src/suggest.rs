@@ -5,12 +5,22 @@ use std::fmt::Write as _;
 use crate::profile::Profile;
 use crate::prompt::suggest::Suggestion;
 
+/// 変更があるのに根拠が 1 つも無い案（反応を根拠にするという規則に反する）。
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the suggestion changes the profile without giving any reason")]
+pub struct NoReasons;
+
 /// 差分が無ければ `None`（案を書き出す必要が無い）。
-pub fn render(current: &Profile, suggestion: &Suggestion, out: &str) -> Option<String> {
+pub fn render(
+    current: &Profile,
+    suggestion: &Suggestion,
+    out: &str,
+) -> Result<Option<String>, NoReasons> {
     let changes = crate::profile::diff(current, &suggestion.profile);
     if changes.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let _ = NoReasons;
     let mut text = String::from("changes:\n");
     for change in &changes {
         let _ = writeln!(text, "  {change}");
@@ -27,7 +37,7 @@ pub fn render(current: &Profile, suggestion: &Suggestion, out: &str) -> Option<S
         "\nwrote {out}. compare it with `nucrawler eval --profile {file}`, \
          then `nucrawler profile import {file}` to adopt it"
     );
-    Some(text)
+    Ok(Some(text))
 }
 
 /// 貼り付けてそのまま実行できるよう、POSIX シェル向けに引用する。安全な文字だけならそのまま。
@@ -66,7 +76,9 @@ mod tests {
                 evidence: "不要 3 件（ATF の記事など）".into(),
             }],
         };
-        let out = render(&profile(0.9), &suggestion, "new.toml").unwrap();
+        let out = render(&profile(0.9), &suggestion, "new.toml")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             out,
             "changes:\n\
@@ -79,19 +91,39 @@ mod tests {
         );
     }
 
+    /// 根拠の無い変更は、反応を根拠にするという規則に反するので書き出さない。
+    #[test]
+    fn rejects_changes_without_reasons() {
+        let suggestion = Suggestion {
+            profile: profile(0.7),
+            reasons: vec![],
+        };
+        assert!(matches!(
+            render(&profile(0.9), &suggestion, "new.toml"),
+            Err(NoReasons)
+        ));
+    }
+
     /// 次の手順はそのまま貼り付けて実行できるよう、パスをシェル向けに引用する。
     #[test]
     fn quotes_paths_for_the_shell() {
         let suggestion = Suggestion {
             profile: profile(0.7),
-            reasons: vec![],
+            reasons: vec![Reason {
+                change: "c".into(),
+                evidence: "e".into(),
+            }],
         };
-        let out = render(&profile(0.9), &suggestion, "my profile's.toml").unwrap();
+        let out = render(&profile(0.9), &suggestion, "my profile's.toml")
+            .unwrap()
+            .unwrap();
         assert!(
             out.contains("nucrawler eval --profile 'my profile'\\''s.toml'"),
             "{out}"
         );
-        let plain = render(&profile(0.9), &suggestion, "dir/new-1.toml").unwrap();
+        let plain = render(&profile(0.9), &suggestion, "dir/new-1.toml")
+            .unwrap()
+            .unwrap();
         assert!(plain.contains("--profile dir/new-1.toml`"), "{plain}");
     }
 
@@ -101,6 +133,6 @@ mod tests {
             profile: profile(0.9),
             reasons: vec![],
         };
-        assert_eq!(render(&profile(0.9), &suggestion, "new.toml"), None);
+        assert_eq!(render(&profile(0.9), &suggestion, "new.toml"), Ok(None));
     }
 }

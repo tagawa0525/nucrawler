@@ -78,7 +78,7 @@ pub(crate) async fn suggest(
             return Ok(());
         }
     };
-    let Some(text) = suggest::render(&current, &suggestion, &out.display().to_string()) else {
+    let Some(text) = suggest::render(&current, &suggestion, &out.display().to_string())? else {
         println!("no changes suggested");
         return Ok(());
     };

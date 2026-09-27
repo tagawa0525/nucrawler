@@ -47,6 +47,8 @@ enum Error {
     Serve(#[from] ServeError),
     #[error(transparent)]
     Mcp(#[from] McpError),
+    #[error(transparent)]
+    NoReasons(#[from] nucrawler::suggest::NoReasons),
     #[error("failed to read {path}")]
     ReadFile {
         path: PathBuf,

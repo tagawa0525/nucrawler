@@ -2134,6 +2134,107 @@ impl Db {
             .collect()
     }
 
+    /// 条件に合い、公開の本文があり、このキーの要約がある記事と、その最新の版を作ったときの訳語集の
+    /// 時点を新しい順に返す。
+    /// 訳語集の変更による作り直しの候補。このモデルの要約の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn redo_digest_existing(
+        &self,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(DigestInput, Option<String>)>, DbError> {
+        let sql = format!(
+            "SELECT a.id, a.source_id, a.title, a.lang, latest.glossary_at
+             FROM articles AS a
+             JOIN artifacts AS latest ON latest.id = (
+               SELECT r.id FROM artifacts AS r
+               WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
+                 AND r.model = :model AND r.prompt_version = :version
+               ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+             WHERE EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
+               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(
+                &*redo_params(key, "digest", filter, now, usize::MAX)?,
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<(i64, String, String, String, Option<String>)>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, source_id, title, lang, glossary_at)| {
+                let input = DigestInput {
+                    article_id,
+                    source_id,
+                    title,
+                    lang,
+                    contents: self.public_contents(article_id, ContentSet::All)?,
+                };
+                Ok((input, glossary_at))
+            })
+            .collect()
+    }
+
+    /// 条件に合い、公開の本文（body/fulltext）があり、このキーの和訳がある英語の記事と、その最新の版を
+    /// 作ったときの訳語集の時点を新しい順に返す。訳語集の変更による作り直しの候補。
+    pub fn redo_translate_existing(
+        &self,
+        key: RedoKey,
+        filter: &RedoFilter,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(TranslateInput, Option<String>)>, DbError> {
+        let sql = format!(
+            "SELECT a.id, a.title, latest.glossary_at
+             FROM articles AS a
+             JOIN artifacts AS latest ON latest.id = (
+               SELECT r.id FROM artifacts AS r
+               WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
+                 AND r.model = :model AND r.prompt_version = :version
+               ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+             WHERE a.lang = 'en'
+               AND EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                   AND c.access_membership_id IS NULL)
+               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_FILTER}
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT :limit"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let articles = stmt
+            .query_map(
+                &*redo_params(key, "translate", filter, now, usize::MAX)?,
+                |r| Ok((r.get::<_, i64>(0)?, r.get(1)?, r.get(2)?)),
+            )?
+            .collect::<Result<Vec<(i64, String, Option<String>)>, _>>()?;
+        articles
+            .into_iter()
+            .map(|(article_id, title, glossary_at)| {
+                let input = TranslateInput {
+                    article_id,
+                    title,
+                    contents: self.public_contents(article_id, ContentSet::Body)?,
+                };
+                Ok((input, glossary_at))
+            })
+            .collect()
+    }
+
     /// 条件に合い、公開の本文（body/fulltext）がある英語の記事のうち、このキーの和訳がまだ無い
     /// ものを新しい順に返す。このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn redo_translate(
@@ -4651,6 +4752,141 @@ mod tests {
         };
         assert!(ids("sonnet").is_empty());
         assert_eq!(ids("opus"), [en]);
+    }
+
+    /// 訳語集による作り直しの候補は、このモデルの和訳がある英語の記事と、その最新の版の時点。
+    #[test]
+    fn redo_translate_existing_returns_the_latest_glossary_time() {
+        let db = Db::open_in_memory().unwrap();
+        let en = scored_article(
+            &db,
+            "https://e.com/en",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let _untranslated = scored_article(
+            &db,
+            "https://e.com/en2",
+            Lang::En,
+            "2026-09-25T00:00:00.000Z",
+            90,
+        );
+        let body: i64 = db
+            .conn()
+            .query_row("SELECT id FROM contents WHERE article_id = ?1", [en], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload = serde_json::json!({"body_ja": "和訳"});
+        for (glossary_at, at) in [
+            (None, "2026-09-27T00:00:00Z"),
+            (Some("2026-09-27T05:00:00.000Z"), "2026-09-27T06:00:00Z"),
+        ] {
+            db.insert_translation(
+                &NewArtifact {
+                    article_id: en,
+                    kind: ArtifactKind::Translation,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &payload,
+                    inputs: &[body],
+                    glossary_at,
+                },
+                t(at),
+            )
+            .unwrap();
+        }
+        let existing = |model| -> Vec<(i64, Option<String>)> {
+            db.redo_translate_existing(
+                redo_key(&db, model),
+                &RedoFilter::default(),
+                t("2026-09-27T07:00:00Z"),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(i, at)| (i.article_id, at))
+            .collect()
+        };
+        assert_eq!(
+            existing("sonnet"),
+            [(en, Some("2026-09-27T05:00:00.000Z".to_string()))]
+        );
+        assert!(existing("opus").is_empty());
+    }
+
+    /// 訳語集による作り直しの候補は、このモデルの要約がある記事と、その最新の版の時点。
+    #[test]
+    fn redo_digest_existing_returns_articles_with_this_model() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let _undigested = page_article(&db, "https://e.com/d", "2026-09-26T00:00:00.000Z");
+        let existing = |model| -> Vec<(i64, Option<String>)> {
+            db.redo_digest_existing(
+                redo_key(&db, model),
+                &RedoFilter::default(),
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(d, at)| (d.article_id, at))
+            .collect()
+        };
+        assert_eq!(existing("sonnet"), [(a, None)]);
+        assert!(existing("opus").is_empty());
+    }
+
+    /// 会員限定の本文からしか作れない記事は、公開の入力が無いので作り直しの候補にしない。
+    #[test]
+    fn redo_existing_skips_articles_without_public_contents() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let gated = insert_content(&db, a, Some(m));
+        for (kind, payload) in [
+            (ArtifactKind::Digest, serde_json::json!({"title_ja": "題"})),
+            (
+                ArtifactKind::Translation,
+                serde_json::json!({"body_ja": "和訳"}),
+            ),
+        ] {
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: a,
+                    kind,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &payload,
+                    inputs: &[gated],
+                    glossary_at: None,
+                },
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        }
+        let now = t("2026-09-27T01:00:00Z");
+        let key = redo_key(&db, "sonnet");
+        assert!(
+            db.redo_digest_existing(key, &RedoFilter::default(), now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.redo_translate_existing(key, &RedoFilter::default(), now)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {

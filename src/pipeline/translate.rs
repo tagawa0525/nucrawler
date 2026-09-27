@@ -1,11 +1,15 @@
 //! 和訳ステージ：依頼された記事と、点数の高い英語記事の本文を 1 件ずつ全文和訳する。
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
+use crate::db::{
+    ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateInput, TranslateQuery,
+};
 use crate::llm::{Llm, LlmRequest};
 use crate::{errors, glossary, translate};
 
@@ -59,6 +63,23 @@ pub async fn translate_articles<L: Llm>(
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let schema = translate::schema();
     let mut summary = TranslateSummary::default();
+    // 訳語集の変更による作り直しは、先に対象を決めて順に訳す
+    let mut outdated = match target {
+        Target::Redo(spec) if spec.glossary => Some(outdated_translations(
+            db,
+            RedoKey {
+                user_id: spec.user_id,
+                profile_hash: spec.profile_hash.as_deref(),
+                backend,
+                model,
+                prompt_version: translate::PROMPT_VERSION,
+            },
+            &spec.filter,
+            llm_cfg,
+            now,
+        )?),
+        _ => None,
+    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -70,9 +91,10 @@ pub async fn translate_articles<L: Llm>(
             break;
         }
         // 全文は長いので 1 件ずつ訳す
-        let Some(input) = (match target {
-            Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1)?,
-            Target::Redo(spec) => db.redo_translate(
+        let Some(input) = (match (&mut outdated, target) {
+            (Some(queue), _) => queue.pop_front().into_iter().collect(),
+            (None, Target::Pending { .. }) => db.pending_translate(query, cutoff, now, 1)?,
+            (None, Target::Redo(spec)) => db.redo_translate(
                 RedoKey {
                     user_id: spec.user_id,
                     profile_hash: spec.profile_hash.as_deref(),
@@ -164,6 +186,27 @@ pub async fn translate_articles<L: Llm>(
         summary.translated += 1;
     }
     Ok(summary)
+}
+
+/// このモデルの最新の和訳が、記事に当たる訳語の変更より前に作られた記事。時点は訳すときと同じ
+/// プロンプトで決める（切り詰めた本文の外の語で作り直しを繰り返さないように）。
+fn outdated_translations(
+    db: &Db,
+    key: RedoKey,
+    filter: &crate::db::RedoFilter,
+    llm_cfg: &LlmConfig,
+    now: DateTime<Utc>,
+) -> Result<VecDeque<TranslateInput>, DbError> {
+    let entries = db.glossary_entries()?;
+    Ok(db
+        .redo_translate_existing(key, filter, now)?
+        .into_iter()
+        .filter(|(input, made_with)| {
+            let prompt = translate::build_prompt(input, llm_cfg.translate_max_input_chars);
+            glossary::relevant(&entries, &prompt).glossary_at > *made_with
+        })
+        .map(|(input, _)| input)
+        .collect())
 }
 
 #[cfg(test)]
@@ -461,6 +504,80 @@ mod tests {
         assert_eq!(summary.failed, 1);
     }
 
+    /// 訳語集が変わった後に作られていない和訳だけを、同じモデルで新しい版として作り直す。
+    /// 作り直した版は時点が新しいので、もう一度実行しても対象にならない。
+    #[tokio::test]
+    async fn redo_glossary_retranslates_only_outdated_translations() {
+        let (db, owner) = setup();
+        let with_edg = article(&db, 0, 90);
+        let without = article(&db, 1, 90);
+        mention_edg(&db, with_edg);
+        run(
+            &db,
+            owner,
+            &FakeLlm::new([ok("初訳"), ok("初訳")]),
+            &mut quota(10),
+            false,
+        )
+        .await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["emergency diesel generator".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: None,
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        let llm = FakeLlm::new([ok("再訳")]);
+        let summary = redo_glossary(&db, owner, &llm, later).await;
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert!(llm.requests()[0].system.contains("非常用ディーゼル発電機"));
+        assert_eq!(
+            db.query_strings(
+                "SELECT article_id || '|' || json_extract(payload, '$.body_ja') || '|'
+                        || coalesce(glossary_at, '-')
+                 FROM artifacts WHERE kind = 'translation' ORDER BY id"
+            )
+            .unwrap(),
+            [
+                format!("{with_edg}|初訳|-"),
+                format!("{without}|初訳|-"),
+                format!("{with_edg}|再訳|{}", crate::db::timestamp(later)),
+            ]
+        );
+        let again = redo_glossary(&db, owner, &FakeLlm::new([]), later).await;
+        assert_eq!(again.calls, 0);
+    }
+
+    async fn redo_glossary(
+        db: &Db,
+        owner: i64,
+        llm: &FakeLlm,
+        now: DateTime<Utc>,
+    ) -> TranslateSummary {
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: owner,
+            profile_hash: None,
+            glossary: true,
+        });
+        translate_articles(
+            LlmStage {
+                db,
+                llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+            },
+            &LlmConfig::default(),
+            &PipelineConfig::default(),
+            owner,
+            &target,
+            now,
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn redo_translates_again_with_another_model() {
         let (db, owner) = setup();
@@ -477,6 +594,7 @@ mod tests {
             filter: crate::db::RedoFilter::default(),
             user_id: owner,
             profile_hash: None,
+            glossary: false,
         });
         let opus = LlmConfig {
             translate_model: "opus".into(),

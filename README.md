@@ -6,7 +6,7 @@
 - 要約・採点・和訳は Claude Code の headless 実行（`claude -p`）で行い、サブスクリプションの枠内に収める
 - 5 時間枠と週次枠の使用率を見て、時間帯ごとの上限を超えないように止まる（`config.toml` の `[quota]`）
 - 処理はステージ（取得 → 本文抽出 → 要約 → 採点 → 和訳）ごとに成果物の有無で進み、中断しても次回は続きから再開する
-- 要約と和訳はモデルごとに版を残し、`redo` で別のモデルでやり直せる
+- 要約と和訳はモデルと訳語集の時点ごとに版を残し、`redo` で別のモデルや新しい訳語集でやり直せる
 - 推薦は関心プロファイル（分野と重み）と、閲覧・👍/👎 の行動をもとに LLM が採点する
 
 ## 導入（NixOS + home-manager）
@@ -80,7 +80,7 @@ users.users.<name>.linger = true;
 
 ```text
 nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N] [--wait-lock]
-nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--min-score N] [--ids 1,2,3]
+nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--min-score N] [--ids 1,2,3] [--glossary]
 nucrawler status
 nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
@@ -92,6 +92,11 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
 - 別の `crawl` が実行中なら終了コード 75（EX_TEMPFAIL）で終わる。`--wait-lock` を付けると終わるのを待ってから始める（unit はこちらを使う）
+- `redo` は、指定したモデル・プロンプト版の成果物がまだ無い記事を作り直す。同じコマンドを再実行すれば続きから処理する。
+  `--glossary` を付けると、そのモデルの最新の版が、記事に当たる訳語の変更（訳・略語・メモの変更と、
+  記事に出てくる原語の追加）より前に作られた記事だけを、同じモデルで新しい版として作り直す
+  （例：訳語集を直した後に `redo translate --model sonnet --glossary`）。当たる訳語は、LLM に渡すのと同じ
+  切り詰めた本文で判定する
 - `status` はソースごとの記事数と取得状況を表示する
 - `search` は Web の検索画面（下記）と同じ条件で記事を探し、1 行 1 件（公開日時・点数・見出し・URL）で出す。
   閲覧としては記録しない

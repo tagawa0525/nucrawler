@@ -22,7 +22,7 @@ pub enum ParseError {
     SearchUsage,
     #[error(
         "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
-         [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
+         [--min-score N] [--ids 1,2,3] [--glossary] [--max-llm-calls N]"
     )]
     RedoUsage,
     #[error(
@@ -190,6 +190,8 @@ pub struct RedoArgs {
     pub kind: RedoKind,
     pub model: String,
     pub filter: crate::db::RedoFilter,
+    /// 訳語集が変わった後に作られていない版だけを作り直す
+    pub glossary: bool,
     pub max_llm_calls: Option<u32>,
 }
 
@@ -203,8 +205,14 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
     let mut model = None;
     let mut filter = crate::db::RedoFilter::default();
     let mut max_llm_calls = None;
+    let mut glossary = false;
     let mut it = rest.iter();
     while let Some(opt) = it.next() {
+        // 値を取らないオプション
+        if opt == "--glossary" {
+            glossary = true;
+            continue;
+        }
         let value = option_value(&mut it).ok_or_else(usage)?;
         match opt.as_str() {
             "--model" => model = Some(value.clone()),
@@ -231,6 +239,7 @@ pub fn parse_redo_args(args: &[String]) -> Result<RedoArgs, ParseError> {
         kind,
         model: model.ok_or_else(usage)?,
         filter,
+        glossary,
         max_llm_calls,
     })
 }
@@ -584,6 +593,12 @@ mod tests {
         let minimal = parse_redo_args(&args(&["translate", "--model", "opus"])).unwrap();
         assert_eq!(minimal.kind, RedoKind::Translate);
         assert_eq!(minimal.filter, crate::db::RedoFilter::default());
+        assert!(!minimal.glossary);
+        // --glossary は値を取らない
+        let glossary =
+            parse_redo_args(&args(&["translate", "--glossary", "--model", "opus"])).unwrap();
+        assert!(glossary.glossary);
+        assert_eq!(glossary.model, "opus");
     }
 
     #[test]

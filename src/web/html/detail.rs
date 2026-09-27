@@ -51,7 +51,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     ));
     if let Some(score) = i.score {
         body.push_str(&format!(
-            "<p><span class=\"score\">{score}</span>{}</p>",
+            "<p><span class=\"score\">{score}</span>{}{}</p>",
+            super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
     }

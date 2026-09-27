@@ -100,6 +100,19 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 /// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
 const SWIPE_SCRIPT: &str = concat!("<script>\n", include_str!("assets/swipe.js"), "</script>");
 
+/// 点数が当たったプロファイルの語（関心分野と、除外に当たった話題）。
+pub(super) fn matches(i: &ListItem) -> String {
+    let matched = i
+        .matched
+        .iter()
+        .map(|t| format!("<span class=\"match\">{}</span>", escape(t)));
+    let excluded = i
+        .excluded
+        .iter()
+        .map(|t| format!("<span class=\"match excluded\">除外 {}</span>", escape(t)));
+    matched.chain(excluded).collect()
+}
+
 /// 記事のカード。`swipe` なら一覧の振り分けの対象にする（`SWIPE_SCRIPT`）。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
@@ -130,7 +143,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
@@ -141,6 +154,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         title = escape(title),
         source = escape(page.source(&i.source_id)),
         at = crate::jst::format_local(&i.at),
+        matches = matches(i),
     )
 }
 

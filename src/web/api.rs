@@ -68,8 +68,8 @@ impl<'a> Article<'a> {
             lwr_relevant: i.lwr_relevant,
             score: i.score,
             reason: i.reason.as_deref(),
-            matched: &[],
-            excluded: &[],
+            matched: &i.matched,
+            excluded: &i.excluded,
             read: i.read,
             feedback: i.feedback.map(|f| match f {
                 Feedback::Up => "up",

@@ -321,8 +321,8 @@ fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
         date: item.at,
         score: item.score,
         reason: item.reason,
-        matched: Vec::new(),
-        excluded: Vec::new(),
+        matched: item.matched,
+        excluded: item.excluded,
         lwr_relevant: item.lwr_relevant,
         feedback: item.feedback.map(|f| {
             match f {

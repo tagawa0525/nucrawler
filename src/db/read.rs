@@ -542,7 +542,13 @@ impl Db {
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
-                    rows.requested, rows.locked_by, rows.bookmarked
+                    rows.requested, rows.locked_by, rows.bookmarked,
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = s.id AND kind = 'interest' ORDER BY topic)) AS matched,
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では 👎、見ない、非軽水炉、未採点、閾値未満を隠す
@@ -601,11 +607,18 @@ impl Db {
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),
             };
-            Ok((item, r.get::<_, String>(16)?))
+            Ok((
+                item,
+                r.get::<_, String>(16)?,
+                r.get::<_, String>(18)?,
+                r.get::<_, String>(19)?,
+            ))
         })?;
         rows.map(|row| {
-            let (mut item, locked_by) = row?;
+            let (mut item, locked_by, matched, excluded) = row?;
             item.locked_by = serde_json::from_str(&locked_by)?;
+            item.matched = serde_json::from_str(&matched)?;
+            item.excluded = serde_json::from_str(&excluded)?;
             Ok(item)
         })
         .collect()

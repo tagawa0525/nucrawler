@@ -1483,6 +1483,29 @@ mod tests {
         assert!(db.explore(q, 0, "2026-09-29").unwrap().is_empty());
     }
 
+    /// 選んだ後に採点し直されて閾値以上になった記事は、確認枠から外す（一覧と二重に出さない）。
+    #[test]
+    fn explore_drops_picks_that_no_longer_qualify() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            20,
+        );
+        let q = list_query(&db, false);
+        let picked: Vec<i64> = db
+            .explore(q, 1, "2026-09-27")
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
+        assert_eq!(picked, [a]);
+        rescore_with_version(&db, a, 2, 90);
+        assert!(db.explore(q, 1, "2026-09-27").unwrap().is_empty());
+    }
+
     /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。
     /// 件数の上限は除いた後にかける（ブックマークが上位を占めても一覧が減らない）。
     #[test]

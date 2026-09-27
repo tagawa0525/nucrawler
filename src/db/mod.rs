@@ -5648,6 +5648,33 @@ mod tests {
         );
     }
 
+    /// 同じ時刻（ミリ秒）の行動が重なっても、取り消すのはその行動で付いたブックマークだけ。
+    /// 外した後に付け直したブックマークは、付け直した行動の取り消しで外れる。
+    #[test]
+    fn undo_follows_the_event_that_made_the_bookmark() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let bookmarked = |db: &Db| db.search_articles(&search_query(db)).unwrap()[0].bookmarked;
+        let at = t("2026-09-27T00:00:00Z");
+        db.record_event(owner, a, SignalKind::Bookmark, at).unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, at).unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(bookmarked(&db));
+
+        db.unbookmark(owner, a).unwrap();
+        db.record_event(owner, a, SignalKind::Bookmark, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.undo_event(owner, a, SignalKind::Bookmark).unwrap();
+        assert!(!bookmarked(&db));
+    }
+
     #[test]
     fn migration_keeps_existing_events_and_accepts_new_kinds() {
         let conn = Connection::open_in_memory().unwrap();

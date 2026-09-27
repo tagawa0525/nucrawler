@@ -45,10 +45,9 @@ pub(crate) async fn eval(
         eval::render(
             &db.eval_labels(owner)?,
             &db.eval_scores(owner)?,
-            current
-                .as_deref()
-                .map(|h| (h, prompt::score::PROMPT_VERSION)),
+            current.as_deref(),
             candidate.as_deref(),
+            prompt::score::PROMPT_VERSION,
             args.all,
         )
     );

@@ -523,7 +523,7 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
             db.replace_topics(&parsed)?;
             tracing::info!(topics = parsed.len(), "topics imported");
         }
-        TopicsArgs::Export => print!("{}", topics::to_toml(&db.topics()?)),
+        TopicsArgs::Export => print!("{}", topics::to_toml(&db.vocabulary()?)),
     }
     Ok(())
 }

@@ -852,9 +852,22 @@ impl Db {
         .collect()
     }
 
+    /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。
+    pub fn vocabulary(&self) -> Result<Vec<crate::topics::Entry>, DbError> {
+        Ok(self
+            .topics()?
+            .into_iter()
+            .map(|t| crate::topics::Entry {
+                name: t.name,
+                facet: t.facet,
+                added_at: None,
+            })
+            .collect())
+    }
+
     /// 語彙を `topics` に置き換える。名前で突き合わせ、無い語は追加、軸が変わった語は更新し、
     /// 並びに無い語は削除する。要約に付いている語を消そうとしたら何も変えずに失敗する。
-    pub fn replace_topics(&self, topics: &[crate::topics::Topic]) -> Result<(), DbError> {
+    pub fn replace_topics(&self, topics: &[crate::topics::Entry]) -> Result<(), DbError> {
         let names = serde_json::to_string(&topics.iter().map(|t| &t.name).collect::<Vec<_>>())?;
         let tx = self.conn.unchecked_transaction()?;
         let in_use: Vec<String> = {
@@ -4198,12 +4211,13 @@ mod tests {
         assert_eq!(search_ids(&db, &["要約の題"]), [1]);
     }
 
-    fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Topic> {
+    fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Entry> {
         names
             .iter()
-            .map(|&(name, facet)| crate::topics::Topic {
+            .map(|&(name, facet)| crate::topics::Entry {
                 name: name.into(),
                 facet,
+                added_at: None,
             })
             .collect()
     }
@@ -4223,9 +4237,10 @@ mod tests {
         for name in ["規制・審査", "燃料", "高経年化", "安全解析"] {
             assert!(topics.iter().any(|t| t.name == name), "{name}");
         }
+        let vocabulary = db.vocabulary().unwrap();
         assert_eq!(
-            crate::topics::parse(&crate::topics::to_toml(&topics)).unwrap(),
-            topics,
+            crate::topics::parse(&crate::topics::to_toml(&vocabulary)).unwrap(),
+            vocabulary,
             "seeded vocabulary passes the import validation"
         );
     }
@@ -4267,7 +4282,7 @@ mod tests {
             "only digest topics in the vocabulary"
         );
         let without: Vec<_> = db
-            .topics()
+            .vocabulary()
             .unwrap()
             .into_iter()
             .filter(|t| t.name != "規制・審査")
@@ -4577,7 +4592,7 @@ mod tests {
     /// 手で取り込んだ語彙に別名と同じ名前があれば、その名前は語として復活し、別名ではなくなる。
     #[test]
     fn importing_an_alias_name_makes_it_a_topic_again() {
-        use crate::topics::{Facet, Topic};
+        use crate::topics::{Entry, Facet};
         let db = Db::open_in_memory().unwrap();
         propose(&db, "新設炉");
         db.merge_topics(
@@ -4587,10 +4602,11 @@ mod tests {
             t("2026-10-04T00:00:00Z"),
         )
         .unwrap();
-        let mut topics = db.topics().unwrap();
-        topics.push(Topic {
+        let mut topics = db.vocabulary().unwrap();
+        topics.push(Entry {
             name: "新設炉".into(),
             facet: Facet::Reactor,
+            added_at: None,
         });
         db.replace_topics(&topics).unwrap();
         assert!(aliases(&db).is_empty());
@@ -4660,7 +4676,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let first = vocab(&[("燃料", Facet::Field), ("PWR", Facet::Reactor)]);
         db.replace_topics(&first).unwrap();
-        assert_eq!(db.topics().unwrap(), first);
+        assert_eq!(db.vocabulary().unwrap(), first);
         let fuel_id: i64 = db
             .conn()
             .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
@@ -4670,10 +4686,7 @@ mod tests {
 
         let second = vocab(&[("燃料", Facet::Reactor), ("米国", Facet::Region)]);
         db.replace_topics(&second).unwrap();
-        assert_eq!(
-            db.topics().unwrap(),
-            [second[0].clone(), second[1].clone(),]
-        );
+        assert_eq!(db.vocabulary().unwrap(), second);
         let kept_id: i64 = db
             .conn()
             .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
@@ -4681,6 +4694,45 @@ mod tests {
             })
             .unwrap();
         assert_eq!(kept_id, fuel_id, "an updated topic keeps its id");
+    }
+
+    /// LLM が足した語かどうかは語彙ファイルの added_at で決まる。書き出した語彙を取り込み直しても変わらず、
+    /// added_at を消して取り込めば人が決めた語になる（整理で統合されない）。
+    #[test]
+    fn import_decides_whether_topics_are_proposed() {
+        let db = Db::open_in_memory().unwrap();
+        propose(&db, "新設炉");
+        let exported = db.vocabulary().unwrap();
+        let proposed = exported.iter().find(|e| e.name == "新設炉").unwrap();
+        assert_eq!(
+            proposed.added_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        assert!(
+            exported
+                .iter()
+                .filter(|e| e.name != "新設炉")
+                .all(|e| e.added_at.is_none())
+        );
+
+        db.replace_topics(&exported).unwrap();
+        assert_eq!(
+            db.vocabulary().unwrap(),
+            exported,
+            "round trip keeps origins"
+        );
+
+        let curated: Vec<_> = exported
+            .iter()
+            .cloned()
+            .map(|e| crate::topics::Entry {
+                added_at: None,
+                ..e
+            })
+            .collect();
+        db.replace_topics(&curated).unwrap();
+        let usage = db.topic_usage().unwrap();
+        assert!(usage.iter().all(|u| u.added_at.is_none()));
     }
 
     #[test]
@@ -4708,7 +4760,11 @@ mod tests {
             matches!(&err, DbError::TopicsInUse(names) if names == &["PWR"]),
             "{err}"
         );
-        assert_eq!(db.topics().unwrap(), before, "nothing changes on failure");
+        assert_eq!(
+            db.vocabulary().unwrap(),
+            before,
+            "nothing changes on failure"
+        );
 
         // 要約の版が消えれば付与も消え、語を削除できる
         db.conn()

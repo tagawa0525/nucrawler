@@ -53,15 +53,26 @@ pub struct Topic {
     pub facet: Facet,
 }
 
+/// 語彙ファイルの 1 語。`added_at` は要約が提案して語彙に加えた時刻（LLM が足した語）で、
+/// 週 1 回の整理で統合されうる。行から消して取り込めば、人が決めた語になり統合されなくなる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub name: String,
+    pub facet: Facet,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Vocabulary {
     #[serde(rename = "topic", default)]
-    topics: Vec<Topic>,
+    topics: Vec<Entry>,
 }
 
 /// TOML を読み、値を検証する（1 件以上、名前は空でなく重複しない）。
-pub fn parse(text: &str) -> Result<Vec<Topic>, TopicsError> {
+pub fn parse(text: &str) -> Result<Vec<Entry>, TopicsError> {
     let Vocabulary { topics } = toml::from_str(text)?;
     if topics.is_empty() {
         return Err(TopicsError::Invalid(
@@ -83,7 +94,7 @@ pub fn parse(text: &str) -> Result<Vec<Topic>, TopicsError> {
     Ok(topics)
 }
 
-pub fn to_toml(topics: &[Topic]) -> String {
+pub fn to_toml(topics: &[Entry]) -> String {
     toml::to_string(&Vocabulary {
         topics: topics.to_vec(),
     })
@@ -94,10 +105,11 @@ pub fn to_toml(topics: &[Topic]) -> String {
 mod tests {
     use super::*;
 
-    fn topic(name: &str, facet: Facet) -> Topic {
-        Topic {
+    fn topic(name: &str, facet: Facet) -> Entry {
+        Entry {
             name: name.into(),
             facet,
+            added_at: None,
         }
     }
 
@@ -145,6 +157,23 @@ facet = "炉型"
                 "{text:?}"
             );
         }
+    }
+
+    /// LLM が足した語は追加した時刻を持ち、書き出して取り込み直しても LLM が足した語のまま。
+    #[test]
+    fn parses_added_at_of_proposed_topics() {
+        let text = "[[topic]]\nname = \"新設炉\"\nfacet = \"分野\"\nadded_at = \"2026-09-28T01:00:00.000Z\"\n";
+        let parsed = parse(text).unwrap();
+        assert_eq!(
+            parsed[0].added_at.as_deref(),
+            Some("2026-09-28T01:00:00.000Z")
+        );
+        assert_eq!(parse(&to_toml(&parsed)).unwrap(), parsed);
+        let bad = "[[topic]]\nname = \"新設炉\"\nfacet = \"分野\"\nadded_at = \"yesterday\"\n";
+        assert!(
+            matches!(parse(bad), Err(TopicsError::Invalid(m)) if m.contains("added_at")),
+            "{bad}"
+        );
     }
 
     #[test]

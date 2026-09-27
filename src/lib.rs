@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod errors;
+pub mod eval;
 pub mod extract;
 pub mod glossary;
 pub mod http;

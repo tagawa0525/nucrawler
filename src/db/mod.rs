@@ -1365,18 +1365,24 @@ impl Db {
         article_id: i64,
         kind: SignalKind,
     ) -> Result<(), DbError> {
+        use rusqlite::OptionalExtension;
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM events WHERE id = (
-               SELECT id FROM events
-               WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
-               ORDER BY created_at DESC, id DESC LIMIT 1)",
-            rusqlite::params![user_id, article_id, kind.as_str()],
-        )?;
-        if kind == SignalKind::Bookmark {
+        let undone: Option<String> = tx
+            .query_row(
+                "DELETE FROM events WHERE id = (
+                   SELECT id FROM events
+                   WHERE user_id = ?1 AND article_id = ?2 AND kind = ?3
+                   ORDER BY created_at DESC, id DESC LIMIT 1)
+                 RETURNING created_at",
+                rusqlite::params![user_id, article_id, kind.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        // ブックマークは同じ時刻で付けているので、その行動で付いたものだけを外す
+        if let (SignalKind::Bookmark, Some(at)) = (kind, undone) {
             tx.execute(
-                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
-                rusqlite::params![user_id, article_id],
+                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2 AND created_at = ?3",
+                rusqlite::params![user_id, article_id, at],
             )?;
         }
         tx.commit()?;

@@ -71,7 +71,8 @@ artifact_access(artifact_id, membership_id)             -- VIEW：入力本文�
 scores(id, user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
   -- UNIQUE(user_id, artifact_id, profile_hash, backend, model)
 events(id, user_id, article_id, kind, created_at)
-  -- kind: open_detail / open_translation / up / down
+  -- kind: open_detail / open_translation / up / down / bookmark / dismiss
+bookmarks(user_id, article_id, event_id)                 -- 今のブックマーク。付けた行動（events）を消すと外れる
 translation_requests(user_id, article_id, requested_at, done_at)
 stage_errors(article_id, stage, backend, model, attempts, last_error, next_retry_at)
 llm_calls(id, at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit JSON)
@@ -117,12 +118,12 @@ source_state(source_id PK, last_success_at, last_error)
 ## 推薦と行動シグナル
 
 - 初期のプロファイル（重み）：規制・審査 1.0、燃料 0.9、高経年化 0.8、安全解析 0.7、その他の対象分野 0.4
-- 行動シグナルの強さ：👎（強い否定）≫ 詳細を開いた（弱い肯定）＜ 全文和訳を開いた（肯定）≪ 👍（強い肯定）。👎 はほかのシグナルより優先する
+- 行動シグナルの強さ：👎（強い否定）≫ 見ない（弱い否定）、詳細を開いた（弱い肯定）＜ 全文和訳を開いた・ブックマーク（肯定）≪ 👍（強い肯定）。👎 はほかのシグナルより優先する
 - 採点プロンプトには、直近の行動シグナルを強さ付きで例として渡す
 - 一覧の並び：
   1. 前回見てから届いた記事（スコア順）
   2. 過去 7 日の未読で高スコアの記事
-  3. 👎 を付けた記事と閾値未満の記事は既定で隠す（切り替えで表示）
+  3. 👎・見ないにした記事と閾値未満の記事は既定で隠す（切り替えで表示）。ブックマークした記事は一覧に出さない
   - 鮮度による重み付けはしない
 - 詳細画面で和訳がまだなら「和訳を依頼」ボタンを出す。15 分ごとの依頼処理で、上限の範囲内で和訳する。上限で待たされるときは「hh:mm 以降」と表示する
 

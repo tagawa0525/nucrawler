@@ -134,6 +134,7 @@ async fn run() -> Result<(), Error> {
             .await
         }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
+        Command::Topics => unimplemented!("topics"),
         Command::Serve => {
             serve(
                 inv.config_dir,

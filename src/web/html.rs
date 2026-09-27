@@ -378,8 +378,12 @@ const SWIPE_SCRIPT: &str = r#"<script>
   const reset = (card) => {
     card.style.transform = "";
     delete card.dataset.dir;
+    delete card.dataset.busy;
   };
+  // 送っている間は同じカードを振り分け直さない（行動が二重に記録される）
   const triage = async (card, kind) => {
+    if (card.dataset.busy) return;
+    card.dataset.busy = "1";
     const id = card.dataset.id;
     card.style.transform = `translateX(${kind === "bookmark" ? "" : "-"}110%)`;
     if (!(await post(`/articles/${id}/feedback`, kind).catch(() => false))) {
@@ -401,7 +405,8 @@ const SWIPE_SCRIPT: &str = r#"<script>
   const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
   document.addEventListener("keydown", (e) => {
     if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
-    const cards = [...document.querySelectorAll(".card[data-id]")].filter((c) => !c.hidden);
+    const cards = [...document.querySelectorAll(".card[data-id]")]
+      .filter((c) => !c.hidden && !c.dataset.busy);
     const current = e.target.closest(".card[data-id]");
     const at = cards.indexOf(current);
     if (e.key in MOVE_KEYS) {
@@ -426,7 +431,8 @@ const SWIPE_SCRIPT: &str = r#"<script>
   for (const card of document.querySelectorAll(".card[data-id]")) {
     let x0 = null, y0 = 0, dx = 0, dragging = false, moved = false;
     card.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.clientX < EDGE || e.clientX > innerWidth - EDGE) return;
+      if (e.button !== 0 || card.dataset.busy) return;
+      if (e.clientX < EDGE || e.clientX > innerWidth - EDGE) return;
       x0 = e.clientX; y0 = e.clientY; dx = 0; dragging = false; moved = false;
     });
     card.addEventListener("pointermove", (e) => {

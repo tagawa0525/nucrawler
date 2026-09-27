@@ -135,7 +135,7 @@ source_state(source_id PK, last_success_at, last_error)
 | 規制      | 原子力規制委員会                                                                                    | 一覧ページ `dl.news__list dd.news__title a`                                          | 後  |
 | 業界      | World Nuclear News、ANS Newswire                                                                    | RSS                                                                                  | ○   |
 | 業界      | 電事連                                                                                              | JSON `https://www.fepc.or.jp/pr/news/index.json`                                     | ○   |
-| 業界      | 原子力産業新聞（JAIF）                                                                              | 実装時に調べる                                                                       | 後  |
+| 業界      | 原子力産業新聞（JAIF）                                                                              | RSS `https://www.jaif.or.jp/journal/feed`（本文入り、会員限定なし）                  | 後  |
 | 業界/研究 | NEI、INL、OECD-NEA                                                                                  | 403 → ヘッドレス Chromium で 1 日 1 回                                               | 後  |
 | 研究      | DOE-NE                                                                                              | RSS `https://www.energy.gov/ne/rss.xml`                                              | ○   |
 | 研究      | 原子力学会                                                                                          | RSS `https://www.aesj.net/feed`（カテゴリ別：学会誌 237、年会 245、論文誌 208 など） | ○   |

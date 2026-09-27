@@ -50,17 +50,29 @@ fn selector(s: &str) -> Result<Selector, SourceError> {
     })
 }
 
-/// ページへのリンク（http/https）。ページ内の移動や javascript: などは None。
+/// ページへのリンク（http/https、フラグメントを除く）。javascript: などと、`base`（一覧ページ
+/// 自身）へのリンク（「ページの先頭へ」など）は None。
 fn page_link(a: ElementRef, base: &Url) -> Option<Url> {
     let href = a.value().attr("href")?.trim();
-    if href.is_empty() || href.starts_with('#') {
+    if href.is_empty() {
         return None;
     }
     let url = base
         .join(href)
         .inspect_err(|e| tracing::debug!(href, "skipping unparsable link: {e}"))
         .ok()?;
-    matches!(url.scheme(), "http" | "https").then_some(url)
+    let url = without_fragment(url);
+    (matches!(url.scheme(), "http" | "https") && url != without_fragment(base.clone()))
+        .then_some(url)
+}
+
+/// フラグメントと空のクエリ（`?` だけ）を除いた URL。
+fn without_fragment(mut url: Url) -> Url {
+    url.set_fragment(None);
+    if url.query() == Some("") {
+        url.set_query(None);
+    }
+    url
 }
 
 /// リンクの文字列。`skip` に一致する要素は除き、`<br>` は空白にし、連続する空白は 1 つにする

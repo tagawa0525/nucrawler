@@ -49,7 +49,8 @@ impl Db {
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
         let at = timestamp(at);
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO source_state (source_id, last_success_at) VALUES (?1, ?2)
              ON CONFLICT (source_id) DO UPDATE SET
                last_success_at = excluded.last_success_at,
@@ -58,7 +59,7 @@ impl Db {
             [source_id, &at],
         )?;
         let count = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO fetch_runs (source_id, fetched_at, total, matched, new, duplicate)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
@@ -70,6 +71,7 @@ impl Db {
                 count(counts.duplicate),
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

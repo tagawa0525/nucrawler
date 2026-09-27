@@ -119,6 +119,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0011_glossary.sql"),
     include_str!("migrations/0012_term_reports.sql"),
     include_str!("migrations/0013_glossary_changes.sql"),
+    include_str!("migrations/0014_report_status.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1635,27 +1636,88 @@ impl Db {
     /// 受付箱（新しい順）。`status` と `article_id` で絞る。
     pub fn term_reports(
         &self,
-        _status: Option<ReportStatus>,
-        _article_id: Option<i64>,
+        status: Option<ReportStatus>,
+        article_id: Option<i64>,
     ) -> Result<Vec<TermReport>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id, r.article_id,
+                    coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
+                                          WHERE d.article_id = a.id AND d.kind = 'digest'
+                                          ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
+                             a.title),
+                    r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
+                    r.reply, r.reported_at, r.resolved_at
+             FROM term_reports AS r
+             JOIN articles AS a ON a.id = r.article_id
+             LEFT JOIN glossary_terms AS t ON t.id = r.term_id
+             WHERE (?1 IS NULL OR r.status = ?1) AND (?2 IS NULL OR r.article_id = ?2)
+             ORDER BY r.reported_at DESC, r.id DESC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![status.map(ReportStatus::as_str), article_id],
+            |r| {
+                let term = match (r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?) {
+                    (Some(id), Some(target)) => Some((id, target)),
+                    _ => None,
+                };
+                Ok((
+                    r.get::<_, String>(7)?,
+                    TermReport {
+                        id: r.get(0)?,
+                        article_id: r.get(1)?,
+                        article_title: r.get(2)?,
+                        found: r.get(3)?,
+                        wanted: r.get(4)?,
+                        source: r.get(5)?,
+                        note: r.get(6)?,
+                        status: ReportStatus::Pending,
+                        term,
+                        reply: r.get(10)?,
+                        reported_at: r.get(11)?,
+                        resolved_at: r.get(12)?,
+                    },
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (status, report) = row?;
+            let status = ReportStatus::parse(&status)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("report status {status:?}")))?;
+            Ok(TermReport { status, ..report })
+        })
+        .collect()
     }
 
     /// 対応状況ごとの件数（`ReportStatus::ALL` の順。0 件も含む）。
     pub fn term_report_counts(&self) -> Result<Vec<(ReportStatus, i64)>, DbError> {
-        todo!()
+        ReportStatus::ALL
+            .into_iter()
+            .map(|status| {
+                let n = self.conn.query_row(
+                    "SELECT count(*) FROM term_reports WHERE status = ?1",
+                    [status.as_str()],
+                    |r| r.get(0),
+                )?;
+                Ok((status, n))
+            })
+            .collect()
     }
 
     /// 指摘の対応状況を変える。無ければ false。受付中に戻せば対応日時を消す。
     pub fn resolve_term_report(
         &self,
-        _id: i64,
-        _status: ReportStatus,
-        _term_id: Option<i64>,
-        _reply: Option<&str>,
-        _now: chrono::DateTime<chrono::Utc>,
+        id: i64,
+        status: ReportStatus,
+        term_id: Option<i64>,
+        reply: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        todo!()
+        let resolved_at = (status != ReportStatus::Pending).then(|| timestamp(now));
+        Ok(self.conn.execute(
+            "UPDATE term_reports SET status = ?2, term_id = ?3, reply = ?4, resolved_at = ?5
+             WHERE id = ?1",
+            rusqlite::params![id, status.as_str(), term_id, reply, resolved_at],
+        )? > 0)
     }
 
     /// 和訳を依頼する。既に和訳があれば完了として登録する。既に依頼していれば、

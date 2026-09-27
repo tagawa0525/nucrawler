@@ -8,7 +8,7 @@ use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
-use crate::{digest, errors};
+use crate::{digest, errors, glossary};
 
 pub const STAGE: &str = "digest";
 
@@ -79,7 +79,8 @@ pub async fn digest_articles<L: Llm>(
         let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
         // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
         let vocab = db.topics()?;
-        let system = digest::system_prompt(&vocab);
+        let terms = glossary::relevant(db.glossary()?, &prompt);
+        let system = digest::system_prompt(&vocab, &terms);
         let schema = digest::schema(&vocab);
         let outcome = call_recorded(
             db,
@@ -355,7 +356,7 @@ mod tests {
         assert_eq!(reqs[0].model, "sonnet");
         let vocab = db.topics().unwrap();
         assert_eq!(reqs[0].schema, crate::digest::schema(&vocab));
-        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab));
+        assert_eq!(reqs[0].system, crate::digest::system_prompt(&vocab, &[]));
         assert!(
             reqs[0]
                 .prompt

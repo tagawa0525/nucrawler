@@ -51,6 +51,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0008_topic_proposals.sql"),
     include_str!("migrations/0009_topic_aliases.sql"),
     include_str!("migrations/0010_bookmarks.sql"),
+    include_str!("migrations/0011_glossary.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -968,7 +969,30 @@ impl Db {
 
     /// 訳語集（登録順）。原語も登録順に並べる。
     pub fn glossary(&self) -> Result<Vec<crate::glossary::Term>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.target, t.abbr, t.note, s.source
+             FROM glossary_terms AS t JOIN glossary_sources AS s ON s.term_id = t.id
+             ORDER BY t.id, s.rowid",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut terms: Vec<(i64, crate::glossary::Term)> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let source: String = r.get(4)?;
+            match terms.last_mut() {
+                Some((last, term)) if *last == id => term.sources.push(source),
+                _ => terms.push((
+                    id,
+                    crate::glossary::Term {
+                        sources: vec![source],
+                        target: r.get(1)?,
+                        abbr: r.get(2)?,
+                        note: r.get(3)?,
+                    },
+                )),
+            }
+        }
+        Ok(terms.into_iter().map(|(_, term)| term).collect())
     }
 
     /// 書き出す語彙（登録順）。LLM が足した語は追加した時刻を持つ。

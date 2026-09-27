@@ -12,13 +12,70 @@ pub struct Term {
 }
 
 /// 原語のどれかが `text` に出てくる語だけを残す。
-pub fn relevant(_terms: Vec<Term>, _text: &str) -> Vec<Term> {
-    todo!()
+pub fn relevant(terms: Vec<Term>, text: &str) -> Vec<Term> {
+    let text = normalize_spaces(text);
+    let folded = text.to_ascii_lowercase();
+    terms
+        .into_iter()
+        .filter(|t| t.sources.iter().any(|s| mentions(&text, &folded, s)))
+        .collect()
+}
+
+/// 改行や連続した空白を 1 つの空白にする（原文の折り返しで語が分かれても当てるため）。
+fn normalize_spaces(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `source` が語として出てくるか。大文字だけの略語は大文字のときだけ、ほかは大文字小文字を問わず当てる。
+/// 語の途中には当てず、複数形（s / es）は当てる。`folded` は `text` を ASCII で小文字にしたもの。
+fn mentions(text: &str, folded: &str, source: &str) -> bool {
+    let source = normalize_spaces(source);
+    let abbreviation = source.chars().any(|c| c.is_ascii_uppercase())
+        && !source.chars().any(|c| c.is_ascii_lowercase());
+    let (haystack, needle) = if abbreviation {
+        (text, source)
+    } else {
+        (folded, source.to_ascii_lowercase())
+    };
+    let is_word = |c: char| c.is_ascii_alphanumeric();
+    haystack.match_indices(&needle).any(|(at, _)| {
+        let rest = &haystack[at + needle.len()..];
+        let rest = ["es", "s"]
+            .iter()
+            .find_map(|plural| rest.strip_prefix(plural))
+            .unwrap_or(rest);
+        !haystack[..at].chars().next_back().is_some_and(is_word)
+            && !rest.chars().next().is_some_and(is_word)
+    })
 }
 
 /// 要約と和訳で共有する表記と用語の決まり。
-pub fn prompt_section(_terms: &[Term]) -> String {
-    todo!()
+pub fn prompt_section(terms: &[Term]) -> String {
+    let mut out = String::from(
+        "# 表記\n- 数値・日付・固有名詞は原文のとおりに書き、記事に無いことは推測で補わない。\n",
+    );
+    if terms.is_empty() {
+        return out;
+    }
+    out.push_str(
+        "- 用語は次の訳に統一する。「/」で区切った原語はどれも同じ訳にする。\
+         訳に略語が付いている語は、初出を「訳語（略語）」と書き、以降は略語だけでもよい：\n",
+    );
+    for term in terms {
+        out.push_str(&format!(
+            "  - {} → {}",
+            term.sources.join(" / "),
+            term.target
+        ));
+        if let Some(abbr) = &term.abbr {
+            out.push_str(&format!("（{abbr}）"));
+        }
+        if let Some(note) = &term.note {
+            out.push_str(&format!(" ※{note}"));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]

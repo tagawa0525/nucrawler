@@ -1,6 +1,7 @@
-//! 全文和訳の依頼内容：system prompt（用語集は要約と共通）、出力の JSON Schema、プロンプト、応答の検証。
+//! 全文和訳の依頼内容：system prompt（訳語集は要約と共通）、出力の JSON Schema、プロンプト、応答の検証。
 
 use crate::db::TranslateInput;
+use crate::glossary::Term;
 use crate::prompt::escape_data;
 
 pub const PROMPT_VERSION: i64 = 1;
@@ -11,11 +12,11 @@ pub enum TranslateError {
     Malformed(String),
 }
 
-pub fn system_prompt() -> &'static str {
-    static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        format!(
-            "{}{}",
-            r#"あなたは原子力（特に軽水炉）分野に詳しい翻訳者です。
+/// `terms` は訳語集のうち記事に出てくる語（[`crate::glossary::relevant`]）。
+pub fn system_prompt(terms: &[Term]) -> String {
+    format!(
+        "{}{}",
+        r#"あなたは原子力（特に軽水炉）分野に詳しい翻訳者です。
 英語の記事の本文を、日本の原子力技術者が読む前提で、自然で正確な日本語に全文翻訳します。
 
 # 入力と出力
@@ -24,10 +25,8 @@ pub fn system_prompt() -> &'static str {
 - 見出しは訳さなくてよい（本文だけを訳す）。
 
 "#,
-            crate::digest::GLOSSARY
-        )
-    });
-    &PROMPT
+        crate::glossary::prompt_section(terms)
+    )
 }
 
 pub fn schema() -> serde_json::Value {
@@ -95,8 +94,14 @@ mod tests {
 
     #[test]
     fn system_prompt_shares_glossary_and_guards_injection() {
-        let s = system_prompt();
-        assert!(s.contains(crate::digest::GLOSSARY), "{s}");
+        let terms = [Term {
+            sources: vec!["scram".into()],
+            target: "スクラム".into(),
+            abbr: None,
+            note: None,
+        }];
+        let s = system_prompt(&terms);
+        assert!(s.ends_with(&crate::glossary::prompt_section(&terms)), "{s}");
         assert!(s.contains("指示"), "{s}");
         assert!(s.contains("全文"), "{s}");
     }

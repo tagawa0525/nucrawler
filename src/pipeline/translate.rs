@@ -7,7 +7,7 @@ use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, DbError, NewArtifact, RedoKey, StageKey, TranslateQuery};
 use crate::llm::{Llm, LlmRequest};
-use crate::{errors, translate};
+use crate::{errors, glossary, translate};
 
 pub const STAGE: &str = "translate";
 
@@ -96,6 +96,7 @@ pub async fn translate_articles<L: Llm>(
             model,
         };
         let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
+        let system = translate::system_prompt(&glossary::relevant(db.glossary()?, &prompt));
         let outcome = call_recorded(
             db,
             llm,
@@ -104,7 +105,7 @@ pub async fn translate_articles<L: Llm>(
                 stage: STAGE,
                 n_items: 1,
                 req: LlmRequest {
-                    system: translate::system_prompt(),
+                    system: &system,
                     prompt: &prompt,
                     schema: &schema,
                     model,
@@ -338,7 +339,7 @@ mod tests {
         let reqs = llm.requests();
         assert!(reqs[0].prompt.contains("Body 2"), "requests first");
         assert!(reqs[1].prompt.contains("Body 0"));
-        assert_eq!(reqs[0].system, crate::translate::system_prompt());
+        assert_eq!(reqs[0].system, crate::translate::system_prompt(&[]));
         assert_eq!(reqs[0].schema, crate::translate::schema());
         assert_eq!(
             db.query_strings(

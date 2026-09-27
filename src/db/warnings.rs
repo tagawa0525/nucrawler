@@ -441,6 +441,24 @@ mod tests {
             d("2026-09-24"),
         ];
         assert_eq!(stale(&mixed, d("2026-10-03")), None);
+        // 中央値が半端（3 と 4 → 3.5 日）なら閾値は 10.5 日。切り捨てて早く警告しない。表示は四捨五入
+        let halves = [
+            d("2026-09-01"),
+            d("2026-09-04"),
+            d("2026-09-08"),
+            d("2026-09-11"),
+            d("2026-09-15"),
+            d("2026-09-18"),
+            d("2026-09-22"),
+        ];
+        assert_eq!(stale(&halves, d("2026-10-02")), None);
+        assert_eq!(
+            stale(&halves, d("2026-10-03")),
+            Some(Stale {
+                idle_days: 11,
+                typical_gap_days: 4
+            })
+        );
         assert_eq!(
             stale(&mixed, d("2026-10-04")),
             Some(Stale {
@@ -567,6 +585,31 @@ mod tests {
                 typical_gap_days: 5,
             }]
         );
+    }
+
+    /// 公開日時は取得時に日時として解釈して書くので、日付として読めない値は壊れた DB。黙って捨てない。
+    #[test]
+    fn stale_check_rejects_unreadable_dates() {
+        let db = Db::open_in_memory().unwrap();
+        for at in ["2026-09-10T03:00:00.000Z", "2026-09-0xT03:00:00.000Z"] {
+            db.insert_article(&NewArticle {
+                source_id: "s",
+                published_at: Some(at),
+                ..article(&format!("https://e.com/{at}"))
+            })
+            .unwrap();
+        }
+        let counts = FetchCounts {
+            total: 5,
+            matched: 5,
+            ..FetchCounts::default()
+        };
+        db.record_source_success("s", &counts, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert!(matches!(
+            db.warnings(t("2026-09-26T00:00:00Z"), t("2026-09-27T12:00:00Z")),
+            Err(DbError::UnexpectedValue(_))
+        ));
     }
 
     /// 一覧が 0 件のソースは、その警告だけを出す（新着の途絶えは同じ原因の結果なので重ねない）。

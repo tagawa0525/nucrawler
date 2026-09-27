@@ -54,6 +54,8 @@ impl Llm for ClaudeCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
+        // claude は自分のプロセスグループの長なので、グループ ID はその PID
+        let _group = child.id().map(ProcessGroup);
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let prompt = req.prompt.as_bytes();
         let run = async {
@@ -90,6 +92,23 @@ impl Llm for ClaudeCli {
                 let (output, rate_limit) = parsed?;
                 Ok(LlmResponse { output, rate_limit })
             }
+        }
+    }
+}
+
+/// claude のプロセスグループ。drop されたら（完了・タイムアウト・中断のいずれでも）グループ全体を
+/// 止め、claude が起動した子プロセスを残さない（`kill_on_drop` は claude 本体しか止めない）。
+struct ProcessGroup(u32);
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let Ok(pgid) = libc::pid_t::try_from(self.0) else {
+            return;
+        };
+        // SAFETY: killpg はシグナルを送るだけで、メモリを扱わない。グループが既に無ければ
+        // ESRCH で失敗するだけなので、結果は見ない
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
         }
     }
 }

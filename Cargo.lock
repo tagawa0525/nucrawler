@@ -1323,6 +1323,7 @@ dependencies = [
  "ego-tree",
  "encoding_rs",
  "feed-rs",
+ "libc",
  "pdf-extract",
  "reqwest",
  "rusqlite",

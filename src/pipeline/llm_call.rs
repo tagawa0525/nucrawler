@@ -43,6 +43,8 @@ pub async fn call_recorded<L: Llm>(
     let started = std::time::Instant::now();
     // 応答を待たずに止める。呼び出しの future を捨てると子プロセスも止まる（kill_on_drop）
     let result = tokio::select! {
+        // 応答と止める指示が同時に届いたら、応答を捨てずに使う
+        biased;
         result = llm.call(req) => result,
         () = cancel.requested() => return Ok(Outcome::Cancelled),
     };

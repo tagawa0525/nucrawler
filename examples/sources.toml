@@ -3,6 +3,7 @@
 # kind:     feed（RSS/Atom/RDF）| fepc_json（電事連のニュース JSON）
 # lang:     en（要約と和訳）| ja（要約のみ）
 # category: regulator | industry | research | utility | vendor | paper
+# label:    画面に出す短い名前。省略時は name
 # enabled:  省略時 true
 # filter:   原子力関連に絞り込む。keywords（タイトル・概要に含む）か url_contains（URL に含む）の
 #           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
@@ -12,6 +13,7 @@
 [[source]]
 id = "nrc-news"
 name = "US NRC News Releases"
+label = "NRC"
 kind = "feed"
 url = "https://www.nrc.gov/public-involve/rss?feed=news"
 lang = "en"
@@ -20,6 +22,7 @@ category = "regulator"
 [[source]]
 id = "nrc-event"
 name = "US NRC Event Notification Reports"
+label = "NRC 事象報告"
 kind = "feed"
 url = "https://www.nrc.gov/public-involve/rss?feed=event"
 lang = "en"
@@ -29,6 +32,7 @@ filter = { keywords = ["Power Reactor"] }
 [[source]]
 id = "iaea"
 name = "IAEA Top News"
+label = "IAEA"
 kind = "feed"
 url = "https://www.iaea.org/feeds/topnews"
 lang = "en"
@@ -39,6 +43,7 @@ category = "regulator"
 [[source]]
 id = "wnn"
 name = "World Nuclear News"
+label = "WNN"
 kind = "feed"
 url = "https://www.world-nuclear-news.org/rss"
 lang = "en"
@@ -47,6 +52,7 @@ category = "industry"
 [[source]]
 id = "ans"
 name = "ANS Nuclear Newswire"
+label = "ANS"
 kind = "feed"
 url = "https://www.ans.org/news/feed/"
 lang = "en"
@@ -55,6 +61,7 @@ category = "industry"
 [[source]]
 id = "fepc"
 name = "電気事業連合会"
+label = "電事連"
 kind = "fepc_json"
 url = "https://www.fepc.or.jp/pr/news/index.json"
 lang = "ja"
@@ -65,6 +72,7 @@ category = "industry"
 [[source]]
 id = "doe-ne"
 name = "DOE Office of Nuclear Energy"
+label = "DOE"
 kind = "feed"
 url = "https://www.energy.gov/ne/rss.xml"
 lang = "en"
@@ -73,6 +81,7 @@ category = "research"
 [[source]]
 id = "aesj"
 name = "日本原子力学会"
+label = "原子力学会"
 kind = "feed"
 url = "https://www.aesj.net/feed"
 lang = "ja"
@@ -119,6 +128,7 @@ filter = { keywords = ["原子力", "島根"] }
 [[source]]
 id = "kyuden"
 name = "九州電力"
+label = "九電"
 kind = "feed"
 url = "https://www.kyuden.co.jp/rss/news.xml"
 lang = "ja"
@@ -128,6 +138,7 @@ filter = { keywords = ["原子力", "玄海", "川内"] }
 [[source]]
 id = "jpower"
 name = "電源開発（J-POWER）"
+label = "J-POWER"
 kind = "feed"
 url = "https://www.jpower.co.jp/rss/news.xml"
 lang = "ja"

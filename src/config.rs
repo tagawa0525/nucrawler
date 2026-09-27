@@ -588,6 +588,34 @@ mod tests {
     }
 
     #[test]
+    fn source_label_falls_back_to_name() {
+        let s = parse_sources(
+            r#"
+            [[sources]]
+            id = "kyuden"
+            name = "九州電力"
+            label = "九電"
+            kind = "feed"
+            url = "https://example.com/rss"
+            lang = "ja"
+            category = "utility"
+
+            [[sources]]
+            id = "wnn"
+            name = "World Nuclear News"
+            kind = "feed"
+            url = "https://example.com/wnn"
+            lang = "en"
+            category = "industry"
+            "#,
+            p(),
+        )
+        .unwrap();
+        assert_eq!(s.sources[0].display_name(), "九電");
+        assert_eq!(s.sources[1].display_name(), "World Nuclear News");
+    }
+
+    #[test]
     fn examples_are_valid() {
         parse_config(include_str!("../examples/config.toml"), p()).unwrap();
         let s = parse_sources(include_str!("../examples/sources.toml"), p()).unwrap();

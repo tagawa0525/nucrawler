@@ -372,17 +372,20 @@ mod tests {
     fn layout_is_mobile_friendly_and_shows_warnings() {
         let html = layout(
             "一覧",
-            &[
-                Warning::SourceFailing {
-                    source_id: "nei".into(),
-                    error: "HTTP 403".into(),
-                    at: "2026-09-27T00:00:00.000Z".into(),
-                },
-                Warning::LlmFailed {
-                    error: "llm reported an error (error): Not logged in".into(),
-                    at: "2026-09-27T01:00:00.000Z".into(),
-                },
-            ],
+            &Page {
+                warnings: &[
+                    Warning::SourceFailing {
+                        source_id: "nei".into(),
+                        error: "HTTP 403".into(),
+                        at: "2026-09-27T00:00:00.000Z".into(),
+                    },
+                    Warning::LlmFailed {
+                        error: "llm reported an error (error): Not logged in".into(),
+                        at: "2026-09-27T01:00:00.000Z".into(),
+                    },
+                ],
+                ..Page::default()
+            },
             "<p>body</p>",
         );
         assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
@@ -406,10 +409,13 @@ mod tests {
         .to_string();
         let html = layout(
             "一覧",
-            &[Warning::LlmFailed {
-                error,
-                at: "2026-09-27T01:00:00.000Z".into(),
-            }],
+            &Page {
+                warnings: &[Warning::LlmFailed {
+                    error,
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                }],
+                ..Page::default()
+            },
             "",
         );
         assert!(html.contains("利用上限"), "{html}");
@@ -420,13 +426,49 @@ mod tests {
     fn auth_hint_ignores_case() {
         let html = layout(
             "一覧",
-            &[Warning::LlmFailed {
-                error: "llm process exited with exit status: 1: Authentication required".into(),
-                at: "2026-09-27T01:00:00.000Z".into(),
-            }],
+            &Page {
+                warnings: &[Warning::LlmFailed {
+                    error: "llm process exited with exit status: 1: Authentication required".into(),
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                }],
+                ..Page::default()
+            },
             "",
         );
         assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// ソースは ID ではなく表示名で出す（設定に無い ID はそのまま）。
+    #[test]
+    fn sources_are_shown_by_label() {
+        let labels = SourceLabels::from([("kyuden".to_string(), "九電".to_string())]);
+        let page = Page {
+            warnings: &[Warning::SourceFailing {
+                source_id: "kyuden".into(),
+                error: "HTTP 500".into(),
+                at: "2026-09-27T00:00:00.000Z".into(),
+            }],
+            labels: &labels,
+        };
+        let mut kyuden = item(1, "2026-09-27T05:00:00.000Z");
+        kyuden.source_id = "kyuden".into();
+        let html = list_page(
+            &[kyuden, item(2, "2026-09-27T05:00:00.000Z")],
+            &[],
+            false,
+            &page,
+        );
+        assert!(!html.contains("kyuden"), "{html}");
+        assert_eq!(html.matches("九電").count(), 2, "card and warning: {html}");
+        assert!(
+            html.contains("wnn"),
+            "unknown ids fall back to the id: {html}"
+        );
+
+        let mut d = detail();
+        d.item.source_id = "kyuden".into();
+        let html = detail_page(&d, DetailView::default(), &page);
+        assert!(!html.contains("kyuden"), "{html}");
     }
 
     /// 見出しが空だとリンクが押せなくなるので、原題、それも空なら URL を出す。
@@ -437,7 +479,12 @@ mod tests {
         let mut blank_both = item(2, "2026-09-26T00:00:00.000Z");
         blank_both.title_ja = None;
         blank_both.title = String::new();
-        let html = list_page(&[blank_ja, blank_both.clone()], &[], false, &[]);
+        let html = list_page(
+            &[blank_ja, blank_both.clone()],
+            &[],
+            false,
+            &Page::default(),
+        );
         assert!(html.contains(">Title 1</a>"), "{html}");
         assert!(
             html.contains(&format!(">{}</a>", escape(&blank_both.url))),
@@ -448,7 +495,7 @@ mod tests {
         for v in &mut d.digests {
             v.payload["title_ja"] = serde_json::json!("");
         }
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(
             html.contains(&format!("<h1>{}</h1>", escape(&d.item.title))),
             "{html}"
@@ -467,7 +514,7 @@ mod tests {
             &[item(1, "2026-09-27T05:00:00.000Z")],
             &[locked, untitled],
             false,
-            &[],
+            &Page::default(),
         );
         assert!(html.contains("前回から"));
         assert!(html.contains(r#"href="/articles/1""#));
@@ -506,7 +553,7 @@ mod tests {
 
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {
-        let html = detail_page(&detail(), DetailView::default(), &[]);
+        let html = detail_page(&detail(), DetailView::default(), &Page::default());
         assert!(
             html.contains("新版") && !html.contains("<h1>旧版"),
             "{html}"
@@ -535,7 +582,7 @@ mod tests {
             digest: Some(10),
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), view, &[]);
+        let html = detail_page(&detail(), view, &Page::default());
         assert!(html.contains("旧版"));
     }
 
@@ -551,7 +598,7 @@ mod tests {
             created_at: "2026-09-26T00:00:00.000Z".into(),
             payload: serde_json::json!({"body_ja": "第一段落。\n\n第二段落<script>"}),
         }];
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(
             html.contains(r#"href="/articles/7?view=translation""#),
             "{html}"
@@ -561,7 +608,7 @@ mod tests {
             show_translation: true,
             ..DetailView::default()
         };
-        let html = detail_page(&d, view, &[]);
+        let html = detail_page(&d, view, &Page::default());
         assert!(html.contains("<p>第一段落。</p>"), "{html}");
         assert!(html.contains("第二段落&lt;script&gt;"));
         assert!(!html.contains(r#"translation-request"#));
@@ -571,7 +618,7 @@ mod tests {
     fn detail_page_shows_waiting_when_requested() {
         let mut d = detail();
         d.item.translation_requested = true;
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
     }

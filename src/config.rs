@@ -268,6 +268,11 @@ pub struct HtmlList {
     /// （年度ごとに URL が変わる一覧を、入口のページから探すときに使う）
     #[serde(default)]
     pub follow: Option<String>,
+    /// 日付の要素の CSS セレクタ。リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の
+    /// 中で最初に一致する要素の文字列から、年・月・日の順の数字を読む（例 2026年9月18日、2026/09/07）。
+    /// 読めなければ `date_in_url`、それも無ければ取得日時で扱う
+    #[serde(default)]
+    pub date: Option<String>,
 }
 
 /// URL のファイル名に含まれる日付の形式（最初に現れる、その桁数の数字の並び）。
@@ -354,6 +359,9 @@ fn validate_list(s: &Source) -> Result<(), String> {
             }
             if let Some(follow) = &list.follow {
                 check("follow", follow)?;
+            }
+            if let Some(date) = &list.date {
+                check("date", date)?;
             }
             Ok(())
         }

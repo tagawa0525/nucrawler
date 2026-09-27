@@ -244,6 +244,7 @@ mod tests {
             date_in_url: Some(crate::config::UrlDate::Yyyymmdd),
             title_skip: None,
             follow: Some("h3 a".into()),
+            date: None,
         };
         let source = |path: &str| Source {
             list: Some(list.clone()),

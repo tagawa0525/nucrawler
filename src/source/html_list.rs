@@ -12,6 +12,7 @@ pub fn parse(list: &HtmlList, html: &str, base: &Url) -> Result<Vec<Candidate>, 
     let doc = Html::parse_document(html);
     let link = selector(&list.link)?;
     let skip = list.title_skip.as_deref().map(selector).transpose()?;
+    let date = list.date.as_deref().map(selector).transpose()?;
     let mut items = Vec::new();
     for a in doc.select(&link) {
         let Some(url) = page_link(a, base) else {
@@ -22,8 +23,12 @@ pub fn parse(list: &HtmlList, html: &str, base: &Url) -> Result<Vec<Candidate>, 
             tracing::debug!(%url, "skipping link without text");
             continue;
         }
+        let published_at = date
+            .as_ref()
+            .and_then(|d| date_in_item(a, &link, d))
+            .or_else(|| list.date_in_url.and_then(|f| date_in_url(&url, f)));
         items.push(Candidate {
-            published_at: list.date_in_url.and_then(|f| date_in_url(&url, f)),
+            published_at,
             url: url.into(),
             title,
             summary: None,
@@ -105,6 +110,43 @@ fn title(a: ElementRef, skip: Option<&Selector>) -> String {
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// リンク `a` を含む項目の中の、`date` に一致する最初の要素が表す日付（日本時間の 0 時）。
+/// 項目は、`a` の祖先を内側からたどり、ほかのリンク（`link` に一致する要素）を含む手前まで。
+/// 項目に日付の要素が無いときや読めないときは None（隣の項目の日付を使わない）。
+fn date_in_item(a: ElementRef, link: &Selector, date: &Selector) -> Option<DateTime<Utc>> {
+    fn matching<'a>(scope: ElementRef<'a>, sel: &Selector) -> impl Iterator<Item = ElementRef<'a>> {
+        scope
+            .descendants()
+            .filter_map(ElementRef::wrap)
+            .filter(move |el| sel.matches(el))
+    }
+    for scope in a.ancestors().filter_map(ElementRef::wrap) {
+        if matching(scope, link).nth(1).is_some() {
+            return None;
+        }
+        if let Some(el) = matching(scope, date).next() {
+            let text = el.text().collect::<String>();
+            let parsed = date_in_text(&text);
+            if parsed.is_none() {
+                tracing::debug!(text = text.trim(), "skipping unreadable date");
+            }
+            return parsed;
+        }
+    }
+    None
+}
+
+/// 文字列の中の、年（4 桁）・月・日の順に並ぶ最初の数字（日本時間の 0 時）。
+fn date_in_text(text: &str) -> Option<DateTime<Utc>> {
+    let mut runs = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| !run.is_empty());
+    let year = runs.find(|run| run.len() == 4)?.parse().ok()?;
+    let month = runs.next()?.parse().ok()?;
+    let day = runs.next()?.parse().ok()?;
+    crate::jst::midnight(NaiveDate::from_ymd_opt(year, month, day)?)
 }
 
 /// URL のファイル名に含まれる日付（日本時間の 0 時）。見つからなければ None。

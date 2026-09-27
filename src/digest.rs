@@ -74,7 +74,10 @@ impl Item {
             let name = t.name.trim();
             if name.is_empty()
                 || name.chars().count() > MAX_TOPIC_CHARS
-                || name.chars().any(char::is_control)
+                // U+2028/U+2029 などは制御文字ではないが行を分けるので、半角の空白以外の空白も拒む
+                || name
+                    .chars()
+                    .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
             {
                 return Err(format!("invalid new topic name {:?}", t.name));
             }

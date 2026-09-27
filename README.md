@@ -98,7 +98,8 @@ nucrawler topics import FILE | nucrawler topics export
   軸（facet）は `分野`・`炉型`・`地域`・`組織` のいずれか。発電所名などの固有名は語彙に入れず全文検索で探す。
   要約に付いている語は削除できない（取り込みがエラーになり、語彙は変わらない）。
   LLM が足した語の表記揺れは、crawl の最後の `tidy` ステージで週 1 回（`llm.tidy_interval_days`）LLM に見直させ、
-  既存の語へ自動で統合する（初期の語と取り込んだ語は統合元にしない）。すぐ整理するなら `crawl --only tidy`。
+  既存の語へ自動で統合する（統合元は LLM が足した語だけで、軸の違う語へは統合しない）。すぐ整理するなら `crawl --only tidy`。
+  書き出した語彙では LLM が足した語に `added_at` が付く。その行を消して取り込めば、人が決めた語になり統合されなくなる。
   統合した語は別名として残り（`topic_aliases` に統合した時刻と LLM を記録）、LLM が同じ名前を付けても統合先に付く。
   誤った統合は、`topics export` した語彙に統合元を足して `topics import` すれば語に戻る
 

@@ -1633,9 +1633,11 @@ impl Db {
         Ok(())
     }
 
-    /// 受付箱（新しい順）。`status` と `article_id` で絞る。
+    /// 受付箱（新しい順）。`status` と `article_id` で絞る。記事の見出しは、利用者 `user_id` が
+    /// 閲覧できる最新の要約から取る（無ければ原題）。
     pub fn term_reports(
         &self,
+        _user_id: i64,
         status: Option<ReportStatus>,
         article_id: Option<i64>,
     ) -> Result<Vec<TermReport>, DbError> {
@@ -5195,7 +5197,7 @@ mod tests {
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
         report(&db, b, "燃料補給停止", "2026-09-27T01:00:00Z");
-        let reports = db.term_reports(None, None).unwrap();
+        let reports = db.term_reports(db.owner_id().unwrap(), None, None).unwrap();
         let found: Vec<&str> = reports.iter().map(|r| r.found.as_str()).collect();
         assert_eq!(found, ["燃料補給停止", "給油停止"]);
         let r = &reports[1];
@@ -5208,7 +5210,12 @@ mod tests {
             (r.resolved_at.as_deref(), &r.term, &r.reply),
             (None, &None, &None)
         );
-        assert_eq!(db.term_reports(None, Some(a)).unwrap().len(), 1);
+        assert_eq!(
+            db.term_reports(db.owner_id().unwrap(), None, Some(a))
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             db.term_report_counts().unwrap(),
             [
@@ -5230,7 +5237,7 @@ mod tests {
             .unwrap()
             .unwrap();
         report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
-        let id = db.term_reports(None, None).unwrap()[0].id;
+        let id = db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].id;
         let term = db
             .add_glossary_term(
                 &glossary_term(&["refuelling outage"], "燃料取替停止（英綴り）", None),
@@ -5247,18 +5254,23 @@ mod tests {
             )
             .unwrap()
         );
-        let r = &db.term_reports(Some(ReportStatus::Added), None).unwrap()[0];
+        let r = &db
+            .term_reports(db.owner_id().unwrap(), Some(ReportStatus::Added), None)
+            .unwrap()[0];
         assert_eq!(r.term, Some((term, "燃料取替停止（英綴り）".to_string())));
         assert_eq!(r.reply.as_deref(), Some("英綴りを追加"));
         assert_eq!(r.resolved_at.as_deref(), Some("2026-09-27T02:00:00.000Z"));
         assert!(
-            db.term_reports(Some(ReportStatus::Pending), None)
+            db.term_reports(db.owner_id().unwrap(), Some(ReportStatus::Pending), None)
                 .unwrap()
                 .is_empty()
         );
 
         db.delete_glossary_term(term).unwrap();
-        assert_eq!(db.term_reports(None, None).unwrap()[0].term, None);
+        assert_eq!(
+            db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0].term,
+            None
+        );
 
         assert!(
             db.resolve_term_report(
@@ -5270,7 +5282,7 @@ mod tests {
             )
             .unwrap()
         );
-        let r = &db.term_reports(None, None).unwrap()[0];
+        let r = &db.term_reports(db.owner_id().unwrap(), None, None).unwrap()[0];
         assert_eq!(
             (r.status, r.resolved_at.as_deref()),
             (ReportStatus::Pending, None)
@@ -5285,6 +5297,58 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    /// 受付箱の見出しには、利用者が閲覧できない（会員限定の本文から作った）要約を使わない。
+    #[test]
+    fn term_reports_do_not_show_titles_of_digests_the_viewer_cannot_see() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let gated = insert_content(&db, a, Some(m));
+        let digest = insert_artifact(&db, a, "m");
+        link_input(&db, digest, gated).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE artifacts SET payload = '{\"title_ja\": \"会員限定の見出し\"}' WHERE id = ?1",
+                [digest],
+            )
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.term_reports(owner, None, None).unwrap()[0].article_title,
+            "t"
+        );
+    }
+
+    /// 対応日時は状況を変えたときだけ進み、ひとことや訳語だけを直しても変わらない。
+    #[test]
+    fn term_report_resolution_time_moves_only_with_the_status() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        let id = db.term_reports(owner, None, None).unwrap()[0].id;
+        let resolve = |status, reply, at| {
+            db.resolve_term_report(id, status, None, Some(reply), t(at))
+                .unwrap();
+            db.term_reports(owner, None, None).unwrap()[0]
+                .resolved_at
+                .clone()
+        };
+        let first = resolve(ReportStatus::Added, "a", "2026-09-27T01:00:00Z");
+        assert_eq!(first.as_deref(), Some("2026-09-27T01:00:00.000Z"));
+        let same = resolve(ReportStatus::Added, "b", "2026-09-27T02:00:00Z");
+        assert_eq!(same, first);
+        let changed = resolve(ReportStatus::Rejected, "c", "2026-09-27T03:00:00Z");
+        assert_eq!(changed.as_deref(), Some("2026-09-27T03:00:00.000Z"));
     }
 
     /// 同じ原語（大文字小文字の違いを含む）を別の訳語に結び付けられない。

@@ -360,7 +360,7 @@ async fn detail(
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
-        let reports = db.term_reports(None, Some(id))?;
+        let reports = db.term_reports(user, None, Some(id))?;
         // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
         // 採点に渡す直近の反応が偏る）
         let opened = if view.show_translation {
@@ -666,7 +666,8 @@ async fn reports(
     let filter = report_filter(params.status.as_deref())?;
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
-        let reports = db.term_reports(filter, None)?;
+        let (user, _) = viewer(db)?;
+        let reports = db.term_reports(user, filter, None)?;
         let counts = db.term_report_counts()?;
         let terms = db.glossary_entries()?;
         let warnings = warnings(db)?;

@@ -96,8 +96,8 @@ pub async fn translate_articles<L: Llm>(
             model,
         };
         let prompt = translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
-        let system =
-            translate::system_prompt(&glossary::relevant(&db.glossary_entries()?, &prompt).terms);
+        let relevant = glossary::relevant(&db.glossary_entries()?, &prompt);
+        let system = translate::system_prompt(&relevant.terms);
         let outcome = call_recorded(
             db,
             llm,
@@ -156,7 +156,7 @@ pub async fn translate_articles<L: Llm>(
                 prompt_version: translate::PROMPT_VERSION,
                 payload: &serde_json::json!({ "body_ja": body_ja }),
                 inputs: &inputs,
-                glossary_at: None,
+                glossary_at: relevant.glossary_at.as_deref(),
             },
             now,
         )?;
@@ -331,10 +331,10 @@ mod tests {
         let llm = FakeLlm::new([ok("和訳"), ok("和訳")]);
         run(&db, owner, &llm, &mut quota(10), true).await;
         assert_eq!(
-            db.query_strings(&format!(
+            db.query_strings(
                 "SELECT article_id || '|' || coalesce(glossary_at, '-') FROM artifacts
                  WHERE kind = 'translation' ORDER BY article_id"
-            ))
+            )
             .unwrap(),
             [
                 format!("{with_edg}|{}", crate::db::timestamp(now())),

@@ -2738,8 +2738,9 @@ fn write_artifact(
     };
     let id: i64 = tx.query_row(
         "INSERT INTO artifacts
-           (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+           (article_id, kind, backend, model, prompt_version, input_scope, payload, created_at,
+            glossary_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
         rusqlite::params![
             a.article_id,
             a.kind.as_str(),
@@ -2749,6 +2750,7 @@ fn write_artifact(
             input_scope,
             a.payload.to_string(),
             timestamp(now),
+            a.glossary_at,
         ],
         |r| r.get(0),
     )?;

@@ -79,8 +79,8 @@ pub async fn digest_articles<L: Llm>(
         let prompt = digest::build_prompt(&batch, llm_cfg.max_input_chars);
         // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
         let vocab = db.topics()?;
-        let terms = glossary::relevant(&db.glossary_entries()?, &prompt).terms;
-        let system = digest::system_prompt(&vocab, &terms);
+        let entries = db.glossary_entries()?;
+        let system = digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
         let schema = digest::schema(&vocab);
         let outcome = call_recorded(
             db,
@@ -137,11 +137,15 @@ pub async fn digest_articles<L: Llm>(
             }
         };
         for (id, payload) in &parsed.items {
-            let inputs: Vec<i64> = batch
-                .iter()
-                .find(|b| b.article_id == *id)
+            let input = batch.iter().find(|b| b.article_id == *id);
+            let inputs: Vec<i64> = input
                 .map(|b| b.contents.iter().map(|c| c.id).collect())
                 .unwrap_or_default();
+            // 時点はバッチ全体ではなく、その記事の部分に当たった訳語から決める
+            let glossary_at = input.and_then(|b| {
+                let own = digest::build_prompt(std::slice::from_ref(b), llm_cfg.max_input_chars);
+                glossary::relevant(&entries, &own).glossary_at
+            });
             db.insert_artifact(
                 &NewArtifact {
                     article_id: *id,
@@ -151,7 +155,7 @@ pub async fn digest_articles<L: Llm>(
                     prompt_version: digest::PROMPT_VERSION,
                     payload,
                     inputs: &inputs,
-                    glossary_at: None,
+                    glossary_at: glossary_at.as_deref(),
                 },
                 now,
             )?;

@@ -24,7 +24,12 @@ pub struct Entry {
 impl Entry {
     /// 訳語か原語を最後に変えた時刻（初期値のままなら None）。
     pub fn changed_at(&self) -> Option<&str> {
-        todo!()
+        self.sources_added_at
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .chain(self.term_changed_at.as_deref())
+            .max()
     }
 }
 
@@ -36,9 +41,37 @@ pub struct Relevant {
     pub glossary_at: Option<String>,
 }
 
-/// 原語のどれかが `text` に出てくる語だけを残す。
-pub fn relevant(_entries: &[Entry], _text: &str) -> Relevant {
-    todo!()
+/// 原語のどれかが `text` に出てくる語だけを残し、その時点を求める。
+pub fn relevant(entries: &[Entry], text: &str) -> Relevant {
+    let text = normalize_spaces(text);
+    let folded = text.to_ascii_lowercase();
+    let mut terms = Vec::new();
+    let mut glossary_at: Option<&str> = None;
+    for entry in entries {
+        let matched: Vec<Option<&str>> = entry
+            .term
+            .sources
+            .iter()
+            .zip(&entry.sources_added_at)
+            .filter(|(source, _)| mentions(&text, &folded, source))
+            .map(|(_, added_at)| added_at.as_deref())
+            .collect();
+        if matched.is_empty() {
+            continue;
+        }
+        // 記事に出てこない原語を加えた時刻は、この記事の時点に含めない
+        let at = matched
+            .into_iter()
+            .flatten()
+            .chain(entry.term_changed_at.as_deref())
+            .max();
+        glossary_at = glossary_at.max(at);
+        terms.push(entry.term.clone());
+    }
+    Relevant {
+        terms,
+        glossary_at: glossary_at.map(str::to_string),
+    }
 }
 
 /// 改行や連続した空白を 1 つの空白にする（原文の折り返しで語が分かれても当てるため）。

@@ -6,7 +6,7 @@ use crate::profile::Profile;
 use crate::prompt::escape_data;
 
 #[derive(Debug, thiserror::Error)]
-pub enum ScoringError {
+pub enum ScoreError {
     #[error("score output does not match the schema: {0}")]
     Malformed(String),
 }
@@ -126,24 +126,24 @@ struct Item {
     reason: String,
 }
 
-pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, ScoringError> {
+pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, ScoreError> {
     let top = output
         .as_object()
-        .ok_or_else(|| ScoringError::Malformed("the output is not an object".into()))?;
+        .ok_or_else(|| ScoreError::Malformed("the output is not an object".into()))?;
     if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(ScoringError::Malformed(format!(
+        return Err(ScoreError::Malformed(format!(
             "unexpected property `{extra}`"
         )));
     }
     let items = top
         .get("items")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| ScoringError::Malformed("`items` is not an array".into()))?;
+        .ok_or_else(|| ScoreError::Malformed("`items` is not an array".into()))?;
     let mut found: Vec<(i64, u8, String)> = Vec::new();
     for item in items {
         let id = item["id"]
             .as_i64()
-            .ok_or_else(|| ScoringError::Malformed("an item has no integer `id`".into()))?;
+            .ok_or_else(|| ScoreError::Malformed("an item has no integer `id`".into()))?;
         if !requested.contains(&id) {
             tracing::warn!(id, "ignoring score for an article that was not requested");
             continue;

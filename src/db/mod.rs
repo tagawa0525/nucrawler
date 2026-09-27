@@ -4835,6 +4835,52 @@ mod tests {
         assert!(existing("opus").is_empty());
     }
 
+    /// 会員限定の本文からしか作れない記事は、公開の入力が無いので作り直しの候補にしない。
+    #[test]
+    fn redo_existing_skips_articles_without_public_contents() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let gated = insert_content(&db, a, Some(m));
+        for (kind, payload) in [
+            (ArtifactKind::Digest, serde_json::json!({"title_ja": "題"})),
+            (
+                ArtifactKind::Translation,
+                serde_json::json!({"body_ja": "和訳"}),
+            ),
+        ] {
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: a,
+                    kind,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &payload,
+                    inputs: &[gated],
+                    glossary_at: None,
+                },
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        }
+        let now = t("2026-09-27T01:00:00Z");
+        let key = redo_key(&db, "sonnet");
+        assert!(
+            db.redo_digest_existing(key, &RedoFilter::default(), now)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            db.redo_translate_existing(key, &RedoFilter::default(), now)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
         ListQuery {
             user_id: db.owner_id().unwrap(),

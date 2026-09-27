@@ -502,8 +502,7 @@ pub fn glossary_page(entries: &[crate::glossary::Entry], page: &Page) -> String 
             .map(|a| format!("（{}）", escape(a)))
             .unwrap_or_default();
         let changed = e
-            .changed_at
-            .as_deref()
+            .changed_at()
             .map(|at| {
                 format!(
                     "<p class=\"meta\">変更 {}</p>",
@@ -2147,7 +2146,8 @@ mod tests {
                 abbr: abbr.map(Into::into),
                 note: Some("注<記>".into()),
             },
-            changed_at: None,
+            term_changed_at: None,
+            sources_added_at: vec![None; sources.len()],
         }
     }
 

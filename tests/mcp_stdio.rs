@@ -44,6 +44,7 @@ fn seed(data: &std::path::Path) -> i64 {
                 "implications_ja": "示唆", "lwr_relevant": true, "topics": ["規制・審査"],
             }),
             inputs: &[body],
+            glossary_at: None,
         },
         chrono::Utc::now(),
     )

@@ -148,6 +148,7 @@ mod tests {
                     "topics": [name], "new_topics": [{"name": name, "facet": "分野"}],
                 }),
                 inputs: &[c],
+                glossary_at: None,
             },
             now() - chrono::Duration::days(1),
         )

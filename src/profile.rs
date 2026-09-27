@@ -311,6 +311,16 @@ mod tests {
             ),
             ("exclude = [\" \"]\n", "exclude"),
             ("exclude = [\"核融合\", \"核融合\"]\n", "duplicate exclude"),
+            // 端末に表示するので、制御文字（改行を含む）は受け付けない
+            (
+                "[[interest]]\ntopic = \"a\\u001b[2J\"\nweight = 0.5\n",
+                "control",
+            ),
+            (
+                "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"x\\ny\"\n",
+                "control",
+            ),
+            ("exclude = [\"a\\tb\"]\n", "control"),
         ] {
             let err = parse(toml).unwrap_err();
             assert!(

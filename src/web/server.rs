@@ -1158,7 +1158,8 @@ mod tests {
         let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
         assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
 
-        // 気になった訳は必須
+        // 気になった訳は必須（欄が無くても空でも同じ）
+        assert_eq!(server.post(&path, "wanted=a").await.status().as_u16(), 400);
         assert_eq!(
             server
                 .post(&path, "found=+&wanted=a")

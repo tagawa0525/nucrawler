@@ -96,6 +96,13 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
             crate::jst::format_local(at),
             escape(error)
         ),
+        Warning::SourceEmpty { source_id, at } => todo!("{source_id} {at}"),
+        Warning::SourceDropped {
+            source_id,
+            total,
+            median,
+            at,
+        } => todo!("{source_id} {total} {median} {at}"),
         // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
         Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
             "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",
@@ -181,6 +188,39 @@ mod tests {
         // 認証切れらしいときは、対処を案内する
         assert!(
             html.contains("claude") && html.contains("ログイン"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn shows_empty_and_dropped_source_warnings() {
+        let html = layout(
+            "一覧",
+            &Page {
+                warnings: &[
+                    Warning::SourceEmpty {
+                        source_id: "hepco".into(),
+                        at: "2026-09-27T00:00:00.000Z".into(),
+                    },
+                    Warning::SourceDropped {
+                        source_id: "fepc".into(),
+                        total: 5,
+                        median: 30,
+                        at: "2026-09-27T01:00:00.000Z".into(),
+                    },
+                ],
+                ..Page::default()
+            },
+            "",
+        );
+        assert!(
+            html.contains("⚠ hepco の一覧が 0 件でした（2026-09-27 09:00）"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "⚠ fepc の取得件数が減っています（2026-09-27 10:00）：5 件（直近の中央値 30 件）"
+            ),
             "{html}"
         );
     }

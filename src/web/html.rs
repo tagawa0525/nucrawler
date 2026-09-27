@@ -224,6 +224,18 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
             ));
         }
     }
+    // 語彙に無い語（統合した語の別名など）も、選んでいれば残す
+    let others: Vec<&String> = p
+        .topics
+        .iter()
+        .filter(|t| vocabulary.iter().all(|u| &u.name != *t))
+        .collect();
+    if !others.is_empty() {
+        topics.push_str("<div class=\"meta\">その他</div>");
+        for t in others {
+            topics.push_str(&checkbox("topic", t, true, t));
+        }
+    }
     let sources: String = page
         .labels
         .iter()

@@ -1,6 +1,7 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。JavaScript は使わない。
 
-use crate::db::{ArticleDetail, ListItem, Warning};
+use crate::db::{ArticleDetail, ListItem, TopicUsage, Warning};
+use crate::search::Params;
 
 /// HTML の特殊文字を実体参照にする。
 pub fn escape(s: &str) -> String {
@@ -150,6 +151,18 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &
         body.extend(earlier.iter().map(|i| card(i, page)));
     }
     layout("一覧", page, &body)
+}
+
+/// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。
+/// トピックの選択肢は要約に付いている語だけを、軸ごとに付いている数の多い順に並べる。
+pub fn search_page(
+    _params: &Params,
+    _results: Option<&[ListItem]>,
+    _vocabulary: &[TopicUsage],
+    _error: Option<&str>,
+    page: &Page,
+) -> String {
+    layout("検索", page, "")
 }
 
 fn card(i: &ListItem, page: &Page) -> String {
@@ -363,6 +376,123 @@ mod tests {
             translation_requested: false,
             locked_by: vec![],
         }
+    }
+
+    fn usage(name: &str, facet: crate::topics::Facet, uses: i64) -> TopicUsage {
+        TopicUsage {
+            name: name.into(),
+            facet,
+            added_at: None,
+            uses,
+        }
+    }
+
+    #[test]
+    fn search_page_keeps_the_conditions_in_the_form() {
+        use crate::topics::Facet;
+        let labels = SourceLabels::from([
+            ("nra".to_string(), "原子力規制委員会".to_string()),
+            ("wnn".to_string(), "WNN".to_string()),
+        ]);
+        let params = Params {
+            q: "炉心 \"<b>\"".into(),
+            since: "2026-09".into(),
+            topics: vec!["PWR".into()],
+            sources: vec!["nra".into()],
+            lang: "ja".into(),
+            unread: true,
+            min_score: "60".into(),
+            sort: "score".into(),
+            ..Params::default()
+        };
+        let vocabulary = [
+            usage("燃料", Facet::Field, 3),
+            usage("規制・審査", Facet::Field, 9),
+            usage("高経年化", Facet::Field, 0),
+            usage("PWR", Facet::Reactor, 2),
+        ];
+        let html = search_page(
+            &params,
+            None,
+            &vocabulary,
+            None,
+            &Page {
+                labels: &labels,
+                ..Page::default()
+            },
+        );
+        assert!(
+            html.contains(r#"<form method="get" action="/search">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="q" value="炉心 &quot;&lt;b&gt;&quot;""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="since" value="2026-09""#), "{html}");
+        // 付いている数の多い順。要約に付いていない語は出さない
+        let field = html.find("規制・審査").unwrap();
+        assert!(field < html.find("燃料").unwrap(), "{html}");
+        assert!(!html.contains("高経年化"), "{html}");
+        assert!(
+            html.contains(r#"name="topic" value="PWR" checked"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="topic" value="燃料">"#), "{html}");
+        assert!(
+            html.contains(r#"name="source" value="nra" checked"#),
+            "{html}"
+        );
+        assert!(html.contains("原子力規制委員会"), "{html}");
+        assert!(html.contains(r#"<option value="ja" selected>"#), "{html}");
+        assert!(
+            html.contains(r#"name="unread" value="1" checked"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
+        assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
+        assert!(
+            html.contains(r#"<option value="score" selected>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("件"),
+            "no results section without results: {html}"
+        );
+    }
+
+    #[test]
+    fn search_page_shows_results_errors_and_empty_results() {
+        let params = Params {
+            q: "炉心".into(),
+            ..Params::default()
+        };
+        let items = [
+            item(1, "2026-09-27T00:00:00.000Z"),
+            item(2, "2026-09-26T00:00:00.000Z"),
+        ];
+        let html = search_page(&params, Some(&items), &[], None, &Page::default());
+        assert!(html.contains("2 件"), "{html}");
+        assert!(
+            html.contains("/articles/1") && html.contains("/articles/2"),
+            "{html}"
+        );
+        let html = search_page(&params, Some(&[]), &[], None, &Page::default());
+        assert!(html.contains("該当する記事はありません"), "{html}");
+        let html = search_page(
+            &params,
+            None,
+            &[],
+            Some("since must be <YYYY-MM>"),
+            &Page::default(),
+        );
+        assert!(html.contains("since must be &lt;YYYY-MM&gt;"), "{html}");
+    }
+
+    #[test]
+    fn list_page_links_to_search() {
+        let html = list_page(&[], &[], false, &Page::default());
+        assert!(html.contains(r#"href="/search""#), "{html}");
     }
 
     #[test]

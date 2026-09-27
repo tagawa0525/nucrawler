@@ -654,6 +654,68 @@ mod tests {
         }
     }
 
+    /// 検索画面は一覧で隠す記事も語で引ける。条件が無ければフォームだけで、閲覧としては記録しない。
+    #[tokio::test]
+    async fn search_page_finds_articles_by_terms() {
+        let db = Db::open_in_memory().unwrap();
+        let (hit, _) = seed_with(&db, "https://e.com/hit", "炉心溶融の解析", false);
+        seed(&db, "https://e.com/other", "燃料の話");
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/search").await;
+        assert_eq!(status, 200);
+        assert!(html.contains(r#"action="/search""#), "{html}");
+        assert!(!html.contains("燃料の話"), "{html}");
+
+        let (status, html) = server.get("/search?q=%E7%82%89%E5%BF%83").await;
+        assert_eq!(status, 200);
+        assert!(html.contains(&format!("/articles/{hit}")), "{html}");
+        assert!(!html.contains("燃料の話"), "{html}");
+        server.assert_no_views();
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_conditions() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        let (status, html) = server.get("/search?since=2026%2F09").await;
+        assert_eq!(status, 400);
+        assert!(
+            html.contains("since must be YYYY-MM or YYYY-MM-DD"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"action="/search""#),
+            "the form stays usable: {html}"
+        );
+        let (status, body) = server.get("/api/search?lang=fr").await;
+        assert_eq!(status, 400);
+        assert!(body.contains("lang must be en or ja"), "{body}");
+    }
+
+    /// API の検索は検索画面と同じ条件で、トピックやソースを繰り返し指定できる。
+    #[tokio::test]
+    async fn api_search_uses_the_same_conditions() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, _) = seed(&db, "https://e.com/a", "題A");
+        seed(&db, "https://e.com/b", "題B");
+        let server = Server::start(db).await;
+        let (status, json) = server
+            .get_json("/api/search?q=%E9%A1%8CA&topic=%E8%A6%8F%E5%88%B6%E3%83%BB%E5%AF%A9%E6%9F%BB&source=none&source=wnn")
+            .await;
+        assert_eq!(status, 200);
+        let ids: Vec<i64> = json["articles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [a], "{json}");
+        let (_, json) = server
+            .get_json("/api/search?topic=%E7%87%83%E6%96%99")
+            .await;
+        assert!(json["articles"].as_array().unwrap().is_empty(), "{json}");
+        server.assert_no_views();
+    }
+
     /// API の一覧は既定では Web と同じ記事を出し、`all=1` ですべてを出す。閲覧としては記録しない。
     #[tokio::test]
     async fn api_lists_the_same_articles_as_the_web() {

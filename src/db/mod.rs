@@ -1658,7 +1658,8 @@ impl Db {
         )
     }
 
-    /// 検索。一覧で隠す記事も含め、新しい順。
+    /// 検索。条件は `SearchQuery` のとおりで、`hide_below` を指定しなければ一覧で隠す記事も含め、
+    /// `order` の順（既定は新しい順）に並べる。
     pub fn search_articles(&self, q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
         self.query_items(q.user_id, q.profile_hash, ItemScope::Search(q))
     }

@@ -47,6 +47,46 @@ pub(super) fn page_article(db: &Db, url: &str, published: &str) -> i64 {
     .unwrap()
 }
 
+pub(super) fn add_digest(
+    db: &Db,
+    article_id: i64,
+    model: &str,
+    title: &str,
+    relevant: bool,
+    at: &str,
+) -> i64 {
+    let c = db
+        .insert_content(article_id, ContentKind::Body, ContentOrigin::Page, "body")
+        .unwrap();
+    let payload = serde_json::json!({
+        "title_ja": title, "summary_ja": format!("{title}の要約"), "points_ja": ["点"],
+        "implications_ja": "", "lwr_relevant": relevant, "topics": ["規制・審査"],
+    });
+    db.insert_artifact(
+        &NewArtifact {
+            article_id,
+            kind: ArtifactKind::Digest,
+            backend: "claude-cli",
+            model,
+            prompt_version: 1,
+            payload: &payload,
+            inputs: &[c],
+            glossary_at: None,
+        },
+        t(at),
+    )
+    .unwrap()
+}
+
+pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
+    ScoreKey {
+        user_id: db.owner_id().unwrap(),
+        profile_hash: "h1",
+        backend: "claude-cli",
+        model: "sonnet",
+    }
+}
+
 pub(super) fn digest_with_topics(
     db: &Db,
     topics: serde_json::Value,

@@ -1,0 +1,283 @@
+//! 採点待ちの要約と、採点の登録。
+
+use super::*;
+
+/// 採点の対象を特定するキー（誰の・どのプロファイルで・どのモデルで）。
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreKey<'a> {
+    pub user_id: i64,
+    pub profile_hash: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+}
+
+/// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
+/// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
+pub fn score_stage(key: ScoreKey) -> String {
+    format!("score:{}:{}", key.user_id, key.profile_hash)
+}
+
+/// 採点に渡す記事（その利用者が閲覧できる最新の digest）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScoreInput {
+    pub article_id: i64,
+    pub artifact_id: i64,
+    pub title_ja: String,
+    pub summary_ja: String,
+    pub topics: Vec<String>,
+}
+
+impl Db {
+    /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
+    /// `cutoff` 以降の記事で、このキーの採点がまだ無いものを新しい順に返す。
+    /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn pending_score(
+        &self,
+        key: ScoreKey,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<ScoreInput>, DbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH viewable AS (
+               -- 利用者が持っていない会員資格を必要とする digest は見せない
+               SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
+               FROM artifacts AS r
+               WHERE r.kind = 'digest'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifact_access AS aa
+                   WHERE aa.artifact_id = r.id
+                     AND aa.membership_id NOT IN (
+                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+             ),
+             latest AS (
+               SELECT v.* FROM viewable AS v
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewable AS w
+                 WHERE w.article_id = v.article_id
+                   AND (w.created_at > v.created_at
+                        OR (w.created_at = v.created_at AND w.id > v.id)))
+             )
+             SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
+                    {linked}
+             FROM latest AS l
+             JOIN articles AS a ON a.id = l.article_id
+             WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+               AND coalesce(a.published_at, a.fetched_at) >= ?2
+               AND NOT EXISTS (
+                 SELECT 1 FROM scores AS s
+                 WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
+                   AND s.backend = ?4 AND s.model = ?5)
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = l.article_id AND e.stage = ?9
+                   AND e.backend = ?4 AND e.model = ?5
+                   AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?8",
+            linked = linked_topics("l"),
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                key.user_id,
+                timestamp(cutoff),
+                key.profile_hash,
+                key.backend,
+                key.model,
+                MAX_ATTEMPTS,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                score_stage(key),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (article_id, artifact_id, title_ja, summary_ja, topics) = row?;
+            let topics = match topics {
+                Some(json) => serde_json::from_str(&json)?,
+                None => Vec::new(),
+            };
+            Ok(ScoreInput {
+                article_id,
+                artifact_id,
+                title_ja,
+                summary_ja,
+                topics,
+            })
+        })
+        .collect()
+    }
+
+    pub fn insert_score(
+        &self,
+        key: ScoreKey,
+        artifact_id: i64,
+        score: u8,
+        reason: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        self.conn.execute(
+            "INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                key.user_id,
+                artifact_id,
+                key.profile_hash,
+                key.backend,
+                key.model,
+                score,
+                reason,
+                timestamp(now),
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_support::*;
+
+    fn score_ids(db: &Db, key: ScoreKey, now: &str) -> Vec<i64> {
+        db.pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.article_id)
+            .collect()
+    }
+
+    #[test]
+    fn pending_score_uses_latest_relevant_digest_without_score() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "haiku", "古い版", true, "2026-09-26T01:00:00Z");
+        let latest = add_digest(&db, a, "sonnet", "新しい版", true, "2026-09-26T02:00:00Z");
+        let unrelated = page_article(&db, "https://e.com/u", "2026-09-25T00:00:00.000Z");
+        add_digest(
+            &db,
+            unrelated,
+            "sonnet",
+            "非軽水炉",
+            false,
+            "2026-09-26T02:00:00Z",
+        );
+        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
+        add_digest(&db, old, "sonnet", "期間外", true, "2026-09-26T02:00:00Z");
+
+        let pending = db
+            .pending_score(key, t("2026-09-10T00:00:00Z"), t(now), 10)
+            .unwrap();
+        assert_eq!(
+            pending,
+            [ScoreInput {
+                article_id: a,
+                artifact_id: latest,
+                title_ja: "新しい版".into(),
+                summary_ja: "新しい版の要約".into(),
+                topics: vec!["規制・審査".into()],
+            }]
+        );
+
+        db.insert_score(key, latest, 80, Some("規制に直結"), t(now))
+            .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        // プロファイルが変われば採点し直しの対象になる
+        let changed = ScoreKey {
+            profile_hash: "h2",
+            ..key
+        };
+        assert_eq!(score_ids(&db, changed, now), [a]);
+    }
+
+    #[test]
+    fn pending_score_hides_digests_the_user_cannot_view() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let gated = insert_content(&db, a, Some(aesj));
+        let payload = serde_json::json!({
+            "title_ja": "会員限定", "summary_ja": "s", "points_ja": ["p"],
+            "implications_ja": "", "lwr_relevant": true, "topics": ["燃料"],
+        });
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &payload,
+                inputs: &[gated],
+                glossary_at: None,
+            },
+            t("2026-09-26T01:00:00Z"),
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, "2026-09-27T00:00:00Z").is_empty());
+        db.conn()
+            .execute(
+                "INSERT INTO user_memberships VALUES (?1, ?2)",
+                [key.user_id, aesj],
+            )
+            .unwrap();
+        assert_eq!(score_ids(&db, key, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    /// 採点の失敗は利用者とプロファイルごと。あるプロファイルの失敗が、別のプロファイルを止めない。
+    #[test]
+    fn score_failures_are_scoped_to_user_and_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let now = "2026-09-27T00:00:00Z";
+        db.record_stage_failure(
+            StageKey {
+                article_id: a,
+                stage: &score_stage(key),
+                backend: key.backend,
+                model: key.model,
+            },
+            "bad output",
+            t(now),
+            true,
+        )
+        .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let other_profile = ScoreKey {
+            profile_hash: "h2",
+            ..key
+        };
+        assert_eq!(score_ids(&db, other_profile, now), [a]);
+    }
+
+    #[test]
+    fn score_is_limited_to_0_through_100() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let d = add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        assert!(
+            db.insert_score(key, d, 101, None, t("2026-09-27T00:00:00Z"))
+                .is_err()
+        );
+    }
+}

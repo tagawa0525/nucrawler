@@ -1167,6 +1167,22 @@ mod tests {
         assert!(html.contains(r#"href="/?all=1""#), "toggle to show all");
     }
 
+    /// カードのソース・日付の横に、いいねとブックマークの印を出す。
+    #[test]
+    fn card_marks_liked_and_bookmarked_articles() {
+        let mut marked = item(1, "2026-09-27T05:00:00.000Z");
+        marked.feedback = Some(Feedback::Up);
+        marked.bookmarked = true;
+        let html = card(&marked, false, &Page::default());
+        assert!(html.contains(" 👍 🔖</div>"), "{html}");
+        let mut disliked = item(2, "2026-09-27T05:00:00.000Z");
+        disliked.feedback = Some(Feedback::Down);
+        for i in [item(3, "2026-09-27T05:00:00.000Z"), disliked] {
+            let html = card(&i, false, &Page::default());
+            assert!(!html.contains('👍') && !html.contains('🔖'), "{html}");
+        }
+    }
+
     fn detail() -> ArticleDetail {
         let digest = |id: i64, model: &str, title: &str| ArtifactVersion {
             id,

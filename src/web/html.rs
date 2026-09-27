@@ -829,6 +829,27 @@ mod tests {
         assert!(html.contains(".wide { width: 100%;"), "{html}");
     }
 
+    /// 期間は文字でも 📅 のカレンダーでも入れられる。カレンダーは名前を持たず送られない。
+    #[test]
+    fn search_page_offers_a_calendar_for_the_period() {
+        let params = Params {
+            since: "2026-09".into(),
+            ..Params::default()
+        };
+        let html = search_page(&params, None, &[], None, &Page::default());
+        // 月だけの指定もできるよう、文字の欄は残す
+        assert!(html.contains(r#"name="since" value="2026-09""#), "{html}");
+        for name in ["since", "until"] {
+            let cal = format!(
+                r#"<label class="cal" title="カレンダー">📅<input type="date" data-for="{name}" tabindex="-1"></label>"#
+            );
+            let text = html.find(&format!(r#"name="{name}""#)).expect(&html);
+            let at = html.find(&cal).expect(&html);
+            assert!(text < at, "the calendar follows the text field: {html}");
+        }
+        assert!(html.contains("showPicker"), "{html}");
+    }
+
     /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。
     #[test]
     fn search_page_keeps_topics_outside_the_vocabulary() {
@@ -911,7 +932,7 @@ mod tests {
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
-            !html.contains(r#"data-id=""#) && !html.contains("<script>"),
+            !html.contains(r#"data-id=""#) && !html.contains(SWIPE_SCRIPT),
             "{html}"
         );
     }

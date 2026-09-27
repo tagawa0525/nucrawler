@@ -188,6 +188,25 @@ mod tests {
         let u = add_digest(&db, unlabeled, "sonnet", "題", true, "2026-09-26T01:00:00Z");
         db.insert_score(key, u, 90, None, t("2026-09-26T03:00:00Z"))
             .unwrap();
+        // digest 以外の成果物に付いた点数は使わない（より新しくても）
+        let c = insert_content(&db, a, None);
+        let translation = db
+            .insert_artifact(
+                &NewArtifact {
+                    article_id: a,
+                    kind: ArtifactKind::Translation,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({ "body_ja": "和訳" }),
+                    inputs: &[c],
+                    glossary_at: None,
+                },
+                t("2026-09-26T06:00:00Z"),
+            )
+            .unwrap();
+        db.insert_score(key, translation, 5, None, t("2026-09-26T07:00:00Z"))
+            .unwrap();
         db.record_event(owner, a, SignalKind::Up, t("2026-09-27T00:00:00Z"))
             .unwrap();
 

@@ -3,6 +3,7 @@
 
 use crate::db::DigestInput;
 use crate::prompt::escape_data;
+use crate::topics::Topic;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
 pub const PROMPT_VERSION: i64 = 1;
@@ -96,7 +97,7 @@ pub const GLOSSARY: &str = r#"# 表記
   - PWR / BWR → 加圧水型軽水炉（PWR）/ 沸騰水型軽水炉（BWR）
   - NRC → 米国原子力規制委員会（NRC）、原子力規制委員会 → 原子力規制委員会（NRA）"#;
 
-pub fn system_prompt() -> &'static str {
+pub fn system_prompt(_vocab: &[Topic]) -> &'static str {
     static PROMPT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
             "{}{GLOSSARY}",
@@ -123,7 +124,7 @@ pub fn system_prompt() -> &'static str {
 }
 
 /// 出力の JSON Schema。
-pub fn schema() -> serde_json::Value {
+pub fn schema(_vocab: &[Topic]) -> serde_json::Value {
     let string = serde_json::json!({"type": "string"});
     let strings = serde_json::json!({
         "type": "array",
@@ -190,7 +191,11 @@ fn attribute(value: &str) -> String {
 }
 
 /// 応答から、依頼した記事の payload を取り出す。依頼していない id は無視し、欠けた id を報告する。
-pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, DigestError> {
+pub fn parse(
+    output: &serde_json::Value,
+    requested: &[i64],
+    _vocab: &[Topic],
+) -> Result<Parsed, DigestError> {
     let top = output
         .as_object()
         .ok_or_else(|| DigestError::Malformed("the output is not an object".into()))?;
@@ -248,6 +253,25 @@ mod tests {
 
     use super::*;
     use crate::db::InputContent;
+    use crate::topics::Facet;
+
+    fn vocab() -> Vec<Topic> {
+        [
+            ("規制・審査", Facet::Field),
+            ("燃料", Facet::Field),
+            ("高経年化", Facet::Field),
+            ("PWR", Facet::Reactor),
+            ("BWR", Facet::Reactor),
+            ("米国", Facet::Region),
+            ("IAEA", Facet::Organization),
+        ]
+        .into_iter()
+        .map(|(name, facet)| Topic {
+            name: name.into(),
+            facet,
+        })
+        .collect()
+    }
 
     fn input(id: i64, lang: &str, contents: &[(&str, &str)]) -> DigestInput {
         DigestInput {
@@ -269,7 +293,7 @@ mod tests {
 
     #[test]
     fn system_prompt_guards_against_injection_and_sets_terms() {
-        let s = system_prompt();
+        let s = system_prompt(&vocab());
         assert!(s.contains("<article>"), "{s}");
         assert!(
             s.contains("指示"),
@@ -280,9 +304,44 @@ mod tests {
         assert!(s.contains("燃料取替"), "{s}");
     }
 
+    /// 語彙は軸ごとに並べ、新しい語の提案は語彙で足りないときだけに限る。
+    #[test]
+    fn system_prompt_lists_vocabulary_by_facet() {
+        let s = system_prompt(&vocab());
+        for line in [
+            "分野：規制・審査、燃料、高経年化",
+            "炉型：PWR、BWR",
+            "地域：米国",
+            "組織：IAEA",
+        ] {
+            assert!(s.contains(line), "{line}: {s}");
+        }
+        assert!(s.contains("new_topics"), "{s}");
+    }
+
+    #[test]
+    fn schema_restricts_topics_to_vocabulary() {
+        let vocab = vocab();
+        let s = schema(&vocab);
+        let item = &s["properties"]["items"]["items"]["properties"];
+        let names: Vec<&str> = vocab.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(item["topics"]["items"]["enum"], serde_json::json!(names));
+        let new = &item["new_topics"];
+        assert_eq!(new["maxItems"], 1);
+        assert_eq!(
+            new["items"]["properties"]["facet"]["enum"],
+            serde_json::json!(["分野", "炉型", "地域", "組織"])
+        );
+        assert_eq!(
+            new["items"]["required"],
+            serde_json::json!(["name", "facet"])
+        );
+        assert_eq!(new["items"]["additionalProperties"], false);
+    }
+
     #[test]
     fn schema_requires_every_field_and_forbids_extras() {
-        let s = schema();
+        let s = schema(&vocab());
         let item = &s["properties"]["items"]["items"];
         assert_eq!(s["additionalProperties"], false);
         assert_eq!(item["additionalProperties"], false);
@@ -307,6 +366,7 @@ mod tests {
             "implications_ja",
             "lwr_relevant",
             "topics",
+            "new_topics",
         ] {
             assert!(properties.contains(field), "{field}");
         }
@@ -359,14 +419,15 @@ mod tests {
             "points_ja": ["点"],
             "implications_ja": "",
             "lwr_relevant": true,
-            "topics": ["規制"],
+            "topics": ["規制・審査"],
+            "new_topics": [],
         })
     }
 
     #[test]
     fn parse_returns_requested_items_and_reports_missing() {
         let output = serde_json::json!({"items": [item(1), item(3), item(99)]});
-        let parsed = parse(&output, &[1, 2, 3]).unwrap();
+        let parsed = parse(&output, &[1, 2, 3], &vocab()).unwrap();
         let ids: Vec<i64> = parsed.items.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [1, 3]);
         assert_eq!(parsed.missing, [2]);
@@ -379,11 +440,12 @@ mod tests {
 
     #[test]
     fn schema_limits_list_lengths() {
-        let item = &schema()["properties"]["items"]["items"]["properties"];
-        for field in ["points_ja", "topics"] {
-            assert_eq!(item[field]["minItems"], 1, "{field}");
-            assert_eq!(item[field]["maxItems"], 5, "{field}");
-        }
+        let item = &schema(&vocab())["properties"]["items"]["items"]["properties"];
+        assert_eq!(item["points_ja"]["minItems"], 1);
+        assert_eq!(item["points_ja"]["maxItems"], 5);
+        // 新しい語だけを付けることもあるので、語彙から選ぶ数は 0 からにして、合計は検証で確かめる
+        assert_eq!(item["topics"]["minItems"], 0);
+        assert_eq!(item["topics"]["maxItems"], 5);
     }
 
     #[test]
@@ -391,9 +453,10 @@ mod tests {
         let mut no_points = item(1);
         no_points["points_ja"] = serde_json::json!([]);
         let mut many_topics = item(2);
-        many_topics["topics"] = serde_json::json!(["a", "b", "c", "d", "e", "f"]);
+        many_topics["topics"] =
+            serde_json::json!(["規制・審査", "燃料", "高経年化", "PWR", "BWR", "米国"]);
         let output = serde_json::json!({"items": [no_points, many_topics, item(3)]});
-        let parsed = parse(&output, &[1, 2, 3]).unwrap();
+        let parsed = parse(&output, &[1, 2, 3], &vocab()).unwrap();
         assert_eq!(parsed.missing, [1, 2]);
     }
 
@@ -407,10 +470,75 @@ mod tests {
         let mut lacking = item(4);
         lacking.as_object_mut().unwrap().remove("topics");
         let output = serde_json::json!({"items": [item(1), wrong_type, extra, lacking]});
-        let parsed = parse(&output, &[1, 2, 3, 4]).unwrap();
+        let parsed = parse(&output, &[1, 2, 3, 4], &vocab()).unwrap();
         let ids: Vec<i64> = parsed.items.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, [1]);
         assert_eq!(parsed.missing, [2, 3, 4]);
+    }
+
+    /// 提案された新しい語は payload の topics にも並べ、表示や検索で既存の語と同じに扱えるようにする。
+    #[test]
+    fn parse_accepts_a_proposed_topic() {
+        let mut proposal = item(1);
+        proposal["new_topics"] =
+            serde_json::json!([{"name": "データセンター需要", "facet": "分野"}]);
+        let output = serde_json::json!({"items": [proposal]});
+        let parsed = parse(&output, &[1], &vocab()).unwrap();
+        let payload = &parsed.items[0].1;
+        assert_eq!(
+            payload["topics"],
+            serde_json::json!(["規制・審査", "データセンター需要"])
+        );
+        assert_eq!(
+            payload["new_topics"],
+            serde_json::json!([{"name": "データセンター需要", "facet": "分野"}])
+        );
+    }
+
+    /// 語彙にある語を新しい語として出してきたら、語彙から選んだものとして扱う。
+    #[test]
+    fn parse_treats_a_proposal_already_in_the_vocabulary_as_chosen() {
+        let mut proposal = item(1);
+        proposal["new_topics"] = serde_json::json!([{"name": "燃料", "facet": "炉型"}]);
+        let output = serde_json::json!({"items": [proposal]});
+        let payload = &parse(&output, &[1], &vocab()).unwrap().items[0].1;
+        assert_eq!(payload["topics"], serde_json::json!(["規制・審査", "燃料"]));
+        assert_eq!(payload["new_topics"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn parse_rejects_topics_breaking_the_rules() {
+        let with = |topics: serde_json::Value, new: serde_json::Value| {
+            let mut i = item(1);
+            i["topics"] = topics;
+            i["new_topics"] = new;
+            i
+        };
+        let new = |name: &str| serde_json::json!([{"name": name, "facet": "分野"}]);
+        for bad in [
+            with(serde_json::json!(["新設炉"]), serde_json::json!([])),
+            with(serde_json::json!(["燃料", "燃料"]), serde_json::json!([])),
+            with(serde_json::json!([]), serde_json::json!([])),
+            with(
+                serde_json::json!([]),
+                serde_json::json!([{"name": "a", "facet": "分野"}, {"name": "b", "facet": "分野"}]),
+            ),
+            with(serde_json::json!(["燃料"]), new(" ")),
+            with(serde_json::json!(["燃料"]), new(&"長".repeat(21))),
+            with(serde_json::json!(["燃料"]), new("行\n替え")),
+            with(
+                serde_json::json!(["燃料"]),
+                serde_json::json!([{"name": "a", "facet": "話題"}]),
+            ),
+            with(
+                serde_json::json!(["規制・審査", "燃料", "高経年化", "PWR", "BWR"]),
+                new("データセンター需要"),
+            ),
+        ] {
+            let output = serde_json::json!({"items": [bad.clone()]});
+            let parsed = parse(&output, &[1], &vocab()).unwrap();
+            assert_eq!(parsed.missing, [1], "{bad}");
+        }
     }
 
     #[test]
@@ -448,7 +576,7 @@ mod tests {
             serde_json::json!({"items": "x"}),
             serde_json::json!({"items": [{"title_ja": "no id"}]}),
         ] {
-            assert!(parse(&bad, &[1]).is_err(), "{bad}");
+            assert!(parse(&bad, &[1], &vocab()).is_err(), "{bad}");
         }
     }
 }

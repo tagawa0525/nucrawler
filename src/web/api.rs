@@ -1,0 +1,144 @@
+//! JSON API の応答の形。`html` と同じく I/O を持たない。
+//! DB の型をそのまま出さず、ここで公開するフィールドを決める。
+
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::db::{ArticleDetail, ArtifactVersion, Feedback, ListItem};
+use crate::web::html::SourceLabels;
+
+/// 記事の一覧（`GET /api/articles`）。
+#[derive(Debug, Serialize)]
+pub struct ArticleList<'a> {
+    pub articles: Vec<Article<'a>>,
+}
+
+impl<'a> ArticleList<'a> {
+    pub fn new(items: &'a [ListItem], labels: &'a SourceLabels) -> Self {
+        Self {
+            articles: items.iter().map(|i| Article::new(i, labels)).collect(),
+        }
+    }
+}
+
+/// 一覧の 1 件。digest の項目は利用者が閲覧できる最新の版のもの。
+#[derive(Debug, Serialize)]
+pub struct Article<'a> {
+    pub id: i64,
+    pub source_id: &'a str,
+    /// ソースの表示名
+    pub source: &'a str,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub lang: &'a str,
+    /// 公開日時（無ければ取得日時）。RFC 3339 の UTC
+    pub at: &'a str,
+    pub fetched_at: &'a str,
+    pub title_ja: Option<&'a str>,
+    pub summary_ja: Option<&'a str>,
+    pub lwr_relevant: Option<bool>,
+    pub score: Option<u8>,
+    pub reason: Option<&'a str>,
+    pub read: bool,
+    /// 最新の 👍/👎（"up" / "down"）
+    pub feedback: Option<&'static str>,
+    pub has_translation: bool,
+    pub translation_requested: bool,
+    /// 原文を読むのに必要で、利用者が持っていない会員資格の名前
+    pub locked_by: &'a [String],
+}
+
+impl<'a> Article<'a> {
+    fn new(i: &'a ListItem, labels: &'a SourceLabels) -> Self {
+        Self {
+            id: i.article_id,
+            source_id: &i.source_id,
+            source: labels.get(&i.source_id).unwrap_or(&i.source_id),
+            url: &i.url,
+            title: &i.title,
+            lang: &i.lang,
+            at: &i.at,
+            fetched_at: &i.fetched_at,
+            title_ja: i.title_ja.as_deref(),
+            summary_ja: i.summary_ja.as_deref(),
+            lwr_relevant: i.lwr_relevant,
+            score: i.score,
+            reason: i.reason.as_deref(),
+            read: i.read,
+            feedback: i.feedback.map(|f| match f {
+                Feedback::Up => "up",
+                Feedback::Down => "down",
+            }),
+            has_translation: i.has_translation,
+            translation_requested: i.translation_requested,
+            locked_by: &i.locked_by,
+        }
+    }
+}
+
+/// 記事の詳細（`GET /api/articles/{id}`）。要約と和訳は、利用者が閲覧できる最新の版。
+#[derive(Debug, Serialize)]
+pub struct ArticleBody<'a> {
+    #[serde(flatten)]
+    pub article: Article<'a>,
+    pub digest: Option<Digest<'a>>,
+    pub translation: Option<Translation<'a>>,
+}
+
+impl<'a> ArticleBody<'a> {
+    pub fn new(d: &'a ArticleDetail, labels: &'a SourceLabels) -> Self {
+        Self {
+            article: Article::new(&d.item, labels),
+            digest: d.digests.first().map(Digest::new),
+            translation: d.translations.first().map(Translation::new),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Digest<'a> {
+    pub id: i64,
+    pub model: &'a str,
+    pub created_at: &'a str,
+    pub title_ja: &'a Value,
+    pub summary_ja: &'a Value,
+    pub points_ja: &'a Value,
+    pub implications_ja: &'a Value,
+    pub topics: &'a Value,
+    pub lwr_relevant: &'a Value,
+}
+
+impl<'a> Digest<'a> {
+    fn new(v: &'a ArtifactVersion) -> Self {
+        Self {
+            id: v.id,
+            model: &v.model,
+            created_at: &v.created_at,
+            title_ja: &v.payload["title_ja"],
+            summary_ja: &v.payload["summary_ja"],
+            points_ja: &v.payload["points_ja"],
+            implications_ja: &v.payload["implications_ja"],
+            topics: &v.payload["topics"],
+            lwr_relevant: &v.payload["lwr_relevant"],
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Translation<'a> {
+    pub id: i64,
+    pub model: &'a str,
+    pub created_at: &'a str,
+    pub body_ja: &'a Value,
+}
+
+impl<'a> Translation<'a> {
+    fn new(v: &'a ArtifactVersion) -> Self {
+        Self {
+            id: v.id,
+            model: &v.model,
+            created_at: &v.created_at,
+            body_ja: &v.payload["body_ja"],
+        }
+    }
+}

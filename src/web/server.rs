@@ -1,5 +1,5 @@
 //! Web UI の HTTP サーバー。画面の描画は `html`、データは `Db` に任せ、ここではルーティングと
-//! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。フィードは `feed` が組み立てる。
+//! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。フィードは `feed`、JSON API の応答の形は `api` が決める。
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -11,8 +11,8 @@ use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
 use crate::db::{Db, DbError, ListQuery, SignalKind};
-use crate::web::feed;
 use crate::web::html::{self, DetailView, Page, SourceLabels};
+use crate::web::{api, feed};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -48,6 +48,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/", get(list))
         .route("/articles/{id}", get(detail))
         .route("/feed.xml", get(feed))
+        .route("/api/articles", get(api_list))
+        .route("/api/articles/{id}", get(api_detail))
         .route("/articles/{id}/feedback", post(feedback))
         .route(
             "/articles/{id}/translation-request",
@@ -78,6 +80,8 @@ enum AppError {
     Db(#[from] DbError),
     #[error("a database task failed")]
     Join(#[from] tokio::task::JoinError),
+    #[error("failed to encode json")]
+    Json(#[from] serde_json::Error),
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -89,7 +93,7 @@ enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
-            AppError::Db(_) | AppError::Join(_) => {
+            AppError::Db(_) | AppError::Join(_) | AppError::Json(_) => {
                 // 詳細（SQL やスキーマ）はログにだけ残し、応答には出さない
                 tracing::error!("{}", crate::errors::error_chain(&self));
                 let status = StatusCode::INTERNAL_SERVER_ERROR;
@@ -200,6 +204,56 @@ async fn feed(State(state): State<AppState>, headers: HeaderMap) -> Result<Respo
         xml,
     )
         .into_response())
+}
+
+fn json(body: String) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+/// Web の一覧と同じ記事（`all=1` ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
+async fn api_list(
+    State(state): State<AppState>,
+    Query(params): Query<ListParams>,
+) -> Result<Response, AppError> {
+    let show_all = params.all.as_deref() == Some("1");
+    let web = state.web.clone();
+    let labels = state.labels.clone();
+    let body = with_db(&state, move |db| {
+        let now = Utc::now();
+        let (user, hash) = viewer(db)?;
+        let items = db.list_articles(ListQuery {
+            user_id: user,
+            profile_hash: hash.as_deref(),
+            min_score: web.min_score,
+            since: now - Duration::days(web.list_days.into()),
+            show_all,
+            limit: web.list_limit,
+        })?;
+        Ok(serde_json::to_string(&api::ArticleList::new(
+            &items, &labels,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
+}
+
+/// 記事 1 件の最新の要約と和訳。閲覧ではないので、開いたことを記録しない。
+async fn api_detail(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let labels = state.labels.clone();
+    let body = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let detail = db
+            .article_detail(user, hash.as_deref(), id)?
+            .ok_or(AppError::NotFound)?;
+        Ok(serde_json::to_string(&api::ArticleBody::new(
+            &detail, &labels,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
 }
 
 #[derive(serde::Deserialize)]

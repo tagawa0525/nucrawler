@@ -103,7 +103,22 @@ pub fn render(
 
 /// 確認枠の反応の内訳。反応した記事のうち関心の割合を、閾値未満での見逃し率の見積もりとして示す。
 pub fn render_explore(stats: ExploreStats) -> String {
-    todo!("{stats:?}")
+    if stats.picked == 0 {
+        return String::new();
+    }
+    let reacted = stats.positive + stats.negative;
+    let mut out = format!(
+        "\nexplore: {} picked below the threshold, {reacted} with reactions ({} positive, {} negative)\n",
+        stats.picked, stats.positive, stats.negative
+    );
+    if reacted > 0 {
+        let _ = writeln!(
+            out,
+            "  about {:.0}% of the reacted picks were of interest (misses below the threshold)",
+            stats.positive as f64 * 100.0 / reacted as f64
+        );
+    }
+    out
 }
 
 /// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。

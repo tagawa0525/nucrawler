@@ -50,6 +50,7 @@ pub(crate) async fn eval(
             args.all,
         )
     );
+    print!("{}", eval::render_explore(db.explore_stats(owner)?));
     Ok(())
 }
 

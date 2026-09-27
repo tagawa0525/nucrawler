@@ -147,7 +147,28 @@ impl Db {
 
     /// 確認枠に選んだ記事と、そのラベルの内訳。
     pub fn explore_stats(&self, user_id: i64) -> Result<ExploreStats, DbError> {
-        todo!("{user_id}")
+        let picked: std::collections::HashSet<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT article_id FROM explore_picks WHERE user_id = ?1")?;
+            let rows = stmt.query_map([user_id], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut stats = ExploreStats {
+            picked: picked.len(),
+            ..ExploreStats::default()
+        };
+        for label in self.eval_labels(user_id)? {
+            if !picked.contains(&label.article_id) {
+                continue;
+            }
+            if label.positive() {
+                stats.positive += 1;
+            } else {
+                stats.negative += 1;
+            }
+        }
+        Ok(stats)
     }
 
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う

@@ -3,12 +3,11 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, Outcome, call_recorded};
-use super::{Cancel, Halt};
+use super::Halt;
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
 use crate::config::LlmConfig;
-use crate::db::{Db, DbError};
+use crate::db::DbError;
 use crate::llm::{Llm, LlmRequest};
-use crate::quota::Quota;
 use crate::{errors, tidy};
 
 pub const STAGE: &str = "tidy";
@@ -29,13 +28,15 @@ pub struct TidySummary {
 
 /// `force` なら前回の整理からの間隔によらず整理する（`crawl --only tidy`）。
 pub async fn tidy_topics<L: Llm>(
-    db: &Db,
-    llm: &L,
-    quota: &mut Quota,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     force: bool,
     now: DateTime<Utc>,
-    cancel: &Cancel,
 ) -> Result<TidySummary, TidyStageError> {
     let mut summary = TidySummary::default();
     let interval = chrono::Duration::days(i64::from(cfg.tidy_interval_days));
@@ -102,10 +103,11 @@ pub async fn tidy_topics<L: Llm>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact};
+    use crate::db::{ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact};
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
-    use crate::quota::{QuotaConfig, Stop};
+    use crate::pipeline::Cancel;
+    use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
         // JST 11:00（10〜15 時の枠）
@@ -164,13 +166,15 @@ mod tests {
 
     async fn run(db: &Db, llm: &FakeLlm, quota: &mut Quota, force: bool) -> TidySummary {
         tidy_topics(
-            db,
-            llm,
-            quota,
+            LlmStage {
+                db,
+                llm,
+                quota,
+                cancel: &Cancel::default(),
+            },
             &LlmConfig::default(),
             force,
             now(),
-            &Cancel::default(),
         )
         .await
         .unwrap()

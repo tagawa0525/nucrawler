@@ -322,14 +322,16 @@ async fn crawl(
             }
             Stage::Tidy => {
                 let summary = tidy::tidy_topics(
-                    &db,
-                    &llm,
-                    &mut quota,
+                    LlmStage {
+                        db: &db,
+                        llm: &llm,
+                        quota: &mut quota,
+                        cancel: &cancel,
+                    },
                     &config.llm,
                     // `--only tidy` なら、前回の整理からの間隔によらず整理する
                     args.only == Some(Stage::Tidy),
                     chrono::Utc::now(),
-                    &cancel,
                 )
                 .await?;
                 tracing::info!(

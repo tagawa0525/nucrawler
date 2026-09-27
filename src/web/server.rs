@@ -568,11 +568,12 @@ impl CommentForm {
             .ok_or(AppError::BadRequest("body must not be empty"))
     }
 
-    fn visibility(&self) -> Visibility {
-        if self.public.is_some() {
-            Visibility::Public
-        } else {
-            Visibility::Private
+    /// `1` なら公開、欄が無ければ非公開。ほかの値は公開範囲を取り違えないよう拒否する。
+    fn visibility(&self) -> Result<Visibility, AppError> {
+        match self.public.as_deref() {
+            None => Ok(Visibility::Private),
+            Some("1") => Ok(Visibility::Public),
+            Some(_) => Err(AppError::BadRequest("public must be 1 or absent")),
         }
     }
 }
@@ -594,7 +595,7 @@ async fn add_comment(
     Form(form): Form<CommentForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
-    let (body, visibility) = (form.body()?, form.visibility());
+    let (body, visibility) = (form.body()?, form.visibility()?);
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
@@ -612,7 +613,7 @@ async fn update_comment(
     Form(form): Form<CommentForm>,
 ) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
-    let (body, visibility) = (form.body()?, form.visibility());
+    let (body, visibility) = (form.body()?, form.visibility()?);
     let article = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         Ok(db.update_comment(user, id, &body, visibility, Utc::now())?)

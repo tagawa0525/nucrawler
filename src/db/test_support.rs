@@ -112,6 +112,7 @@ pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
         profile_hash: "h1",
         backend: "claude-cli",
         model: "sonnet",
+        prompt_version: 1,
     }
 }
 
@@ -132,6 +133,7 @@ pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, sc
             profile_hash: "h1",
             backend: "claude-cli",
             model: "sonnet",
+            prompt_version: 1,
         },
         digest,
         score,

@@ -2,17 +2,20 @@
 
 use super::*;
 
-/// 採点の対象を特定するキー（誰の・どのプロファイルで・どのモデルで）。
+/// 採点の対象を特定するキー（誰の・どのプロファイルで・どのモデルと版のプロンプトで）。
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreKey<'a> {
     pub user_id: i64,
     pub profile_hash: &'a str,
     pub backend: &'a str,
     pub model: &'a str,
+    pub prompt_version: i64,
 }
 
 /// 採点の失敗を記録するステージ名。`stage_errors` の主キーは記事・ステージ・バックエンド・
 /// モデルで、利用者とプロファイルを持たないので、ステージ名にそれらを含めて範囲を区別する。
+/// プロンプトの版は含めない（digest の失敗と同じ扱い）ので、古い版で断念した記事は、
+/// 版を上げても再試行しない。
 pub fn score_stage(key: ScoreKey) -> String {
     format!("score:{}:{}", key.user_id, key.profile_hash)
 }
@@ -29,7 +32,7 @@ pub struct ScoreInput {
 
 impl Db {
     /// 各記事について利用者が閲覧できる最新の digest のうち、軽水炉に関係し（lwr_relevant）、
-    /// `cutoff` 以降の記事で、このキーの採点がまだ無いものを新しい順に返す。
+    /// `cutoff` 以降の記事で、このキー（プロンプトの版を含む）の採点がまだ無いものを新しい順に返す。
     /// このモデルの採点の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_score(
         &self,
@@ -67,7 +70,7 @@ impl Db {
                AND NOT EXISTS (
                  SELECT 1 FROM scores AS s
                  WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
-                   AND s.backend = ?4 AND s.model = ?5)
+                   AND s.backend = ?4 AND s.model = ?5 AND s.prompt_version = ?10)
                AND NOT EXISTS (
                  SELECT 1 FROM stage_errors AS e
                  WHERE e.article_id = l.article_id AND e.stage = ?9
@@ -88,6 +91,7 @@ impl Db {
                 timestamp(now),
                 i64::try_from(limit).unwrap_or(i64::MAX),
                 score_stage(key),
+                key.prompt_version,
             ],
             |r| {
                 Ok((
@@ -126,14 +130,16 @@ impl Db {
     ) -> Result<(), DbError> {
         self.conn.execute(
             "INSERT INTO scores
-               (user_id, artifact_id, profile_hash, backend, model, score, reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+               (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, reason,
+                created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 key.user_id,
                 artifact_id,
                 key.profile_hash,
                 key.backend,
                 key.model,
+                key.prompt_version,
                 score,
                 reason,
                 timestamp(now),
@@ -199,6 +205,29 @@ mod tests {
             ..key
         };
         assert_eq!(score_ids(&db, changed, now), [a]);
+    }
+
+    #[test]
+    fn pending_score_rescores_when_prompt_version_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let d = add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        db.insert_score(key, d, 80, None, t(now)).unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        let next = ScoreKey {
+            prompt_version: key.prompt_version + 1,
+            ..key
+        };
+        assert_eq!(score_ids(&db, next, now), [a]);
+        db.insert_score(next, d, 60, None, t(now)).unwrap();
+        assert!(score_ids(&db, next, now).is_empty());
+        assert_eq!(
+            db.query_strings("SELECT prompt_version || ':' || score FROM scores ORDER BY id")
+                .unwrap(),
+            ["1:80", "2:60"]
+        );
     }
 
     #[test]

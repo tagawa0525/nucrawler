@@ -5,6 +5,10 @@ use crate::db::{ScoreInput, Signal, SignalKind};
 use crate::profile::Profile;
 use crate::prompt::escape_data;
 
+/// プロンプトや出力の形を変えたら上げる。採点はこの版ごとに別の行として残り、版を上げると
+/// `pipeline.backlog_days` の範囲の記事が採点し直しになる。
+pub const PROMPT_VERSION: i64 = 1;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScoreError {
     #[error("score output does not match the schema: {0}")]

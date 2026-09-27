@@ -15,6 +15,7 @@
 #                       無いか読めなければ取得日時
 #           title_skip  見出しから除く要素の CSS セレクタ（会社名のラベルなど）
 #           follow      一覧の前にたどるリンクの CSS セレクタ（年度ごとに URL が変わる一覧など）
+#           also        一覧に続けて同じ読み方で読むほかのページの URL の配列。一覧にも載る記事は 1 件にする
 
 # --- 規制当局 ---
 
@@ -46,7 +47,9 @@ url = "https://www.iaea.org/feeds/topnews"
 lang = "en"
 category = "regulator"
 
-# 新着履歴は月ごとのページで、index.html はその月の分。日付は URL ではなく一覧の dt から取る
+# 新着履歴は月ごとのページで、index.html はその月の分。月が替わると前の月の分は載らない（月の初めは
+# 0 件のこともある）ので、月をまたいで最新の 5 件を載せるトップの新着情報も読む。
+# 日付は URL ではなく一覧の dt から取る
 [[source]]
 id = "nra"
 name = "原子力規制委員会"
@@ -55,7 +58,7 @@ kind = "html_list"
 url = "https://www.nra.go.jp/news/index.html"
 lang = "ja"
 category = "regulator"
-list = { link = "dl.news__list dd.news__title a", date = ".news__date" }
+list = { link = "dl.news__list dd.news__title a", date = ".news__date", also = ["https://www.nra.go.jp/"] }
 
 # --- 業界 ---
 

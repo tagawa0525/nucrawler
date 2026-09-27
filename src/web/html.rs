@@ -191,11 +191,11 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
         "<nav class=\"bar\">{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
-        button(&all_toggle.href(), "すべて表示", "🗂", Some(view.all)),
+        button(&all_toggle.href(), "すべて表示", "👁", Some(view.all)),
         button(
             &read_toggle.href(),
             "過去の既読も表示",
-            "📖",
+            "🕘",
             Some(view.read)
         ),
     );

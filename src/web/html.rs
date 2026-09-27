@@ -565,6 +565,21 @@ mod tests {
         );
     }
 
+    /// 語彙に無い語（統合した語の別名など）で検索しても、フォームを送り直して条件が消えないようにする。
+    #[test]
+    fn search_page_keeps_topics_outside_the_vocabulary() {
+        let params = Params {
+            topics: vec!["新設炉".into()],
+            ..Params::default()
+        };
+        let vocabulary = [usage("燃料", crate::topics::Facet::Field, 3)];
+        let html = search_page(&params, Some(&[]), &vocabulary, None, &Page::default());
+        assert!(
+            html.contains(r#"name="topic" value="新設炉" checked"#),
+            "{html}"
+        );
+    }
+
     #[test]
     fn search_page_shows_results_errors_and_empty_results() {
         let params = Params {

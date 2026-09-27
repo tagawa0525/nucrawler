@@ -168,6 +168,7 @@ mod tests {
         Source {
             id: id.into(),
             name: id.into(),
+            label: None,
             kind: SourceKind::Feed,
             url: "https://unused.example/rss".into(),
             lang: Lang::En,

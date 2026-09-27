@@ -499,10 +499,15 @@ async fn serve(
     data: Option<PathBuf>,
     args: cli::ServeArgs,
 ) -> Result<(), Error> {
-    let (config, _) = config::load(&config_dir(config)?)?;
+    let (config, sources) = config::load(&config_dir(config)?)?;
     let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
     let addr = args.addr.unwrap_or(config.web.bind);
-    let state = server::AppState::new(db, config.web);
+    let labels = sources
+        .sources
+        .iter()
+        .map(|s| (s.id.clone(), s.display_name().to_string()))
+        .collect();
+    let state = server::AppState::new(db, config.web, labels);
     server::run(addr, state, shutdown_signal()).await?;
     Ok(())
 }

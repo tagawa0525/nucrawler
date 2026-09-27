@@ -55,9 +55,40 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .translation p { line-height: 1.7; }
 ";
 
+/// ソースの ID から画面に出す名前へ（`Source::display_name`）。
+pub type SourceLabels = std::collections::BTreeMap<String, String>;
+
+/// どのページにも共通の表示の材料。
+#[derive(Debug, Clone, Copy)]
+pub struct Page<'a> {
+    pub warnings: &'a [Warning],
+    pub labels: &'a SourceLabels,
+}
+
+impl Default for Page<'_> {
+    fn default() -> Self {
+        static NONE: SourceLabels = SourceLabels::new();
+        Self {
+            warnings: &[],
+            labels: &NONE,
+        }
+    }
+}
+
+impl Page<'_> {
+    /// ソースの表示名（設定に無い ID はそのまま）。
+    fn source<'s>(&'s self, id: &'s str) -> &'s str {
+        self.labels.get(id).map_or(id, String::as_str)
+    }
+}
+
 /// 全ページ共通の外枠（スマホ向けの 1 カラム、警告のバナー）。
-pub fn layout(title: &str, warnings: &[Warning], body: &str) -> String {
-    let banners: String = warnings.iter().map(warning_banner).collect();
+pub fn layout(title: &str, page: &Page, body: &str) -> String {
+    let banners: String = page
+        .warnings
+        .iter()
+        .map(|w| warning_banner(w, page))
+        .collect();
     format!(
         "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -67,15 +98,15 @@ pub fn layout(title: &str, warnings: &[Warning], body: &str) -> String {
     )
 }
 
-fn warning_banner(w: &Warning) -> String {
+fn warning_banner(w: &Warning, page: &Page) -> String {
     match w {
         Warning::SourceFailing {
             source_id,
             error,
             at,
         } => format!(
-            "<div class=\"warn\">⚠ ソース {} の取得に失敗しています（{}）：{}</div>",
-            escape(source_id),
+            "<div class=\"warn\">⚠ {} の取得に失敗しています（{}）：{}</div>",
+            escape(page.source(source_id)),
             crate::jst::format_local(at),
             escape(error)
         ),
@@ -101,12 +132,7 @@ fn warning_banner(w: &Warning) -> String {
     }
 }
 
-pub fn list_page(
-    new: &[ListItem],
-    earlier: &[ListItem],
-    show_all: bool,
-    warnings: &[Warning],
-) -> String {
+pub fn list_page(new: &[ListItem], earlier: &[ListItem], show_all: bool, page: &Page) -> String {
     let mut body = String::from("<h1>nucrawler</h1>");
     let toggle = if show_all {
         "<a href=\"/\">おすすめだけ表示</a>"
@@ -118,15 +144,15 @@ pub fn list_page(
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
     }
-    body.extend(new.iter().map(card));
+    body.extend(new.iter().map(|i| card(i, page)));
     if !earlier.is_empty() {
         body.push_str("<h2>過去の未読</h2>");
-        body.extend(earlier.iter().map(card));
+        body.extend(earlier.iter().map(|i| card(i, page)));
     }
-    layout("一覧", warnings, &body)
+    layout("一覧", page, &body)
 }
 
-fn card(i: &ListItem) -> String {
+fn card(i: &ListItem, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
     let score = i
         .score
@@ -153,7 +179,7 @@ fn card(i: &ListItem) -> String {
         read = if i.read { " read" } else { "" },
         id = i.article_id,
         title = escape(title),
-        source = escape(&i.source_id),
+        source = escape(page.source(&i.source_id)),
         at = crate::jst::format_local(&i.at),
     )
 }
@@ -176,7 +202,7 @@ pub struct DetailView {
     pub translation: Option<i64>,
 }
 
-pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) -> String {
+pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
     let i = &d.item;
     let id = i.article_id;
     let digest = view
@@ -195,7 +221,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) ->
     );
     body.push_str(&format!(
         "<p class=\"meta\">{} ・{} ・<a href=\"{}\">原文</a>{}</p>",
-        escape(&i.source_id),
+        escape(page.source(&i.source_id)),
         crate::jst::format_local(&i.at),
         escape(&i.url),
         if i.locked_by.is_empty() {
@@ -247,7 +273,7 @@ pub fn detail_page(d: &ArticleDetail, view: DetailView, warnings: &[Warning]) ->
         body.push_str("</p>");
     }
     body.push_str(&translation_section(d, view));
-    layout(&title, warnings, &body)
+    layout(&title, page, &body)
 }
 
 fn feedback_forms(id: i64, current: Option<crate::db::Feedback>) -> String {
@@ -372,17 +398,20 @@ mod tests {
     fn layout_is_mobile_friendly_and_shows_warnings() {
         let html = layout(
             "一覧",
-            &[
-                Warning::SourceFailing {
-                    source_id: "nei".into(),
-                    error: "HTTP 403".into(),
-                    at: "2026-09-27T00:00:00.000Z".into(),
-                },
-                Warning::LlmFailed {
-                    error: "llm reported an error (error): Not logged in".into(),
-                    at: "2026-09-27T01:00:00.000Z".into(),
-                },
-            ],
+            &Page {
+                warnings: &[
+                    Warning::SourceFailing {
+                        source_id: "nei".into(),
+                        error: "HTTP 403".into(),
+                        at: "2026-09-27T00:00:00.000Z".into(),
+                    },
+                    Warning::LlmFailed {
+                        error: "llm reported an error (error): Not logged in".into(),
+                        at: "2026-09-27T01:00:00.000Z".into(),
+                    },
+                ],
+                ..Page::default()
+            },
             "<p>body</p>",
         );
         assert!(html.starts_with("<!DOCTYPE html>"), "{html}");
@@ -406,10 +435,13 @@ mod tests {
         .to_string();
         let html = layout(
             "一覧",
-            &[Warning::LlmFailed {
-                error,
-                at: "2026-09-27T01:00:00.000Z".into(),
-            }],
+            &Page {
+                warnings: &[Warning::LlmFailed {
+                    error,
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                }],
+                ..Page::default()
+            },
             "",
         );
         assert!(html.contains("利用上限"), "{html}");
@@ -420,13 +452,49 @@ mod tests {
     fn auth_hint_ignores_case() {
         let html = layout(
             "一覧",
-            &[Warning::LlmFailed {
-                error: "llm process exited with exit status: 1: Authentication required".into(),
-                at: "2026-09-27T01:00:00.000Z".into(),
-            }],
+            &Page {
+                warnings: &[Warning::LlmFailed {
+                    error: "llm process exited with exit status: 1: Authentication required".into(),
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                }],
+                ..Page::default()
+            },
             "",
         );
         assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// ソースは ID ではなく表示名で出す（設定に無い ID はそのまま）。
+    #[test]
+    fn sources_are_shown_by_label() {
+        let labels = SourceLabels::from([("kyuden".to_string(), "九電".to_string())]);
+        let page = Page {
+            warnings: &[Warning::SourceFailing {
+                source_id: "kyuden".into(),
+                error: "HTTP 500".into(),
+                at: "2026-09-27T00:00:00.000Z".into(),
+            }],
+            labels: &labels,
+        };
+        let mut kyuden = item(1, "2026-09-27T05:00:00.000Z");
+        kyuden.source_id = "kyuden".into();
+        let html = list_page(
+            &[kyuden, item(2, "2026-09-27T05:00:00.000Z")],
+            &[],
+            false,
+            &page,
+        );
+        assert!(!html.contains("kyuden"), "{html}");
+        assert_eq!(html.matches("九電").count(), 2, "card and warning: {html}");
+        assert!(
+            html.contains("wnn"),
+            "unknown ids fall back to the id: {html}"
+        );
+
+        let mut d = detail();
+        d.item.source_id = "kyuden".into();
+        let html = detail_page(&d, DetailView::default(), &page);
+        assert!(!html.contains("kyuden"), "{html}");
     }
 
     /// 見出しが空だとリンクが押せなくなるので、原題、それも空なら URL を出す。
@@ -437,7 +505,12 @@ mod tests {
         let mut blank_both = item(2, "2026-09-26T00:00:00.000Z");
         blank_both.title_ja = None;
         blank_both.title = String::new();
-        let html = list_page(&[blank_ja, blank_both.clone()], &[], false, &[]);
+        let html = list_page(
+            &[blank_ja, blank_both.clone()],
+            &[],
+            false,
+            &Page::default(),
+        );
         assert!(html.contains(">Title 1</a>"), "{html}");
         assert!(
             html.contains(&format!(">{}</a>", escape(&blank_both.url))),
@@ -448,7 +521,7 @@ mod tests {
         for v in &mut d.digests {
             v.payload["title_ja"] = serde_json::json!("");
         }
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(
             html.contains(&format!("<h1>{}</h1>", escape(&d.item.title))),
             "{html}"
@@ -467,7 +540,7 @@ mod tests {
             &[item(1, "2026-09-27T05:00:00.000Z")],
             &[locked, untitled],
             false,
-            &[],
+            &Page::default(),
         );
         assert!(html.contains("前回から"));
         assert!(html.contains(r#"href="/articles/1""#));
@@ -506,7 +579,7 @@ mod tests {
 
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {
-        let html = detail_page(&detail(), DetailView::default(), &[]);
+        let html = detail_page(&detail(), DetailView::default(), &Page::default());
         assert!(
             html.contains("新版") && !html.contains("<h1>旧版"),
             "{html}"
@@ -535,7 +608,7 @@ mod tests {
             digest: Some(10),
             ..DetailView::default()
         };
-        let html = detail_page(&detail(), view, &[]);
+        let html = detail_page(&detail(), view, &Page::default());
         assert!(html.contains("旧版"));
     }
 
@@ -551,7 +624,7 @@ mod tests {
             created_at: "2026-09-26T00:00:00.000Z".into(),
             payload: serde_json::json!({"body_ja": "第一段落。\n\n第二段落<script>"}),
         }];
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(
             html.contains(r#"href="/articles/7?view=translation""#),
             "{html}"
@@ -561,7 +634,7 @@ mod tests {
             show_translation: true,
             ..DetailView::default()
         };
-        let html = detail_page(&d, view, &[]);
+        let html = detail_page(&d, view, &Page::default());
         assert!(html.contains("<p>第一段落。</p>"), "{html}");
         assert!(html.contains("第二段落&lt;script&gt;"));
         assert!(!html.contains(r#"translation-request"#));
@@ -571,7 +644,7 @@ mod tests {
     fn detail_page_shows_waiting_when_requested() {
         let mut d = detail();
         d.item.translation_requested = true;
-        let html = detail_page(&d, DetailView::default(), &[]);
+        let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
     }

@@ -11,7 +11,7 @@ use chrono::{Duration, Utc};
 
 use crate::config::WebConfig;
 use crate::db::{Db, DbError, ListQuery, SignalKind};
-use crate::web::html::{self, DetailView};
+use crate::web::html::{self, DetailView, Page, SourceLabels};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -29,13 +29,15 @@ pub enum ServeError {
 pub struct AppState {
     db: Arc<Mutex<Db>>,
     web: Arc<WebConfig>,
+    labels: Arc<SourceLabels>,
 }
 
 impl AppState {
-    pub fn new(db: Db, web: WebConfig) -> Self {
+    pub fn new(db: Db, web: WebConfig, labels: SourceLabels) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
             web: Arc::new(web),
+            labels: Arc::new(labels),
         }
     }
 }
@@ -136,6 +138,7 @@ async fn list(
 ) -> Result<Html<String>, AppError> {
     let show_all = params.all.as_deref() == Some("1");
     let web = state.web.clone();
+    let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
@@ -150,7 +153,12 @@ async fn list(
             limit: web.list_limit,
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
-        Ok(html::list_page(&new, &earlier, show_all, &warnings(db)?))
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        Ok(html::list_page(&new, &earlier, show_all, &page))
     })
     .await?;
     Ok(Html(page))
@@ -173,6 +181,7 @@ async fn detail(
         show_translation: params.view.as_deref() == Some("translation"),
         translation: params.translation,
     };
+    let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let (user, hash) = viewer(db)?;
         let detail = db
@@ -189,7 +198,12 @@ async fn detail(
         if let Some(kind) = opened {
             db.record_event(user, id, kind, Utc::now())?;
         }
-        Ok(html::detail_page(&detail, view, &warnings(db)?))
+        let warnings = warnings(db)?;
+        let page = Page {
+            warnings: &warnings,
+            labels: &labels,
+        };
+        Ok(html::detail_page(&detail, view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -334,7 +348,7 @@ mod tests {
 
     impl Server {
         async fn start(db: Db) -> Self {
-            let state = AppState::new(db, WebConfig::default());
+            let state = AppState::new(db, WebConfig::default(), SourceLabels::new());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             tokio::spawn(axum::serve(listener, router(state.clone())).into_future());

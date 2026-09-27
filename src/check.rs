@@ -135,6 +135,7 @@ mod tests {
         Source {
             id: id.into(),
             name: id.into(),
+            label: None,
             kind,
             url,
             lang: Lang::En,

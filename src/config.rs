@@ -211,6 +211,9 @@ pub struct Sources {
 pub struct Source {
     pub id: String,
     pub name: String,
+    /// 画面に出す短い名前（例：九電）。無ければ `name`
+    #[serde(default)]
+    pub label: Option<String>,
     pub kind: SourceKind,
     pub url: String,
     pub lang: Lang,
@@ -222,6 +225,13 @@ pub struct Source {
     /// 記事ページの本文を示す CSS セレクタ。無ければ readability で推定する。
     #[serde(default)]
     pub body_selector: Option<String>,
+}
+
+impl Source {
+    /// 画面に出す名前。
+    pub fn display_name(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
 }
 
 fn enabled_by_default() -> bool {
@@ -510,6 +520,7 @@ mod tests {
             Source {
                 id: "a".into(),
                 name: "A".into(),
+                label: None,
                 kind: SourceKind::Feed,
                 url: "https://example.com/rss".into(),
                 lang: Lang::Ja,
@@ -585,6 +596,34 @@ mod tests {
                 "{text}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn source_label_falls_back_to_name() {
+        let s = parse_sources(
+            r#"
+            [[source]]
+            id = "kyuden"
+            name = "九州電力"
+            label = "九電"
+            kind = "feed"
+            url = "https://example.com/rss"
+            lang = "ja"
+            category = "utility"
+
+            [[source]]
+            id = "wnn"
+            name = "World Nuclear News"
+            kind = "feed"
+            url = "https://example.com/wnn"
+            lang = "en"
+            category = "industry"
+            "#,
+            p(),
+        )
+        .unwrap();
+        assert_eq!(s.sources[0].display_name(), "九電");
+        assert_eq!(s.sources[1].display_name(), "World Nuclear News");
     }
 
     #[test]

@@ -87,7 +87,7 @@ nucrawler serve [--addr IP:PORT]
 nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export
 nucrawler topics import FILE | nucrawler topics export
-nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--min-score N] [--sort newest|score] [--limit N] [語]...
+nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] [--limit N] [語]...
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
@@ -109,10 +109,14 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
 ## Web UI
 
 - 一覧は「前回の訪問の後に届いた記事」と「それより前の未読」に分かれ、点数の高い順に並ぶ。
-  👎・閾値（`web.min_score`）未満・未採点・軽水炉と無関係の記事は「すべて表示」（`?all=1`）でだけ出る。
+  👎・見ない・閾値（`web.min_score`）未満・未採点・軽水炉と無関係の記事は「すべて表示」（`?all=1`）でだけ出る。
   前回より前の既読の記事は「過去の既読も表示」（`?read=1`）でだけ出る（前回からの欄は既読も出す）
+- 一覧の記事は、詳細を開かずに左右のスワイプで振り分けられる。右でブックマーク、左で見ない。
+  振り分けた記事は一覧から外れ、しばらく「元に戻す」が出る（戻すと振り分けは無かったことになる）。
+  ブックマークした記事は「🔖 ブックマーク」（`/search?bookmarked=1`）で読め、詳細の 🔖 で外せる
 - 詳細では要約の版を切り替えられる。英語の記事は全文和訳を読むか、まだ無ければ依頼できる
-- 詳細や和訳を開いたこと、👍/👎 は、次回からの採点に反映される
+- 詳細や和訳を開いたこと、👍/👎、ブックマーク、見ないは、次回からの採点に反映される。
+  ブックマークと見ないは 👍/👎 より弱い反応として扱う（ブックマークを外しても、した反応は残る）
 - 取得に失敗しているソースや、LLM の失敗（認証切れなど）は画面の上部に出る
 - 検索（`/search`、一覧の「🔍 検索」）では、一覧で隠す記事や期間外の記事も探せる。条件はすべて AND で、
   既定は新しい順（点数順も選べる）。件数の上限は `web.list_limit`
@@ -121,7 +125,7 @@ nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang
   - `since` / `until`：日本時間の年月か年月日（`2026-09` / `2026-09-20`、`until` はその日・月を含む）
   - `topic`：最新の要約に付いているトピック（繰り返すとすべてが付いている記事）。統合した語の別名でもよい
   - `source`：ソース（繰り返すとどれかのソース）
-  - `lang`（`en` / `ja`）、`translated=1`（和訳あり）、`liked=1`（👍）、`unread=1`（未読）、`min_score`（最低点。未採点は除く）
+  - `lang`（`en` / `ja`）、`translated=1`（和訳あり）、`liked=1`（👍）、`unread=1`（未読）、`bookmarked=1`（ブックマーク中）、`min_score`（最低点。未採点は除く）
   - `sort`：`newest`（既定）か `score`
 - 認証は無いので、Tailscale など信頼できるネットワークのアドレスで待ち受ける
 - 同じサーバーで、既定の一覧と同じ記事をフィードと JSON でも出す。
@@ -144,7 +148,7 @@ stdio で起動できるのはこのマシンの利用者だけなので、オ�
   - `since` / `until`：日本時間の日付か月（`YYYY-MM-DD` / `YYYY-MM`、`until` はその日・月を含む）。既定は Web UI と同じ直近 `web.list_days` 日
   - `source`：ソースの ID
   - `min_score`：最低点（既定は `web.min_score`）
-  - `include_hidden`：Web UI の「すべて表示」と同じく、👎・閾値未満・未採点・軽水炉と無関係の記事も含める
+  - `include_hidden`：Web UI の「すべて表示」と同じく、👎・見ない・閾値未満・未採点・軽水炉と無関係の記事も含める
   - `limit`：最大件数（既定は `web.list_limit`）
 - `get_article`：記事 1 件（`id`）の元記事の URL、最新の要約、全文和訳があればその本文
 

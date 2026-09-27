@@ -210,6 +210,7 @@ source_state(source_id PK, last_success_at, last_error)
 - ✅ 記事の全文検索（Web・JSON API・CLI・MCP）。計画は [linear-skipping-pebble.md](linear-skipping-pebble.md)
 - ✅ トピックの語彙を DB で管理（import/export、要約での語彙からの選択と新語の提案、統合と別名、週 1 回の表記揺れの統合）
 - ✅ 一覧の過去の欄で既読を表示するかの切り替え
+- ✅ 一覧のスワイプでの振り分け（右でブックマーク、左で見ない。どちらも 👍/👎 より弱い反応として採点に渡す）
 
 ## 検証
 

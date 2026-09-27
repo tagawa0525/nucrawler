@@ -150,7 +150,7 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
 #[derive(Clone, Copy, Default)]
 pub struct ListView {
-    /// 👎・低い点・未採点の記事も出す
+    /// 👎・見ない・低い点・未採点の記事も出す
     pub all: bool,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
@@ -180,7 +180,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     let all_label = if view.all {
         "おすすめだけ表示"
     } else {
-        "すべて表示（👎・低い点・未採点を含む）"
+        "すべて表示（👎・見ない・低い点・未採点を含む）"
     };
     let read_toggle = ListView {
         read: !view.read,

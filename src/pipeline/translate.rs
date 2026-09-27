@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded, record_failures};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
@@ -147,8 +147,7 @@ pub async fn translate_articles<L: Llm>(
             }
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
-                    db.record_stage_failure(key, message, now, false)?;
-                    summary.failed += 1;
+                    summary.failed += record_failures(db, std::iter::once(key), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -162,8 +161,7 @@ pub async fn translate_articles<L: Llm>(
                     article_id = input.article_id,
                     "translation rejected: {message}"
                 );
-                db.record_stage_failure(key, &message, now, false)?;
-                summary.failed += 1;
+                summary.failed += record_failures(db, std::iter::once(key), &message, now)?;
                 continue;
             }
         };

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ArtifactKind, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
@@ -138,10 +138,8 @@ pub async fn digest_articles<L: Llm>(
             }
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
-                    for &id in &ids {
-                        db.record_stage_failure(key(id), message, now, false)?;
-                    }
-                    summary.failed += ids.len();
+                    summary.failed +=
+                        record_failures(db, ids.iter().map(|&id| key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -152,10 +150,8 @@ pub async fn digest_articles<L: Llm>(
             Err(e) => {
                 let message = errors::error_chain(&e);
                 tracing::warn!("digest output rejected: {message}");
-                for &id in &ids {
-                    db.record_stage_failure(key(id), &message, now, false)?;
-                }
-                summary.failed += ids.len();
+                summary.failed +=
+                    record_failures(db, ids.iter().map(|&id| key(id)), &message, now)?;
                 continue;
             }
         };
@@ -185,10 +181,8 @@ pub async fn digest_articles<L: Llm>(
             db.clear_stage_failure(key(*id))?;
             summary.digested += 1;
         }
-        for &id in &parsed.missing {
-            db.record_stage_failure(key(id), "missing or invalid in the llm output", now, false)?;
-        }
-        summary.failed += parsed.missing.len();
+        summary.failed +=
+            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
     }
     Ok(summary)
 }

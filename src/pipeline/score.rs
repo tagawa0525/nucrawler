@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{DbError, ScoreKey, StageKey, score_stage};
 use crate::llm::{Llm, LlmRequest};
@@ -111,10 +111,8 @@ pub async fn score_articles<L: Llm>(
             }
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
-                    for &id in &ids {
-                        db.record_stage_failure(failure_key(id), message, now, false)?;
-                    }
-                    summary.failed += ids.len();
+                    summary.failed +=
+                        record_failures(db, ids.iter().map(|&id| failure_key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -125,10 +123,8 @@ pub async fn score_articles<L: Llm>(
             Err(e) => {
                 let message = errors::error_chain(&e);
                 tracing::warn!("score output rejected: {message}");
-                for &id in &ids {
-                    db.record_stage_failure(failure_key(id), &message, now, false)?;
-                }
-                summary.failed += ids.len();
+                summary.failed +=
+                    record_failures(db, ids.iter().map(|&id| failure_key(id)), &message, now)?;
                 continue;
             }
         };
@@ -140,15 +136,12 @@ pub async fn score_articles<L: Llm>(
             db.clear_stage_failure(failure_key(*article_id))?;
             summary.scored += 1;
         }
-        for &id in &parsed.missing {
-            db.record_stage_failure(
-                failure_key(id),
-                "missing or invalid in the llm output",
-                now,
-                false,
-            )?;
-        }
-        summary.failed += parsed.missing.len();
+        summary.failed += record_failures(
+            db,
+            parsed.missing.iter().map(|&id| failure_key(id)),
+            MISSING,
+            now,
+        )?;
     }
     Ok(summary)
 }

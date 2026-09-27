@@ -27,6 +27,9 @@ pub enum DbError {
     /// 入力の無い成果物は閲覧資格を導出できず、公開扱いになってしまうので登録しない。
     #[error("artifact for article {article_id} has no input contents")]
     NoArtifactInputs { article_id: i64 },
+    /// 要約に付いているトピックは語彙から消せない
+    #[error("topics in use cannot be removed: {}", .0.join(", "))]
+    TopicsInUse(Vec<String>),
 }
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
@@ -38,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0004_visit_boundary.sql"),
     include_str!("migrations/0005_retry_pdf_extracts.sql"),
     include_str!("migrations/0006_search.sql"),
+    include_str!("migrations/0007_topics.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -792,6 +796,54 @@ impl Db {
                 timestamp(now),
             ],
         )?;
+        Ok(())
+    }
+
+    /// トピックの語彙（登録順）。
+    pub fn topics(&self) -> Result<Vec<crate::topics::Topic>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, facet FROM topics ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.map(|row| {
+            let (name, facet) = row?;
+            let facet = crate::topics::Facet::parse(&facet)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("topic facet {facet:?}")))?;
+            Ok(crate::topics::Topic { name, facet })
+        })
+        .collect()
+    }
+
+    /// 語彙を `topics` に置き換える。名前で突き合わせ、無い語は追加、軸が変わった語は更新し、
+    /// 並びに無い語は削除する。要約に付いている語を消そうとしたら何も変えずに失敗する。
+    pub fn replace_topics(&self, topics: &[crate::topics::Topic]) -> Result<(), DbError> {
+        let names = serde_json::to_string(&topics.iter().map(|t| &t.name).collect::<Vec<_>>())?;
+        let tx = self.conn.unchecked_transaction()?;
+        let in_use: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT t.name FROM topics AS t
+                 JOIN artifact_topics AS at ON at.topic_id = t.id
+                 WHERE t.name NOT IN (SELECT value FROM json_each(?1))
+                 ORDER BY t.name",
+            )?;
+            stmt.query_map([&names], |r| r.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        if !in_use.is_empty() {
+            return Err(DbError::TopicsInUse(in_use));
+        }
+        tx.execute(
+            "DELETE FROM topics WHERE name NOT IN (SELECT value FROM json_each(?1))",
+            [&names],
+        )?;
+        for t in topics {
+            tx.execute(
+                "INSERT INTO topics (name, facet) VALUES (?1, ?2)
+                 ON CONFLICT (name) DO UPDATE SET facet = excluded.facet",
+                [&t.name, t.facet.as_str()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -3955,6 +4007,148 @@ mod tests {
         assert_eq!(search_ids(&db, &["old title"]), [1]);
         assert_eq!(search_ids(&db, &["本文の記述"]), [1]);
         assert_eq!(search_ids(&db, &["要約の題"]), [1]);
+    }
+
+    fn vocab(names: &[(&str, crate::topics::Facet)]) -> Vec<crate::topics::Topic> {
+        names
+            .iter()
+            .map(|&(name, facet)| crate::topics::Topic {
+                name: name.into(),
+                facet,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn migration_seeds_topic_vocabulary() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        let topics = db.topics().unwrap();
+        for facet in Facet::ALL {
+            assert!(
+                topics.iter().any(|t| t.facet == facet),
+                "no seeded topic for {facet:?}"
+            );
+        }
+        // 関心プロファイルの例の分野は語彙にある
+        for name in ["規制・審査", "燃料", "高経年化", "安全解析"] {
+            assert!(topics.iter().any(|t| t.name == name), "{name}");
+        }
+        assert_eq!(
+            crate::topics::parse(&crate::topics::to_toml(&topics)).unwrap(),
+            topics,
+            "seeded vocabulary passes the import validation"
+        );
+    }
+
+    /// 語彙を入れる前の要約も、語彙と同じ名前のトピックは付与として移し、消せないようにする。
+    #[test]
+    fn migration_links_existing_digest_topics_in_the_vocabulary() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        for sql in &MIGRATIONS[..6] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload, created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"topics\": [\"規制・審査\", \"新設炉\", \"規制・審査\"]}',
+                       '2026-09-27T00:00:00Z'),
+                      (2, 1, 'judgment', 'b', 'm', 1, 'public',
+                       '{\"topics\": [\"燃料\"]}', '2026-09-27T00:00:00Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1), (2, 1, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let linked = db
+            .query_strings(
+                "SELECT t.name FROM artifact_topics AS at JOIN topics AS t ON t.id = at.topic_id
+                 WHERE at.artifact_id IN (1, 2)",
+            )
+            .unwrap();
+        assert_eq!(
+            linked,
+            ["規制・審査"],
+            "only digest topics in the vocabulary"
+        );
+        let without: Vec<_> = db
+            .topics()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.name != "規制・審査")
+            .collect();
+        let err = db.replace_topics(&without).unwrap_err();
+        assert!(matches!(err, DbError::TopicsInUse(_)), "{err}");
+    }
+
+    #[test]
+    fn replace_topics_adds_updates_and_removes_by_name() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        let first = vocab(&[("燃料", Facet::Field), ("PWR", Facet::Reactor)]);
+        db.replace_topics(&first).unwrap();
+        assert_eq!(db.topics().unwrap(), first);
+        let fuel_id: i64 = db
+            .conn()
+            .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        let second = vocab(&[("燃料", Facet::Reactor), ("米国", Facet::Region)]);
+        db.replace_topics(&second).unwrap();
+        assert_eq!(
+            db.topics().unwrap(),
+            [second[0].clone(), second[1].clone(),]
+        );
+        let kept_id: i64 = db
+            .conn()
+            .query_row("SELECT id FROM topics WHERE name = '燃料'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept_id, fuel_id, "an updated topic keeps its id");
+    }
+
+    #[test]
+    fn replace_topics_refuses_to_remove_topics_in_use() {
+        use crate::topics::Facet;
+        let db = Db::open_in_memory().unwrap();
+        let before = vocab(&[("燃料", Facet::Field), ("PWR", Facet::Reactor)]);
+        db.replace_topics(&before).unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        let digest = insert_artifact(&db, a, "public");
+        db.conn()
+            .execute(
+                "INSERT INTO artifact_topics (artifact_id, topic_id)
+                 SELECT ?1, id FROM topics WHERE name = 'PWR'",
+                [digest],
+            )
+            .unwrap();
+        let err = db
+            .replace_topics(&vocab(&[("燃料", Facet::Region)]))
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::TopicsInUse(names) if names == &["PWR"]),
+            "{err}"
+        );
+        assert_eq!(db.topics().unwrap(), before, "nothing changes on failure");
+
+        // 要約の版が消えれば付与も消え、語を削除できる
+        db.conn()
+            .execute("DELETE FROM artifacts WHERE id = ?1", [digest])
+            .unwrap();
+        db.replace_topics(&vocab(&[("燃料", Facet::Field)]))
+            .unwrap();
     }
 
     #[test]

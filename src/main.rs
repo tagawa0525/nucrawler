@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, ProfileArgs, RedoArgs, RedoKind, SourcesArgs};
+use nucrawler::cli::{self, Command, ProfileArgs, RedoArgs, RedoKind, SourcesArgs, TopicsArgs};
 use nucrawler::config::{self, ConfigError, LlmConfig};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
@@ -19,6 +19,7 @@ use nucrawler::pipeline::{self, Cancel, Halt, Stage, Target};
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::quota::Quota;
 use nucrawler::status;
+use nucrawler::topics::{self, TopicsError};
 use nucrawler::web::server::{self, ServeError};
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +50,8 @@ enum Error {
     LlmFailed(String),
     #[error(transparent)]
     Profile(#[from] ProfileError),
+    #[error(transparent)]
+    Topics(#[from] TopicsError),
     #[error(transparent)]
     Serve(#[from] ServeError),
     #[error(transparent)]
@@ -134,6 +137,7 @@ async fn run() -> Result<(), Error> {
             .await
         }
         Command::Profile => profile(inv.data_dir, cli::parse_profile_args(&inv.args)?),
+        Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
         Command::Serve => {
             serve(
                 inv.config_dir,
@@ -470,6 +474,23 @@ fn spawn_signal_handler(cancel: Cancel) {
             cancel.request();
         }
     });
+}
+
+fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    match args {
+        TopicsArgs::Import { file } => {
+            let text = std::fs::read_to_string(&file).map_err(|source| Error::ReadFile {
+                path: file.clone(),
+                source,
+            })?;
+            let parsed = topics::parse(&text)?;
+            db.replace_topics(&parsed)?;
+            tracing::info!(topics = parsed.len(), "topics imported");
+        }
+        TopicsArgs::Export => print!("{}", topics::to_toml(&db.topics()?)),
+    }
+    Ok(())
 }
 
 /// プロファイルはオーナー（このマシンの利用者）のものを扱う。

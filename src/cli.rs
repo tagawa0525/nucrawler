@@ -12,6 +12,8 @@ pub enum ParseError {
     SourcesUsage,
     #[error("usage: nucrawler profile import FILE | nucrawler profile export")]
     ProfileUsage,
+    #[error("usage: nucrawler topics import FILE | nucrawler topics export")]
+    TopicsUsage,
     #[error(
         "usage: nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] \
          [--min-score N] [--ids 1,2,3] [--max-llm-calls N]"
@@ -47,6 +49,7 @@ pub enum Command {
     Mcp,
     Rescore,
     Profile,
+    Topics,
     Help,
 }
 
@@ -66,6 +69,7 @@ commands:
   mcp       MCP stdio サーバを起動
   rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し（profile import FILE / profile export）
+  topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   help      このヘルプを表示
 ";
 
@@ -94,6 +98,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("mcp") => Command::Mcp,
         Some("rescore") => Command::Rescore,
         Some("profile") => Command::Profile,
+        Some("topics") => Command::Topics,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -273,6 +278,25 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
     }
 }
 
+/// `topics` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub enum TopicsArgs {
+    /// `topics import FILE`
+    Import { file: PathBuf },
+    /// `topics export`（標準出力へ）
+    Export,
+}
+
+pub fn parse_topics_args(args: &[String]) -> Result<TopicsArgs, ParseError> {
+    match args {
+        [cmd, file] if cmd == "import" => Ok(TopicsArgs::Import {
+            file: PathBuf::from(file),
+        }),
+        [cmd] if cmd == "export" => Ok(TopicsArgs::Export),
+        _ => Err(ParseError::TopicsUsage),
+    }
+}
+
 /// `sources` サブコマンドの引数。
 #[derive(Debug, PartialEq, Eq)]
 pub enum SourcesArgs {
@@ -323,6 +347,7 @@ mod tests {
             ("mcp", Command::Mcp),
             ("rescore", Command::Rescore),
             ("profile", Command::Profile),
+            ("topics", Command::Topics),
             ("help", Command::Help),
             ("--help", Command::Help),
             ("-h", Command::Help),
@@ -565,6 +590,29 @@ mod tests {
         ] {
             let err = parse_profile_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::ProfileUsage), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_topics_args() {
+        assert_eq!(
+            parse_topics_args(&args(&["import", "t.toml"])).unwrap(),
+            TopicsArgs::Import {
+                file: PathBuf::from("t.toml")
+            }
+        );
+        assert_eq!(
+            parse_topics_args(&args(&["export"])).unwrap(),
+            TopicsArgs::Export
+        );
+        for bad in [
+            &[][..],
+            &["import"][..],
+            &["export", "x"][..],
+            &["list"][..],
+        ] {
+            let err = parse_topics_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::TopicsUsage), "{bad:?}");
         }
     }
 

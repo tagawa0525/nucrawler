@@ -597,6 +597,8 @@ pub struct DetailView {
     /// 全文和訳を表示する（`translation` があればその版、無ければ最新）
     pub show_translation: bool,
     pub translation: Option<i64>,
+    /// 訳語の指摘を受け付けた直後
+    pub reported: bool,
 }
 
 pub fn detail_page(d: &ArticleDetail, view: DetailView, page: &Page) -> String {
@@ -1368,5 +1370,51 @@ mod tests {
         let html = detail_page(&d, DetailView::default(), &Page::default());
         assert!(html.contains("和訳待ち"));
         assert!(!html.contains(r#"action="/articles/7/translation-request""#));
+    }
+
+    /// 訳語の指摘は畳んでおき、開いたときだけフォームを出す。和訳を読んでいれば和訳に戻る。
+    #[test]
+    fn detail_page_offers_a_folded_term_report() {
+        let html = detail_page(&detail(), DetailView::default(), &Page::default());
+        assert!(
+            html.contains(
+                r#"<details class="report" id="term-report"><summary>訳語の指摘</summary>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/7/term-report">"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="found" required"#), "{html}");
+        for name in ["wanted", "source", "note"] {
+            assert!(
+                html.contains(&format!(r#"name="{name}""#)),
+                "{name}: {html}"
+            );
+        }
+        assert!(!html.contains(r#"name="view""#), "{html}");
+        assert!(!html.contains("受け付けました"), "{html}");
+
+        let view = DetailView {
+            show_translation: true,
+            reported: true,
+            ..DetailView::default()
+        };
+        let html = detail_page(&detail(), view, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="view" value="translation">"#),
+            "{html}"
+        );
+        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+    }
+
+    /// 要約も和訳も無ければ、指摘する訳が無い。
+    #[test]
+    fn detail_page_without_japanese_has_no_term_report() {
+        let mut d = detail();
+        d.digests.clear();
+        let html = detail_page(&d, DetailView::default(), &Page::default());
+        assert!(!html.contains("term-report"), "{html}");
     }
 }

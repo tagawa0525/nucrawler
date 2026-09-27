@@ -341,6 +341,7 @@ async fn detail(
         digest: params.digest,
         show_translation: params.view.as_deref() == Some("translation"),
         translation: params.translation,
+        reported: false,
     };
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -1069,6 +1070,61 @@ mod tests {
         );
         let (_, html) = server.get(&format!("/articles/{id}")).await;
         assert!(html.contains("和訳待ち"), "{html}");
+    }
+
+    /// 訳語の指摘は受付箱に入り、空の欄は記録しない。読んでいた画面に戻る。
+    #[tokio::test]
+    async fn term_report_is_recorded_and_returns_to_detail() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let path = format!("/articles/{id}/term-report");
+        let res = server
+            .post(
+                &path,
+                "found=%E7%B5%A6%E6%B2%B9%E5%81%9C%E6%AD%A2&wanted=&source=+refueling+outage+&note=&view=translation",
+            )
+            .await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?view=translation&reported=1#term-report")
+        );
+        assert_eq!(
+            server.count(&format!(
+                "SELECT count(*) FROM term_reports
+                 WHERE article_id = {id} AND found = '給油停止' AND wanted IS NULL
+                   AND source = 'refueling outage' AND note IS NULL AND resolved_at IS NULL"
+            )),
+            1
+        );
+        let res = server.post(&path, "found=x").await;
+        assert_eq!(
+            res.headers()["location"].to_str().unwrap(),
+            format!("/articles/{id}?reported=1#term-report")
+        );
+        let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
+        assert!(html.contains("訳語の指摘を受け付けました"), "{html}");
+
+        // 気になった訳は必須
+        assert_eq!(
+            server
+                .post(&path, "found=+&wanted=a")
+                .await
+                .status()
+                .as_u16(),
+            400
+        );
+        let res = server
+            .form(&path, "found=x")
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let res = server.post("/articles/999/term-report", "found=x").await;
+        assert_eq!(res.status().as_u16(), 404);
+        assert_eq!(server.count("SELECT count(*) FROM term_reports"), 2);
     }
 
     /// 内部エラーの詳細（SQL やスキーマ）は応答に出さず、ログにだけ残す。

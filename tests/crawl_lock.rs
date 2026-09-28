@@ -72,4 +72,6 @@ fn waits_for_a_crawl_of_the_previous_version() {
     let _legacy = hold(&data, "crawl.lock");
     assert_eq!(crawl(&config, &data, &["--only", "extract"]), Some(75));
     assert_eq!(crawl(&config, &data, &["--requests-only"]), Some(75));
+    // 古い版が使っている DB にマイグレーションを当てない
+    assert!(!data.join("nucrawler.db").exists());
 }

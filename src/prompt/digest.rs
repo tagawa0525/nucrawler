@@ -585,6 +585,27 @@ mod tests {
         assert_eq!(payload["new_topics"], serde_json::json!([]));
     }
 
+    /// 原子力と関係の無い記事（広報のお知らせなど）には当てはまる語が無いので、語を付けなくてよい。
+    #[test]
+    fn parse_accepts_no_topics_for_unrelated_articles() {
+        let mut unrelated = item(1);
+        unrelated["lwr_relevant"] = serde_json::json!(false);
+        unrelated["topics"] = serde_json::json!([]);
+        let output = serde_json::json!({"items": [unrelated]});
+        let parsed = parse(&output, &[1], &vocab()).unwrap();
+        assert_eq!(parsed.missing, Vec::<i64>::new());
+        assert_eq!(parsed.items[0].1["topics"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn system_prompt_allows_no_topics_for_unrelated_articles() {
+        let s = system_prompt(&vocab(), &[]);
+        assert!(
+            s.contains("lwr_relevant が false で当てはまる語が無ければ 0 個"),
+            "{s}"
+        );
+    }
+
     #[test]
     fn parse_rejects_topics_breaking_the_rules() {
         let with = |topics: serde_json::Value, new: serde_json::Value| {

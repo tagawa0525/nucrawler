@@ -242,24 +242,34 @@ mod tests {
         );
     }
 
+    /// 新着の途絶えは急ぎでないので、本文の後（ページの一番下）に出す。ほかの警告は上のまま。
     #[test]
-    fn shows_stale_source_warning() {
+    fn shows_stale_source_warning_below_body() {
         let html = layout(
             "一覧",
             &Page {
-                warnings: &[Warning::SourceStale {
-                    source_id: "nrc-news".into(),
-                    idle_days: 13,
-                    typical_gap_days: 2,
-                }],
+                warnings: &[
+                    Warning::SourceFailing {
+                        source_id: "nei".into(),
+                        error: "HTTP 403".into(),
+                        at: "2026-09-27T00:00:00.000Z".into(),
+                    },
+                    Warning::SourceStale {
+                        source_id: "nrc-news".into(),
+                        idle_days: 13,
+                        typical_gap_days: 2,
+                    },
+                ],
                 ..Page::default()
             },
-            "",
+            "<p>body</p>",
         );
-        assert!(
-            html.contains("⚠ nrc-news の新着が 13 日ありません（普段は 2 日おき）"),
-            "{html}"
-        );
+        let stale = html
+            .find("⚠ nrc-news の新着が 13 日ありません（普段は 2 日おき）")
+            .expect(&html);
+        let failing = html.find("HTTP 403").expect(&html);
+        let body = html.find("<p>body</p>").expect(&html);
+        assert!(failing < body && body < stale, "{html}");
     }
 
     /// 利用上限は失敗ではなく一時停止なので、失敗とは書かず再開の見込みを示す。

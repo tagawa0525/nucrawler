@@ -39,12 +39,14 @@ lang = "en"
 category = "regulator"
 filter = { keywords = ["Power Reactor"] }
 
+# トップニュース（feeds/topnews）は十数件だけなので、全件の feeds/news を読む。どちらも description は空で、
+# 記事ページは Cloudflare のチャレンジで 403 になるため、本文は取れず見出しだけになる
 [[source]]
 id = "iaea"
-name = "IAEA Top News"
+name = "IAEA News"
 label = "IAEA"
 kind = "feed"
-url = "https://www.iaea.org/feeds/topnews"
+url = "https://www.iaea.org/feeds/news"
 lang = "en"
 category = "regulator"
 

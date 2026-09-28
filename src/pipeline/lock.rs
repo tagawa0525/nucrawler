@@ -44,8 +44,9 @@ impl LockKind {
 /// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
 #[derive(Debug)]
 pub struct Lock {
-    _legacy: File,
+    // フィールドは宣言の順に解放される。取った順の逆に、`crawl.lock` を最後に放す
     _file: File,
+    _legacy: File,
 }
 
 /// ロックを分ける前の版が排他で取っていたロック。
@@ -56,8 +57,8 @@ pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
     let legacy = try_lock(dir, LEGACY, File::try_lock_shared)?;
     let file = try_lock(dir, kind.file_name(), File::try_lock)?;
     Ok(Lock {
-        _legacy: legacy,
         _file: file,
+        _legacy: legacy,
     })
 }
 

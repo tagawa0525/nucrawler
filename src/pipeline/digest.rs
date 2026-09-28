@@ -450,7 +450,7 @@ mod tests {
                 "SELECT backend || '|' || model || '|' || prompt_version FROM artifacts LIMIT 1"
             )
             .unwrap(),
-            ["fake|sonnet|2"]
+            ["fake|sonnet|3"]
         );
         assert_eq!(
             db.query_strings(

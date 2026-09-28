@@ -7,7 +7,7 @@ use crate::prompt::escape_data;
 use crate::topics::Topic;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
-pub const PROMPT_VERSION: i64 = 2;
+pub const PROMPT_VERSION: i64 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DigestError {
@@ -95,9 +95,11 @@ impl Item {
             }
         }
         topics.extend(new_topics.iter().map(|t| t.name.clone()));
-        if !(MIN_LIST..=MAX_LIST).contains(&topics.len()) {
+        // 原子力と関係の無い記事（広報のお知らせなど）には当てはまる語が無いので、付けなくてよい
+        let min_topics = if self.lwr_relevant { MIN_LIST } else { 0 };
+        if !(min_topics..=MAX_LIST).contains(&topics.len()) {
             return Err(format!(
-                "topics and new_topics must have {MIN_LIST}..={MAX_LIST} items in total, got {}",
+                "topics and new_topics must have {min_topics}..={MAX_LIST} items in total, got {}",
                 topics.len()
             ));
         }
@@ -148,7 +150,7 @@ pub fn system_prompt(vocab: &[Topic], terms: &[Term]) -> String {
 - points_ja: 要点を 1〜5 個（各 1 文。短い記事なら少なくてよい）
 - implications_ja: 日本の軽水炉の規制・運転・事業への示唆。特に無ければ空文字
 - lwr_relevant: 軽水炉（軽水炉型 SMR を含む）、燃料・燃料サイクル・バックエンド、廃止措置、原子力の政策・市場に関係すれば true。高速炉・高温ガス炉・溶融塩炉・核融合・医療や農業などの非発電利用だけの記事なら false
-- topics: 下の「トピックの語彙」から当てはまる語を選ぶ。分野から 1〜3 個、話題の中心の炉型、主な舞台の国・地域、中心となる組織があればそれも。new_topics と合わせて 1〜5 個
+- topics: 下の「トピックの語彙」から当てはまる語を選ぶ。分野から 1〜3 個、話題の中心の炉型、主な舞台の国・地域、中心となる組織があればそれも。new_topics と合わせて 1〜5 個（lwr_relevant が false で当てはまる語が無ければ 0 個でよい）
 - new_topics: 語彙のどれにも当てはまらない重要な話題があるときだけ、新しい語を 1 個まで提案する（name と facet。facet は 分野・炉型・地域・組織 のいずれか）。語彙の語の言い換えや細分化、発電所名などの固有名は提案しない。ふつうは空の配列
 
 # トピックの語彙

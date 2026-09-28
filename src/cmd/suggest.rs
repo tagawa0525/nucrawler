@@ -8,7 +8,7 @@ use nucrawler::config;
 use nucrawler::db::Db;
 use nucrawler::llm::claude_cli::ClaudeCli;
 use nucrawler::pipeline::Cancel;
-use nucrawler::pipeline::lock;
+use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv, Suggested};
 use nucrawler::profile;
 use nucrawler::quota::Quota;
@@ -33,7 +33,7 @@ pub(crate) async fn suggest(
     }
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let _lock = lock::acquire(&data)?;
+    let _lock = lock::acquire(&data, LockKind::Llm)?;
     let db = Db::open(&data.join("nucrawler.db"))?;
     let owner = db.owner_id()?;
     let (current, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;

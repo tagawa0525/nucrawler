@@ -7,7 +7,7 @@ use nucrawler::config;
 use nucrawler::db::Db;
 use nucrawler::llm::claude_cli::ClaudeCli;
 use nucrawler::pipeline::Cancel;
-use nucrawler::pipeline::lock;
+use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::quota::Quota;
 
@@ -23,7 +23,7 @@ pub(crate) async fn redo(
 ) -> Result<(), Error> {
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let _lock = lock::acquire(&data)?;
+    let _lock = lock::acquire(&data, LockKind::Llm)?;
     let db = Db::open(&data.join("nucrawler.db"))?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());

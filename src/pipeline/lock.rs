@@ -1,7 +1,13 @@
-//! 同時実行の防止。timer から起動した crawl と手動の crawl が重ならないようにする。
+//! 同時実行の防止。timer から起動した crawl と手動の crawl・redo が重ならないようにする。
+//! 取得（fetch・extract）と LLM を呼ぶ処理は別のロックを取り、互いを待たずに並行して動ける。
+//! LLM を呼ぶ処理を 1 つずつにするのは、同じ記事を二重に処理せず、クォータの判定が他の
+//! 実行の呼び出しを見落とさないようにするため。取得は LLM を使わず、記事と本文を書くだけ。
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use super::Cancel;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
@@ -14,15 +20,33 @@ pub enum LockError {
     },
 }
 
+/// どの処理のロックか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockKind {
+    /// fetch・extract
+    Fetch,
+    /// LLM を呼ぶステージと redo・suggest・eval の採点
+    Llm,
+}
+
+impl LockKind {
+    fn file_name(self) -> &'static str {
+        match self {
+            LockKind::Fetch => "fetch.lock",
+            LockKind::Llm => "llm.lock",
+        }
+    }
+}
+
 /// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
 #[derive(Debug)]
 pub struct Lock {
     _file: File,
 }
 
-/// `dir/crawl.lock` の排他ロックを待たずに取る。既に取られていれば `Held`。
-pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
-    let (path, file) = open(dir)?;
+/// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。
+pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
+    let (path, file) = open(dir, kind)?;
     match file.try_lock() {
         Ok(()) => Ok(Lock { _file: file }),
         Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
@@ -30,16 +54,31 @@ pub fn acquire(dir: &Path) -> Result<Lock, LockError> {
     }
 }
 
-/// `dir/crawl.lock` の排他ロックを、取れるまで待って取る（スレッドをブロックする）。
-pub fn acquire_waiting(dir: &Path) -> Result<Lock, LockError> {
-    let (path, file) = open(dir)?;
-    file.lock()
-        .map_err(|source| LockError::Io { path, source })?;
-    Ok(Lock { _file: file })
+/// `dir` にある `kind` のロックを、取れるまで待って取る。待っている間に中断を要求されたら
+/// （systemd の停止など）取らずに `None` を返す。スレッドをブロックして待つと、止められても
+/// 待ち続けてしまうので、間隔を置いて取り直す。
+pub async fn acquire_waiting(
+    dir: &Path,
+    kind: LockKind,
+    cancel: &Cancel,
+) -> Result<Option<Lock>, LockError> {
+    loop {
+        match acquire(dir, kind) {
+            Err(LockError::Held { .. }) => {
+                tokio::select! {
+                    () = tokio::time::sleep(RETRY_INTERVAL) => {}
+                    () = cancel.requested() => return Ok(None),
+                }
+            }
+            lock => return lock.map(Some),
+        }
+    }
 }
 
-fn open(dir: &Path) -> Result<(PathBuf, File), LockError> {
-    let path = dir.join("crawl.lock");
+const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+fn open(dir: &Path, kind: LockKind) -> Result<(PathBuf, File), LockError> {
+    let path = dir.join(kind.file_name());
     let file = File::options()
         .create(true)
         .truncate(false)
@@ -55,7 +94,6 @@ fn open(dir: &Path) -> Result<(PathBuf, File), LockError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::Cancel;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nucrawler-{}-{name}", std::process::id()));

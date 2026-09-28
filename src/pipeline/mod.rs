@@ -191,4 +191,28 @@ mod tests {
         assert_eq!(plan(None, Some(Stage::Extract)), [Stage::Extract]);
         assert_eq!(plan(None, Some(Stage::Fetch)), [Stage::Fetch]);
     }
+
+    /// 取得のステージと LLM のステージは、それぞれのロックを取って順に実行する。
+    #[test]
+    fn groups_stages_by_lock() {
+        assert_eq!(
+            lock_groups(&plan(None, None)),
+            [
+                (LockKind::Fetch, vec![Stage::Fetch, Stage::Extract]),
+                (
+                    LockKind::Llm,
+                    vec![Stage::Digest, Stage::Score, Stage::Translate, Stage::Tidy]
+                ),
+            ]
+        );
+        assert_eq!(
+            lock_groups(&[Stage::Extract]),
+            [(LockKind::Fetch, vec![Stage::Extract])]
+        );
+        assert_eq!(
+            lock_groups(&[Stage::Translate]),
+            [(LockKind::Llm, vec![Stage::Translate])]
+        );
+        assert_eq!(lock_groups(&[]), []);
+    }
 }

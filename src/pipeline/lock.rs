@@ -168,6 +168,18 @@ mod tests {
         assert!(matches!(err, LockError::Held { .. }), "{err}");
     }
 
+    /// 更新前の版の実行（`crawl.lock` を排他で取る）とは、どちらのロックも重ならない。
+    #[test]
+    fn waits_for_a_run_of_the_previous_version() {
+        let dir = temp_dir("lock-legacy");
+        let legacy = File::create(dir.join("crawl.lock")).unwrap();
+        legacy.try_lock().unwrap();
+        for kind in [LockKind::Fetch, LockKind::Llm] {
+            let err = acquire(&dir, kind).unwrap_err();
+            assert!(matches!(err, LockError::Held { .. }), "{err}");
+        }
+    }
+
     #[test]
     fn missing_dir_is_io_error() {
         let dir = temp_dir("lock-missing").join("nope");

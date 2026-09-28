@@ -64,3 +64,12 @@ fn requested_translations_wait_for_other_llm_stages() {
     let _llm = hold(&data, "llm.lock");
     assert_eq!(crawl(&config, &data, &["--requests-only"]), Some(75));
 }
+
+/// 更新前の版の crawl（`crawl.lock` を排他で取る）が動いている間は、どのステージも始めない。
+#[test]
+fn waits_for_a_crawl_of_the_previous_version() {
+    let (config, data) = dirs("legacy");
+    let _legacy = hold(&data, "crawl.lock");
+    assert_eq!(crawl(&config, &data, &["--only", "extract"]), Some(75));
+    assert_eq!(crawl(&config, &data, &["--requests-only"]), Some(75));
+}

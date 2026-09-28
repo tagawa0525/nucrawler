@@ -9,7 +9,7 @@ use nucrawler::db::Db;
 use nucrawler::eval;
 use nucrawler::llm::claude_cli::ClaudeCli;
 use nucrawler::pipeline::Cancel;
-use nucrawler::pipeline::lock;
+use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::profile;
 use nucrawler::prompt;
@@ -30,7 +30,7 @@ pub(crate) async fn eval(
     // 候補で採点するときは LLM を呼んで DB に書くので、redo と同じく DB を開く前にロックを取る
     let _lock = candidate
         .is_some()
-        .then(|| lock::acquire(&data))
+        .then(|| lock::acquire(&data, LockKind::Llm))
         .transpose()?;
     let db = Db::open(&data.join("nucrawler.db"))?;
     let owner = db.owner_id()?;

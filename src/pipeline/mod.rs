@@ -15,6 +15,8 @@ pub mod translate;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use lock::LockKind;
+
 /// 中断の要求。ステージは作業の切れ目ごとに確認し、要求があれば処理中の 1 件を終えて止まる。
 /// LLM の呼び出しのように長く待つ処理は、`requested` と競わせて待たずに止める。
 #[derive(Clone, Default)]
@@ -117,6 +119,26 @@ impl Stage {
     pub fn from_name(name: &str) -> Option<Stage> {
         Stage::ALL.iter().copied().find(|s| s.name() == name)
     }
+
+    /// 実行中に取っておくロック。取得は LLM を使わないので、LLM のステージと並行して動ける。
+    pub fn lock(self) -> LockKind {
+        match self {
+            Stage::Fetch | Stage::Extract => LockKind::Fetch,
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Tidy => LockKind::Llm,
+        }
+    }
+}
+
+/// 計画したステージを、同じロックで続けて実行する単位に分ける（計画の順は保つ）。
+pub fn lock_groups(stages: &[Stage]) -> Vec<(LockKind, Vec<Stage>)> {
+    let mut groups: Vec<(LockKind, Vec<Stage>)> = Vec::new();
+    for &stage in stages {
+        match groups.last_mut() {
+            Some((kind, group)) if *kind == stage.lock() => group.push(stage),
+            _ => groups.push((stage.lock(), vec![stage])),
+        }
+    }
+    groups
 }
 
 /// 要約が採点のために残す呼び出し回数。採点が計画に無いか、プロファイルが無くて採点が
@@ -190,5 +212,29 @@ mod tests {
         );
         assert_eq!(plan(None, Some(Stage::Extract)), [Stage::Extract]);
         assert_eq!(plan(None, Some(Stage::Fetch)), [Stage::Fetch]);
+    }
+
+    /// 取得のステージと LLM のステージは、それぞれのロックを取って順に実行する。
+    #[test]
+    fn groups_stages_by_lock() {
+        assert_eq!(
+            lock_groups(&plan(None, None)),
+            [
+                (LockKind::Fetch, vec![Stage::Fetch, Stage::Extract]),
+                (
+                    LockKind::Llm,
+                    vec![Stage::Digest, Stage::Score, Stage::Translate, Stage::Tidy]
+                ),
+            ]
+        );
+        assert_eq!(
+            lock_groups(&[Stage::Extract]),
+            [(LockKind::Fetch, vec![Stage::Extract])]
+        );
+        assert_eq!(
+            lock_groups(&[Stage::Translate]),
+            [(LockKind::Llm, vec![Stage::Translate])]
+        );
+        assert_eq!(lock_groups(&[]), []);
     }
 }

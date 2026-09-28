@@ -69,18 +69,22 @@ impl Page<'_> {
 }
 
 /// 全ページ共通の外枠（スマホ向けの 1 カラム、警告のバナー）。
+/// 新着の途絶えは急ぎでないので、本文を押し下げないよう一番下に出す。
 pub fn layout(title: &str, page: &Page, body: &str) -> String {
-    let banners: String = page
+    let (bottom, top): (Vec<_>, Vec<_>) = page
         .warnings
         .iter()
-        .map(|w| warning_banner(w, page))
-        .collect();
+        .partition(|w| matches!(w, Warning::SourceStale { .. }));
+    let banners =
+        |ws: Vec<&Warning>| -> String { ws.into_iter().map(|w| warning_banner(w, page)).collect() };
     format!(
         "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>{} - nucrawler</title><style>{STYLE}</style></head>\
-         <body><main>{banners}{body}</main></body></html>\n",
-        escape(title)
+         <body><main>{}{body}{}</main></body></html>\n",
+        escape(title),
+        banners(top),
+        banners(bottom),
     )
 }
 
@@ -242,24 +246,34 @@ mod tests {
         );
     }
 
+    /// 新着の途絶えは急ぎでないので、本文の後（ページの一番下）に出す。ほかの警告は上のまま。
     #[test]
-    fn shows_stale_source_warning() {
+    fn shows_stale_source_warning_below_body() {
         let html = layout(
             "一覧",
             &Page {
-                warnings: &[Warning::SourceStale {
-                    source_id: "nrc-news".into(),
-                    idle_days: 13,
-                    typical_gap_days: 2,
-                }],
+                warnings: &[
+                    Warning::SourceFailing {
+                        source_id: "nei".into(),
+                        error: "HTTP 403".into(),
+                        at: "2026-09-27T00:00:00.000Z".into(),
+                    },
+                    Warning::SourceStale {
+                        source_id: "nrc-news".into(),
+                        idle_days: 13,
+                        typical_gap_days: 2,
+                    },
+                ],
                 ..Page::default()
             },
-            "",
+            "<p>body</p>",
         );
-        assert!(
-            html.contains("⚠ nrc-news の新着が 13 日ありません（普段は 2 日おき）"),
-            "{html}"
-        );
+        let stale = html
+            .find("⚠ nrc-news の新着が 13 日ありません（普段は 2 日おき）")
+            .expect(&html);
+        let failing = html.find("HTTP 403").expect(&html);
+        let body = html.find("<p>body</p>").expect(&html);
+        assert!(failing < body && body < stale, "{html}");
     }
 
     /// 利用上限は失敗ではなく一時停止なので、失敗とは書かず再開の見込みを示す。

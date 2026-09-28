@@ -28,9 +28,6 @@ pub(crate) async fn crawl(
     };
     let (config, sources) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    // マイグレーションは 1 つのトランザクションでバージョンを確かめてから適用するので、
-    // ロックの外で開いても他の実行と重ならない
-    let db = Db::open(&data.join("nucrawler.db"))?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let fetcher = Fetcher::from_config(&config.http)?;
@@ -43,6 +40,8 @@ pub(crate) async fn crawl(
             report.cancelled = true;
             break;
         };
+        // DB はロックを取ってから開く。更新前の版の実行が使っている間にマイグレーションを当てないため
+        let db = Db::open(&data.join("nucrawler.db"))?;
         // 使用率はロックを取ってから読む。待っている間に他の実行が呼んだ分も判定に入れるため。
         // LLM のステージは 1 つの単位にまとまるので、呼び出し回数の上限はこの実行全体に効く
         let mut quota = Quota::new(

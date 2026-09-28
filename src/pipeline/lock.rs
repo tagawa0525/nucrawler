@@ -2,6 +2,9 @@
 //! 取得（fetch・extract）と LLM を呼ぶ処理は別のロックを取り、互いを待たずに並行して動ける。
 //! LLM を呼ぶ処理を 1 つずつにするのは、同じ記事を二重に処理せず、クォータの判定が他の
 //! 実行の呼び出しを見落とさないようにするため。取得は LLM を使わず、記事と本文を書くだけ。
+//!
+//! ロックを分ける前の版は `crawl.lock` を排他で取っていた。更新の前後で古い版の実行が残っていても
+//! 重ならないよう、どちらのロックを取るときも `crawl.lock` を共有で取る（新しい版どうしは待たない）。
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -41,14 +44,31 @@ impl LockKind {
 /// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
 #[derive(Debug)]
 pub struct Lock {
+    _legacy: File,
     _file: File,
 }
 
+/// ロックを分ける前の版が排他で取っていたロック。
+const LEGACY: &str = "crawl.lock";
+
 /// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。
 pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
-    let (path, file) = open(dir, kind)?;
-    match file.try_lock() {
-        Ok(()) => Ok(Lock { _file: file }),
+    let legacy = try_lock(dir, LEGACY, File::try_lock_shared)?;
+    let file = try_lock(dir, kind.file_name(), File::try_lock)?;
+    Ok(Lock {
+        _legacy: legacy,
+        _file: file,
+    })
+}
+
+fn try_lock(
+    dir: &Path,
+    name: &str,
+    lock: fn(&File) -> Result<(), std::fs::TryLockError>,
+) -> Result<File, LockError> {
+    let (path, file) = open(dir, name)?;
+    match lock(&file) {
+        Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
         Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),
     }
@@ -77,8 +97,8 @@ pub async fn acquire_waiting(
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-fn open(dir: &Path, kind: LockKind) -> Result<(PathBuf, File), LockError> {
-    let path = dir.join(kind.file_name());
+fn open(dir: &Path, name: &str) -> Result<(PathBuf, File), LockError> {
+    let path = dir.join(name);
     let file = File::options()
         .create(true)
         .truncate(false)

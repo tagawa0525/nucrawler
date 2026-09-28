@@ -69,18 +69,22 @@ impl Page<'_> {
 }
 
 /// 全ページ共通の外枠（スマホ向けの 1 カラム、警告のバナー）。
+/// 新着の途絶えは急ぎでないので、本文を押し下げないよう一番下に出す。
 pub fn layout(title: &str, page: &Page, body: &str) -> String {
-    let banners: String = page
+    let (bottom, top): (Vec<_>, Vec<_>) = page
         .warnings
         .iter()
-        .map(|w| warning_banner(w, page))
-        .collect();
+        .partition(|w| matches!(w, Warning::SourceStale { .. }));
+    let banners =
+        |ws: Vec<&Warning>| -> String { ws.into_iter().map(|w| warning_banner(w, page)).collect() };
     format!(
         "<!DOCTYPE html>\n<html lang=\"ja\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>{} - nucrawler</title><style>{STYLE}</style></head>\
-         <body><main>{banners}{body}</main></body></html>\n",
-        escape(title)
+         <body><main>{}{body}{}</main></body></html>\n",
+        escape(title),
+        banners(top),
+        banners(bottom),
     )
 }
 

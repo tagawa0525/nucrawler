@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// 画面の上部に出す警告。
+/// 画面に出す警告（新着の途絶えは一番下、ほかは上部）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     /// 最後の取得が失敗している（最後の成功より新しい失敗がある）ソース

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
 };
 use crate::config::LlmConfig;
 use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
@@ -61,7 +61,7 @@ pub async fn translate_titles<L: Llm>(
             break;
         }
         // 予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (batch, _claim) = db.claim_selected(
+        let (batch, claim) = db.claim_selected(
             ClaimKey {
                 stage: STAGE,
                 backend,
@@ -113,6 +113,9 @@ pub async fn translate_titles<L: Llm>(
                 break;
             }
         };
+        // 保存する前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は、
+        // 延長できないので結果を保存しない（予約を持っている実行だけが保存する）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let parsed = match prompt::title::parse(&response.output, &ids) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -124,6 +127,13 @@ pub async fn translate_titles<L: Llm>(
             }
         };
         for (id, title_ja) in &parsed.items {
+            if !held.contains(id) {
+                tracing::warn!(
+                    article_id = *id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
             let glossary_at = batch.iter().find(|b| b.article_id == *id).and_then(|b| {
                 let own = prompt::title::build_prompt(std::slice::from_ref(b));
@@ -145,8 +155,12 @@ pub async fn translate_titles<L: Llm>(
             db.clear_stage_failure(key(*id))?;
             summary.translated += 1;
         }
-        summary.failed +=
-            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
+        summary.failed += record_failures(
+            db,
+            held_missing(&parsed.missing, &held).map(key),
+            MISSING,
+            now,
+        )?;
     }
     Ok(summary)
 }

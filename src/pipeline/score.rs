@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
 };
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
@@ -109,7 +109,7 @@ pub async fn score_articles<L: Llm>(
             break;
         }
         // 予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (batch, _claim) = db.claim_selected(
+        let (batch, claim) = db.claim_selected(
             ClaimKey {
                 stage: &failure_stage,
                 backend,
@@ -159,6 +159,9 @@ pub async fn score_articles<L: Llm>(
                 break;
             }
         };
+        // 保存する前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は、
+        // 延長できないので結果を保存しない（予約を持っている実行だけが保存する）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let parsed = match prompt::score::parse(&response.output, &ids, &profile) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -173,6 +176,13 @@ pub async fn score_articles<L: Llm>(
             let Some(input) = batch.iter().find(|b| b.article_id == item.id) else {
                 continue;
             };
+            if !held.contains(&item.id) {
+                tracing::warn!(
+                    article_id = item.id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             db.insert_score_with_matches(
                 key,
                 input.artifact_id,
@@ -189,7 +199,7 @@ pub async fn score_articles<L: Llm>(
         }
         summary.failed += record_failures(
             db,
-            parsed.missing.iter().map(|&id| failure_key(id)),
+            held_missing(&parsed.missing, &held).map(failure_key),
             MISSING,
             now,
         )?;

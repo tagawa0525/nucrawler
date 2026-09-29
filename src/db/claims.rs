@@ -33,6 +33,35 @@ impl Claim<'_> {
     pub fn ids(&self) -> &[i64] {
         &self.ids
     }
+
+    /// 予約を `now + ttl` まで延長し、延長できた（まだ自分の予約である）記事を返す。期限が切れて
+    /// ほかの実行に取り直された記事は延長できない。
+    pub fn renew(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        ttl: chrono::Duration,
+    ) -> Result<Vec<i64>, DbError> {
+        let mut stmt = self.db.conn.prepare(
+            "UPDATE work_claims SET expires_at = ?1
+             WHERE article_id = ?2 AND stage = ?3 AND backend = ?4 AND model = ?5 AND token = ?6",
+        )?;
+        let expires_at = timestamp(now + ttl);
+        let mut held = Vec::new();
+        for &id in &self.ids {
+            let changed = stmt.execute(rusqlite::params![
+                expires_at,
+                id,
+                self.stage,
+                self.backend,
+                self.model,
+                self.token
+            ])?;
+            if changed == 1 {
+                held.push(id);
+            }
+        }
+        Ok(held)
+    }
 }
 
 impl Drop for Claim<'_> {

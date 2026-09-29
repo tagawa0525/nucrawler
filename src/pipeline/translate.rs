@@ -82,7 +82,7 @@ pub async fn translate_articles<L: Llm>(
         // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ。
         // 対象は毎回、予約と同じトランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を
         // 作ると、ほかの実行が作り直し終えた記事をもう一度訳してしまう）
-        let (inputs, _claim) = db.claim_selected(
+        let (inputs, claim) = db.claim_selected(
             claim_key,
             clock(),
             claim_ttl(llm_cfg),
@@ -150,6 +150,16 @@ pub async fn translate_articles<L: Llm>(
                 break;
             }
         };
+        // 保存する前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は、
+        // 延長できないので結果を保存しない（予約を持っている実行だけが保存する）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+        if !held.contains(&input.article_id) {
+            tracing::warn!(
+                article_id = input.article_id,
+                "{STAGE} result dropped: the claim was taken over"
+            );
+            continue;
+        }
         let body_ja = match prompt::translate::parse(&response.output) {
             Ok(body_ja) => body_ja,
             Err(e) => {

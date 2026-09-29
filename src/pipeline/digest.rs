@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -67,7 +67,7 @@ pub async fn digest_articles<L: Llm>(
         // 予約は処理を終える（この周の終わりで drop する）まで持つ。対象は毎回、予約と同じ
         // トランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を作ると、ほかの実行が
         // 作り直し終えた記事をもう一度作り直してしまう）
-        let (batch, _claim) = db.claim_selected(
+        let (batch, claim) = db.claim_selected(
             claim_key,
             clock(),
             claim_ttl(llm_cfg),
@@ -146,6 +146,9 @@ pub async fn digest_articles<L: Llm>(
                 break;
             }
         };
+        // 保存する前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は、
+        // 延長できないので結果を保存しない（予約を持っている実行だけが保存する）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
             Ok(parsed) => parsed,
             Err(e) => {
@@ -157,6 +160,13 @@ pub async fn digest_articles<L: Llm>(
             }
         };
         for (id, payload) in &parsed.items {
+            if !held.contains(id) {
+                tracing::warn!(
+                    article_id = *id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             let input = batch.iter().find(|b| b.article_id == *id);
             let inputs: Vec<i64> = input
                 .map(|b| b.contents.iter().map(|c| c.id).collect())
@@ -183,8 +193,12 @@ pub async fn digest_articles<L: Llm>(
             db.clear_stage_failure(key(*id))?;
             summary.digested += 1;
         }
-        summary.failed +=
-            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
+        summary.failed += record_failures(
+            db,
+            held_missing(&parsed.missing, &held).map(key),
+            MISSING,
+            now,
+        )?;
     }
     Ok(summary)
 }

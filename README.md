@@ -4,7 +4,9 @@
 スマホから Tailscale 経由で読むための Web UI を持つ。
 
 - 要約・採点・和訳は Claude Code の headless 実行（`claude -p`）で行い、サブスクリプションの枠内に収める
-- 5 時間枠と週次枠の使用率を見て、時間帯ごとの上限を超えないように止まる（`config.toml` の `[quota]`）
+  （`llm.backend = "copilot-cli"` にすると GitHub Copilot CLI（`copilot`）で行い、AI Credits の枠を使う）
+- 5 時間枠と週次枠の使用率を見て、時間帯ごとの上限を超えないように止まる（`config.toml` の `[quota]`）。
+  Copilot では、今月の消費クレジットを月の経過に合わせた上限までに抑える（`[copilot_quota]`）
 - 処理はステージ（取得 → 本文抽出 → 要約 → 採点 → 和訳 → 見出しの和訳）ごとに成果物の有無で進み、中断しても次回は続きから再開する
 - 本文が取れず要約できない英語記事（記事ページがボット対策で開けない IAEA など）は、見出しだけを和訳して
   一覧・検索・受付箱に日本語の見出しを出す（`title` ステージ。`llm.title_batch_size` 件ずつまとめて訳す）。
@@ -59,7 +61,8 @@ users.users.<name>.linger = true;
 ### 初回の準備
 
 1. `claude` にログインしておく（`claude` を一度起動する）。unit は利用者のプロファイルの `claude` を使う。
-   別の場所にあるなら `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す
+   別の場所にあるなら `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す。
+   `llm.backend = "copilot-cli"` なら、代わりに `copilot login` でログインしておく
 2. 関心プロファイルを用意して取り込む。パッケージに入っている例をコピーして編集するとよい
 
    ```sh
@@ -102,7 +105,7 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
   `eval --profile`）は、取得ともほかの LLM の処理とも並行して動く（例：長い `redo digest` の最中でも、和訳の依頼や
   定時の crawl は待たされない）。同じ記事・同じモデルを同時に処理しないよう、処理する記事は DB 上で予約してから扱う。
   クォータの判定は呼び出しのたびに DB の最新の使用率を読むので、ほかの実行の呼び出しも入る（並行している呼び出しの分だけ、
-  上限を少し超えることはある）。同時に動く claude の数は、実行をまたいで `llm.concurrency` 個まで。1 つの実行の中でも、
+  上限を少し超えることはある）。同時に動くバックエンド（claude・copilot）の数は、実行をまたいで `llm.concurrency` 個まで。1 つの実行の中でも、
   要約・採点・和訳・見出しの和訳はそれぞれ `llm.concurrency` 本まで同時に呼ぶ（応答を待つ間に次を呼ぶので、過去分を
   まとめて処理するときに 5 時間枠を使い切れる）。語彙の整理は 1 つずつ
 - 同じロックを別の実行が持っていれば、終了コード 75（EX_TEMPFAIL）で終わる（`crawl` の途中でロックが

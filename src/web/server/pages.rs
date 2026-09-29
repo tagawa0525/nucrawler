@@ -673,6 +673,12 @@ mod tests {
             // 絞り込みの最低点の既定は 0（「-」）
             ("/?rating=4&min=0", "/?rating=4"),
             ("/?rating=4&min=60", "/?min=60&rating=4"),
+            // JavaScript が無いときの評価の「-」は、絞り込みの条件（最低点・既読）を一緒に送るが、
+            // 一覧へ戻るので一覧の既定にする
+            ("/?rating=&min=60", "/"),
+            ("/?rating=&min=0&read=0", "/"),
+            // ブックマークで絞り込んだままなら、絞り込みの条件を引き継ぐ
+            ("/?rating=&min=60&bookmarked=1", "/?min=60&bookmarked=1"),
         ] {
             let res = server.get_raw(from).await;
             assert_eq!(res.status().as_u16(), 303, "{from}");

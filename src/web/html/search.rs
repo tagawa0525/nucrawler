@@ -190,6 +190,7 @@ mod tests {
             lang: "ja".into(),
             unread: true,
             bookmarked: true,
+            unrated: true,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -242,6 +243,11 @@ mod tests {
         assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
         assert!(
             html.contains(r#"name="bookmarked" value="1" checked"#),
+            "{html}"
+        );
+        // 評価の無い記事だけ（一覧の評価の選択の ☆ と同じ）
+        assert!(
+            html.contains(r#"name="unrated" value="1" checked"#),
             "{html}"
         );
         assert!(html.contains(r#"name="min_score" value="60""#), "{html}");

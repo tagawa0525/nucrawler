@@ -1041,6 +1041,85 @@ mod tests {
         assert!(!stars.contains(r#"name="read""#), "{stars}");
     }
 
+    /// 👁 と 🔖 は押すたびに 絞らない（白）→ 印のある記事だけ（緑）→ 印の無い記事だけ（赤・斜線）と切り替える。
+    /// 一覧の 👁 の既定は未読だけ（赤）、絞り込みの既定は絞らない（白）。今の状態と押したときの次を名前に出す。
+    #[test]
+    fn bar_marks_cycle_through_three_states() {
+        assert!(STYLE.contains(".btn.not {"), "{STYLE}");
+        let eye = |read: Option<bool>| {
+            let html = list_page(
+                &[],
+                &[],
+                ListView {
+                    read,
+                    ..ListView::default()
+                },
+                &Page::default(),
+            );
+            let at = html.find("👁</span></a>").expect(&html);
+            let start = html[..at].rfind("<a ").unwrap();
+            html[start..at].to_string()
+        };
+        assert_eq!(
+            eye(Some(false)),
+            r#"<a class="btn not" href="/?read=any" aria-label="既読：未読だけ（押すと絞らない）" title="既読：未読だけ（押すと絞らない）"><span>"#
+        );
+        assert!(
+            eye(None).starts_with(
+                r#"<a class="btn" href="/?read=1" aria-label="既読：絞らない（押すと既読だけ）""#
+            ),
+            "{}",
+            eye(None)
+        );
+        assert!(
+            eye(Some(true)).starts_with(
+                r#"<a class="btn on" href="/" aria-label="既読：既読だけ（押すと未読だけ）""#
+            ),
+            "{}",
+            eye(Some(true))
+        );
+        let bookmark = |view: ListView| {
+            let html = filtered_page(&[], view, &Page::default());
+            let at = html.find("🔖</span></a>").expect(&html);
+            let start = html[..at].rfind("<a ").unwrap();
+            html[start..at].to_string()
+        };
+        // ブックマーク中だけ（絞り込み）→ ブックマークなしだけ（一覧の既定へ戻る）
+        let only = ListView {
+            min: 0,
+            read: None,
+            bookmarked: Some(true),
+            ..ListView::default()
+        };
+        assert!(
+            bookmark(only).starts_with(r#"<a class="btn on" href="/?bookmarked=0" aria-label="ブックマーク：ブックマーク中だけ（押すとブックマークなしだけ）""#),
+            "{}",
+            bookmark(only)
+        );
+        let html = list_page(
+            &[],
+            &[],
+            ListView {
+                bookmarked: Some(false),
+                ..ListView::default()
+            },
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<a class="btn not" href="/" aria-label="ブックマーク：ブックマークなしだけ（押すと絞らない）""#),
+            "{html}"
+        );
+        // 欄の条件は印ごとに、あり（1）・なし（0）で持つ
+        assert!(
+            html.contains(r#"<div class="sections" data-read="0" data-bookmarked="0">"#),
+            "{html}"
+        );
+        assert!(
+            MARKS_SCRIPT.contains("want(f.read") && MARKS_SCRIPT.contains("want(f.bookmarked"),
+            "{MARKS_SCRIPT}"
+        );
+    }
+
     /// 「絞らない」の選択肢は、閉じた選択では 00・★ と書き、開いた一覧では「-」に戻す。
     #[test]
     fn bar_script_relabels_the_blank_choice() {

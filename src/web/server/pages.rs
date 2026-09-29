@@ -720,6 +720,39 @@ mod tests {
         assert_eq!(server.get_raw("/?rating=9").await.status().as_u16(), 400);
     }
 
+    /// 一覧の 👁 と 🔖 は、印のある記事だけ（1）・無い記事だけ（0）・絞らない（any）で絞る。
+    #[tokio::test]
+    async fn list_filters_by_marks_both_ways() {
+        let db = Db::open_in_memory().unwrap();
+        let (read, digest) = seed(&db, "https://e.com/read", "読んだ記事");
+        score(&db, digest, 80);
+        let (kept, digest) = seed(&db, "https://e.com/kept", "取っておく記事");
+        score(&db, digest, 80);
+        let server = Server::start(db).await;
+        server.post(&format!("/articles/{read}/read"), "on=1").await;
+        server
+            .post(&format!("/articles/{kept}/bookmark"), "on=1")
+            .await;
+        let (_, html) = server.get("/?read=1").await;
+        assert!(
+            html.contains("読んだ記事") && !html.contains("取っておく記事"),
+            "{html}"
+        );
+        let (_, html) = server.get("/?read=any").await;
+        assert!(
+            html.contains("読んだ記事") && html.contains("取っておく記事"),
+            "{html}"
+        );
+        let (_, html) = server.get("/?read=any&bookmarked=0").await;
+        assert!(
+            html.contains("読んだ記事") && !html.contains("取っておく記事"),
+            "{html}"
+        );
+        // 一覧の既定は未読だけ（read=0 は既定なので付けない）
+        let res = server.get_raw("/?read=0").await;
+        assert_eq!(res.headers()["location"], "/");
+    }
+
     /// `read=1` を受け取り、切り替えのリンクに反映する。
     #[tokio::test]
     async fn list_reads_the_read_toggle() {

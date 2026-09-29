@@ -404,4 +404,46 @@ mod tests {
             "{summary:?}"
         );
     }
+
+    /// 同時に `llm.concurrency` 本まで呼び出す。同じ記事は取り合わない。
+    #[tokio::test]
+    async fn calls_concurrently_up_to_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        articles(&db, 4);
+        let llm = FakeLlm::responding(std::time::Duration::from_millis(50), |req| {
+            let id: i64 = req
+                .prompt
+                .split("<article id=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap()
+                .parse()
+                .unwrap();
+            ok(&[id])
+        });
+        let summary = translate_titles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &LlmConfig {
+                title_batch_size: 1,
+                concurrency: 2,
+                ..LlmConfig::default()
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.translated, summary.calls), (4, 4));
+        assert_eq!(llm.max_in_flight(), 2);
+        assert_eq!(
+            db.query_i64("SELECT count(DISTINCT article_id) FROM artifacts WHERE kind = 'title'")
+                .unwrap(),
+            4
+        );
+    }
 }

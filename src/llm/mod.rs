@@ -129,6 +129,9 @@ pub mod fake {
     /// 呼び出しの最中にほかの実行が DB を書き換える状況を作るのに使う。
     type Hook = Box<dyn FnMut(usize) + Send>;
 
+    /// 依頼から応答を作る処理（応答を順に用意せず、依頼の内容に応じて返すとき）。
+    type Responder = Box<dyn Fn(&LlmRequest<'_>) -> Result<LlmResponse, LlmError> + Send + Sync>;
+
     #[derive(Default)]
     pub struct FakeLlm {
         responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
@@ -136,6 +139,10 @@ pub mod fake {
         hook: Mutex<Option<Hook>>,
         reserve_hook: Mutex<Option<Hook>>,
         reserved: Mutex<usize>,
+        responder: Option<Responder>,
+        delay: std::time::Duration,
+        /// いま応答を待っている呼び出しの数と、その最大
+        in_flight: Mutex<(usize, usize)>,
     }
 
     impl FakeLlm {
@@ -146,6 +153,9 @@ pub mod fake {
                 hook: Mutex::default(),
                 reserve_hook: Mutex::default(),
                 reserved: Mutex::default(),
+                responder: None,
+                delay: std::time::Duration::ZERO,
+                in_flight: Mutex::default(),
             }
         }
 
@@ -169,6 +179,24 @@ pub mod fake {
                 reserve_hook: Mutex::new(Some(Box::new(hook))),
                 ..Self::new(responses)
             }
+        }
+
+        /// 依頼ごとに `respond` で応答を作り、`delay` だけ待ってから返す。同時に何本呼ばれたかを
+        /// 確かめるのに使う（`max_in_flight`）。
+        pub fn responding(
+            delay: std::time::Duration,
+            respond: impl Fn(&LlmRequest<'_>) -> Result<LlmResponse, LlmError> + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                responder: Some(Box::new(respond)),
+                delay,
+                ..Self::new([])
+            }
+        }
+
+        /// 同時に応答を待った呼び出しの数の最大
+        pub fn max_in_flight(&self) -> usize {
+            self.in_flight.lock().unwrap().1
         }
 
         pub fn requests(&self) -> Vec<Recorded> {
@@ -208,6 +236,18 @@ pub mod fake {
             };
             if let Some(hook) = self.hook.lock().unwrap().as_mut() {
                 hook(n);
+            }
+            if !self.delay.is_zero() {
+                {
+                    let mut in_flight = self.in_flight.lock().unwrap();
+                    in_flight.0 += 1;
+                    in_flight.1 = in_flight.1.max(in_flight.0);
+                }
+                tokio::time::sleep(self.delay).await;
+                self.in_flight.lock().unwrap().0 -= 1;
+            }
+            if let Some(respond) = &self.responder {
+                return respond(&req);
             }
             self.responses
                 .lock()

@@ -804,4 +804,44 @@ mod tests {
         let summary = redo_glossary(&db, owner, &llm, later).await;
         assert_eq!((summary.translated, summary.calls), (1, 1));
     }
+
+    /// 同時に `llm.concurrency` 本まで訳す。同じ記事は取り合わない。
+    #[tokio::test]
+    async fn translates_concurrently_up_to_the_limit() {
+        let (db, owner) = setup();
+        for i in 0..4 {
+            article(&db, i, 90);
+        }
+        let llm = FakeLlm::responding(std::time::Duration::from_millis(50), |_| ok("和訳"));
+        let summary = translate_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &LlmConfig {
+                concurrency: 2,
+                ..LlmConfig::default()
+            },
+            &PipelineConfig::default(),
+            owner,
+            &Target::Pending {
+                requests_only: false,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.translated, summary.calls), (4, 4));
+        assert_eq!(llm.max_in_flight(), 2);
+        assert_eq!(
+            db.query_i64(
+                "SELECT count(DISTINCT article_id) FROM artifacts WHERE kind = 'translation'"
+            )
+            .unwrap(),
+            4
+        );
+    }
 }

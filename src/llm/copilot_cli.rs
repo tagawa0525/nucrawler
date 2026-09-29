@@ -18,6 +18,9 @@ use std::time::Duration;
 use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
 
+/// `llm_calls` などに記録する名前
+pub const BACKEND: &str = "copilot-cli";
+
 /// `--available-tools` に渡す、存在しないツールの名前。これだけを許可してツールを 0 個にする。
 const NO_TOOLS: &str = "nucrawler-no-tools";
 
@@ -40,7 +43,7 @@ impl Llm for CopilotCli {
     type Slot = crate::pipeline::lock::Slot;
 
     fn backend(&self) -> &'static str {
-        "copilot-cli"
+        BACKEND
     }
 
     async fn reserve(&self) -> Result<Self::Slot, LlmError> {

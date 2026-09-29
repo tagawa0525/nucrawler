@@ -108,6 +108,35 @@ pub enum LlmError {
     NoStructuredOutput,
 }
 
+/// 設定で選んだバックエンド（`llm.backend`）。
+pub enum Backend {
+    Claude(claude_cli::ClaudeCli),
+    Copilot(copilot_cli::CopilotCli),
+}
+
+impl Backend {
+    /// 設定のバックエンドを、データディレクトリ `data` の下を作業場所にして作る。
+    pub fn from_config(_c: &crate::config::LlmConfig, _data: &std::path::Path) -> Self {
+        todo!()
+    }
+}
+
+impl Llm for Backend {
+    type Slot = crate::pipeline::lock::Slot;
+
+    fn backend(&self) -> &'static str {
+        todo!()
+    }
+
+    async fn reserve(&self) -> Result<Self::Slot, LlmError> {
+        todo!()
+    }
+
+    async fn call(&self, _req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
+        todo!()
+    }
+}
+
 /// 失敗した呼び出し。失敗しても、それまでに分かった使用量を運ぶ（消費した分をクォータに数えるため）。
 #[derive(Debug)]
 pub struct LlmFailure {
@@ -305,5 +334,41 @@ pub mod fake {
                 .pop_front()
                 .expect("FakeLlm ran out of prepared responses")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LlmBackend, LlmConfig};
+
+    #[test]
+    fn builds_the_configured_backend() {
+        let data = std::path::Path::new("/data");
+        let claude = Backend::from_config(&LlmConfig::default(), data);
+        assert_eq!(claude.backend(), "claude-cli");
+        let Backend::Claude(c) = &claude else {
+            panic!("expected claude");
+        };
+        assert_eq!(c.command, std::path::PathBuf::from("claude"));
+        assert_eq!(c.cwd, data.join("llm-cwd"));
+
+        let copilot = Backend::from_config(
+            &LlmConfig {
+                backend: LlmBackend::CopilotCli,
+                ..LlmConfig::default()
+            },
+            data,
+        );
+        assert_eq!(copilot.backend(), "copilot-cli");
+        let Backend::Copilot(c) = &copilot else {
+            panic!("expected copilot");
+        };
+        assert_eq!(c.command, std::path::PathBuf::from("copilot"));
+        assert_eq!(c.cwd, data.join("llm-cwd"));
+        assert_eq!(c.homes, data.join("copilot-home"));
+        // 呼び出しの枠はバックエンドによらず同じ場所で数える
+        assert_eq!(c.slots, data);
+        assert_eq!(c.timeout, std::time::Duration::from_secs(300));
     }
 }

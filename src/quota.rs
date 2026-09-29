@@ -254,6 +254,12 @@ impl Quota {
         }
     }
 
+    /// 設定のバックエンド（`llm.backend`）に合わせて判定する。claude-cli は使用率（`[quota]`）、
+    /// copilot-cli は月の消費クレジット（`[copilot_quota]`）。
+    pub fn from_config(_config: &crate::config::Config, _max_calls: Option<u32>) -> Self {
+        todo!()
+    }
+
     /// `backend` の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`
     /// （`max_calls` を指定すればそちら）を使う。使用率（5 時間枠・週次枠）は見ない。
     pub fn with_credits(
@@ -526,6 +532,17 @@ mod tests {
             month_start(jst("2026-10-01T08:00:00")),
             utc("2026-09-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn follows_the_configured_backend() {
+        let mut config = crate::config::Config::default();
+        assert_eq!(Quota::from_config(&config, None).credits_backend(), None);
+        config.llm.backend = crate::config::LlmBackend::CopilotCli;
+        config.copilot_quota = Some(credits(1000.0));
+        let q = Quota::from_config(&config, Some(2));
+        assert_eq!(q.credits_backend(), Some("copilot-cli"));
+        assert_eq!(q.max_calls, 2);
     }
 
     /// クレジットで判定するときは、Claude の使用率を見ない。

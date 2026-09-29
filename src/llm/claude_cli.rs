@@ -27,7 +27,7 @@ impl ClaudeCli {
     /// 設定のコマンド・タイムアウト・同時に動かす数で、`cwd` を作業ディレクトリにして呼ぶ。
     pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf, slots: PathBuf) -> Self {
         Self {
-            command: c.command.clone().into(),
+            command: c.command().into(),
             cwd,
             timeout: Duration::from_secs(c.timeout_secs),
             slots,

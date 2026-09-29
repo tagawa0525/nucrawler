@@ -71,11 +71,24 @@ impl Default for RecommendConfig {
     }
 }
 
+/// LLM を呼ぶバックエンド。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmBackend {
+    /// Claude Code の headless モード（`claude -p`）。サブスクリプションの枠で動かす（`[quota]`）
+    #[default]
+    ClaudeCli,
+    /// GitHub Copilot CLI（`copilot`）。AI Credits の月の予算で動かす（`[copilot_quota]`）
+    CopilotCli,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
-    /// `claude` の実行ファイル（PATH から探す）
-    pub command: String,
+    /// LLM を呼ぶバックエンド。ステージごとのモデル名も、そのバックエンドの名前にする
+    pub backend: LlmBackend,
+    /// バックエンドの実行ファイル（PATH から探す）。省けば `claude` か `copilot`
+    pub command: Option<String>,
     /// 1 回の呼び出しのタイムアウト
     pub timeout_secs: u64,
     /// 要約に使うモデル
@@ -109,6 +122,11 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
+    /// バックエンドの実行ファイル。
+    pub fn command(&self) -> &str {
+        todo!()
+    }
+
     /// 0 だと処理が黙って何もしなくなる値を拒否する。
     pub fn validate(&self) -> Result<(), String> {
         for (name, is_zero) in [
@@ -141,7 +159,8 @@ impl LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            command: "claude".into(),
+            backend: LlmBackend::ClaudeCli,
+            command: None,
             timeout_secs: 300,
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
@@ -564,6 +583,31 @@ mod tests {
     }
 
     #[test]
+    fn selects_the_copilot_backend() {
+        let c = parse_config(
+            "[llm]\nbackend = \"copilot-cli\"\n[copilot_quota]\nmonthly_credits = 1500\n",
+            p(),
+        )
+        .unwrap();
+        assert_eq!(c.llm.backend, LlmBackend::CopilotCli);
+        assert_eq!(c.llm.command(), "copilot");
+        let c = parse_config(
+            "[llm]\nbackend = \"copilot-cli\"\ncommand = \"/opt/copilot\"\n\
+             [copilot_quota]\nmonthly_credits = 1500\n",
+            p(),
+        )
+        .unwrap();
+        assert_eq!(c.llm.command(), "/opt/copilot");
+        // 月の予算が無いまま Copilot で動かさない
+        let err = parse_config("[llm]\nbackend = \"copilot-cli\"\n", p()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains("copilot_quota")),
+            "{err}"
+        );
+        assert!(parse_config("[llm]\nbackend = \"gemini-cli\"\n", p()).is_err());
+    }
+
+    #[test]
     fn reads_the_copilot_quota() {
         assert_eq!(parse_config("", p()).unwrap().copilot_quota, None);
         let c = parse_config("[copilot_quota]\nmonthly_credits = 1500\n", p()).unwrap();
@@ -627,7 +671,8 @@ mod tests {
     #[test]
     fn llm_defaults() {
         let d = LlmConfig::default();
-        assert_eq!(d.command, "claude");
+        assert_eq!(d.backend, LlmBackend::ClaudeCli);
+        assert_eq!(d.command(), "claude");
         assert_eq!(d.timeout_secs, 300);
         assert_eq!(d.digest_model, "sonnet");
         assert_eq!(d.digest_batch_size, 5);

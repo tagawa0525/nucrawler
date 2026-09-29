@@ -43,7 +43,8 @@ pub struct RunEnv<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
-    /// ステージを始めるたびに今の時刻を読む（テストでは固定する）
+    /// ステージを始めるたびに今の時刻を読む。ステージの中でも、クォータの判定・作業の予約と延長・
+    /// 呼び出しの記録のたびに読む（`LlmStage::clock`。テストでは固定する）
     pub clock: &'a dyn Fn() -> DateTime<Utc>,
 }
 
@@ -301,9 +302,7 @@ pub async fn suggest_profile<L: Llm>(
     evidence: &[Evidence],
 ) -> Result<(RunReport, Suggested), RunError> {
     let mut report = RunReport::default();
-    let now = (env.clock)();
-    let summary =
-        suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
+    let summary = suggest::suggest_profile(env.stage(), &config.llm, profile, evidence).await?;
     // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
     let reason = match &summary.halted {
         Some(Halt::Quota(stop)) => stop.to_string(),

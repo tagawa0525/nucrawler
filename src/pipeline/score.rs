@@ -180,7 +180,7 @@ pub async fn score_articles<L: Llm>(
                         model,
                     },
                 },
-                now,
+                clock,
                 cancel,
             )
             .await?;

@@ -199,7 +199,7 @@ pub async fn translate_articles<L: Llm>(
                         model,
                     },
                 },
-                now,
+                clock,
                 cancel,
             )
             .await?;

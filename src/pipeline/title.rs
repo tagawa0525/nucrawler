@@ -132,7 +132,7 @@ pub async fn translate_titles<L: Llm>(
                         model,
                     },
                 },
-                now,
+                clock,
                 cancel,
             )
             .await?;

@@ -20,7 +20,8 @@ extract_max_per_run = 100
 command = "claude"
 # 1 回の呼び出しのタイムアウト（秒）
 timeout_secs = 300
-# 同時に動かす claude の数の上限（crawl・redo などの実行をまたいで数える）
+# 同時に動かす claude の数の上限（crawl・redo などの実行をまたいで数える）。1 つの実行の中でも、
+# 各ステージがこの数まで同時に呼ぶ
 concurrency = 2
 # 要約に使うモデル、1 回の呼び出しで要約する記事数、本文の部分ごとの最大文字数
 digest_model = "sonnet"

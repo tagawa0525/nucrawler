@@ -11,7 +11,9 @@ pub fn search_page(
     error: Option<&str>,
     page: &Page,
 ) -> String {
-    let mut body = String::from("<h1>検索</h1><p class=\"meta\"><a href=\"/\">一覧へ</a></p>");
+    // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）
+    let mut body = super::list::home_bar(page);
+    body.push_str("<h1>検索</h1>");
     if let Some(error) = error {
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
     }
@@ -174,6 +176,31 @@ mod tests {
             added_at: None,
             uses,
         }
+    }
+
+    /// 検索の画面にも一覧と同じ上部のバーを出す。先頭は 🔍 ではなく、一覧へ戻る 🏠。
+    #[test]
+    fn search_page_shows_the_list_bar_with_home() {
+        let page = Page {
+            default_min: 60,
+            ..Page::default()
+        };
+        let html = search_page(&Params::default(), None, &[], None, &page);
+        assert!(
+            html.contains(r#"<nav class="bar"><a class="btn" href="/" aria-label="ホーム" title="ホーム">🏠</a>"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"aria-label="検索""#), "{html}");
+        assert!(!html.contains("一覧へ"), "{html}");
+        // バーは一覧の既定（設定の最低点）を指す
+        assert!(
+            html.contains(r#"<option value="60" data-href="/" selected>60</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="rating""#) && html.contains("既読も表示"),
+            "{html}"
+        );
     }
 
     #[test]

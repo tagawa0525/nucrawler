@@ -34,10 +34,9 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             .map(str::to_string)
     };
     let title = display_title(field("title_ja").as_deref(), i).to_string();
-    let mut body = format!(
-        "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>{}</h1>",
-        escape(&title)
-    );
+    // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）
+    let mut body = super::list::home_bar(page);
+    body.push_str(&format!("<h1>{}</h1>", escape(&title)));
     body.push_str(&format!(
         // 原文へは、開いたことを記録してから移る（`/articles/{id}/source`）
         "<p class=\"meta\">{} ・{} ・<a href=\"/articles/{}/source\">原文</a>{}</p>",
@@ -314,6 +313,22 @@ mod tests {
     use super::*;
     use crate::db::ArtifactVersion;
     use crate::web::html::test_support::*;
+
+    /// 詳細の画面にも一覧と同じ上部のバーを出し、「← 一覧」の代わりに先頭の 🏠 で一覧へ戻る。
+    #[test]
+    fn detail_page_shows_the_list_bar_with_home() {
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<nav class="bar"><a class="btn" href="/" aria-label="ホーム" title="ホーム">🏠</a>"#),
+            "{html}"
+        );
+        assert!(!html.contains("← 一覧"), "{html}");
+    }
 
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {

@@ -162,9 +162,9 @@ pub(super) trait BarView: Clone {
     fn with_rating(&self, rating: Option<u8>) -> Self;
     fn with_read(&self, read: Option<bool>) -> Self;
     fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self;
-    /// JavaScript が無いとき、評価の選択と一緒に今の条件を送るか
-    fn keeps_state_on_rating(&self) -> bool {
-        true
+    /// JavaScript が無いときに評価の選択と一緒に送る、今の条件（評価の選択で置き換わる欄は送らない）
+    fn rating_inputs(&self) -> String {
+        state_inputs(self, self.rating_replaces())
     }
     /// JavaScript が無いときに最低点の選択を送る欄の名前（選んだ値で置き換わるので、今の条件からは外す）
     fn min_name(&self) -> &'static str;
@@ -210,9 +210,14 @@ impl BarView for ListView {
     fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self {
         self.with_filters(self.rating, bookmarked)
     }
-    /// 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
-    fn keeps_state_on_rating(&self) -> bool {
-        self.filtered()
+    /// 一覧から絞り込みへ移るときは、絞り込みでも引き継ぐ条件（ブックマーク）だけを送り、最低点と既読は
+    /// 絞り込みの既定にする（JavaScript のときの行き先 `with_filters` と同じ）
+    fn rating_inputs(&self) -> String {
+        if self.filtered() {
+            state_inputs(self, self.rating_replaces())
+        } else {
+            state_inputs(&self.with_rating(Some(1)), self.rating_replaces())
+        }
     }
     fn min_name(&self) -> &'static str {
         "min"
@@ -297,7 +302,7 @@ fn min_select(view: &impl BarView) -> String {
 /// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」（閉じた選択では数字の無い ★）は絞らない、
 /// ★1〜★5 は最低点と同じく小さい順で「以上」の印は付けない（★4 は ★4 以上）、最後の白抜きの「☆」は
 /// 評価の無い記事だけ。絞っているあいだは緑にする。
-/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、`keeps_state_on_rating` ならほかの条件も送る）。
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、`rating_inputs` の条件も送る）。
 fn rating_select(view: &impl BarView) -> String {
     let choices = [
         (Some(1), "★1"),
@@ -320,11 +325,7 @@ fn rating_select(view: &impl BarView) -> String {
             )
         }))
         .collect();
-    let inputs = if view.keeps_state_on_rating() {
-        state_inputs(view, view.rating_replaces())
-    } else {
-        String::new()
-    };
+    let inputs = view.rating_inputs();
     format!(
         "<form class=\"stars{}\" method=\"get\" action=\"{}\"><select name=\"rating\" aria-label=\"評価で絞る\" \
          title=\"評価で絞る\" onchange=\"{JUMP}\">{options}</select>{inputs}\

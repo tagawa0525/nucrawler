@@ -127,7 +127,8 @@ fn min_select(view: ListView) -> String {
         .iter()
         .map(|v| {
             let selected = if *v == view.min { " selected" } else { "" };
-            format!("<option value=\"{v}\"{selected}>{v}</option>")
+            // 桁をそろえる（0 は 00）
+            format!("<option value=\"{v}\"{selected}>{v:02}</option>")
         })
         .collect();
     let read = if view.read {
@@ -142,13 +143,13 @@ fn min_select(view: ListView) -> String {
     )
 }
 
-/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（「👍」は絞らない）。
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（白抜きの「☆」は絞らない）。
 /// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。ブックマークの絞り込みと、
 /// 絞り込みで既読を隠していること（`read=0`）は引き継ぐ。
 fn rating_select(view: ListView) -> String {
     let current = view.rating.map(|r| r.to_string()).unwrap_or_default();
     let options: String = [
-        ("", "👍"),
+        ("", "☆"),
         ("5", "★5"),
         ("4", "★4↑"),
         ("3", "★3↑"),
@@ -179,7 +180,8 @@ fn rating_select(view: ListView) -> String {
     )
 }
 
-/// 一覧の上部のバー。絞り込みの画面では、効かない最低点を出さない。
+/// 一覧の上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
+/// 絞り込みの画面では、効かない最低点を出さない。
 fn bar(view: ListView) -> String {
     let bookmark = button(
         &view.with_filters(view.rating, !view.bookmarked).href(),
@@ -198,7 +200,7 @@ fn bar(view: ListView) -> String {
     };
     let read = button(&read_toggle.href(), "既読も表示", "👁", Some(view.read));
     format!(
-        "<nav class=\"bar\">{}{}{bookmark}{min}{read}{}</nav>",
+        "<nav class=\"bar\">{}{min}{}{read}{bookmark}{}</nav>",
         button("/search", "検索", "🔍", None),
         rating_select(view),
         button("/settings", "設定", "⚙️", None),
@@ -287,12 +289,13 @@ pub fn list_page_with_explore(
 pub(super) const MARKS_SCRIPT: &str =
     concat!("<script>\n", include_str!("assets/marks.js"), "</script>");
 
-/// 評価（1〜5 の星）とブックマーク・既読の印。一覧のカードと詳細で共有する。
+/// 評価（1〜5 の星）と既読・ブックマークの印。一覧のカードと詳細で共有する。並びは上部のバーと同じで、
+/// キーの h（既読）が左、l（ブックマーク）が右。`lead` は行の先頭に置くもの（一覧のカードの点数）。
 /// 星は今の評価まで塗り、今の評価の星を押すと評価なしに戻る。星は記号だけなので、段階の意味を
 /// 読み上げの名前（aria-label）にも付け、`data-label` にも持たせて画面の側で付け直せるようにする。
 /// ブックマーク・既読は押すと今の逆にするボタンで、状態を `aria-pressed` で示す。
 /// JavaScript が無ければフォームの送信で付け、詳細に戻る。
-pub(super) fn marks(i: &ListItem) -> String {
+pub(super) fn marks(i: &ListItem, lead: &str) -> String {
     let id = i.article_id;
     let stars: String = Rating::all()
         .map(|r| {
@@ -321,10 +324,10 @@ pub(super) fn marks(i: &ListItem) -> String {
         )
     };
     format!(
-        "<div class=\"actions marks\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
+        "<div class=\"actions marks\">{lead}<form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
          {stars}</form>{}{}</div>",
-        toggle("bookmark", "ブックマーク", "🔖", i.bookmarked),
         toggle("read", "既読", "👁", i.is_read()),
+        toggle("bookmark", "ブックマーク", "🔖", i.bookmarked),
     )
 }
 
@@ -384,7 +387,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .as_deref()
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
-        "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
+        "<div class=\"card{read}\"{swipe}>{title_score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
          <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}{marks}</div>",
         read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
@@ -392,7 +395,13 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         } else {
             String::new()
         },
-        marks = if swipe { marks(i) } else { String::new() },
+        // 一覧のカードでは点数を印の行の先頭に置く。検索の結果は印の行が無いので見出しの左に
+        title_score = if swipe { String::new() } else { score.clone() },
+        marks = if swipe {
+            marks(i, &score)
+        } else {
+            String::new()
+        },
         id = i.article_id,
         title = escape(title),
         source = escape(page.source(&i.source_id)),

@@ -16,8 +16,8 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .bar .min, .bar .stars { display: inline; margin: 0; }
 .bar select { font-size: 1rem; height: 100%; padding: 0 0.4rem; border: 1px solid #bbb; border-radius: 0.5rem;
   background: #fff; }
-.bar .stars select { border: 2px solid #946200; color: #946200; font-weight: 700; }
-.bar .stars.on select { background: #fdf3dc; }
+.bar .stars select { border: 2px solid #f5b400; font-weight: 700; }
+.bar .stars.on select { background: #fff3c4; }
 .btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
   background: #fff; text-decoration: none; }
 .btn.on, .marks button[aria-pressed=true] { border-color: #2e7d32; background: #e3f1e4; }
@@ -67,4 +67,4 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .card .marks { margin-top: 0.3rem; }
 .card .marks button { font-size: 1rem; padding: 0.2rem 0.55rem; margin: 0.1rem; }
 .actions .rating button { padding: 0.4rem 0.15rem; border: none; background: none; color: #999; }
-.actions .rating button.on { background: none; color: #946200; }
+.actions .rating button.on { background: none; color: #f5b400; }

@@ -82,7 +82,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    body.push_str(&super::list::marks(i));
+    // 詳細の点数は理由と一緒に上に出しているので、印の行には置かない
+    body.push_str(&super::list::marks(i, ""));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {

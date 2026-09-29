@@ -49,13 +49,15 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
         }
     ));
-    if let Some(score) = i.score {
+    if i.score.is_some() {
         body.push_str(&format!(
-            "<p><span class=\"score\">{score}</span>{}{}</p>",
+            "<p>{}{}{}</p>",
+            super::list::score_badge(i),
             super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
     }
+    body.push_str(&adjustments(d, page));
     if let Some(summary) = field("summary_ja") {
         body.push_str(&format!("<p>{}</p>", escape(&summary)));
     }
@@ -231,6 +233,34 @@ fn report_summary(r: &Report) -> String {
     }
 }
 
+/// 推薦点の補正の内訳（例：`推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
+fn adjustments(d: &ArticleDetail, page: &Page) -> String {
+    use crate::recommend::FeatureKind;
+    let (Some(score), Some(llm)) = (d.item.score, d.item.llm_score) else {
+        return String::new();
+    };
+    if d.adjustments.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = d
+        .adjustments
+        .iter()
+        .map(|(f, points)| {
+            let (kind, name) = match f.kind {
+                FeatureKind::Topic => ("トピック", f.key.as_str()),
+                FeatureKind::Source => ("ソース", page.source(&f.key)),
+                FeatureKind::Interest => ("関心分野", f.key.as_str()),
+                FeatureKind::Exclude => ("推薦しない話題", f.key.as_str()),
+            };
+            format!("{kind} {} {points:+}", escape(name))
+        })
+        .collect();
+    format!(
+        "<p class=\"meta\">推薦点 {score}（LLM {llm}）：{}</p>",
+        parts.join("、")
+    )
+}
+
 fn translation_section(d: &ArticleDetail, view: DetailView) -> String {
     let id = d.item.article_id;
     if view.show_translation {
@@ -355,6 +385,44 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    /// 推薦点が LLM の点数と違えば、補正の内訳（効いた特徴と、動かした点数）を出す。
+    #[test]
+    fn detail_page_explains_the_recommended_score() {
+        use crate::recommend::{Feature, FeatureKind};
+        let mut d = detail();
+        d.item.score = Some(81);
+        d.item.llm_score = Some(72);
+        d.adjustments = vec![
+            (
+                Feature {
+                    kind: FeatureKind::Interest,
+                    key: "燃料".into(),
+                },
+                6,
+            ),
+            (
+                Feature {
+                    kind: FeatureKind::Source,
+                    key: "wnn".into(),
+                },
+                3,
+            ),
+        ];
+        let labels = SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
+        let page = Page {
+            labels: &labels,
+            ..Page::default()
+        };
+        let html = detail_page(&d, &Notes::default(), DetailView::default(), &page);
+        assert!(
+            html.contains("推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3"),
+            "{html}"
+        );
+        // 補正が無ければ出さない
+        let html = detail_page(&detail(), &Notes::default(), DetailView::default(), &page);
+        assert!(!html.contains("推薦点"), "{html}");
     }
 
     /// ブックマーク済みなら、同じボタンで外す。

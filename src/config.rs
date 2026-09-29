@@ -41,7 +41,10 @@ pub struct Config {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecommendConfig {
-    /// 補正の正則化の強さ。大きいほど LLM の点数に近いまま（評価が多くないと補正が効かない）
+    /// 補正の正則化の強さ。大きいほど LLM の点数に近いまま。ある特徴の補正が半分の強さに達するのは、その特徴の
+    /// 評価がおよそ「強さ ÷ p(1−p)」件（p は LLM 点を確率とみなした値。50 点付近で強さの 4 倍）そろったとき。
+    /// 1 件の評価は記事の特徴（ソース・トピック・関心分野など）のすべてに効くので、既定の 20 では、評価 1 件で
+    /// 特徴を共有する記事が動くのは数点に収まる
     pub prior_strength: f64,
 }
 
@@ -61,7 +64,7 @@ impl RecommendConfig {
 impl Default for RecommendConfig {
     fn default() -> Self {
         Self {
-            prior_strength: 1.0,
+            prior_strength: 20.0,
         }
     }
 }
@@ -745,7 +748,10 @@ mod tests {
     /// 推薦点の補正の強さ。既定は 1.0 で、正の有限値だけを受け付ける（∞ や 0 では学習できない）。
     #[test]
     fn reads_the_recommend_prior_strength() {
-        assert_eq!(parse_config("", p()).unwrap().recommend.prior_strength, 1.0);
+        assert_eq!(
+            parse_config("", p()).unwrap().recommend.prior_strength,
+            20.0
+        );
         let c = parse_config("[recommend]\nprior_strength = 2.5\n", p()).unwrap();
         assert_eq!(c.recommend.prior_strength, 2.5);
         for text in [

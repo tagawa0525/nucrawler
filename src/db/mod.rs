@@ -10,6 +10,7 @@ mod claims;
 mod eval;
 mod notes;
 mod read;
+mod recommend;
 mod redo;
 mod score;
 mod signals;
@@ -117,6 +118,11 @@ const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct Db {
     conn: Connection,
+    /// 推薦点の補正の正則化の強さ（`[recommend] prior_strength`）
+    prior_strength: f64,
+    /// 学習した推薦点のモデル（`recommend::ModelCache`）。読み出しのたびに学習し直さないよう、
+    /// 学習の材料が変わるまで使い回す
+    recommend: std::cell::RefCell<Option<recommend::ModelCache>>,
 }
 
 /// DB に書く時刻の書式。SQL の `NOW` と同じく UTC・ミリ秒・'Z' に揃え、文字列の大小で比較できるようにする。
@@ -140,7 +146,23 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
         migrate(&mut conn)?;
-        Ok(Self { conn })
+        recommend::register_functions(&conn)?;
+        Ok(Self {
+            conn,
+            prior_strength: crate::config::RecommendConfig::default().prior_strength,
+            recommend: std::cell::RefCell::new(None),
+        })
+    }
+
+    /// 推薦点の補正の正則化の強さ（`[recommend] prior_strength`。正の有限値）を設定する。
+    pub fn with_prior_strength(mut self, prior_strength: f64) -> Self {
+        assert!(
+            prior_strength.is_finite() && prior_strength > 0.0,
+            "prior_strength must be positive and finite"
+        );
+        self.prior_strength = prior_strength;
+        self.recommend = std::cell::RefCell::new(None);
+        self
     }
 
     pub fn schema_version(&self) -> Result<i64, DbError> {

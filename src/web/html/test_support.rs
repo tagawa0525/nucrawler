@@ -16,6 +16,7 @@ pub(super) fn item(id: i64, fetched_at: &str) -> ListItem {
         summary_ja: Some("要約<b>".into()),
         lwr_relevant: Some(true),
         score: Some(80),
+        llm_score: Some(80),
         reason: Some("理由".into()),
         matched: Vec::new(),
         excluded: Vec::new(),
@@ -47,6 +48,7 @@ pub(super) fn detail() -> ArticleDetail {
         digests: vec![digest(11, "opus", "新版"), digest(10, "sonnet", "旧版")],
         translations: vec![],
         has_body: true,
+        adjustments: Vec::new(),
     }
 }
 

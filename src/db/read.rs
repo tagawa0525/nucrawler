@@ -16,8 +16,11 @@ pub struct ListItem {
     pub title_ja: Option<String>,
     pub summary_ja: Option<String>,
     pub lwr_relevant: Option<bool>,
-    /// 現在のプロファイルでの点数（最新の digest に付いたもの）
+    /// 推薦点：現在のプロファイルでの LLM の点数（最新の digest に付いたもの）に、評価から学んだ補正を
+    /// 足した点数（`crate::recommend`）。並び・閾値はこれで決める
     pub score: Option<u8>,
+    /// 補正の前の LLM の点数
+    pub llm_score: Option<u8>,
     pub reason: Option<String>,
     /// その点数が当たった関心分野（プロファイルの interest の topic）
     pub matched: Vec<String>,
@@ -116,6 +119,8 @@ pub struct ArticleDetail {
     pub translations: Vec<ArtifactVersion>,
     /// 和訳の依頼に使える公開の本文がある
     pub has_body: bool,
+    /// 推薦点の補正の内訳：効いた特徴と、その特徴が無かったときから動かした点数（大きい順）
+    pub adjustments: Vec<(crate::recommend::Feature, i32)>,
 }
 
 impl ArticleDetail {
@@ -211,7 +216,7 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.bookmarked = 1");
         }
         if let Some(min) = q.min_score {
-            f.rows.push_str(" AND s.score >= :min_score");
+            f.rows.push_str(" AND rows.rec >= :min_score");
             f.params.push((":min_score".into(), Box::new(min)));
         }
         f
@@ -397,11 +402,36 @@ impl Db {
         let has_body = !self
             .public_contents(article_id, ContentSet::Body)?
             .is_empty();
+        let digests = self.versions(user_id, article_id, ArtifactKind::Digest)?;
+        // 補正の内訳は、一覧と同じ特徴（採点した最新の digest のトピック）で求める
+        let adjustments = match item.llm_score {
+            Some(llm) => {
+                let topics: Vec<String> = digests
+                    .first()
+                    .and_then(|d| d.payload["topics"].as_array())
+                    .map(|t| {
+                        t.iter()
+                            .filter_map(|t| t.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let features = crate::recommend::features(
+                    &item.source_id,
+                    &topics,
+                    &item.matched,
+                    &item.excluded,
+                );
+                self.recommend_model(user_id, profile_hash)?
+                    .contributions(llm, &features)
+            }
+            None => Vec::new(),
+        };
         Ok(Some(ArticleDetail {
-            digests: self.versions(user_id, article_id, ArtifactKind::Digest)?,
+            digests,
             translations: self.versions(user_id, article_id, ArtifactKind::Translation)?,
             item,
             has_body,
+            adjustments,
         }))
     }
 
@@ -529,11 +559,12 @@ impl Db {
         profile_hash: Option<&str>,
         scope: ItemScope,
     ) -> Result<Vec<ListItem>, DbError> {
-        const BY_SCORE: &str = "s.score IS NULL, s.score DESC, rows.at DESC, rows.id DESC";
+        // 並び・閾値は推薦点（rows.rec）で決める
+        const BY_SCORE: &str = "rows.rec IS NULL, rows.rec DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
         let list_filter = match scope {
             ItemScope::Explore { .. } => {
-                "AND rows.relevant = 1 AND s.score < :min
+                "AND rows.relevant = 1 AND rows.rec < :min
                  AND rows.rating IS NULL AND rows.read_at IS NULL
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
@@ -632,30 +663,39 @@ impl Db {
                          ORDER BY m.name)) AS locked_by
                FROM items AS i
                LEFT JOIN artifacts AS d ON d.id = i.digest_id
+             ),
+             scored AS (
+               SELECT rows.*, {rec} AS rec
+               FROM rows
+               LEFT JOIN scores AS s ON s.id = rows.score_id
              )
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
-                    s.score, s.reason, rows.read_at, rows.rating, rows.has_translation,
+                    rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
                     rows.requested, rows.locked_by, rows.bookmarked,
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
                        WHERE score_id = s.id AND kind = 'interest' ORDER BY topic)) AS matched,
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
-                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded
-             FROM rows
+                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded,
+                    s.score
+             FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では評価 1〜2、非軽水炉、未採点、閾値未満を隠す
              WHERE (:all = 1
                 OR ((rows.rating IS NULL OR rows.rating > 2)
-                    AND rows.relevant = 1 AND s.score >= :min))
+                    AND rows.relevant = 1 AND rows.rec >= :min))
                {rows_filter}
                {list_filter}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
             viewable_t = viewable("t"),
+            rec = super::recommend::recommend_score_sql(),
         );
+        let model = self.recommend_model(user_id, profile_hash)?;
+        let weights = model.weights_json();
         let mut stmt = self.conn.prepare(&sql)?;
         let since = since.map(timestamp);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -667,6 +707,7 @@ impl Db {
             (":all", &show_all),
             (":min", &min_score),
             (":limit", &limit),
+            (":rec_weights", &weights),
         ];
         params.extend(
             filter_params
@@ -686,6 +727,7 @@ impl Db {
                 summary_ja: r.get(8)?,
                 lwr_relevant: r.get(9)?,
                 score: r.get(10)?,
+                llm_score: r.get(20)?,
                 reason: r.get(11)?,
                 matched: Vec::new(),
                 excluded: Vec::new(),
@@ -805,8 +847,10 @@ mod tests {
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
+        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は LLM の点数から少し下がる
+        assert!(h.score.is_some_and(|s| s < 90), "{h:?}");
         assert_eq!(
-            (h.score, h.title_ja.as_deref(), h.read_at.as_deref()),
+            (h.llm_score, h.title_ja.as_deref(), h.read_at.as_deref()),
             (Some(90), Some("題"), None)
         );
     }

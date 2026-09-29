@@ -316,13 +316,25 @@ pub(super) fn matches(i: &ListItem) -> String {
     matched.chain(excluded).collect()
 }
 
+/// 推薦点の印。LLM の点数と違えば、title に LLM の点数と補正を出す（例：`LLM 72・補正 +9`）。
+pub(super) fn score_badge(i: &ListItem) -> String {
+    let Some(score) = i.score else {
+        return String::new();
+    };
+    match i.llm_score.filter(|llm| *llm != score) {
+        Some(llm) => format!(
+            "<span class=\"score\" title=\"LLM {llm}・補正 {:+}\">{score}</span>",
+            i32::from(score) - i32::from(llm)
+        ),
+        None => format!("<span class=\"score\">{score}</span>"),
+    }
+}
+
 /// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
 /// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
-    let score = i
-        .score
-        .map_or_else(String::new, |s| format!("<span class=\"score\">{s}</span>"));
+    let score = score_badge(i);
     let lock = if i.locked_by.is_empty() {
         String::new()
     } else {
@@ -814,6 +826,29 @@ mod tests {
         assert!(html.contains("data-id=\"9\""), "{html}");
         let none = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(!none.contains("確認枠"), "{none}");
+    }
+
+    /// 推薦点が LLM の点数と違えば、点数の title に LLM の点数と補正を出す。
+    #[test]
+    fn card_shows_the_llm_score_behind_the_recommended_score() {
+        let mut adjusted = item(1, "2026-09-27T05:00:00.000Z");
+        adjusted.score = Some(81);
+        adjusted.llm_score = Some(72);
+        let html = card(&adjusted, false, &Page::default());
+        assert!(
+            html.contains(r#"<span class="score" title="LLM 72・補正 +9">81</span>"#),
+            "{html}"
+        );
+        let mut lowered = adjusted.clone();
+        lowered.score = Some(60);
+        let html = card(&lowered, false, &Page::default());
+        assert!(html.contains(r#"title="LLM 72・補正 -12""#), "{html}");
+        let html = card(
+            &item(2, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(html.contains(r#"<span class="score">80</span>"#), "{html}");
     }
 
     #[test]

@@ -407,6 +407,23 @@ mod tests {
             }),
             SearchError::InvalidSort("old".into())
         );
+        // 評価なしと ★N 以上は同時には成り立たない
+        assert_eq!(
+            err(Params {
+                unrated: true,
+                min_rating: "4".into(),
+                ..Params::default()
+            }),
+            SearchError::ConflictingRating
+        );
+    }
+
+    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、空は絞らない。
+    #[test]
+    fn reads_the_bar_rating() {
+        assert!(Params::from_query("rating=0").unrated);
+        assert_eq!(Params::from_query("rating=4").min_rating, "4");
+        assert_eq!(Params::from_query("rating="), Params::default());
     }
 
     #[test]

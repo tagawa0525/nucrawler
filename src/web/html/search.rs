@@ -314,10 +314,39 @@ mod tests {
             bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマークだけ表示：OFF""#),
             "{bar}"
         );
-        // JavaScript が無いときは、選択と一緒にほかの条件を送る
+        // JavaScript が無いときは、選択を検索の欄で送り、ほかの条件を hidden で送る（選択で置き換わる条件は送らない）
         assert!(
             bar.contains(r#"<input type="hidden" name="q" value="炉心">"#),
             "{bar}"
+        );
+        let min_form = bar.split(r#"<form class="min on""#).nth(1).unwrap();
+        let min_form = min_form.split("</form>").next().unwrap();
+        assert!(
+            min_form.contains(r#"<select name="min_score""#),
+            "{min_form}"
+        );
+        assert!(
+            !min_form.contains(r#"type="hidden" name="min_score""#),
+            "{min_form}"
+        );
+        assert!(
+            min_form.contains(r#"type="hidden" name="min_rating" value="4""#),
+            "{min_form}"
+        );
+        let stars_form = bar.split(r#"<form class="stars on""#).nth(1).unwrap();
+        let stars_form = stars_form.split("</form>").next().unwrap();
+        assert!(
+            stars_form.contains(r#"<select name="rating""#),
+            "{stars_form}"
+        );
+        assert!(
+            !stars_form.contains(r#"name="min_rating""#)
+                && !stars_form.contains(r#"name="unrated""#),
+            "{stars_form}"
+        );
+        assert!(
+            stars_form.contains(r#"type="hidden" name="min_score" value="60""#),
+            "{stars_form}"
         );
         // フォームには重ねず、送るときにバーの条件を引き継ぐ
         let form = html

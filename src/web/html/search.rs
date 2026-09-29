@@ -1,6 +1,83 @@
 //! 検索の画面。
 
+use super::list::BarView;
 use super::*;
+
+/// 検索の画面の上部のバーが指す検索。点数・評価・既読・ブックマークはバーの条件で、変えるとほかの条件は
+/// そのままに検索し直す。既読は既定で出し（👁 が ON）、OFF で未読だけ（`unread=1`）。評価の ☆ は評価の無い記事だけ。
+#[derive(Clone)]
+struct SearchView(Params);
+
+impl SearchView {
+    fn with(&self, change: impl FnOnce(&mut Params)) -> Self {
+        let mut p = self.0.clone();
+        change(&mut p);
+        Self(p)
+    }
+}
+
+impl BarView for SearchView {
+    fn action(&self) -> &'static str {
+        "/search"
+    }
+    fn bar_url(&self) -> String {
+        match self.0.query_string() {
+            q if q.is_empty() => "/search".to_string(),
+            q => format!("/search?{q}"),
+        }
+    }
+    fn min(&self) -> u8 {
+        // 検索の条件と同じく、前後の空白を除いて読む
+        self.0.min_score.trim().parse().unwrap_or(0)
+    }
+    fn extra_min(&self) -> Option<u8> {
+        None
+    }
+    fn rating(&self) -> Option<u8> {
+        if self.0.unrated {
+            Some(0)
+        } else {
+            self.0.min_rating.trim().parse().ok()
+        }
+    }
+    fn read(&self) -> bool {
+        !self.0.unread
+    }
+    fn bookmarked(&self) -> bool {
+        self.0.bookmarked
+    }
+    fn with_min(&self, min: u8) -> Self {
+        self.with(|p| {
+            p.min_score = if min == 0 {
+                String::new()
+            } else {
+                min.to_string()
+            }
+        })
+    }
+    fn with_rating(&self, rating: Option<u8>) -> Self {
+        self.with(|p| {
+            p.unrated = rating == Some(0);
+            p.min_rating = rating
+                .filter(|r| *r > 0)
+                .map(|r| r.to_string())
+                .unwrap_or_default();
+        })
+    }
+    fn with_read(&self, read: bool) -> Self {
+        self.with(|p| p.unread = !read)
+    }
+    fn with_bookmarked(&self, bookmarked: bool) -> Self {
+        self.with(|p| p.bookmarked = bookmarked)
+    }
+    fn min_name(&self) -> &'static str {
+        "min_score"
+    }
+    /// 評価の選択（`rating`、検索の条件の読み取りで min_rating・unrated にする）で置き換わる
+    fn rating_replaces(&self) -> &'static [&'static str] {
+        &["min_rating", "unrated"]
+    }
+}
 
 /// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。
 /// トピックの選択肢は要約に付いている語だけを、軸ごとに付いている数の多い順に並べる。
@@ -11,8 +88,8 @@ pub fn search_page(
     error: Option<&str>,
     page: &Page,
 ) -> String {
-    // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）
-    let mut body = super::list::home_bar(page);
+    // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）で、点数・評価・既読・ブックマークの検索の条件を持つ
+    let mut body = super::list::bar(&SearchView(params.clone()), true);
     body.push_str("<h1>検索</h1>");
     if let Some(error) = error {
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
@@ -28,6 +105,33 @@ pub fn search_page(
         }
     }
     layout("検索", page, &body)
+}
+
+/// 上部のバーの条件（点数・評価・評価なし・未読・ブックマーク）を、フォームで送るための hidden の入力にする。
+fn hidden_bar_conditions(p: &Params) -> String {
+    let flags = [
+        ("unread", p.unread),
+        ("bookmarked", p.bookmarked),
+        ("unrated", p.unrated),
+    ];
+    let texts = [("min_rating", &p.min_rating), ("min_score", &p.min_score)];
+    flags
+        .into_iter()
+        .filter(|(_, on)| *on)
+        .map(|(name, _)| (name, "1".to_string()))
+        .chain(
+            texts
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(name, v)| (name, v.clone())),
+        )
+        .map(|(name, value)| {
+            format!(
+                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                escape(&value)
+            )
+        })
+        .collect()
 }
 
 fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
@@ -99,7 +203,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
          <details{topics_open}><summary>トピック</summary>{topics}</details>\
          <details{sources_open}><summary>ソース</summary>{sources}</details>\
          <p>言語 {lang} 並び {sort}</p>\
-         <p>{translated}{unread}{bookmarked}{unrated}評価 {min_rating} 最低点 {min_score}</p>\
+         <p>{translated}</p>{bar_conditions}\
          <p><button type=\"submit\">検索</button></p></form>",
         q = text(
             "q",
@@ -123,26 +227,8 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
             &[("newest", "新しい順"), ("score", "点数順")]
         ),
         translated = checkbox("translated", "1", p.translated, "和訳あり"),
-        unread = checkbox("unread", "1", p.unread, "未読"),
-        bookmarked = checkbox("bookmarked", "1", p.bookmarked, "🔖"),
-        unrated = checkbox("unrated", "1", p.unrated, "評価なし"),
-        min_rating = select(
-            "min_rating",
-            &p.min_rating,
-            &[
-                ("", "問わない"),
-                ("5", "★5"),
-                ("4", "★4 以上"),
-                ("3", "★3 以上"),
-                ("2", "★2 以上"),
-                ("1", "★1 以上"),
-            ]
-        ),
-        min_score = text(
-            "min_score",
-            &p.min_score,
-            " type=\"number\" min=\"0\" max=\"100\" size=\"3\""
-        ),
+        // 点数・評価・既読・ブックマークは上部のバーの条件なので、フォームで送るときは hidden で引き継ぐ
+        bar_conditions = hidden_bar_conditions(p),
     )
 }
 
@@ -181,26 +267,130 @@ mod tests {
     /// 検索の画面にも一覧と同じ上部のバーを出す。先頭は 🔍 ではなく、一覧へ戻る 🏠。
     #[test]
     fn search_page_shows_the_list_bar_with_home() {
-        let page = Page {
-            default_min: 60,
-            ..Page::default()
-        };
-        let html = search_page(&Params::default(), None, &[], None, &page);
+        let html = search_page(&Params::default(), None, &[], None, &Page::default());
         assert!(
             html.contains(r#"<nav class="bar"><a class="btn" href="/" aria-label="ホーム" title="ホーム">🏠</a>"#),
             "{html}"
         );
         assert!(!html.contains(r#"aria-label="検索""#), "{html}");
         assert!(!html.contains("一覧へ"), "{html}");
-        // バーは一覧の既定（設定の最低点）を指す
-        assert!(
-            html.contains(r#"<option value="60" data-href="/" selected>60</option>"#),
-            "{html}"
-        );
         assert!(
             html.contains(r#"name="rating""#) && html.contains("既読も表示"),
             "{html}"
         );
+    }
+
+    /// バーは、検索と同じく前後の空白を除いた値を読む（検索の条件とバーの表示を合わせる）。
+    #[test]
+    fn search_bar_reads_trimmed_values() {
+        let params = Params::from_query("min_score=%2060%20&min_rating=%204");
+        let html = search_page(&params, Some(&[]), &[], None, &Page::default());
+        let bar = html.split("</nav>").next().unwrap();
+        assert!(bar.contains(r#"selected>60</option>"#), "{bar}");
+        assert!(bar.contains(r#"selected>★4</option>"#), "{bar}");
+    }
+
+    /// 検索の画面のバーは、点数・評価・既読・ブックマークの検索の条件を持つ（フォームには重ねない）。
+    /// バーを変えるとほかの条件はそのままに検索し直し、フォームで送るときはバーの条件を引き継ぐ。
+    /// 👁 は既定で ON（既読も出す）、OFF で未読だけ。評価の ☆ は評価の無い記事だけ。
+    #[test]
+    fn search_bar_holds_the_mark_conditions() {
+        let params = Params {
+            q: "炉心".into(),
+            unread: true,
+            min_rating: "4".into(),
+            min_score: "60".into(),
+            ..Params::default()
+        };
+        let html = search_page(&params, Some(&[]), &[], None, &Page::default());
+        let bar = html.split("</nav>").next().unwrap();
+        assert!(
+            bar.contains(r#"<form class="min on" method="get" action="/search">"#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<option value="60" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=4&amp;min_score=60" selected>60</option>"#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=4" data-closed="00">-</option>"#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<option value="3" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=3&amp;min_score=60">★3</option>"#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;unrated=1&amp;min_score=60">☆</option>"#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読も表示：OFF""#),
+            "{bar}"
+        );
+        assert!(
+            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマークだけ表示：OFF""#),
+            "{bar}"
+        );
+        // JavaScript が無いときは、選択を検索の欄で送り、ほかの条件を hidden で送る（選択で置き換わる条件は送らない）
+        assert!(
+            bar.contains(r#"<input type="hidden" name="q" value="炉心">"#),
+            "{bar}"
+        );
+        let min_form = bar.split(r#"<form class="min on""#).nth(1).unwrap();
+        let min_form = min_form.split("</form>").next().unwrap();
+        assert!(
+            min_form.contains(r#"<select name="min_score""#),
+            "{min_form}"
+        );
+        assert!(
+            !min_form.contains(r#"type="hidden" name="min_score""#),
+            "{min_form}"
+        );
+        assert!(
+            min_form.contains(r#"type="hidden" name="min_rating" value="4""#),
+            "{min_form}"
+        );
+        let stars_form = bar.split(r#"<form class="stars on""#).nth(1).unwrap();
+        let stars_form = stars_form.split("</form>").next().unwrap();
+        assert!(
+            stars_form.contains(r#"<select name="rating""#),
+            "{stars_form}"
+        );
+        assert!(
+            !stars_form.contains(r#"name="min_rating""#)
+                && !stars_form.contains(r#"name="unrated""#),
+            "{stars_form}"
+        );
+        assert!(
+            stars_form.contains(r#"type="hidden" name="min_score" value="60""#),
+            "{stars_form}"
+        );
+        // フォームには重ねず、送るときにバーの条件を引き継ぐ
+        let form = html
+            .split(r#"<form method="get" action="/search">"#)
+            .nth(1)
+            .unwrap();
+        let form = form.split("</form>").next().unwrap();
+        for name in ["unread", "bookmarked", "unrated", "min_rating", "min_score"] {
+            assert!(
+                !form.contains(&format!(r#"name="{name}" value="1" checked"#))
+                    && !form.contains(&format!(r#"<select name="{name}""#))
+                    && !form.contains(&format!(r#"name="{name}" value="" "#)),
+                "{name}: {form}"
+            );
+        }
+        for (name, value) in [("unread", "1"), ("min_rating", "4"), ("min_score", "60")] {
+            assert!(
+                form.contains(&format!(
+                    r#"<input type="hidden" name="{name}" value="{value}">"#
+                )),
+                "{name}: {form}"
+            );
+        }
+        assert!(!form.contains(r#"name="bookmarked""#), "{form}");
+        // 和訳ありはバーに無いのでフォームに残す
+        assert!(form.contains(r#"name="translated" value="1">"#), "{form}");
     }
 
     #[test]
@@ -264,25 +454,22 @@ mod tests {
         );
         assert!(html.contains("原子力規制委員会"), "{html}");
         assert!(html.contains(r#"<option value="ja" selected>"#), "{html}");
-        assert!(
-            html.contains(r#"name="unread" value="1" checked"#),
-            "{html}"
-        );
         assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
-        assert!(
-            html.contains(r#"name="bookmarked" value="1" checked"#),
-            "{html}"
-        );
-        // 評価の無い記事だけ（一覧の評価の選択の ☆ と同じ）
-        assert!(
-            html.contains(r#"name="unrated" value="1" checked"#),
-            "{html}"
-        );
-        assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
-        assert!(
-            html.contains(r#"<option value="4" selected>★4 以上</option>"#),
-            "{html}"
-        );
+        // 未読・ブックマーク・評価・評価なし・最低点はバーの条件で、フォームは hidden で引き継ぐ
+        for (name, value) in [
+            ("unread", "1"),
+            ("bookmarked", "1"),
+            ("unrated", "1"),
+            ("min_rating", "4"),
+            ("min_score", "60"),
+        ] {
+            assert!(
+                html.contains(&format!(
+                    r#"<input type="hidden" name="{name}" value="{value}">"#
+                )),
+                "{name}: {html}"
+            );
+        }
         assert!(!html.contains(r#"name="liked""#), "{html}");
         assert!(
             html.contains(r#"<option value="score" selected>"#),

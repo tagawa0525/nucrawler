@@ -18,6 +18,8 @@ pub enum SearchError {
     InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
+    #[error("unrated and min_rating cannot be combined")]
+    ConflictingRating,
 }
 
 /// 検索画面・JSON API・CLI の条件。名前はクエリ文字列のキーと同じ（`topic` と `source` は繰り返せる）。
@@ -60,12 +62,64 @@ impl Params {
                 "bookmarked" => p.bookmarked = value == "1",
                 "unrated" => p.unrated = value == "1",
                 "min_rating" => p.min_rating = value,
+                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、空は絞らない
+                "rating" => match value.as_str() {
+                    "" => {}
+                    "0" => p.unrated = true,
+                    _ => p.min_rating = value,
+                },
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
                 _ => {}
             }
         }
         p
+    }
+
+    /// クエリ文字列（`?` を除く）に戻す。空の条件は付けない（`from_query` で読み直すと同じ条件になる）。
+    pub fn query_string(&self) -> String {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        let texts = [
+            ("q", &self.q),
+            ("since", &self.since),
+            ("until", &self.until),
+        ];
+        for (key, value) in texts {
+            if !value.is_empty() {
+                q.append_pair(key, value);
+            }
+        }
+        for topic in &self.topics {
+            q.append_pair("topic", topic);
+        }
+        for source in &self.sources {
+            q.append_pair("source", source);
+        }
+        if !self.lang.is_empty() {
+            q.append_pair("lang", &self.lang);
+        }
+        let flags = [
+            ("translated", self.translated),
+            ("unread", self.unread),
+            ("bookmarked", self.bookmarked),
+            ("unrated", self.unrated),
+        ];
+        for (key, on) in flags {
+            if on {
+                q.append_pair(key, "1");
+            }
+        }
+        let rest = [
+            ("min_rating", &self.min_rating),
+            ("min_score", &self.min_score),
+            ("sort", &self.sort),
+        ];
+        for (key, value) in rest {
+            if !value.is_empty() {
+                q.append_pair(key, value);
+            }
+        }
+        q.finish()
     }
 
     /// 条件が 1 つも無い（検索画面では結果を出さず、フォームだけを出す）。並びは条件に数えない。
@@ -105,7 +159,9 @@ impl Params {
                     .filter(|score| *score <= 100)
                     .ok_or_else(|| SearchError::InvalidScore(v.to_string()))
             })
-            .transpose()?;
+            .transpose()?
+            // 0 は一覧の 00 と同じく点数で絞らない（未採点も出す）
+            .filter(|score| *score > 0);
         let min_rating = given(&self.min_rating)
             .map(|v| {
                 v.parse::<u8>()
@@ -114,6 +170,10 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
             })
             .transpose()?;
+        // 評価の無い記事と ★N 以上の記事は重ならないので、両方は指定できない
+        if self.unrated && min_rating.is_some() {
+            return Err(SearchError::ConflictingRating);
+        }
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -249,6 +309,25 @@ mod tests {
         );
     }
 
+    /// 条件をクエリ文字列に戻す（検索の画面のバーの行き先）。空の条件は付けず、読み直すと同じ条件になる。
+    #[test]
+    fn writes_params_back_to_a_query_string() {
+        let p = Params {
+            q: "炉心 NRC".into(),
+            topics: vec!["燃料".into(), "PWR".into()],
+            unread: true,
+            min_rating: "4".into(),
+            min_score: "60".into(),
+            ..Params::default()
+        };
+        assert_eq!(
+            p.query_string(),
+            "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&unread=1&min_rating=4&min_score=60"
+        );
+        assert_eq!(Params::from_query(&p.query_string()), p);
+        assert_eq!(Params::default().query_string(), "");
+    }
+
     #[test]
     fn builds_a_search_query() {
         let p = Params {
@@ -261,7 +340,7 @@ mod tests {
             translated: true,
             unread: true,
             bookmarked: true,
-            unrated: true,
+            unrated: false,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -274,12 +353,23 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.unread && q.bookmarked && q.unrated);
+        assert!(q.translated && q.unread && q.bookmarked && !q.unrated);
+        let unrated = Params {
+            unrated: true,
+            ..Params::default()
+        };
+        assert!(unrated.to_query(7, None, 30).unwrap().unrated);
         assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert_eq!(q.hide_below, None, "search shows what the list hides");
 
+        // 最低点 0 は、一覧の 00 と同じく点数で絞らない（未採点も出す）
+        let zero = Params {
+            min_score: "0".into(),
+            ..Params::default()
+        };
+        assert_eq!(zero.to_query(7, None, 30).unwrap().min_score, None);
         let empty = Params::default().to_query(7, None, 30).unwrap();
         assert!(empty.terms.is_empty() && empty.since.is_none() && empty.until.is_none());
         assert_eq!(
@@ -342,6 +432,23 @@ mod tests {
             }),
             SearchError::InvalidSort("old".into())
         );
+        // 評価なしと ★N 以上は同時には成り立たない
+        assert_eq!(
+            err(Params {
+                unrated: true,
+                min_rating: "4".into(),
+                ..Params::default()
+            }),
+            SearchError::ConflictingRating
+        );
+    }
+
+    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、空は絞らない。
+    #[test]
+    fn reads_the_bar_rating() {
+        assert!(Params::from_query("rating=0").unrated);
+        assert_eq!(Params::from_query("rating=4").min_rating, "4");
+        assert_eq!(Params::from_query("rating="), Params::default());
     }
 
     #[test]

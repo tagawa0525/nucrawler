@@ -54,8 +54,13 @@ pub(super) struct ListParams {
 
 impl ListParams {
     pub(super) fn min(&self, web: &WebConfig) -> Result<u8, AppError> {
+        self.min_or(web.min_score)
+    }
+
+    /// 表示する最低点。無ければ `default`。
+    fn min_or(&self, default: u8) -> Result<u8, AppError> {
         match self.min.as_deref() {
-            None => Ok(web.min_score),
+            None => Ok(default),
             Some(v) => v
                 .parse()
                 .ok()
@@ -70,9 +75,10 @@ impl ListParams {
             Some(v) => v
                 .parse()
                 .ok()
-                .filter(|r| (1..=5).contains(r))
+                // 0 は評価の無い記事だけ
+                .filter(|r| (0..=5).contains(r))
                 .map(Some)
-                .ok_or(AppError::BadRequest("rating must be 1..=5")),
+                .ok_or(AppError::BadRequest("rating must be 0..=5")),
         }
     }
 }
@@ -82,14 +88,25 @@ pub(super) async fn list(
     Query(params): Query<ListParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
-    let min = params.min(&state.web)?;
     let rating = params.rating()?;
     let bookmarked = params.bookmarked.as_deref() == Some("1");
+    let filtering = rating.is_some() || bookmarked;
+    // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
+    // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
+    let leaving = params.rating.as_deref() == Some("") && !filtering;
+    let carried = |value: Option<&str>| value.filter(|_| !leaving).map(str::to_string);
+    let params = ListParams {
+        min: carried(params.min.as_deref()),
+        read: carried(params.read.as_deref()),
+        ..params
+    };
+    // 最低点の既定は、一覧では設定の最低点、絞り込みでは 0（点数で絞らない）
+    let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
     // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す
     let show_read = match params.read.as_deref() {
         Some("1") => true,
         Some("0") => false,
-        _ => rating.is_some() || bookmarked,
+        _ => filtering,
     };
     let view = html::ListView {
         min,
@@ -98,8 +115,8 @@ pub(super) async fn list(
         rating,
         bookmarked,
     };
-    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。選択のフォームは
-    // 値を選べないので、👍 を「👍」に戻すと `rating=` や絞り込みの `read=0` が残る
+    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。JavaScript が無いときの
+    // 選択のフォームは、評価の「★」（絞らない）で `rating=` や、絞り込みを外したときの `read=0` を残す
     let canonical = view.url();
     let requested = match raw.as_deref() {
         None | Some("") => "/".to_string(),
@@ -169,9 +186,19 @@ fn filtered(
     view: html::ListView,
 ) -> Result<String, AppError> {
     let params = Params {
-        min_rating: view.rating.map(|r| r.to_string()).unwrap_or_default(),
+        min_rating: view
+            .rating
+            .filter(|r| *r > 0)
+            .map(|r| r.to_string())
+            .unwrap_or_default(),
+        unrated: view.rating == Some(0),
         bookmarked: view.bookmarked,
         unread: !view.read,
+        min_score: if view.min > 0 {
+            view.min.to_string()
+        } else {
+            String::new()
+        },
         ..Params::default()
     };
     let query = params
@@ -423,7 +450,7 @@ mod tests {
         );
         assert_eq!(html.matches("四十点").count(), 1, "{html}");
         assert!(
-            html.contains(r#"<option value="30" selected>30</option>"#),
+            html.contains(r#"<option value="30" data-href="/?min=30" selected>30</option>"#),
             "{html}"
         );
         let (_, html) = server.get("/?min=0").await;
@@ -652,12 +679,27 @@ mod tests {
             ("/?min=50", "/"),
             ("/?read=1&min=30", "/?min=30&read=1"),
             ("/?rating=4&read=1", "/?rating=4"),
+            // 絞り込みの最低点の既定は 0（00）
+            ("/?rating=4&min=0", "/?rating=4"),
+            ("/?rating=4&min=60", "/?min=60&rating=4"),
+            // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）を一緒に送るが、
+            // 一覧へ戻るので一覧の既定にする
+            ("/?rating=&min=60", "/"),
+            ("/?rating=&min=0&read=0", "/"),
+            // ブックマークで絞り込んだままなら、絞り込みの条件を引き継ぐ
+            ("/?rating=&min=60&bookmarked=1", "/?min=60&bookmarked=1"),
         ] {
             let res = server.get_raw(from).await;
             assert_eq!(res.status().as_u16(), 303, "{from}");
             assert_eq!(res.headers()["location"], to, "{from}");
         }
-        for canonical in ["/", "/?min=30&read=1", "/?rating=4&read=0&bookmarked=1"] {
+        for canonical in [
+            "/",
+            "/?min=0",
+            "/?min=30&read=1",
+            "/?rating=4&read=0&bookmarked=1",
+            "/?rating=0",
+        ] {
             assert_eq!(
                 server.get_raw(canonical).await.status().as_u16(),
                 200,
@@ -834,6 +876,35 @@ mod tests {
         assert!(html.contains("見出しA"), "{html}");
     }
 
+    /// 絞り込みの「☆」（`rating=0`）は評価の無い記事だけ、最低点（`min`）は絞り込みの中でも効く（既定は絞らない）。
+    #[tokio::test]
+    async fn filtered_list_takes_unrated_and_the_minimum_score() {
+        let db = Db::open_in_memory().unwrap();
+        let (low, digest) = seed(&db, "https://e.com/low", "低い点");
+        score(&db, digest, 20);
+        let (high, digest) = seed(&db, "https://e.com/high", "高い点");
+        score(&db, digest, 80);
+        seed(&db, "https://e.com/none", "評価なし");
+        let server = Server::start(db).await;
+        for id in [low, high] {
+            server
+                .post(&format!("/articles/{id}/rating"), "value=4")
+                .await;
+        }
+        let (_, html) = server.get("/?rating=4").await;
+        assert!(html.contains("低い点") && html.contains("高い点"), "{html}");
+        let (_, html) = server.get("/?min=60&rating=4").await;
+        assert!(
+            !html.contains("低い点") && html.contains("高い点"),
+            "{html}"
+        );
+        let (_, html) = server.get("/?rating=0").await;
+        assert!(
+            html.contains("評価なし") && !html.contains("低い点") && !html.contains("高い点"),
+            "{html}"
+        );
+    }
+
     /// 👍（`rating=N`）と 🔖（`bookmarked=1`）の絞り込みは、一覧の期間・最低点・既読によらず全期間から探す。
     /// 検索と同じく閲覧ではないので、訪問は始めない。
     #[tokio::test]
@@ -881,11 +952,12 @@ mod tests {
             server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             0
         );
-        // 👍 を選び直す（空）と一覧に戻る
+        // 評価の「★」（絞らない）（空）を選ぶと一覧に戻る
         let res = server.get_raw("/?rating=").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");
-        for bad in ["0", "6", "x"] {
+        // 0 は評価の無い記事だけなので誤りではない
+        for bad in ["-1", "6", "x"] {
             let (status, _) = server.get(&format!("/?rating={bad}")).await;
             assert_eq!(status, 400, "{bad}");
         }

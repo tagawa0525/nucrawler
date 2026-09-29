@@ -49,7 +49,7 @@
   const pressed = (card, selector) =>
     card.querySelector(selector)?.getAttribute("aria-pressed") === "true";
   // カードの今の印が、欄（.sections）の条件に合うか。既読を隠す一覧（data-hide-read）では未読、
-  // 評価で絞った画面（data-min-rating）ではその評価以上、ブックマークで絞った画面（data-bookmarked）では
+  // 評価で絞った画面（data-min-rating）ではその評価以上（data-unrated なら評価なし）、ブックマークで絞った画面（data-bookmarked）では
   // ブックマーク中
   const matches = (card) => {
     const f = card.closest(".sections")?.dataset ?? {};
@@ -57,6 +57,7 @@
     if (f.bookmarked && !pressed(card, BOOKMARK)) return false;
     const rating = card.querySelectorAll(".rating button.on").length;
     if (f.minRating && rating < Number(f.minRating)) return false;
+    if (f.unrated && rating > 0) return false;
     return true;
   };
   // 絞った画面の件数（.count）を、出ているカードの数に合わせる

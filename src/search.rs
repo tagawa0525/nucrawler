@@ -33,6 +33,8 @@ pub struct Params {
     pub translated: bool,
     pub unread: bool,
     pub bookmarked: bool,
+    /// 評価の無い記事だけ
+    pub unrated: bool,
     /// この評価（1〜5）以上
     pub min_rating: String,
     pub min_score: String,
@@ -56,6 +58,7 @@ impl Params {
                 "translated" => p.translated = value == "1",
                 "unread" => p.unread = value == "1",
                 "bookmarked" => p.bookmarked = value == "1",
+                "unrated" => p.unrated = value == "1",
                 "min_rating" => p.min_rating = value,
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
@@ -79,7 +82,7 @@ impl Params {
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.unread || self.bookmarked)
+            && !(self.translated || self.unread || self.bookmarked || self.unrated)
     }
 
     /// 検索の条件にする。一覧で隠す記事も含める。
@@ -128,6 +131,7 @@ impl Params {
             translated: self.translated,
             unread: self.unread,
             bookmarked: self.bookmarked,
+            unrated: self.unrated,
             min_rating,
             min_score,
             hide_below: None,
@@ -236,6 +240,9 @@ mod tests {
         assert!(Params::from_query("").is_empty());
         assert!(!Params::from_query("bookmarked=1").is_empty());
         assert!(!Params::from_query("min_rating=4").is_empty());
+        // 評価の無い記事だけ
+        assert!(Params::from_query("unrated=1").unrated);
+        assert!(!Params::from_query("unrated=1").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -254,6 +261,7 @@ mod tests {
             translated: true,
             unread: true,
             bookmarked: true,
+            unrated: true,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -266,7 +274,7 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.unread && q.bookmarked);
+        assert!(q.translated && q.unread && q.bookmarked && q.unrated);
         assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);

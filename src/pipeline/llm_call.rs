@@ -2,9 +2,6 @@
 //! 失敗を「止める理由」に振り分ける。記事ごとの失敗の記録もここにまとめる。
 
 use std::cell::{Cell, RefCell};
-use std::future::Future;
-use std::pin::Pin;
-use std::task::Poll;
 
 use chrono::{DateTime, Utc};
 
@@ -75,41 +72,6 @@ impl<'q> Shared<'q> {
     pub fn stopped(&self) -> bool {
         self.stop.get()
     }
-}
-
-/// `n` 個の作業者を同じタスクの中で同時に回し、すべて終わったら結果を並べて返す。どれかが失敗
-/// したら、その失敗を返す（ほかの作業者は捨てる。予約は drop で外れる）。作業者は `make` に
-/// 番号を渡して作る。
-pub async fn run_workers<T, E, F, Fut>(n: usize, mut make: F) -> Result<Vec<T>, E>
-where
-    F: FnMut(usize) -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-{
-    let mut workers: Vec<Pin<Box<Fut>>> = (0..n.max(1)).map(|i| Box::pin(make(i))).collect();
-    let mut results: Vec<Option<T>> = workers.iter().map(|_| None).collect();
-    std::future::poll_fn(|cx| {
-        let mut pending = false;
-        for (worker, result) in workers.iter_mut().zip(results.iter_mut()) {
-            if result.is_some() {
-                continue;
-            }
-            match worker.as_mut().poll(cx) {
-                Poll::Ready(Ok(value)) => *result = Some(value),
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => pending = true,
-            }
-        }
-        if pending {
-            Poll::Pending
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    })
-    .await?;
-    Ok(results
-        .into_iter()
-        .map(|r| r.expect("every worker finished"))
-        .collect())
 }
 
 /// 呼び出しの枠を取った結果。

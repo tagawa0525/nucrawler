@@ -39,10 +39,11 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
         escape(&title)
     );
     body.push_str(&format!(
-        "<p class=\"meta\">{} ・{} ・<a href=\"{}\">原文</a>{}</p>",
+        // 原文へは、開いたことを記録してから移る（`/articles/{id}/source`）
+        "<p class=\"meta\">{} ・{} ・<a href=\"/articles/{}/source\">原文</a>{}</p>",
         escape(page.source(&i.source_id)),
         crate::jst::format_local(&i.at),
-        escape(&i.url),
+        i.article_id,
         if i.locked_by.is_empty() {
             String::new()
         } else {
@@ -330,10 +331,6 @@ mod tests {
         assert!(
             html.contains(r#"<a href="/articles/7/source">原文</a>"#),
             "{html}"
-        );
-        assert!(
-            html.contains(r#"href="https://e.com/7""#),
-            "link to original"
         );
         assert!(
             html.contains(r#"href="/articles/7?digest=10""#),

@@ -73,6 +73,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/", get(list))
         .route("/articles/{id}", get(detail))
+        .route("/articles/{id}/source", get(source))
         .route("/feed.xml", get(feed))
         .route("/api/articles", get(api_list))
         .route("/api/articles/{id}", get(api_detail))

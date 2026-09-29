@@ -84,6 +84,8 @@ pub enum OpenKind {
     Detail,
     /// 全文和訳を開いた
     Translation,
+    /// 詳細の「原文」のリンクから元の記事を開いた
+    Source,
 }
 
 impl OpenKind {
@@ -91,6 +93,7 @@ impl OpenKind {
         match self {
             Self::Detail => "open_detail",
             Self::Translation => "open_translation",
+            Self::Source => "open_source",
         }
     }
 }

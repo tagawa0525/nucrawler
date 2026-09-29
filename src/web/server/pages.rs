@@ -307,6 +307,24 @@ pub(super) async fn detail(
     Ok(Html(page))
 }
 
+/// 原文へ移る。開いたことを記録してから、元の記事の URL へリダイレクトする。
+pub(super) async fn source(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let url = with_db(&state, move |db| {
+        let (user, hash) = viewer(db)?;
+        let item = db
+            .article_detail(user, hash.as_deref(), id)?
+            .ok_or(AppError::NotFound)?
+            .item;
+        db.record_open(user, id, OpenKind::Source, Utc::now())?;
+        Ok(item.url)
+    })
+    .await?;
+    Ok(Redirect::to(&url).into_response())
+}
+
 pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {

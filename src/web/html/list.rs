@@ -481,16 +481,37 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains(" ★4"), "{html}");
+        // カードの下は 点数・評価・既読・ブックマーク の順（h で既読、l でブックマーク）。
+        // 点数は見出しの左から、この行の先頭に移す
+        let card = html.split(r#"data-id="2""#).nth(1).unwrap();
+        assert!(
+            card.contains(r#"<div class="actions marks"><span class="score">80</span><form method="post" action="/articles/2/rating""#),
+            "{card}"
+        );
+        assert!(
+            card.find("/articles/2/read").unwrap() < card.find("/articles/2/bookmark").unwrap(),
+            "{card}"
+        );
+        assert!(
+            !card.contains(r#"tabindex="0"><span class="score">"#),
+            "{card}"
+        );
     }
 
     #[test]
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
-        // 検索とブックマークの間に、評価で絞る選択を置く
-        let search = html.find(r#"href="/search""#).expect(&html);
-        let liked = html.find(r#"name="rating""#).expect(&html);
-        let bookmarked = html.find(r#"href="/?bookmarked=1""#).expect(&html);
-        assert!(search < liked && liked < bookmarked, "{html}");
+        // バーは 検索・点数・評価・既読・ブックマーク・設定 の順（カードの下の印と同じ並び）
+        let at = |needle: &str| html.find(needle).expect(needle);
+        let order = [
+            at(r#"href="/search""#),
+            at(r#"name="min""#),
+            at(r#"name="rating""#),
+            at(r#"aria-label="既読も表示"#),
+            at(r#"href="/?bookmarked=1""#),
+            at(r#"href="/settings""#),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{html}");
     }
 
     /// 一覧のカードは左右のスワイプで印を付けられる（ブックマーク・既読）。
@@ -595,7 +616,8 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<option value="0" selected>0</option>"#),
+            // 数字の桁をそろえるため、0 は 00 と書く
+            html.contains(r#"<option value="0" selected>00</option>"#),
             "{html}"
         );
         assert!(html.contains(r#"<option value="50">50</option>"#), "{html}");
@@ -667,7 +689,7 @@ mod tests {
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>👍</option><option value="5">★5</option><option value="4">★4↑</option><option value="3">★3↑</option><option value="2">★2↑</option><option value="1">★1↑</option></select>"#
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>☆</option><option value="5">★5</option><option value="4">★4↑</option><option value="3">★3↑</option><option value="2">★2↑</option><option value="1">★1↑</option></select>"#
             ),
             "{html}"
         );

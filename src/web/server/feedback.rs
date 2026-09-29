@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}")
+            format!("/articles/{id}?back=1")
         );
         server.post(&path, "value=5").await;
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
             assert_eq!(res.status().as_u16(), 303, "{mark}");
             assert_eq!(
                 res.headers()["location"].to_str().unwrap(),
-                format!("/articles/{id}")
+                format!("/articles/{id}?back=1")
             );
             assert_eq!(server.count(&format!("SELECT count(*) FROM {table}")), 1);
             assert_eq!(server.post(&path, "on=x").await.status().as_u16(), 400);

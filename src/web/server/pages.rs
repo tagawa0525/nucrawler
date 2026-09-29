@@ -489,6 +489,54 @@ mod tests {
         assert_eq!(server.count("SELECT count(*) FROM reads"), 1);
     }
 
+    /// 書き込み（評価・印・和訳の依頼・指摘・コメント）の後に戻った詳細は、開いたとは数えない。
+    /// 数えると、外した既読が付き直り、開いた記録も戻るたびに増える。
+    #[tokio::test]
+    async fn returning_after_a_write_is_not_an_open() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        add_translation(&db, id);
+        let server = Server::start(db).await;
+        let opens = || server.count("SELECT count(*) FROM events");
+        server.get(&format!("/articles/{id}")).await;
+        assert_eq!(opens(), 1);
+        let writes = [
+            ("read", "on=0"),
+            ("bookmark", "on=1"),
+            ("rating", "value=3"),
+            ("comments", "body=x"),
+            ("report", "kind=other&note=x"),
+        ];
+        for (path, body) in writes {
+            let res = server.post(&format!("/articles/{id}/{path}"), body).await;
+            assert_eq!(res.status().as_u16(), 303, "{path}");
+            let location = res.headers()["location"].to_str().unwrap().to_string();
+            assert!(location.contains("back=1"), "{path}: {location}");
+            let (status, _) = server.get(&location).await;
+            assert_eq!(status, 200, "{path}");
+        }
+        server.post(&format!("/articles/{id}/read"), "on=0").await;
+        server
+            .get(&format!("/articles/{id}?view=translation&back=1"))
+            .await;
+        assert_eq!(opens(), 1);
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 0);
+    }
+
+    /// 開いた詳細は、開いたときに付いた既読をそのまま示す。一覧と同じく、印はその場で付け外しする。
+    #[tokio::test]
+    async fn detail_shows_the_read_mark_it_just_set() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        let (_, html) = server.get(&format!("/articles/{id}")).await;
+        assert!(
+            html.contains(r#"<button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">✓</button>"#),
+            "{html}"
+        );
+        assert!(html.contains("requestSubmit"), "{html}");
+    }
+
     #[tokio::test]
     async fn translation_view_without_translation_is_not_an_open() {
         let db = Db::open_in_memory().unwrap();

@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation&reported=1#reports")
+            format!("/articles/{id}?view=translation&reported=1&back=1#reports")
         );
         assert_eq!(
             server.count(&format!(
@@ -313,7 +313,7 @@ mod tests {
         let res = server.post(&path, "kind=term&found=x").await;
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?reported=1#reports")
+            format!("/articles/{id}?reported=1&back=1#reports")
         );
         let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
         assert!(html.contains("指摘を受け付けました"), "{html}");
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation#comments")
+            format!("/articles/{id}?view=translation&back=1#comments")
         );
         assert_eq!(
             server.strings("SELECT body || '|' || visibility FROM comments"),
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}#comments")
+            format!("/articles/{id}?back=1#comments")
         );
         assert_eq!(
             server.strings("SELECT body || '|' || visibility FROM comments"),
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation#comments")
+            format!("/articles/{id}?view=translation&back=1#comments")
         );
         assert_eq!(server.count("SELECT count(*) FROM comments"), 0);
     }

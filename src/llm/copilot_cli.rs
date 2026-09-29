@@ -495,6 +495,53 @@ mod tests {
         );
     }
 
+    /// 実物の copilot で、見出しの和訳の依頼が検証に通る応答を返し、消費を記録できること。
+    /// `cargo test -- --ignored real_copilot` で実行する（ログイン済みの copilot と AI Credits を使う）。
+    #[tokio::test]
+    #[ignore = "uses the real copilot and consumes AI Credits"]
+    async fn real_copilot_translates_titles() {
+        let dir =
+            std::env::temp_dir().join(format!("nucrawler-{}-real-copilot", std::process::id()));
+        let cli = CopilotCli {
+            command: "copilot".into(),
+            cwd: dir.join("cwd"),
+            homes: dir.join("homes"),
+            timeout: Duration::from_secs(120),
+            slots: dir.clone(),
+            concurrency: 1,
+        };
+        let inputs = [crate::db::TitleInput {
+            article_id: 1,
+            title: "Fed signals rate cut as inflation cools, but hawks push back".into(),
+        }];
+        let system = crate::prompt::title::system_prompt(&[]);
+        let schema = crate::prompt::title::schema();
+        let prompt = crate::prompt::title::build_prompt(&inputs);
+        let resp = cli
+            .call(LlmRequest {
+                system: &system,
+                prompt: &prompt,
+                schema: &schema,
+                model: "gpt-6-luna",
+            })
+            .await
+            .unwrap_or_else(|f| panic!("{} ({:?})", f.error, f.usage));
+        let parsed = crate::prompt::title::parse(&resp.output, &[1]).unwrap();
+        assert_eq!(parsed.missing, Vec::<i64>::new(), "{}", resp.output);
+        assert!(
+            matches!(resp.usage, Some(Usage::Credits { nano_aiu }) if nano_aiu > 0),
+            "{:?}",
+            resp.usage
+        );
+        assert!(
+            std::fs::read_dir(dir.join("homes"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        eprintln!("{:?} {:?}", parsed.items, resp.usage);
+    }
+
     #[tokio::test]
     async fn slow_process_times_out() {
         let (script, dir) = fake_copilot("copilot-slow", "cat >/dev/null\nsleep 5");

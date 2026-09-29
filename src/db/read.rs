@@ -53,8 +53,10 @@ pub struct ListQuery<'a> {
     pub since: chrono::DateTime<chrono::Utc>,
     /// 評価 1〜2、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
-    /// 未読の記事だけ（件数の上限より前に既読を除く）
-    pub unread: bool,
+    /// 既読で絞る（true は既読だけ、false は未読だけ、None は絞らない）。件数の上限より前に絞る
+    pub read: Option<bool>,
+    /// ブックマークで絞る（true はブックマーク中だけ、false はブックマークしていない記事だけ）
+    pub bookmarked: Option<bool>,
     pub limit: usize,
 }
 
@@ -78,10 +80,10 @@ pub struct SearchQuery<'a> {
     pub translated: bool,
     /// この評価以上（評価なしは除く）
     pub min_rating: Option<Rating>,
-    /// 未読（既読の印が無い）
-    pub unread: bool,
-    /// ブックマークしている
-    pub bookmarked: bool,
+    /// 既読で絞る（true は既読だけ、false は未読だけ）
+    pub read: Option<bool>,
+    /// ブックマークで絞る（true はブックマーク中だけ、false はブックマークしていない記事だけ）
+    pub bookmarked: Option<bool>,
     /// 評価の無い記事だけ
     pub unrated: bool,
     /// この点数以上（未採点は除く）
@@ -139,7 +141,8 @@ enum ItemScope<'a> {
         since: chrono::DateTime<chrono::Utc>,
         show_all: bool,
         min_score: u8,
-        unread: bool,
+        read: Option<bool>,
+        bookmarked: Option<bool>,
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
@@ -150,6 +153,22 @@ enum ItemScope<'a> {
         min_score: u8,
         limit: usize,
     },
+}
+
+/// 既読・ブックマークの印で絞る条件（組み立てた行 `rows` の条件、`AND` で始まる）。
+/// `Some(true)` は印のある記事だけ、`Some(false)` は印の無い記事だけ、`None` は絞らない。
+fn mark_filter(read: Option<bool>, bookmarked: Option<bool>) -> String {
+    let read = match read {
+        Some(true) => " AND rows.read_at IS NOT NULL",
+        Some(false) => " AND rows.read_at IS NULL",
+        None => "",
+    };
+    let bookmarked = match bookmarked {
+        Some(true) => " AND rows.bookmarked = 1",
+        Some(false) => " AND rows.bookmarked = 0",
+        None => "",
+    };
+    format!("{read}{bookmarked}")
 }
 
 /// 検索の条件を、`query_items` の SQL に足す条件とその名前付きパラメータにしたもの。
@@ -211,12 +230,7 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.rating >= :min_rating");
             f.params.push((":min_rating".into(), Box::new(min)));
         }
-        if q.unread {
-            f.rows.push_str(" AND rows.read_at IS NULL");
-        }
-        if q.bookmarked {
-            f.rows.push_str(" AND rows.bookmarked = 1");
-        }
+        f.rows.push_str(&mark_filter(q.read, q.bookmarked));
         if q.unrated {
             f.rows.push_str(" AND rows.rating IS NULL");
         }
@@ -378,7 +392,8 @@ impl Db {
                 since: q.since,
                 show_all: q.show_all,
                 min_score: q.min_score,
-                unread: q.unread,
+                read: q.read,
+                bookmarked: q.bookmarked,
                 limit: q.limit,
             },
         )
@@ -581,15 +596,16 @@ impl Db {
         const BY_SCORE: &str = "rows.rec IS NULL, rows.rec DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
         let list_filter = match scope {
-            ItemScope::Explore { .. } => {
-                "AND rows.relevant = 1 AND rows.rec < :min
+            ItemScope::Explore { .. } => "AND rows.relevant = 1 AND rows.rec < :min
                  AND rows.rating IS NULL AND rows.read_at IS NULL
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
-            }
-            ItemScope::List { unread: true, .. } => "AND rows.read_at IS NULL",
-            _ => "",
+                .to_string(),
+            ItemScope::List {
+                read, bookmarked, ..
+            } => mark_filter(read, bookmarked),
+            _ => String::new(),
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),

@@ -33,8 +33,10 @@ pub struct Params {
     pub sources: Vec<String>,
     pub lang: String,
     pub translated: bool,
-    pub unread: bool,
-    pub bookmarked: bool,
+    /// 既読で絞る（`read=1` は既読だけ、`read=0`・`unread=1` は未読だけ）
+    pub read: Option<bool>,
+    /// ブックマークで絞る（`bookmarked=1` はブックマーク中だけ、`bookmarked=0` はしていない記事だけ）
+    pub bookmarked: Option<bool>,
     /// 評価の無い記事だけ
     pub unrated: bool,
     /// この評価（1〜5）以上
@@ -58,8 +60,10 @@ impl Params {
                 "source" if !value.trim().is_empty() => p.sources.push(value),
                 "lang" => p.lang = value,
                 "translated" => p.translated = value == "1",
-                "unread" => p.unread = value == "1",
-                "bookmarked" => p.bookmarked = value == "1",
+                "read" => p.read = flag(&value),
+                // 未読だけ（read=0 と同じ。前からある名前）
+                "unread" if value == "1" => p.read = Some(false),
+                "bookmarked" => p.bookmarked = flag(&value),
                 "unrated" => p.unrated = value == "1",
                 "min_rating" => p.min_rating = value,
                 // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、空は絞らない
@@ -98,16 +102,17 @@ impl Params {
         if !self.lang.is_empty() {
             q.append_pair("lang", &self.lang);
         }
-        let flags = [
-            ("translated", self.translated),
-            ("unread", self.unread),
-            ("bookmarked", self.bookmarked),
-            ("unrated", self.unrated),
-        ];
-        for (key, on) in flags {
-            if on {
-                q.append_pair(key, "1");
+        if self.translated {
+            q.append_pair("translated", "1");
+        }
+        let marks = [("read", self.read), ("bookmarked", self.bookmarked)];
+        for (key, value) in marks {
+            if let Some(on) = value {
+                q.append_pair(key, if on { "1" } else { "0" });
             }
+        }
+        if self.unrated {
+            q.append_pair("unrated", "1");
         }
         let rest = [
             ("min_rating", &self.min_rating),
@@ -136,7 +141,9 @@ impl Params {
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.unread || self.bookmarked || self.unrated)
+            && !(self.translated || self.unrated)
+            && self.read.is_none()
+            && self.bookmarked.is_none()
     }
 
     /// 検索の条件にする。一覧で隠す記事も含める。
@@ -189,7 +196,7 @@ impl Params {
             sources: self.sources.clone(),
             lang,
             translated: self.translated,
-            unread: self.unread,
+            read: self.read,
             bookmarked: self.bookmarked,
             unrated: self.unrated,
             min_rating,
@@ -237,6 +244,15 @@ pub fn result_line(item: &crate::db::ListItem) -> String {
         crate::jst::format_local(&item.at),
         item.url
     )
+}
+
+/// 印で絞る値。`1` はあり、`0` はなし、ほかは絞らない。
+fn flag(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// 入力された値（前後の空白を除く）。空なら指定しなかったもの。
@@ -289,7 +305,7 @@ mod tests {
                 sources: vec!["nra".into(), "wnn".into()],
                 lang: "ja".into(),
                 translated: true,
-                bookmarked: true,
+                bookmarked: Some(true),
                 min_rating: "4".into(),
                 min_score: "60".into(),
                 sort: "score".into(),

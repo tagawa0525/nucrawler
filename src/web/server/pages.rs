@@ -17,7 +17,8 @@ fn list_query<'a>(
         min_score,
         since: now - Duration::days(web.list_days.into()),
         show_all: min_score == 0,
-        unread: true,
+        read: Some(false),
+        bookmarked: None,
         limit: web.list_limit,
     }
 }
@@ -138,7 +139,7 @@ pub(super) async fn list(
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         // 既読は件数の上限より前に除く（上位が既読で埋まっても、下の未読が出るように）
         let items = db.list_articles(ListQuery {
-            unread: !show_read,
+            read: (!show_read).then_some(false),
             ..list_query(&web, user, hash.as_deref(), now, min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
@@ -194,8 +195,8 @@ fn filtered(
             .map(|r| r.to_string())
             .unwrap_or_default(),
         unrated: view.rating == Some(0),
-        bookmarked: view.bookmarked,
-        unread: !view.read,
+        bookmarked: view.bookmarked.then_some(true),
+        read: (!view.read).then_some(false),
         min_score: if view.min > 0 {
             view.min.to_string()
         } else {

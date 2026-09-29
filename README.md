@@ -92,7 +92,7 @@ nucrawler serve [--addr IP:PORT]
 nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N]
 nucrawler topics import FILE | nucrawler topics export
-nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--unread] [--bookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
+nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
 ```
 
@@ -219,7 +219,7 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
     画面では文字で入れるほか、横の 📅 のカレンダーで日付を選べる
   - `topic`：最新の要約に付いているトピック（繰り返すとすべてが付いている記事）。統合した語の別名でもよい
   - `source`：ソース（繰り返すとどれかのソース）
-  - `lang`（`en` / `ja`）、`translated=1`（和訳あり）、`min_rating`（この評価以上。1〜5）、`unread=1`（未読。既読の印が無い）、`bookmarked=1`（ブックマーク中）、`unrated=1`（評価なし。`min_rating` とは同時に指定できない）、`min_score`（最低点。未採点は除く。0 は一覧の 00 と同じく絞らない）
+  - `lang`（`en` / `ja`）、`translated=1`（和訳あり）、`min_rating`（この評価以上。1〜5）、`read=1`・`read=0`（既読だけ・未読だけ。`unread=1` は `read=0` と同じ）、`bookmarked=1`・`bookmarked=0`（ブックマーク中だけ・していない記事だけ）、`unrated=1`（評価なし。`min_rating` とは同時に指定できない）、`min_score`（最低点。未採点は除く。0 は一覧の 00 と同じく絞らない）
   - `sort`：`newest`（既定）か `score`
 - 認証は無いので、Tailscale など信頼できるネットワークのアドレスで待ち受ける
 - 同じサーバーで、既定の一覧と同じ記事（既読の記事は除く）をフィードと JSON でも出す。

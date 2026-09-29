@@ -4,7 +4,7 @@ use super::list::BarView;
 use super::*;
 
 /// 検索の画面の上部のバーが指す検索。点数・評価・既読・ブックマークはバーの条件で、変えるとほかの条件は
-/// そのままに検索し直す。既読は既定で出し（👁 が ON）、OFF で未読だけ（`unread=1`）。評価の ☆ は評価の無い記事だけ。
+/// そのままに検索し直す。既読は既定で出し（👁 が ON）、OFF で未読だけ（`read=0`）。評価の ☆ は評価の無い記事だけ。
 #[derive(Clone)]
 struct SearchView(Params);
 
@@ -41,10 +41,10 @@ impl BarView for SearchView {
         }
     }
     fn read(&self) -> bool {
-        !self.0.unread
+        self.0.read != Some(false)
     }
     fn bookmarked(&self) -> bool {
-        self.0.bookmarked
+        self.0.bookmarked == Some(true)
     }
     fn with_min(&self, min: u8) -> Self {
         self.with(|p| {
@@ -65,10 +65,10 @@ impl BarView for SearchView {
         })
     }
     fn with_read(&self, read: bool) -> Self {
-        self.with(|p| p.unread = !read)
+        self.with(|p| p.read = if read { None } else { Some(false) })
     }
     fn with_bookmarked(&self, bookmarked: bool) -> Self {
-        self.with(|p| p.bookmarked = bookmarked)
+        self.with(|p| p.bookmarked = bookmarked.then_some(true))
     }
     fn min_name(&self) -> &'static str {
         "min_score"
@@ -107,18 +107,14 @@ pub fn search_page(
     layout("検索", page, &body)
 }
 
-/// 上部のバーの条件（点数・評価・評価なし・未読・ブックマーク）を、フォームで送るための hidden の入力にする。
+/// 上部のバーの条件（点数・評価・評価なし・既読・ブックマーク）を、フォームで送るための hidden の入力にする。
 fn hidden_bar_conditions(p: &Params) -> String {
-    let flags = [
-        ("unread", p.unread),
-        ("bookmarked", p.bookmarked),
-        ("unrated", p.unrated),
-    ];
+    let marks = [("read", p.read), ("bookmarked", p.bookmarked)];
     let texts = [("min_rating", &p.min_rating), ("min_score", &p.min_score)];
-    flags
+    marks
         .into_iter()
-        .filter(|(_, on)| *on)
-        .map(|(name, _)| (name, "1".to_string()))
+        .filter_map(|(name, v)| v.map(|on| (name, if on { "1" } else { "0" }.to_string())))
+        .chain(p.unrated.then(|| ("unrated", "1".to_string())))
         .chain(
             texts
                 .into_iter()

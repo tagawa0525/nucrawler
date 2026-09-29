@@ -313,13 +313,11 @@ pub(super) async fn source(
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let url = with_db(&state, move |db| {
-        let (user, hash) = viewer(db)?;
-        let item = db
-            .article_detail(user, hash.as_deref(), id)?
-            .ok_or(AppError::NotFound)?
-            .item;
+        let (user, _) = viewer(db)?;
+        // 移るだけなので、詳細の中身（要約・和訳・本文）は読まない
+        let url = db.article_url(id)?.ok_or(AppError::NotFound)?;
         db.record_open(user, id, OpenKind::Source, Utc::now())?;
-        Ok(item.url)
+        Ok(url)
     })
     .await?;
     Ok(Redirect::to(&url).into_response())

@@ -385,6 +385,19 @@ impl Db {
         self.query_items(q.user_id, q.profile_hash, ItemScope::Search(q))
     }
 
+    /// 記事の URL（原文へ移るとき）。記事が無ければ None。
+    pub fn article_url(&self, article_id: i64) -> Result<Option<String>, DbError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT url FROM articles WHERE id = ?1",
+                [article_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// 詳細画面の内容。記事が無ければ None。
     pub fn article_detail(
         &self,

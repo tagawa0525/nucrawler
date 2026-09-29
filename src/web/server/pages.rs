@@ -91,7 +91,7 @@ pub(super) async fn list(
     let rating = params.rating()?;
     let bookmarked = params.bookmarked.as_deref() == Some("1");
     let filtering = rating.is_some() || bookmarked;
-    // JavaScript が無いときの評価の「-」は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
+    // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
     // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
     let leaving = params.rating.as_deref() == Some("") && !filtering;
     let carried = |value: Option<&str>| value.filter(|_| !leaving).map(str::to_string);
@@ -116,7 +116,7 @@ pub(super) async fn list(
         bookmarked,
     };
     // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。JavaScript が無いときの
-    // 選択のフォームは、評価の「-」で `rating=` や、絞り込みを外したときの `read=0` を残す
+    // 選択のフォームは、評価の「★」（絞らない）で `rating=` や、絞り込みを外したときの `read=0` を残す
     let canonical = view.url();
     let requested = match raw.as_deref() {
         None | Some("") => "/".to_string(),
@@ -679,10 +679,10 @@ mod tests {
             ("/?min=50", "/"),
             ("/?read=1&min=30", "/?min=30&read=1"),
             ("/?rating=4&read=1", "/?rating=4"),
-            // 絞り込みの最低点の既定は 0（「-」）
+            // 絞り込みの最低点の既定は 0（00）
             ("/?rating=4&min=0", "/?rating=4"),
             ("/?rating=4&min=60", "/?min=60&rating=4"),
-            // JavaScript が無いときの評価の「-」は、絞り込みの条件（最低点・既読）を一緒に送るが、
+            // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）を一緒に送るが、
             // 一覧へ戻るので一覧の既定にする
             ("/?rating=&min=60", "/"),
             ("/?rating=&min=0&read=0", "/"),
@@ -952,7 +952,7 @@ mod tests {
             server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             0
         );
-        // 評価の「-」（空）を選ぶと一覧に戻る
+        // 評価の「★」（絞らない）（空）を選ぶと一覧に戻る
         let res = server.get_raw("/?rating=").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");

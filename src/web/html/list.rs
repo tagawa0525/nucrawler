@@ -958,7 +958,7 @@ mod tests {
             html.contains(r#"<option value="" data-href="/">★</option>"#),
             "{html}"
         );
-        // 一覧から絞り込みへ移ると、最低点は「-」になる
+        // 一覧から絞り込みへ移ると、最低点は 00 になる
         let list = ListView {
             min: 30,
             ..ListView::default()

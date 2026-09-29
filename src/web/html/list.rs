@@ -388,6 +388,11 @@ mod tests {
         assert!(html.contains("<script>"), "{html}");
         // スワイプ・キーは、カードのボタンと同じ送信を通す（印を付けてもカードは消さない）
         assert!(html.contains("requestSubmit"), "{html}");
+        // 戻るボタンで戻ったときは、ブラウザが残していた古いページを出すので、印を今の状態に合わせ直す
+        assert!(
+            html.contains("pageshow") && html.contains("back_forward"),
+            "{html}"
+        );
         assert!(
             !html.contains("card.hidden = true") && !html.contains("元に戻す"),
             "{html}"

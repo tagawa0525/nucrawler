@@ -880,4 +880,37 @@ mod tests {
             4
         );
     }
+
+    /// 並行して判定しても、呼び出し回数の上限を超えない（呼び出しは始めた時点で数える）。
+    #[tokio::test]
+    async fn concurrent_workers_respect_the_call_limit() {
+        let (db, owner) = setup();
+        for i in 0..4 {
+            article(&db, i, 90);
+        }
+        let llm = FakeLlm::responding(std::time::Duration::from_millis(50), |_| ok("和訳"));
+        let summary = translate_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(1),
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &LlmConfig {
+                concurrency: 2,
+                ..LlmConfig::default()
+            },
+            &PipelineConfig::default(),
+            owner,
+            &Target::Pending {
+                requests_only: false,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!(llm.requests().len(), 1);
+    }
 }

@@ -1,3 +1,149 @@
+//! 推薦点（LLM の点数に、評価から学んだ補正を足した点数。`crate::recommend`）の DB 側：
+//! SQL の関数 `recommend_score`、評価からの学習の材料の読み出し、学習したモデルの使い回し。
+
+use super::*;
+use crate::recommend::{Example, Model};
+
+/// 学習したモデルと、学習したときの材料の目印。目印が変わるまで使い回す。
+pub(super) struct ModelCache {
+    fingerprint: String,
+    model: Model,
+}
+
+/// SQL の関数 `recommend_score(llm_score, weight_sum)` を登録する。LLM 点が NULL（未採点）なら NULL。
+pub(super) fn register_functions(conn: &Connection) -> Result<(), DbError> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "recommend_score",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let Some(llm) = ctx.get::<Option<u8>>(0)? else {
+                return Ok(None);
+            };
+            Ok(Some(crate::recommend::score_from(llm, ctx.get::<f64>(1)?)))
+        },
+    )?;
+    Ok(())
+}
+
+/// 別名 `rows`（記事と `source_id`・`digest_id`）と `s`（採点）の行の推薦点を求める SQL の式。
+/// 重みは `:rec_weights`（`Model::weights_json`）で渡す。
+/// 重みは、キーが記事の特徴（`crate::recommend::feature_key`）に当たるものを 1 回ずつ足す。
+pub(super) fn recommend_score_sql() -> &'static str {
+    "recommend_score(s.score, (
+       SELECT total(w.value) FROM json_each(:rec_weights) AS w
+       WHERE w.key = 'source:' || rows.source_id
+          OR w.key IN (
+            SELECT 'topic:' || t.name FROM artifact_topics AS at
+            JOIN topics AS t ON t.id = at.topic_id
+            WHERE at.artifact_id = rows.digest_id)
+          OR w.key IN (
+            SELECT kind || ':' || topic FROM score_matches WHERE score_id = s.id)))"
+}
+
+impl Db {
+    /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = LLM 点）。
+    /// 評価・採点・プロファイルが前に学習したときと変わっていれば、学習し直す。
+    pub(super) fn recommend_model(
+        &self,
+        user_id: i64,
+        profile_hash: Option<&str>,
+    ) -> Result<Model, DbError> {
+        let Some(profile_hash) = profile_hash else {
+            return Ok(Model::identity());
+        };
+        // 評価の件数と最後の時刻、このプロファイルの最後の採点で、学習の材料が変わったかを見る
+        let fingerprint: String = self.conn.query_row(
+            "SELECT ?1 || '/' || ?2 || '/' ||
+                    (SELECT count(*) || '/' || coalesce(max(rated_at), '')
+                     FROM ratings WHERE user_id = ?1) || '/' ||
+                    (SELECT coalesce(max(id), 0) FROM scores
+                     WHERE user_id = ?1 AND profile_hash = ?2)",
+            rusqlite::params![user_id, profile_hash],
+            |r| r.get(0),
+        )?;
+        if let Some(cache) = self.recommend.borrow().as_ref()
+            && cache.fingerprint == fingerprint
+        {
+            return Ok(cache.model.clone());
+        }
+        let model = Model::fit(
+            &self.recommend_examples(user_id, profile_hash)?,
+            self.prior_strength,
+        );
+        *self.recommend.borrow_mut() = Some(ModelCache {
+            fingerprint,
+            model: model.clone(),
+        });
+        Ok(model)
+    }
+
+    /// 学習の材料：評価した記事ごとに、一覧と同じ採点（閲覧できる最新の digest の、最新のプロンプトの版で
+    /// 最高点の採点）の LLM 点と特徴、評価。そのプロファイルで採点されていない記事は使わない。
+    fn recommend_examples(
+        &self,
+        user_id: i64,
+        profile_hash: &str,
+    ) -> Result<Vec<Example>, DbError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH rated AS (
+               SELECT rt.article_id, rt.value,
+                      (SELECT r.id FROM artifacts AS r
+                       WHERE r.article_id = rt.article_id AND r.kind = 'digest' AND {viewable}
+                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+               FROM ratings AS rt WHERE rt.user_id = :user),
+             scored AS (
+               SELECT rated.*,
+                      (SELECT s.id FROM scores AS s
+                       WHERE s.user_id = :user AND s.profile_hash = :profile
+                         AND s.artifact_id = rated.digest_id
+                       ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
+                       LIMIT 1) AS score_id
+               FROM rated)
+             SELECT x.value, s.score, a.source_id, {topics},
+                    (SELECT json_group_array(topic) FROM score_matches
+                     WHERE score_id = s.id AND kind = 'interest'),
+                    (SELECT json_group_array(topic) FROM score_matches
+                     WHERE score_id = s.id AND kind = 'exclude')
+             FROM scored AS x
+             JOIN scores AS s ON s.id = x.score_id
+             JOIN artifacts AS r ON r.id = x.digest_id
+             JOIN articles AS a ON a.id = x.article_id
+             ORDER BY x.article_id",
+            viewable = super::read::viewable("r"),
+            topics = super::read::linked_topics("r"),
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {":user": user_id, ":profile": profile_hash},
+            |r| {
+                Ok((
+                    r.get::<_, Rating>(0)?,
+                    r.get::<_, u8>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (rating, llm_score, source, topics, matched, excluded) = row?;
+            let [topics, matched, excluded]: [Vec<String>; 3] = [
+                serde_json::from_str(&topics)?,
+                serde_json::from_str(&matched)?,
+                serde_json::from_str(&excluded)?,
+            ];
+            Ok(Example {
+                llm_score,
+                features: crate::recommend::features(&source, &topics, &matched, &excluded),
+                rating,
+            })
+        })
+        .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

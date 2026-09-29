@@ -185,7 +185,17 @@ impl Model {
 
     /// 推薦点（0〜100）。
     pub fn score(&self, llm_score: u8, features: &[Feature]) -> u8 {
-        points(sigmoid(llm_logit(llm_score) + self.weight_sum(features)))
+        score_from(llm_score, self.weight_sum(features))
+    }
+
+    /// 重みを、特徴のキー（`feature_key`）から重みへの JSON のオブジェクトにする（SQL に渡す）。
+    pub fn weights_json(&self) -> String {
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .weights
+            .iter()
+            .map(|(f, w)| (feature_key(f), (*w).into()))
+            .collect();
+        serde_json::Value::Object(map).to_string()
     }
 
     /// 補正の内訳：特徴ごとに、その特徴が無かったときの推薦点からどれだけ動かしたか（点）。
@@ -204,6 +214,22 @@ impl Model {
         parts.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
         parts
     }
+}
+
+/// 推薦点を、LLM 点と特徴の重みの和から求める（SQL の `recommend_score` と `Model::score` で共有する）。
+pub fn score_from(llm_score: u8, weight_sum: f64) -> u8 {
+    points(sigmoid(llm_logit(llm_score) + weight_sum))
+}
+
+/// 特徴を SQL で突き合わせるキー（`topic:燃料` など）。
+pub fn feature_key(f: &Feature) -> String {
+    let kind = match f.kind {
+        FeatureKind::Topic => "topic",
+        FeatureKind::Source => "source",
+        FeatureKind::Interest => "interest",
+        FeatureKind::Exclude => "exclude",
+    };
+    format!("{kind}:{}", f.key)
 }
 
 /// 記事の特徴：ソース、要約のトピック、点数が当たった関心分野と推薦しない話題。

@@ -68,7 +68,10 @@ pub struct Article<'a> {
     pub title_ja: Option<&'a str>,
     pub summary_ja: Option<&'a str>,
     pub lwr_relevant: Option<bool>,
+    /// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）
     pub score: Option<u8>,
+    /// 補正の前の LLM の点数
+    pub llm_score: Option<u8>,
     pub reason: Option<&'a str>,
     /// 点数が当たった関心分野（プロファイルの語）
     pub matched: &'a [String],
@@ -98,6 +101,7 @@ impl<'a> Article<'a> {
             summary_ja: i.summary_ja.as_deref(),
             lwr_relevant: i.lwr_relevant,
             score: i.score,
+            llm_score: i.llm_score,
             reason: i.reason.as_deref(),
             matched: &i.matched,
             excluded: &i.excluded,

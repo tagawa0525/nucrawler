@@ -49,13 +49,15 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
         }
     ));
-    if let Some(score) = i.score {
+    if i.score.is_some() {
         body.push_str(&format!(
-            "<p><span class=\"score\">{score}</span>{}{}</p>",
+            "<p>{}{}{}</p>",
+            super::list::score_badge(i),
             super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
     }
+    body.push_str(&adjustments(d, page));
     if let Some(summary) = field("summary_ja") {
         body.push_str(&format!("<p>{}</p>", escape(&summary)));
     }
@@ -229,6 +231,34 @@ fn report_summary(r: &Report) -> String {
             escape(r.note.as_deref().unwrap_or_default())
         ),
     }
+}
+
+/// 推薦点の補正の内訳（例：`推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
+fn adjustments(d: &ArticleDetail, page: &Page) -> String {
+    use crate::recommend::FeatureKind;
+    let (Some(score), Some(llm)) = (d.item.score, d.item.llm_score) else {
+        return String::new();
+    };
+    if d.adjustments.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = d
+        .adjustments
+        .iter()
+        .map(|(f, points)| {
+            let (kind, name) = match f.kind {
+                FeatureKind::Topic => ("トピック", f.key.as_str()),
+                FeatureKind::Source => ("ソース", page.source(&f.key)),
+                FeatureKind::Interest => ("関心分野", f.key.as_str()),
+                FeatureKind::Exclude => ("推薦しない話題", f.key.as_str()),
+            };
+            format!("{kind} {} {points:+}", escape(name))
+        })
+        .collect();
+    format!(
+        "<p class=\"meta\">推薦点 {score}（LLM {llm}）：{}</p>",
+        parts.join("、")
+    )
 }
 
 fn translation_section(d: &ArticleDetail, view: DetailView) -> String {

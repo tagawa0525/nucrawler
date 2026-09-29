@@ -203,7 +203,8 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Error> {
 /// 検索して 1 行 1 件で出す。オーナーとして閲覧判定し、閲覧としては記録しない。
 fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> Result<(), Error> {
     let (config, _) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
+        .with_prior_strength(config.recommend.prior_strength);
     let owner = db.owner_id()?;
     let hash = db.profile_hash(owner)?;
     let limit = args.limit.unwrap_or(config.web.list_limit);
@@ -277,7 +278,8 @@ async fn serve(
     args: cli::ServeArgs,
 ) -> Result<(), Error> {
     let (config, sources) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
+        .with_prior_strength(config.recommend.prior_strength);
     let addr = args.addr.unwrap_or(config.web.bind);
     let labels = sources
         .sources
@@ -312,7 +314,8 @@ async fn shutdown_signal() {
 /// MCP の stdio サーバー。一覧の既定値とソースの表示名は Web UI と同じ設定を使う。
 async fn mcp(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
     let (config, sources) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
+        .with_prior_strength(config.recommend.prior_strength);
     let labels = sources
         .sources
         .iter()

@@ -316,13 +316,25 @@ pub(super) fn matches(i: &ListItem) -> String {
     matched.chain(excluded).collect()
 }
 
+/// 推薦点の印。LLM の点数と違えば、title に LLM の点数と補正を出す（例：`LLM 72・補正 +9`）。
+pub(super) fn score_badge(i: &ListItem) -> String {
+    let Some(score) = i.score else {
+        return String::new();
+    };
+    match i.llm_score.filter(|llm| *llm != score) {
+        Some(llm) => format!(
+            "<span class=\"score\" title=\"LLM {llm}・補正 {:+}\">{score}</span>",
+            i32::from(score) - i32::from(llm)
+        ),
+        None => format!("<span class=\"score\">{score}</span>"),
+    }
+}
+
 /// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
 /// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
-    let score = i
-        .score
-        .map_or_else(String::new, |s| format!("<span class=\"score\">{s}</span>"));
+    let score = score_badge(i);
     let lock = if i.locked_by.is_empty() {
         String::new()
     } else {

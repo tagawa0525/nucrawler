@@ -362,6 +362,12 @@ mod tests {
         assert_eq!(q.order, SearchOrder::Score);
         assert_eq!(q.hide_below, None, "search shows what the list hides");
 
+        // 最低点 0 は、一覧の 00 と同じく点数で絞らない（未採点も出す）
+        let zero = Params {
+            min_score: "0".into(),
+            ..Params::default()
+        };
+        assert_eq!(zero.to_query(7, None, 30).unwrap().min_score, None);
         let empty = Params::default().to_query(7, None, 30).unwrap();
         assert!(empty.terms.is_empty() && empty.since.is_none() && empty.until.is_none());
         assert_eq!(

@@ -34,6 +34,36 @@ pub struct Config {
     pub llm: LlmConfig,
     pub quota: crate::quota::QuotaConfig,
     pub web: WebConfig,
+    pub recommend: RecommendConfig,
+}
+
+/// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）の設定。
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecommendConfig {
+    /// 補正の正則化の強さ。大きいほど LLM の点数に近いまま（評価が多くないと補正が効かない）
+    pub prior_strength: f64,
+}
+
+impl RecommendConfig {
+    /// 学習できない強さ（0 以下・∞・NaN）を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.prior_strength.is_finite() && self.prior_strength > 0.0) {
+            return Err(format!(
+                "recommend.prior_strength must be positive and finite, got {}",
+                self.prior_strength
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for RecommendConfig {
+    fn default() -> Self {
+        Self {
+            prior_strength: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -346,6 +376,7 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         .validate()
         .and_then(|()| config.llm.validate())
         .and_then(|()| config.web.validate())
+        .and_then(|()| config.recommend.validate())
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,
@@ -706,6 +737,26 @@ mod tests {
             let err = parse_config(text, p()).unwrap_err();
             assert!(
                 matches!(&err, ConfigError::Invalid { reason: r, .. } if r.contains(reason)),
+                "{text}: {err}"
+            );
+        }
+    }
+
+    /// 推薦点の補正の強さ。既定は 1.0 で、正の有限値だけを受け付ける（∞ や 0 では学習できない）。
+    #[test]
+    fn reads_the_recommend_prior_strength() {
+        assert_eq!(parse_config("", p()).unwrap().recommend.prior_strength, 1.0);
+        let c = parse_config("[recommend]\nprior_strength = 2.5\n", p()).unwrap();
+        assert_eq!(c.recommend.prior_strength, 2.5);
+        for text in [
+            "[recommend]\nprior_strength = 0.0\n",
+            "[recommend]\nprior_strength = -1.0\n",
+            "[recommend]\nprior_strength = inf\n",
+            "[recommend]\nprior_strength = nan\n",
+        ] {
+            let err = parse_config(text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains("recommend.prior_strength")),
                 "{text}: {err}"
             );
         }

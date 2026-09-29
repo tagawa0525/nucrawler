@@ -24,8 +24,9 @@ pub(crate) async fn eval(
     data: Option<PathBuf>,
     args: EvalArgs,
 ) -> Result<(), Error> {
-    // 候補のファイルの誤りは、ロックを取る前に知らせる
+    // 候補のファイルと設定の誤りは、ロックを取る前に知らせる
     let candidate = args.profile.as_deref().map(read_profile).transpose()?;
+    let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
     // 候補で採点するときは LLM を呼んで DB に書くので、redo と同じく DB を開く前にロックを取る
     let _lock = candidate
@@ -35,7 +36,7 @@ pub(crate) async fn eval(
     let db = Db::open(&data.join("nucrawler.db"))?;
     let owner = db.owner_id()?;
     if let Some(candidate) = &candidate {
-        score_candidate(config, &data, &db, candidate, args.max_llm_calls).await?;
+        score_candidate(&config, &data, &db, candidate, args.max_llm_calls).await?;
     }
     let candidate = candidate.as_ref().map(profile::hash);
     let current = db.profile_hash(owner)?;
@@ -48,6 +49,7 @@ pub(crate) async fn eval(
             candidate.as_deref(),
             prompt::score::PROMPT_VERSION,
             args.all,
+            config.recommend.prior_strength,
         )
     );
     print!("{}", eval::render_explore(db.explore_stats(owner)?));
@@ -65,13 +67,12 @@ fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {
 /// ラベルの付いた記事を候補のプロファイルで採点する。クォータ・シグナルは `redo` と同じ。
 /// ロックは呼び出し側が取る。
 async fn score_candidate(
-    config: Option<PathBuf>,
+    config: &config::Config,
     data: &std::path::Path,
     db: &Db,
     candidate: &profile::Profile,
     max_llm_calls: Option<u32>,
 ) -> Result<(), Error> {
-    let (config, _) = config::load(&config_dir(config)?)?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.to_path_buf());
@@ -89,7 +90,7 @@ async fn score_candidate(
             cancel: &cancel,
             clock: &chrono::Utc::now,
         },
-        &config,
+        config,
         candidate,
         &articles,
     )

@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::db::{EvalKey, ExploreStats, Label, LabeledScore, Rating};
+use crate::recommend::{Example, leave_one_out};
 
 /// 関心（評価 4〜5）・不要（評価 1〜2）のどちらかがこれより少なければ、指標は参考値と注記する
 const FEW_LABELS: usize = 5;
@@ -48,6 +49,7 @@ pub fn render(
     candidate: Option<&str>,
     version: i64,
     all: bool,
+    prior_strength: f64,
 ) -> String {
     let current = current.map(|hash| (hash, version));
     let mut out = String::new();
@@ -111,7 +113,7 @@ pub fn render(
         } else {
             ""
         };
-        render_key(&mut out, key, role, labels, scores);
+        render_key(&mut out, key, role, labels, scores, prior_strength);
     }
     out
 }
@@ -143,6 +145,7 @@ fn render_key(
     role: &str,
     labels: &[Label],
     scores: &[LabeledScore],
+    prior_strength: f64,
 ) {
     let hash: String = key.profile_hash.chars().take(8).collect();
     let _ = writeln!(
@@ -151,21 +154,40 @@ fn render_key(
         key.backend, key.model, key.prompt_version,
     );
     // ラベルと突き合わせた (点数, 評価, 評価より後に採点したか)
-    let matched: Vec<(u8, Rating, bool)> = scores
+    let labeled: Vec<(&LabeledScore, Rating, bool)> = scores
         .iter()
         .filter(|s| &s.key == key)
         .filter_map(|s| {
             let label = labels.iter().find(|l| l.article_id == s.article_id)?;
-            Some((s.score, label.rating, s.scored_at > label.at))
+            Some((s, label.rating, s.scored_at > label.at))
         })
         .collect();
+    let matched: Vec<(u8, Rating, bool)> = labeled
+        .iter()
+        .map(|(s, rating, late)| (s.score, *rating, *late))
+        .collect();
+    let format = |c: Option<f64>| c.map_or_else(|| "-".to_string(), |c| format!("{c:.2}"));
     let pairs: Vec<(u8, Rating)> = matched.iter().map(|m| (m.0, m.1)).collect();
-    let concordance = concordance(&pairs).map_or_else(|| "-".to_string(), |c| format!("{c:.2}"));
+    // 推薦点（評価から学んだ補正を足した点数）は、1 件ずつ外して学習した予測で測る
+    let examples: Vec<Example> = labeled
+        .iter()
+        .map(|(s, rating, _)| Example {
+            llm_score: s.score,
+            features: s.features.clone(),
+            rating: *rating,
+        })
+        .collect();
+    let adjusted: Vec<(u8, Rating)> = leave_one_out(&examples, prior_strength)
+        .into_iter()
+        .zip(examples.iter().map(|e| e.rating))
+        .collect();
     let _ = writeln!(
         out,
-        "  scored {}/{}  concordance {concordance}",
+        "  scored {}/{}  concordance {}  adjusted {} (leave-one-out)",
         matched.len(),
-        labels.len()
+        labels.len(),
+        format(concordance(&pairs)),
+        format(concordance(&adjusted)),
     );
     let late = matched.iter().filter(|m| m.2).count();
     if key.prompt_version == 1 && late > 0 {
@@ -201,6 +223,7 @@ fn render_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recommend::{Feature, FeatureKind};
 
     fn pair(score: u8, rating: u8) -> (u8, Rating) {
         (score, Rating::new(rating).unwrap())
@@ -255,7 +278,42 @@ mod tests {
             article_id,
             score,
             scored_at: scored_at.into(),
+            features: Vec::new(),
         }
+    }
+
+    fn topic(name: &str) -> Feature {
+        Feature {
+            kind: FeatureKind::Topic,
+            key: name.into(),
+        }
+    }
+
+    /// 推薦点（1 件ずつ外して学習した予測）の一致率を、LLM 点の一致率と並べる。
+    /// LLM が過大評価するトピックを低く、過小評価するトピックを高く評価していれば、推薦点のほうが当たる。
+    #[test]
+    fn compares_the_adjusted_score_left_out() {
+        let current = key("h", 3);
+        let at = "2026-09-26T00:00:00.000Z";
+        let mut labels = Vec::new();
+        let mut scores = Vec::new();
+        for i in 0..5 {
+            labels.push(label(i, 1));
+            scores.push(LabeledScore {
+                features: vec![topic("電力市場")],
+                ..scored(&current, i, 62, at)
+            });
+            labels.push(label(10 + i, 5));
+            scores.push(LabeledScore {
+                features: vec![topic("燃料")],
+                ..scored(&current, 10 + i, 45, at)
+            });
+        }
+        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        assert!(
+            out.contains("scored 10/10  concordance 0.00  adjusted 1.00 (leave-one-out)"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -271,7 +329,15 @@ mod tests {
             scored(&current, 3, 40, before),
             scored(&old, 1, 10, before),
         ];
-        let out = render(&labels, &scores, Some("0123456789abcdef"), None, 1, false);
+        let out = render(
+            &labels,
+            &scores,
+            Some("0123456789abcdef"),
+            None,
+            1,
+            false,
+            1.0,
+        );
         assert!(
             out.starts_with("labels: 3 rated (★5 1, ★4 1, ★3 0, ★2 1, ★1 0)\n"),
             "{out}"
@@ -281,7 +347,10 @@ mod tests {
             out.contains("profile 01234567  claude-cli/sonnet  prompt v1  (current)"),
             "{out}"
         );
-        assert!(out.contains("scored 3/3  concordance 1.00"), "{out}");
+        assert!(
+            out.contains("scored 3/3  concordance 1.00  adjusted"),
+            "{out}"
+        );
         assert!(out.contains("1 scored after the reaction"), "{out}");
         assert!(out.contains("  score     ★1  ★2  ★3  ★4  ★5\n"), "{out}");
         assert!(out.contains("  90-100     0   0   0   0   1\n"), "{out}");
@@ -289,7 +358,15 @@ mod tests {
         assert!(out.contains("  40-49      0   1   0   0   0\n"), "{out}");
         // 既定では現行のキーだけ
         assert!(!out.contains("fedcba98"), "{out}");
-        let all = render(&labels, &scores, Some("0123456789abcdef"), None, 1, true);
+        let all = render(
+            &labels,
+            &scores,
+            Some("0123456789abcdef"),
+            None,
+            1,
+            true,
+            1.0,
+        );
         assert!(
             all.contains("profile fedcba98  claude-cli/sonnet  prompt v1\n"),
             "{all}"
@@ -304,7 +381,7 @@ mod tests {
         let v2 = key("h", 2);
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
-        let out = render(&labels, &scores, Some("h"), None, 2, false);
+        let out = render(&labels, &scores, Some("h"), None, 2, false, 1.0);
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
     }
@@ -330,6 +407,7 @@ mod tests {
             Some("bbbbbbbbbbbb"),
             2,
             false,
+            1.0,
         );
         let current_at = out.find("profile aaaaaaaa").unwrap();
         let candidate_at = out.find("profile bbbbbbbb").unwrap();
@@ -353,6 +431,7 @@ mod tests {
             Some("bbbbbbbbbbbb"),
             2,
             false,
+            1.0,
         );
         assert!(out.contains("no scores for the current profile"), "{out}");
         assert!(out.contains("(candidate)"), "{out}");
@@ -365,7 +444,7 @@ mod tests {
         let candidate = key("bbbbbbbbbbbb", 2);
         let at = "2026-09-26T00:00:00.000Z";
         let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
-        let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false);
+        let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false, 1.0);
         assert!(out.contains("no profile"), "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
@@ -398,9 +477,9 @@ mod tests {
     #[test]
     fn says_when_the_current_key_has_no_scores() {
         let labels = [label(1, 4)];
-        let out = render(&labels, &[], Some("h"), None, 1, false);
+        let out = render(&labels, &[], Some("h"), None, 1, false, 1.0);
         assert!(out.contains("no scores for the current profile"), "{out}");
-        let out = render(&[], &[], None, None, 1, false);
+        let out = render(&[], &[], None, None, 1, false, 1.0);
         assert!(out.starts_with("labels: 0 rated"), "{out}");
         assert!(out.contains("no profile"), "{out}");
     }

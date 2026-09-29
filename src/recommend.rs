@@ -228,6 +228,48 @@ impl Model {
     }
 }
 
+/// 記事の特徴：ソース、要約のトピック、点数が当たった関心分野と推薦しない話題。
+pub fn features(
+    source_id: &str,
+    topics: &[String],
+    matched: &[String],
+    excluded: &[String],
+) -> Vec<Feature> {
+    let of = |kind, keys: &[String]| {
+        keys.iter()
+            .map(move |key| Feature {
+                kind,
+                key: key.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut all = vec![Feature {
+        kind: FeatureKind::Source,
+        key: source_id.to_string(),
+    }];
+    all.extend(of(FeatureKind::Topic, topics));
+    all.extend(of(FeatureKind::Interest, matched));
+    all.extend(of(FeatureKind::Exclude, excluded));
+    all
+}
+
+/// 1 件ずつ外して学習し、外した 1 件の推薦点を予測する（例の順）。学習と評価に同じ評価を使うと
+/// 当たり具合が良く出すぎるので、`eval` の比較にはこちらを使う。
+pub fn leave_one_out(examples: &[Example], prior_strength: f64) -> Vec<u8> {
+    (0..examples.len())
+        .map(|i| {
+            let others: Vec<Example> = examples
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, e)| e.clone())
+                .collect();
+            let e = &examples[i];
+            Model::fit(&others, prior_strength).score(e.llm_score, &e.features)
+        })
+        .collect()
+}
+
 /// log(1 + e^z) を、z が大きくても溢れないように求める。
 fn softplus(z: f64) -> f64 {
     if z > 0.0 {
@@ -296,6 +338,44 @@ mod tests {
         assert_eq!(model.score(0, &[]), 1);
         assert_eq!(model.score(100, &[]), 100);
         assert!(model.weights.is_empty());
+    }
+
+    /// 記事の特徴：ソース・要約のトピック・点数が当たった関心分野と推薦しない話題。
+    #[test]
+    fn features_of_an_article() {
+        let f = features(
+            "nrc",
+            &["燃料".to_string()],
+            &["燃料".to_string()],
+            &["核融合".to_string()],
+        );
+        let kind = |k| {
+            f.iter()
+                .filter(|x| x.kind == k)
+                .map(|x| x.key.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kind(FeatureKind::Source), ["nrc"]);
+        assert_eq!(kind(FeatureKind::Topic), ["燃料"]);
+        assert_eq!(kind(FeatureKind::Interest), ["燃料"]);
+        assert_eq!(kind(FeatureKind::Exclude), ["核融合"]);
+    }
+
+    /// 1 件ずつ外して学習し、外した 1 件を予測する。外した評価を使わないので、学習に使った場合より控えめになる。
+    /// 1 件だけなら、外すと評価が無いので LLM 点のまま。
+    #[test]
+    fn leave_one_out_predicts_without_the_held_out_rating() {
+        let market = topic("電力市場");
+        let examples = repeat(6, example(85, std::slice::from_ref(&market), 1));
+        let held_out = leave_one_out(&examples, 1.0);
+        let in_sample = Model::fit(&examples, 1.0).score(85, std::slice::from_ref(&market));
+        assert_eq!(held_out.len(), 6);
+        assert!(
+            held_out.iter().all(|&s| in_sample < s && s < 85),
+            "{held_out:?} {in_sample}"
+        );
+        assert_eq!(leave_one_out(&examples[..1], 1.0), [85]);
+        assert!(leave_one_out(&[], 1.0).is_empty());
     }
 
     /// 正則化の強さは正の有限値だけ（∞ だと勾配が ∞·0 で NaN になる）。

@@ -404,6 +404,13 @@ mod tests {
         );
         assert!(html.contains(r#"e.key === "u""#), "{html}");
         // 戻るボタンで戻ったときの読み直しでも、既読になっていたカード（詳細を開いた記事）を隠す。
+        // 元に戻す（未読にする）送信が失敗したら、読み直しの前に隠し直す（読み直しも失敗したときに、
+        // 既読のカードが出たまま残らないように）
+        assert_eq!(
+            html.matches("setVisibility(card, true)").count(),
+            2,
+            "{html}"
+        );
         // 元に戻すの送信中に始まった読み直しが隠していても、未読にできたら出し直す
         assert!(
             html.contains("setVisibility(card, m.read)")

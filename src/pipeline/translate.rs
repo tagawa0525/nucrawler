@@ -917,4 +917,50 @@ mod tests {
         assert_eq!((summary.translated, summary.calls), (1, 1));
         assert_eq!(llm.requests().len(), 1);
     }
+
+    /// 同時に終わった呼び出しの一方が LLM の失敗なら、もう一方の作業者も次の呼び出しを始めない
+    /// （止める旗が伝わってから次の周に入る）。時計を止めて、2 本の呼び出しを同じ時刻に終わらせる。
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_finishing_alongside_a_success_stops_both_workers() {
+        let (db, owner) = setup();
+        for i in 0..4 {
+            article(&db, i, 90);
+        }
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let llm = FakeLlm::responding(std::time::Duration::from_millis(50), move |_| {
+            match n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                1 => Err(LlmError::Reported {
+                    subtype: "error".into(),
+                    message: "Not logged in".into(),
+                }),
+                _ => ok("和訳"),
+            }
+        });
+        let summary = translate_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &LlmConfig {
+                concurrency: 2,
+                ..LlmConfig::default()
+            },
+            &PipelineConfig::default(),
+            owner,
+            &Target::Pending {
+                requests_only: false,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(llm.requests().len(), 2);
+        assert!(
+            matches!(summary.halted, Some(Halt::LlmFailed(_))),
+            "{summary:?}"
+        );
+    }
 }

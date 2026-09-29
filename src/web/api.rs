@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::db::{ArticleDetail, ArtifactVersion, ListItem, Rating};
+use crate::db::{ArticleDetail, ArtifactVersion, ListItem, Marks, Rating};
 use crate::web::html::SourceLabels;
 
 /// 記事の一覧（`GET /api/articles`）。
@@ -17,6 +17,37 @@ impl<'a> ArticleList<'a> {
     pub fn new(items: &'a [ListItem], labels: &'a SourceLabels) -> Self {
         Self {
             articles: items.iter().map(|i| Article::new(i, labels)).collect(),
+        }
+    }
+}
+
+/// 記事の印（`GET /api/marks`）。一覧に戻ったときに、カードの印を今の状態に合わせるために使う。
+#[derive(Debug, Serialize)]
+pub struct MarkList {
+    pub marks: Vec<Mark>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Mark {
+    pub id: i64,
+    /// 評価（1〜5）。評価なしは null
+    pub rating: Option<Rating>,
+    pub bookmarked: bool,
+    pub read: bool,
+}
+
+impl MarkList {
+    pub fn new(marks: Vec<Marks>) -> Self {
+        Self {
+            marks: marks
+                .into_iter()
+                .map(|m| Mark {
+                    id: m.article_id,
+                    rating: m.rating,
+                    bookmarked: m.bookmarked,
+                    read: m.read,
+                })
+                .collect(),
         }
     }
 }

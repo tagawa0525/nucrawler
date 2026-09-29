@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/articles/{id}", get(api_detail))
         .route("/search", get(search))
         .route("/api/search", get(api_search))
+        .route("/api/marks", get(api_marks))
         .route("/articles/{id}/rating", post(rating))
         .route("/articles/{id}/bookmark", post(bookmark))
         .route("/articles/{id}/read", post(read))

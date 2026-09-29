@@ -68,6 +68,15 @@ impl rusqlite::ToSql for Rating {
     }
 }
 
+/// 記事 1 件の印（一覧に戻ったときの読み直し用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marks {
+    pub article_id: i64,
+    pub rating: Option<Rating>,
+    pub bookmarked: bool,
+    pub read: bool,
+}
+
 /// 開いたものの種類（`events.kind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenKind {
@@ -101,6 +110,32 @@ fn mark_read(
 }
 
 impl Db {
+    /// 指定した記事の印を、指定した順に返す。無い記事は返さない。
+    pub fn marks(&self, user_id: i64, article_ids: &[i64]) -> Result<Vec<Marks>, DbError> {
+        let ids = serde_json::to_string(article_ids)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id,
+                    (SELECT value FROM ratings WHERE user_id = :user AND article_id = a.id),
+                    EXISTS (SELECT 1 FROM bookmarks WHERE user_id = :user AND article_id = a.id),
+                    EXISTS (SELECT 1 FROM reads WHERE user_id = :user AND article_id = a.id)
+             FROM json_each(:ids) AS j
+             JOIN articles AS a ON a.id = j.value
+             ORDER BY j.key",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {":user": user_id, ":ids": ids},
+            |r| {
+                Ok(Marks {
+                    article_id: r.get(0)?,
+                    rating: r.get(1)?,
+                    bookmarked: r.get(2)?,
+                    read: r.get(3)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// 開いたことを記録し、既読にする。
     pub fn record_open(
         &self,

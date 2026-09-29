@@ -46,6 +46,46 @@ pub(super) async fn api_search(
     Ok(json(body))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct MarksParams {
+    #[serde(default)]
+    ids: String,
+}
+
+/// 一度に読み直せる印の件数の上限（一覧の件数 `web.list_limit` の既定 200 より多めに取る）
+const MAX_MARK_IDS: usize = 500;
+
+/// 記事の印（評価・ブックマーク・既読）。`ids` はカンマ区切りの記事の ID。一覧に戻ったときの読み直しに使い、
+/// 閲覧ではないので、訪問も開いたことも記録しない。
+pub(super) async fn api_marks(
+    State(state): State<AppState>,
+    Query(params): Query<MarksParams>,
+) -> Result<Response, AppError> {
+    let ids: Vec<i64> = if params.ids.is_empty() {
+        Vec::new()
+    } else {
+        params
+            .ids
+            .split(',')
+            .map(|id| id.parse().ok().filter(|id: &i64| *id > 0))
+            .collect::<Option<_>>()
+            .ok_or(AppError::BadRequest(
+                "ids must be positive integers separated by commas",
+            ))?
+    };
+    if ids.len() > MAX_MARK_IDS {
+        return Err(AppError::BadRequest("too many ids"));
+    }
+    let body = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(serde_json::to_string(&api::MarkList::new(
+            db.marks(user, &ids)?,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
+}
+
 /// 記事 1 件の最新の要約と和訳。閲覧ではないので、開いたことを記録しない。
 pub(super) async fn api_detail(
     State(state): State<AppState>,

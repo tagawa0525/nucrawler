@@ -145,20 +145,23 @@
     }, true);
   }
   // 戻るボタンで戻ると、ブラウザは詳細を開く前のページを出す（詳細で付いた既読や評価が映らない）。
-  // 同じページを読み直し、カードの印と既読の見た目だけを今の状態に置き換える
+  // カードの記事の印（評価・ブックマーク・既読）だけを読み直して、見た目を今の状態に合わせる
   const resync = async () => {
-    const html = await fetch(location.href, { cache: "no-store" })
-      .then((res) => (res.ok ? res.text() : null))
+    const cards = new Map(
+      [...document.querySelectorAll(".card[data-id]")].map((c) => [c.dataset.id, c]),
+    );
+    if (cards.size === 0) return;
+    const res = await fetch(`/api/marks?ids=${[...cards.keys()].join(",")}`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
       .catch(() => null);
-    if (!html) return;
-    const fresh = new DOMParser().parseFromString(html, "text/html");
-    for (const card of document.querySelectorAll(".card[data-id]")) {
-      const now = fresh.querySelector(`.card[data-id="${card.dataset.id}"]`);
-      const marks = card.querySelector(".marks");
-      const nowMarks = now && now.querySelector(".marks");
-      if (!marks || !nowMarks) continue;
-      marks.replaceWith(document.importNode(nowMarks, true));
-      card.classList.toggle("read", now.classList.contains("read"));
+    if (!res) return;
+    for (const m of res.marks) {
+      const card = cards.get(String(m.id));
+      const marks = card && card.querySelector(".marks");
+      if (!marks) continue;
+      setStars(marks.querySelector(".rating"), m.rating ?? 0);
+      setToggle(marks.querySelector('form[action$="/bookmark"] button'), m.bookmarked);
+      setRead(marks, m.read);
     }
   };
   addEventListener("pageshow", (e) => {

@@ -121,7 +121,7 @@ pub struct Db {
     /// 推薦点の補正の正則化の強さ（`[recommend] prior_strength`）
     prior_strength: f64,
     /// 学習した推薦点のモデル（`recommend::ModelCache`）。読み出しのたびに学習し直さないよう、
-    /// 評価・採点が変わるまで使い回す
+    /// 学習の材料が変わるまで使い回す
     recommend: std::cell::RefCell<Option<recommend::ModelCache>>,
 }
 

@@ -4,9 +4,11 @@
 use super::*;
 use crate::recommend::{Example, Model};
 
-/// 学習したモデルと、学習したときの材料の目印。目印が変わるまで使い回す。
+/// 学習したモデルと、学習した材料。材料が変わるまで使い回す。
 pub(super) struct ModelCache {
-    fingerprint: String,
+    user_id: i64,
+    profile_hash: String,
+    examples: Vec<Example>,
     model: Model,
 }
 
@@ -44,7 +46,8 @@ pub(super) fn recommend_score_sql() -> &'static str {
 
 impl Db {
     /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = LLM 点）。
-    /// 評価・採点・プロファイルが前に学習したときと変わっていれば、学習し直す。
+    /// 学習の材料（評価した記事ごとの LLM 点・特徴・評価）を毎回読み、前に学習したときと違えば学習し直す。
+    /// 材料は評価した記事の分だけなので軽く、評価・採点・最新の要約・トピックの統合のどの変化も漏らさない。
     pub(super) fn recommend_model(
         &self,
         user_id: i64,
@@ -53,27 +56,19 @@ impl Db {
         let Some(profile_hash) = profile_hash else {
             return Ok(Model::identity());
         };
-        // 評価の件数と最後の時刻、このプロファイルの最後の採点で、学習の材料が変わったかを見る
-        let fingerprint: String = self.conn.query_row(
-            "SELECT ?1 || '/' || ?2 || '/' ||
-                    (SELECT count(*) || '/' || coalesce(max(rated_at), '')
-                     FROM ratings WHERE user_id = ?1) || '/' ||
-                    (SELECT coalesce(max(id), 0) FROM scores
-                     WHERE user_id = ?1 AND profile_hash = ?2)",
-            rusqlite::params![user_id, profile_hash],
-            |r| r.get(0),
-        )?;
+        let examples = self.recommend_examples(user_id, profile_hash)?;
         if let Some(cache) = self.recommend.borrow().as_ref()
-            && cache.fingerprint == fingerprint
+            && cache.user_id == user_id
+            && cache.profile_hash == profile_hash
+            && cache.examples == examples
         {
             return Ok(cache.model.clone());
         }
-        let model = Model::fit(
-            &self.recommend_examples(user_id, profile_hash)?,
-            self.prior_strength,
-        );
+        let model = Model::fit(&examples, self.prior_strength);
         *self.recommend.borrow_mut() = Some(ModelCache {
-            fingerprint,
+            user_id,
+            profile_hash: profile_hash.to_string(),
+            examples,
             model: model.clone(),
         });
         Ok(model)
@@ -102,10 +97,12 @@ impl Db {
                        LIMIT 1) AS score_id
                FROM rated)
              SELECT x.value, s.score, a.source_id, {topics},
-                    (SELECT json_group_array(topic) FROM score_matches
-                     WHERE score_id = s.id AND kind = 'interest'),
-                    (SELECT json_group_array(topic) FROM score_matches
-                     WHERE score_id = s.id AND kind = 'exclude')
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = s.id AND kind = 'interest' ORDER BY topic)),
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic))
              FROM scored AS x
              JOIN scores AS s ON s.id = x.score_id
              JOIN artifacts AS r ON r.id = x.digest_id

@@ -65,6 +65,10 @@ pub struct LlmConfig {
     pub tidy_model: String,
     /// 語彙の整理の間隔（日）。crawl のたびに、前回の整理からこの日数がたっていれば整理する
     pub tidy_interval_days: u32,
+    /// 本文が無く要約できない英語記事の見出しの和訳に使うモデル
+    pub title_model: String,
+    /// 1 回の呼び出しで和訳する見出しの数
+    pub title_batch_size: usize,
 }
 
 impl LlmConfig {
@@ -80,6 +84,7 @@ impl LlmConfig {
             ),
             ("timeout_secs", self.timeout_secs == 0),
             ("tidy_interval_days", self.tidy_interval_days == 0),
+            ("title_batch_size", self.title_batch_size == 0),
         ] {
             if is_zero {
                 return Err(format!("llm.{name} must be at least 1"));
@@ -111,6 +116,8 @@ impl Default for LlmConfig {
             translate_max_input_chars: 20000,
             tidy_model: "sonnet".into(),
             tidy_interval_days: 7,
+            title_model: "sonnet".into(),
+            title_batch_size: 30,
         }
     }
 }

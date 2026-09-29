@@ -92,6 +92,8 @@ pub enum Stage {
     Digest,
     Score,
     Translate,
+    /// 本文が無く要約できない英語記事の見出しの和訳
+    Title,
     /// 語彙の整理。前回から `llm.tidy_interval_days` 日たったときだけ実行する
     Tidy,
 }
@@ -103,6 +105,7 @@ impl Stage {
         Stage::Digest,
         Stage::Score,
         Stage::Translate,
+        Stage::Title,
         Stage::Tidy,
     ];
 
@@ -113,6 +116,7 @@ impl Stage {
             Stage::Digest => "digest",
             Stage::Score => "score",
             Stage::Translate => "translate",
+            Stage::Title => "title",
             Stage::Tidy => "tidy",
         }
     }
@@ -125,7 +129,9 @@ impl Stage {
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Tidy => LockKind::Llm,
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy => {
+                LockKind::Llm
+            }
         }
     }
 }

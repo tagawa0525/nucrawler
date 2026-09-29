@@ -1,4 +1,141 @@
 //! 見出しの和訳ステージ：本文が取れず要約できない英語記事の見出しを、まとめて和訳する。
+//! 本文が後から取れて要約ができれば、表示には要約の見出しが使われる。
+
+use chrono::{DateTime, Utc};
+
+use super::Halt;
+use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use crate::config::LlmConfig;
+use crate::db::{ArtifactKind, DbError, NewArtifact, StageKey};
+use crate::llm::{Llm, LlmRequest};
+use crate::{errors, glossary, prompt};
+
+pub const STAGE: &str = "title";
+
+#[derive(Debug, thiserror::Error)]
+pub enum TitleStageError {
+    #[error("database error")]
+    Db(#[from] DbError),
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct TitleSummary {
+    pub translated: usize,
+    pub failed: usize,
+    pub calls: usize,
+    pub halted: Option<Halt>,
+    pub cancelled: bool,
+}
+
+pub async fn translate_titles<L: Llm>(
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+    }: LlmStage<'_, L>,
+    llm_cfg: &LlmConfig,
+    now: DateTime<Utc>,
+) -> Result<TitleSummary, TitleStageError> {
+    let backend = llm.backend();
+    let model = llm_cfg.title_model.as_str();
+    let schema = prompt::title::schema();
+    let key = |article_id| StageKey {
+        article_id,
+        stage: STAGE,
+        backend,
+        model,
+    };
+    let mut summary = TitleSummary::default();
+    loop {
+        if cancel.is_requested() {
+            summary.cancelled = true;
+            break;
+        }
+        if let Err(stop) = quota.permit(now) {
+            tracing::info!("title stops: {stop}");
+            summary.halted = Some(Halt::Quota(stop));
+            break;
+        }
+        let batch = db.pending_titles(now, backend, model, llm_cfg.title_batch_size)?;
+        if batch.is_empty() {
+            break;
+        }
+        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+        let prompt = prompt::title::build_prompt(&batch);
+        let entries = db.glossary_entries()?;
+        let system = prompt::title::system_prompt(&glossary::relevant(&entries, &prompt).terms);
+        let outcome = call_recorded(
+            db,
+            llm,
+            quota,
+            Call {
+                stage: STAGE,
+                n_items: batch.len(),
+                req: LlmRequest {
+                    system: &system,
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
+            },
+            now,
+            cancel,
+        )
+        .await?;
+        summary.calls += 1;
+        let response = match outcome {
+            Outcome::Response(response) => response,
+            Outcome::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
+            Outcome::Halted(halt) => {
+                if let Halt::LlmFailed(message) = &halt {
+                    summary.failed +=
+                        record_failures(db, ids.iter().map(|&id| key(id)), message, now)?;
+                }
+                summary.halted = Some(halt);
+                break;
+            }
+        };
+        let parsed = match prompt::title::parse(&response.output, &ids) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let message = errors::error_chain(&e);
+                tracing::warn!("title output rejected: {message}");
+                summary.failed +=
+                    record_failures(db, ids.iter().map(|&id| key(id)), &message, now)?;
+                continue;
+            }
+        };
+        for (id, title_ja) in &parsed.items {
+            // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
+            let glossary_at = batch.iter().find(|b| b.article_id == *id).and_then(|b| {
+                let own = prompt::title::build_prompt(std::slice::from_ref(b));
+                glossary::relevant(&entries, &own).glossary_at
+            });
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: *id,
+                    kind: ArtifactKind::Title,
+                    backend,
+                    model,
+                    prompt_version: prompt::title::PROMPT_VERSION,
+                    payload: &serde_json::json!({ "title_ja": title_ja }),
+                    inputs: &[],
+                    glossary_at: glossary_at.as_deref(),
+                },
+                now,
+            )?;
+            db.clear_stage_failure(key(*id))?;
+            summary.translated += 1;
+        }
+        summary.failed +=
+            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
+    }
+    Ok(summary)
+}
 
 #[cfg(test)]
 mod tests {

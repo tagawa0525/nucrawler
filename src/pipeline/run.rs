@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, suggest, tidy, translate};
+use super::{digest, extract, fetch, score, suggest, tidy, title, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -31,6 +31,8 @@ pub enum RunError {
     Translate(#[from] translate::TranslateStageError),
     #[error(transparent)]
     Tidy(#[from] tidy::TidyStageError),
+    #[error(transparent)]
+    Title(#[from] title::TitleStageError),
     #[error(transparent)]
     Suggest(#[from] suggest::SuggestStageError),
 }
@@ -100,7 +102,9 @@ pub async fn crawl<L: Llm>(
                 );
                 report.failed_sources += summary.failed_sources.len();
             }
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Tidy if llm_blocked => {
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy
+                if llm_blocked =>
+            {
                 tracing::warn!(
                     stage = stage.name(),
                     "skipped: the llm is unavailable in this run"
@@ -172,6 +176,17 @@ pub async fn crawl<L: Llm>(
                     failed = summary.failed,
                     calls = summary.calls,
                     "translate stage finished"
+                );
+                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+            }
+            Stage::Title => {
+                let now = (env.clock)();
+                let summary = title::translate_titles(env.stage(), &config.llm, now).await?;
+                tracing::info!(
+                    translated = summary.translated,
+                    failed = summary.failed,
+                    calls = summary.calls,
+                    "title stage finished"
                 );
                 llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
             }

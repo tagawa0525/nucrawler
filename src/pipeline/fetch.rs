@@ -4,6 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Cancel;
+use super::workers::{group_by_host, run_workers};
 use crate::check;
 use crate::config::Source;
 use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, FetchCounts, NewArticle};
@@ -37,8 +38,47 @@ pub async fn fetch_sources(
     cancel: &Cancel,
     now: DateTime<Utc>,
 ) -> Result<FetchSummary, FetchError> {
+    let enabled: Vec<&Source> = sources.iter().filter(|s| s.enabled).collect();
+    // ホストごとに 1 つの作業者が順に取り、ホストどうしは並行する（同じホストへの間隔は `Fetcher` が
+    // 守る）
+    let groups = group_by_host(enabled, |s| s.url.as_str());
+    if groups.is_empty() {
+        return Ok(FetchSummary::default());
+    }
+    let parts = run_workers(groups.len(), |i| {
+        fetch_host(db, fetcher, &groups[i], cancel, now)
+    })
+    .await?;
+    let mut summary = parts
+        .into_iter()
+        .fold(FetchSummary::default(), FetchSummary::merge);
+    // 失敗したソースは設定の順に並べる（並行して取ると終わる順が前後する）
+    summary
+        .failed_sources
+        .sort_by_key(|id| sources.iter().position(|s| &s.id == id));
+    Ok(summary)
+}
+
+impl FetchSummary {
+    /// ホストごとの集計を合わせる。
+    fn merge(mut self, other: FetchSummary) -> FetchSummary {
+        self.new_articles += other.new_articles;
+        self.failed_sources.extend(other.failed_sources);
+        self.cancelled |= other.cancelled;
+        self
+    }
+}
+
+/// 1 つのホストのソースを順に取る。
+async fn fetch_host(
+    db: &Db,
+    fetcher: &Fetcher,
+    sources: &[&Source],
+    cancel: &Cancel,
+    now: DateTime<Utc>,
+) -> Result<FetchSummary, FetchError> {
     let mut summary = FetchSummary::default();
-    for s in sources.iter().filter(|s| s.enabled) {
+    for &s in sources {
         if cancel.is_requested() {
             summary.cancelled = true;
             break;

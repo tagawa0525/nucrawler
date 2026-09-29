@@ -38,3 +38,49 @@ where
         .map(|r| r.expect("every worker finished"))
         .collect())
 }
+
+/// `items` を URL のホスト（とポート）ごとに分ける。分けた中の順と、ホストの並び（最初に出てきた順）は
+/// 保つ。URL として読めないものは、それだけで 1 つにまとめる（取得するときに失敗として扱われる）。
+pub fn group_by_host<T>(items: Vec<T>, url: impl Fn(&T) -> &str) -> Vec<Vec<T>> {
+    let mut groups: Vec<(Option<String>, Vec<T>)> = Vec::new();
+    for item in items {
+        let host = url::Url::parse(url(&item)).ok().map(|u| {
+            format!(
+                "{}:{}",
+                u.host_str().unwrap_or_default(),
+                u.port_or_known_default().unwrap_or_default()
+            )
+        });
+        match groups.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, group)) => group.push(item),
+            None => groups.push((host, vec![item])),
+        }
+    }
+    groups.into_iter().map(|(_, group)| group).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_by_host_and_port_keeping_order() {
+        let urls = [
+            "https://a.example/1",
+            "https://b.example/1",
+            "https://a.example/2",
+            "http://a.example/3",
+            "not a url",
+        ];
+        let groups = group_by_host(urls.to_vec(), |u| u);
+        assert_eq!(
+            groups,
+            [
+                vec!["https://a.example/1", "https://a.example/2"],
+                vec!["https://b.example/1"],
+                vec!["http://a.example/3"],
+                vec!["not a url"],
+            ]
+        );
+    }
+}

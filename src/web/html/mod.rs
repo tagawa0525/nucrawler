@@ -147,7 +147,7 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
 }
 
 /// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
-/// `state` があれば切り替えとして ON（緑）/ OFF（赤）を示す。`href` はエスケープ済みで渡す。
+/// `state` があれば切り替えとして ON（緑）/ OFF（白）を示す。`href` はエスケープ済みで渡す。
 fn button(href: &str, name: &str, emoji: &str, state: Option<bool>) -> String {
     let (class, label) = match state {
         None => (String::new(), name.to_string()),

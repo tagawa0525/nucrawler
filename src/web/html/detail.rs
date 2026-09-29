@@ -390,6 +390,27 @@ mod tests {
         );
     }
 
+    /// 詳細の印の行も一覧のカードと同じく 点数・評価・既読・ブックマーク の順。点数は理由の段落には重ねない。
+    #[test]
+    fn detail_marks_lead_with_the_score_like_the_list() {
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="actions marks"><span class="score">80</span><form method="post" action="/articles/7/rating""#),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"<span class="score">"#).count(), 1, "{html}");
+        let marks = html.split(r#"<div class="actions marks">"#).nth(1).unwrap();
+        assert!(
+            marks.find("/articles/7/read").unwrap() < marks.find("/articles/7/bookmark").unwrap(),
+            "{marks}"
+        );
+    }
+
     /// 推薦点が LLM の点数と違えば、補正の内訳（効いた特徴と、動かした点数）を出す。
     #[test]
     fn detail_page_explains_the_recommended_score() {

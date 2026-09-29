@@ -35,22 +35,47 @@ pub fn hide_read_before(
         .collect()
 }
 
-/// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
-#[derive(Clone, Copy, Default)]
+/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、過去の既読は `read=1` で持つ。
+#[derive(Clone, Copy)]
 pub struct ListView {
-    /// 評価 1〜2・低い点・未採点の記事も出す
-    pub all: bool,
+    /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）
+    pub min: u8,
+    /// 既定の最低点（設定の `web.min_score`）
+    pub default_min: u8,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
 }
 
+impl Default for ListView {
+    fn default() -> Self {
+        let min = crate::config::WebConfig::default().min_score;
+        Self {
+            min,
+            default_min: min,
+            read: false,
+        }
+    }
+}
+
+/// 最低点の選択肢の刻み（0〜90）
+const MIN_STEP: u8 = 10;
+
 impl ListView {
+    /// 「すべて」の表示か（評価 1〜2・未採点・軽水炉と無関係の記事も出す）。
+    pub fn shows_all(self) -> bool {
+        self.min == 0
+    }
+
     /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
     fn href(self) -> String {
-        let query: Vec<_> = [(self.all, "all=1"), (self.read, "read=1")]
-            .into_iter()
-            .filter_map(|(on, q)| on.then_some(q))
-            .collect();
+        let min = format!("min={}", self.min);
+        let query: Vec<&str> = [
+            (self.min != self.default_min, min.as_str()),
+            (self.read, "read=1"),
+        ]
+        .into_iter()
+        .filter_map(|(on, q)| on.then_some(q))
+        .collect();
         if query.is_empty() {
             "/".to_string()
         } else {
@@ -63,6 +88,32 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     list_page_with_explore(new, earlier, &[], view, page)
 }
 
+/// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
+/// （JavaScript が無ければ「表示」のボタンで）。過去の既読の表示は引き継ぐ。
+fn min_select(view: ListView) -> String {
+    let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
+    values.extend([view.default_min, view.min]);
+    values.sort_unstable();
+    values.dedup();
+    let options: String = values
+        .iter()
+        .map(|v| {
+            let selected = if *v == view.min { " selected" } else { "" };
+            format!("<option value=\"{v}\"{selected}>{v}</option>")
+        })
+        .collect();
+    let read = if view.read {
+        "<input type=\"hidden\" name=\"read\" value=\"1\">"
+    } else {
+        ""
+    };
+    format!(
+        "<form class=\"min\" method=\"get\" action=\"/\"><select name=\"min\" aria-label=\"表示する最低点\" \
+         title=\"表示する最低点\" onchange=\"this.form.submit()\">{options}</select>{read}\
+         <noscript><button>表示</button></noscript></form>"
+    )
+}
+
 /// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）を添える。
 pub fn list_page_with_explore(
     new: &[ListItem],
@@ -71,10 +122,6 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let all_toggle = ListView {
-        all: !view.all,
-        ..view
-    };
     let read_toggle = ListView {
         read: !view.read,
         ..view
@@ -84,12 +131,7 @@ pub fn list_page_with_explore(
         button("/search", "検索", "🔍", None),
         button("/search?min_rating=4", "評価 4 以上", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
-        button(
-            &all_toggle.href(),
-            "おすすめだけ表示",
-            "⭐",
-            Some(!view.all)
-        ),
+        min_select(view),
         button(
             &read_toggle.href(),
             "過去の既読も表示",

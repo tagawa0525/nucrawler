@@ -6,18 +6,18 @@ pub(super) fn json(body: String) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// Web の一覧と同じ記事（`all=1` ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
+/// Web の一覧と同じ記事（`min` で最低点を選べ、0 ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, AppError> {
-    let show_all = params.all.as_deref() == Some("1");
+    let min = params.min(&state.web)?;
     let web = state.web.clone();
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,
         ))?)

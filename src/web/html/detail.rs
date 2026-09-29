@@ -315,6 +315,22 @@ mod tests {
     use crate::db::ArtifactVersion;
     use crate::web::html::test_support::*;
 
+    /// 詳細の画面にも一覧と同じ上部のバーを出し、「← 一覧」の代わりに先頭の 🏠 で一覧へ戻る。
+    #[test]
+    fn detail_page_shows_the_list_bar_with_home() {
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<nav class="bar"><a class="btn" href="/" aria-label="ホーム" title="ホーム">🏠</a>"#),
+            "{html}"
+        );
+        assert!(!html.contains("← 一覧"), "{html}");
+    }
+
     #[test]
     fn detail_page_shows_latest_digest_and_version_links() {
         let html = detail_page(

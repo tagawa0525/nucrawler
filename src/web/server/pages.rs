@@ -613,6 +613,24 @@ mod tests {
         );
     }
 
+    /// 原文へは、開いたことを記録してから元の記事へ移す。無い記事は 404。
+    #[tokio::test]
+    async fn source_link_records_the_open_and_redirects() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a?x=1&y=2", "見出しA");
+        let server = Server::start(db).await;
+        let res = server.get_raw(&format!("/articles/{id}/source")).await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "https://e.com/a?x=1&y=2");
+        assert_eq!(
+            server.count(&format!(
+                "SELECT count(*) FROM events WHERE article_id = {id} AND kind = 'open_source'"
+            )),
+            1
+        );
+        assert_eq!(server.get("/articles/999/source").await.0, 404);
+    }
+
     #[tokio::test]
     async fn detail_records_opens_once_per_view() {
         let db = Db::open_in_memory().unwrap();

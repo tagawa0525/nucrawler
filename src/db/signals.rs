@@ -333,6 +333,8 @@ mod tests {
             .unwrap();
         db.record_open(owner, a, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
             .unwrap();
+        db.record_open(owner, a, OpenKind::Source, t("2026-09-27T02:00:00Z"))
+            .unwrap();
         assert_eq!(
             item(&db, a).read_at.as_deref(),
             Some("2026-09-27T00:00:00.000Z")
@@ -340,7 +342,7 @@ mod tests {
         assert_eq!(
             db.query_strings("SELECT kind FROM events ORDER BY id")
                 .unwrap(),
-            ["open_detail", "open_translation"]
+            ["open_detail", "open_translation", "open_source"]
         );
     }
 

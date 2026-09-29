@@ -326,6 +326,11 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("要点A") && html.contains("示唆") && html.contains("燃料"));
+        // 原文は開いたことを記録してから移る
+        assert!(
+            html.contains(r#"<a href="/articles/7/source">原文</a>"#),
+            "{html}"
+        );
         assert!(
             html.contains(r#"href="https://e.com/7""#),
             "link to original"

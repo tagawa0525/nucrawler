@@ -45,6 +45,8 @@
     e.preventDefault();
     if (busy.has(form)) return;
     busy.add(form);
+    // 読み直し（resync）が、この送信より前の状態で上書きしないように、押した時刻を残す
+    marks.dataset.changed = String(performance.now());
     const { name, value } = e.submitter;
     const ok = await fetch(form.action, {
       method: "POST",
@@ -147,6 +149,7 @@
   // 戻るボタンで戻ると、ブラウザは詳細を開く前のページを出す（詳細で付いた既読や評価が映らない）。
   // カードの記事の印（評価・ブックマーク・既読）だけを読み直して、見た目を今の状態に合わせる
   const resync = async () => {
+    const started = performance.now();
     const cards = new Map(
       [...document.querySelectorAll(".card[data-id]")].map((c) => [c.dataset.id, c]),
     );
@@ -158,7 +161,8 @@
     for (const m of res.marks) {
       const card = cards.get(String(m.id));
       const marks = card && card.querySelector(".marks");
-      if (!marks) continue;
+      // 読み直しを始めた後に押された印は、その送信の結果のほうが新しい
+      if (!marks || Number(marks.dataset.changed ?? -1) >= started) continue;
       setStars(marks.querySelector(".rating"), m.rating ?? 0);
       setToggle(marks.querySelector('form[action$="/bookmark"] button'), m.bookmarked);
       setRead(marks, m.read);

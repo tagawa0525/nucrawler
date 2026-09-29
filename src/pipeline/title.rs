@@ -355,4 +355,53 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
         drop(other);
     }
+
+    /// クォータの判定は、ステージを始めた時刻ではなく判定する時点の時刻で行う（枠を待つ間や長い
+    /// ステージの途中で時間帯が変われば、その時間帯の上限を使う）。
+    #[tokio::test]
+    async fn checks_the_quota_at_the_current_time() {
+        let db = Db::open_in_memory().unwrap();
+        articles(&db, 1);
+        // JST 23:00 の時間帯の上限は 20%（ステージを始めた JST 11:00 は 85%）
+        let late = now() + chrono::Duration::hours(12);
+        db.record_llm_call(
+            &crate::db::LlmCall {
+                stage: "digest",
+                backend: "fake",
+                model: "sonnet",
+                n_items: 1,
+                ok: true,
+                duration_ms: 1,
+                error: None,
+                rate_limit: Some(&crate::llm::RateLimit {
+                    five_hour: Some(crate::llm::Window {
+                        utilization: 0.5,
+                        resets_at: late.timestamp() + 3600,
+                    }),
+                    seven_day: None,
+                }),
+            },
+            now(),
+        )
+        .unwrap();
+        let llm = FakeLlm::new([]);
+        let summary = translate_titles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &|| late,
+            },
+            &LlmConfig::default(),
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.calls, 0);
+        assert!(
+            matches!(summary.halted, Some(Halt::Quota(_))),
+            "{summary:?}"
+        );
+    }
 }

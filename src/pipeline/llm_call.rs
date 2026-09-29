@@ -1,6 +1,11 @@
 //! LLM ステージ共通の 1 回の呼び出し：呼んで、`llm_calls` に記録し、使用率をクォータに反映し、
 //! 失敗を「止める理由」に振り分ける。記事ごとの失敗の記録もここにまとめる。
 
+use std::cell::{Cell, RefCell};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+
 use chrono::{DateTime, Utc};
 
 use super::{Cancel, Halt};
@@ -46,6 +51,67 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
     missing.iter().copied().filter(|id| held.contains(id))
 }
 
+/// ステージの中で同時に回す作業者が共有する状態。作業者は同じタスクの中で動くので、`RefCell` で
+/// 共有し、`await` をまたいで借りない。
+pub struct Shared<'q> {
+    quota: RefCell<&'q mut Quota>,
+    stop: Cell<bool>,
+}
+
+impl<'q> Shared<'q> {
+    pub fn new(quota: &'q mut Quota) -> Self {
+        Self {
+            quota: RefCell::new(quota),
+            stop: Cell::new(false),
+        }
+    }
+
+    /// ほかの作業者を止める（クォータ・LLM の失敗・中断で止まった作業者が呼ぶ）
+    pub fn stop(&self) {
+        self.stop.set(true);
+    }
+
+    /// ほかの作業者が止まったか。作業者は周の最初に確かめ、止まっていれば新しい作業を始めない
+    pub fn stopped(&self) -> bool {
+        self.stop.get()
+    }
+}
+
+/// `n` 個の作業者を同じタスクの中で同時に回し、すべて終わったら結果を並べて返す。どれかが失敗
+/// したら、その失敗を返す（ほかの作業者は捨てる。予約は drop で外れる）。作業者は `make` に
+/// 番号を渡して作る。
+pub async fn run_workers<T, E, F, Fut>(n: usize, mut make: F) -> Result<Vec<T>, E>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut workers: Vec<Pin<Box<Fut>>> = (0..n.max(1)).map(|i| Box::pin(make(i))).collect();
+    let mut results: Vec<Option<T>> = workers.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (worker, result) in workers.iter_mut().zip(results.iter_mut()) {
+            if result.is_some() {
+                continue;
+            }
+            match worker.as_mut().poll(cx) {
+                Poll::Ready(Ok(value)) => *result = Some(value),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => pending = true,
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    })
+    .await?;
+    Ok(results
+        .into_iter()
+        .map(|r| r.expect("every worker finished"))
+        .collect())
+}
+
 /// 呼び出しの枠を取った結果。
 pub enum Reserved<S> {
     Slot(S),
@@ -77,10 +143,11 @@ pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 /// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
 pub fn permit(
     db: &Db,
-    quota: &mut Quota,
+    shared: &Shared<'_>,
     now: DateTime<Utc>,
     reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
+    let mut quota = shared.quota.borrow_mut();
     quota.observe(db.latest_rate_limit(now)?);
     Ok(quota.permit_reserving(now, reserve))
 }
@@ -115,10 +182,12 @@ pub struct Call<'a> {
     pub req: LlmRequest<'a>,
 }
 
+/// 判定（`permit`）から呼び出しを始めるまでの間に `await` を挟まないこと。呼び出しは始めた時点で
+/// 数えるので、その間に並行する作業者が判定すると、上限を超えて呼んでしまう。
 pub async fn call_recorded<L: Llm>(
     db: &Db,
     llm: &L,
-    quota: &mut Quota,
+    shared: &Shared<'_>,
     Call {
         stage,
         n_items,
@@ -131,6 +200,7 @@ pub async fn call_recorded<L: Llm>(
     if cancel.is_requested() {
         return Ok(Outcome::Cancelled);
     }
+    shared.quota.borrow_mut().start_call();
     let started = std::time::Instant::now();
     // 応答を待たずに止める。呼び出しの future を捨てると子プロセスも止まる（kill_on_drop）
     let result = tokio::select! {
@@ -161,7 +231,7 @@ pub async fn call_recorded<L: Llm>(
         Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
         Err(_) => None,
     };
-    quota.record_call(rate_limit);
+    shared.quota.borrow_mut().observe(rate_limit);
     let error = result.as_ref().err().map(|e| errors::error_chain(e));
     db.record_llm_call(
         &LlmCall {
@@ -211,7 +281,7 @@ mod tests {
         let outcome = call_recorded(
             &db,
             &llm,
-            &mut Quota::new(QuotaConfig::default(), None, None),
+            &Shared::new(&mut Quota::new(QuotaConfig::default(), None, None)),
             Call {
                 stage: "digest",
                 n_items: 1,
@@ -250,7 +320,7 @@ mod tests {
         let outcome = call_recorded(
             &db,
             &llm,
-            &mut Quota::new(QuotaConfig::default(), None, None),
+            &Shared::new(&mut Quota::new(QuotaConfig::default(), None, None)),
             Call {
                 stage: "digest",
                 n_items: 1,
@@ -284,7 +354,7 @@ mod tests {
         let outcome = call_recorded(
             &db,
             &llm,
-            &mut Quota::new(QuotaConfig::default(), None, None),
+            &Shared::new(&mut Quota::new(QuotaConfig::default(), None, None)),
             Call {
                 stage: "digest",
                 n_items: 1,

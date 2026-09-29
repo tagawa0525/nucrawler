@@ -222,8 +222,14 @@ impl Quota {
 
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
     pub fn record_call(&mut self, usage: Option<RateLimit>) {
-        self.calls += 1;
+        self.start_call();
         self.observe(usage);
+    }
+
+    /// 呼び出しを始めたことを数える。ステージの中で呼び出しを並行させるので、応答を待たずに
+    /// 始めた時点で数え、並行して判定するほかの呼び出しにも上限が効くようにする。
+    pub fn start_call(&mut self) {
+        self.calls += 1;
     }
 
     /// ほかの実行を含めて分かった最新の使用率（DB の最新の llm_calls）を取り込む。LLM を呼ぶ実行は

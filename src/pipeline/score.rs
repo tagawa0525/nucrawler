@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
-    record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
+    permit, record_failures, reserve, run_workers,
 };
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
@@ -46,6 +46,19 @@ pub struct ScoreSummary {
     pub cancelled: bool,
     /// プロファイルが未登録で、採点しなかった
     pub no_profile: bool,
+}
+
+impl ScoreSummary {
+    /// 作業者ごとの集計を合わせる。
+    fn merge(mut self, other: ScoreSummary) -> ScoreSummary {
+        self.scored += other.scored;
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted, other.halted);
+        self.cancelled |= other.cancelled;
+        self.no_profile |= other.no_profile;
+        self
+    }
 }
 
 pub async fn score_articles<L: Llm>(
@@ -99,125 +112,152 @@ pub async fn score_articles<L: Llm>(
     };
     let system = prompt::score::system_prompt(&profile);
     let schema = prompt::score::schema(&profile);
-    loop {
-        if cancel.is_requested() {
-            summary.cancelled = true;
-            break;
-        }
-        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-        let _slot = match reserve(llm, cancel).await {
-            Reserved::Slot(slot) => slot,
-            Reserved::Cancelled => {
+    let shared = Shared::new(quota);
+    // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
+    let parts = run_workers(llm_cfg.concurrency, |_| async {
+        let mut summary = ScoreSummary::default();
+        loop {
+            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+            tokio::task::yield_now().await;
+            if shared.stopped() {
+                break;
+            }
+            if cancel.is_requested() {
                 summary.cancelled = true;
                 break;
             }
-            Reserved::Failed(message) => {
-                summary.halted = Some(Halt::LlmFailed(message));
+            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+            let _slot = match reserve(llm, cancel).await {
+                Reserved::Slot(slot) => slot,
+                Reserved::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Reserved::Failed(message) => {
+                    summary.halted = Some(Halt::LlmFailed(message));
+                    break;
+                }
+            };
+            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+            if shared.stopped() {
                 break;
             }
-        };
-        if let Err(stop) = permit(db, quota, clock(), 0)? {
-            tracing::info!("score stops: {stop}");
-            summary.halted = Some(Halt::Quota(stop));
-            break;
-        }
-        // 予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (batch, claim) = db.claim_selected(
-            ClaimKey {
-                stage: &failure_stage,
-                backend,
-                model,
-            },
-            clock(),
-            claim_ttl(llm_cfg),
-            |db| db.pending_score(key, scope, now, llm_cfg.score_batch_size),
-            |b| b.article_id,
-        )?;
-        if batch.is_empty() {
-            break;
-        }
-        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
-        let prompt = prompt::score::build_prompt(&batch);
-        let outcome = call_recorded(
-            db,
-            llm,
-            quota,
-            Call {
-                stage: STAGE,
-                n_items: batch.len(),
-                req: LlmRequest {
-                    system: &system,
-                    prompt: &prompt,
-                    schema: &schema,
+            if let Err(stop) = permit(db, &shared, clock(), 0)? {
+                tracing::info!("score stops: {stop}");
+                summary.halted = Some(Halt::Quota(stop));
+                break;
+            }
+            // 予約は処理を終える（この周の終わりで drop する）まで持つ
+            let (batch, claim) = db.claim_selected(
+                ClaimKey {
+                    stage: &failure_stage,
+                    backend,
                     model,
                 },
-            },
-            now,
-            cancel,
-        )
-        .await?;
-        summary.calls += 1;
-        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
-        let response = match outcome {
-            Outcome::Response(response) => response,
-            Outcome::Cancelled => {
-                summary.cancelled = true;
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| db.pending_score(key, scope, now, llm_cfg.score_batch_size),
+                |b| b.article_id,
+            )?;
+            if batch.is_empty() {
                 break;
             }
-            Outcome::Halted(halt) => {
-                if let Halt::LlmFailed(message) = &halt {
-                    summary.failed +=
-                        record_failures(db, held.iter().map(|&id| failure_key(id)), message, now)?;
-                }
-                summary.halted = Some(halt);
-                break;
-            }
-        };
-        let parsed = match prompt::score::parse(&response.output, &ids, &profile) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                let message = errors::error_chain(&e);
-                tracing::warn!("score output rejected: {message}");
-                summary.failed +=
-                    record_failures(db, held.iter().map(|&id| failure_key(id)), &message, now)?;
-                continue;
-            }
-        };
-        for item in &parsed.items {
-            let Some(input) = batch.iter().find(|b| b.article_id == item.id) else {
-                continue;
-            };
-            if !held.contains(&item.id) {
-                tracing::warn!(
-                    article_id = item.id,
-                    "{STAGE} result dropped: the claim was taken over"
-                );
-                continue;
-            }
-            db.insert_score_with_matches(
-                key,
-                input.artifact_id,
-                item.score,
-                Some(&item.reason),
-                ScoreMatches {
-                    interests: &item.matched,
-                    excludes: &item.excluded,
+            let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+            let prompt = prompt::score::build_prompt(&batch);
+            let outcome = call_recorded(
+                db,
+                llm,
+                &shared,
+                Call {
+                    stage: STAGE,
+                    n_items: batch.len(),
+                    req: LlmRequest {
+                        system: &system,
+                        prompt: &prompt,
+                        schema: &schema,
+                        model,
+                    },
                 },
                 now,
+                cancel,
+            )
+            .await?;
+            summary.calls += 1;
+            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let response = match outcome {
+                Outcome::Response(response) => response,
+                Outcome::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Outcome::Halted(halt) => {
+                    if let Halt::LlmFailed(message) = &halt {
+                        summary.failed += record_failures(
+                            db,
+                            held.iter().map(|&id| failure_key(id)),
+                            message,
+                            now,
+                        )?;
+                    }
+                    summary.halted = Some(halt);
+                    break;
+                }
+            };
+            let parsed = match prompt::score::parse(&response.output, &ids, &profile) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let message = errors::error_chain(&e);
+                    tracing::warn!("score output rejected: {message}");
+                    summary.failed +=
+                        record_failures(db, held.iter().map(|&id| failure_key(id)), &message, now)?;
+                    continue;
+                }
+            };
+            for item in &parsed.items {
+                let Some(input) = batch.iter().find(|b| b.article_id == item.id) else {
+                    continue;
+                };
+                if !held.contains(&item.id) {
+                    tracing::warn!(
+                        article_id = item.id,
+                        "{STAGE} result dropped: the claim was taken over"
+                    );
+                    continue;
+                }
+                db.insert_score_with_matches(
+                    key,
+                    input.artifact_id,
+                    item.score,
+                    Some(&item.reason),
+                    ScoreMatches {
+                        interests: &item.matched,
+                        excludes: &item.excluded,
+                    },
+                    now,
+                )?;
+                db.clear_stage_failure(failure_key(item.id))?;
+                summary.scored += 1;
+            }
+            summary.failed += record_failures(
+                db,
+                held_missing(&parsed.missing, &held).map(failure_key),
+                MISSING,
+                now,
             )?;
-            db.clear_stage_failure(failure_key(item.id))?;
-            summary.scored += 1;
         }
-        summary.failed += record_failures(
-            db,
-            held_missing(&parsed.missing, &held).map(failure_key),
-            MISSING,
-            now,
-        )?;
-    }
-    Ok(summary)
+        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
+        if summary.halted.is_some() || summary.cancelled {
+            shared.stop();
+        }
+        Ok::<_, ScoreStageError>(summary)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(ScoreSummary::default(), ScoreSummary::merge))
 }
 
 #[cfg(test)]

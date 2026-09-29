@@ -65,6 +65,24 @@ pub enum Halt {
     LlmFailed(String),
 }
 
+impl Halt {
+    /// 並行した作業者の止めた理由のうち、重い方（LLM の失敗 > 利用上限 > クォータ）。LLM の失敗を
+    /// 落とすと、後続のステージが失敗している LLM をまた呼んでしまう。
+    pub fn most_severe(a: Option<Halt>, b: Option<Halt>) -> Option<Halt> {
+        fn rank(h: &Halt) -> u8 {
+            match h {
+                Halt::Quota(_) => 0,
+                Halt::UsageLimit { .. } => 1,
+                Halt::LlmFailed(_) => 2,
+            }
+        }
+        match (a, b) {
+            (Some(a), Some(b)) => Some(if rank(&b) > rank(&a) { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 /// LLM ステージが処理する対象。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
@@ -218,6 +236,26 @@ mod tests {
         );
         assert_eq!(plan(None, Some(Stage::Extract)), [Stage::Extract]);
         assert_eq!(plan(None, Some(Stage::Fetch)), [Stage::Fetch]);
+    }
+
+    /// 並行した作業者の止めた理由は、重い方を残す（LLM の失敗 > 利用上限 > クォータ）。
+    /// LLM の失敗を落とすと、後続のステージが失敗している LLM をまた呼んでしまう。
+    #[test]
+    fn keeps_the_most_severe_halt() {
+        let quota = || Halt::Quota(crate::quota::Stop::MaxCalls { limit: 1 });
+        let usage = || Halt::UsageLimit { resets_at: None };
+        let failed = || Halt::LlmFailed("Not logged in".into());
+        for (a, b, want) in [
+            (Some(quota()), Some(failed()), Some(failed())),
+            (Some(failed()), Some(quota()), Some(failed())),
+            (Some(quota()), Some(usage()), Some(usage())),
+            (Some(usage()), Some(failed()), Some(failed())),
+            (None, Some(quota()), Some(quota())),
+            (Some(quota()), None, Some(quota())),
+            (None, None, None),
+        ] {
+            assert_eq!(Halt::most_severe(a.clone(), b.clone()), want, "{a:?} {b:?}");
+        }
     }
 
     /// 取得のステージと LLM のステージは、それぞれのロックを取って順に実行する。

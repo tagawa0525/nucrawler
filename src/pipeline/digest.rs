@@ -1,13 +1,14 @@
 //! 要約ステージ：digest の無い記事を数件ずつ LLM に渡し、応答を検証して成果物として保存する。
 //! 呼び出しの前にクォータを確かめ、上限に達したら残りは次回に回す。
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
-    record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
+    permit, record_failures, reserve, run_workers,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -36,6 +37,18 @@ pub struct DigestSummary {
     pub cancelled: bool,
 }
 
+impl DigestSummary {
+    /// 作業者ごとの集計を合わせる。
+    fn merge(mut self, other: DigestSummary) -> DigestSummary {
+        self.digested += other.digested;
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted, other.halted);
+        self.cancelled |= other.cancelled;
+        self
+    }
+}
+
 pub async fn digest_articles<L: Llm>(
     LlmStage {
         db,
@@ -52,12 +65,11 @@ pub async fn digest_articles<L: Llm>(
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
-    let mut summary = DigestSummary::default();
     // 訳語集の変更による作り直しは、対象の記事を最初に 1 回だけ洗い出し、毎回その先頭の分だけを
     // 予約と同じトランザクションの中で判定し直す（毎回すべてを洗い直すと件数の 2 乗の読み込みになり、
     // 先に決めた一覧をそのまま使うと、ほかの実行が作り直し終えた記事をもう一度作り直してしまう）
     let glossary_redo = matches!(target, Target::Redo(spec) if spec.glossary);
-    let mut outdated: VecDeque<i64> = match target {
+    let outdated: VecDeque<i64> = match target {
         Target::Redo(spec) if spec.glossary => outdated_digests(
             db,
             redo_key(spec, backend, model),
@@ -70,172 +82,198 @@ pub async fn digest_articles<L: Llm>(
         .collect(),
         _ => VecDeque::new(),
     };
-    loop {
-        if cancel.is_requested() {
-            summary.cancelled = true;
-            break;
-        }
-        // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-        let _slot = match reserve(llm, cancel).await {
-            Reserved::Slot(slot) => slot,
-            Reserved::Cancelled => {
+    let shared = Shared::new(quota);
+    let outdated = RefCell::new(outdated);
+    // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
+    let parts = run_workers(llm_cfg.concurrency, |_| async {
+        let mut summary = DigestSummary::default();
+        loop {
+            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+            tokio::task::yield_now().await;
+            if shared.stopped() {
+                break;
+            }
+            if cancel.is_requested() {
                 summary.cancelled = true;
                 break;
             }
-            Reserved::Failed(message) => {
-                summary.halted = Some(Halt::LlmFailed(message));
+            // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
+            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+            let _slot = match reserve(llm, cancel).await {
+                Reserved::Slot(slot) => slot,
+                Reserved::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Reserved::Failed(message) => {
+                    summary.halted = Some(Halt::LlmFailed(message));
+                    break;
+                }
+            };
+            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+            if shared.stopped() {
                 break;
             }
-        };
-        if let Err(stop) = permit(db, quota, clock(), llm_cfg.score_reserved_calls)? {
-            tracing::info!("digest stops: {stop}");
-            summary.halted = Some(Halt::Quota(stop));
-            break;
-        }
-        let claim_key = ClaimKey {
-            stage: STAGE,
-            backend,
-            model,
-        };
-        // 予約は処理を終える（この周の終わりで drop する）まで持つ。対象は毎回、予約と同じ
-        // トランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を作ると、ほかの実行が
-        // 作り直し終えた記事をもう一度作り直してしまう）
-        let (batch, claim) = db.claim_selected(
-            claim_key,
-            clock(),
-            claim_ttl(llm_cfg),
-            |db| match target {
-                Target::Redo(spec) if spec.glossary => {
-                    let n = llm_cfg.digest_batch_size.min(outdated.len());
-                    let next = RedoFilter {
-                        ids: outdated.drain(..n).collect(),
-                        ..spec.filter.clone()
-                    };
-                    outdated_digests(db, redo_key(spec, backend, model), &next, llm_cfg, now)
-                }
-                Target::Pending { .. } => {
-                    db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)
-                }
-                Target::Redo(spec) => db.redo_digest(
-                    redo_key(spec, backend, model),
-                    &spec.filter,
-                    now,
-                    llm_cfg.digest_batch_size,
-                ),
-            },
-            |b| b.article_id,
-        )?;
-        if batch.is_empty() {
-            // 先頭の分がほかの実行に作り直されていたら、残りに進む
-            if glossary_redo && !outdated.is_empty() {
-                continue;
+            if let Err(stop) = permit(db, &shared, clock(), llm_cfg.score_reserved_calls)? {
+                tracing::info!("digest stops: {stop}");
+                summary.halted = Some(Halt::Quota(stop));
+                break;
             }
-            break;
-        }
-        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
-        let prompt = prompt::digest::build_prompt(&batch, llm_cfg.max_input_chars);
-        // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
-        let vocab = db.topics()?;
-        let entries = db.glossary_entries()?;
-        let system =
-            prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
-        let schema = prompt::digest::schema(&vocab);
-        let outcome = call_recorded(
-            db,
-            llm,
-            quota,
-            Call {
+            let claim_key = ClaimKey {
                 stage: STAGE,
-                n_items: batch.len(),
-                req: LlmRequest {
-                    system: &system,
-                    prompt: &prompt,
-                    schema: &schema,
-                    model,
+                backend,
+                model,
+            };
+            // 予約は処理を終える（この周の終わりで drop する）まで持つ。対象は毎回、予約と同じ
+            // トランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を作ると、ほかの実行が
+            // 作り直し終えた記事をもう一度作り直してしまう）
+            let (batch, claim) = db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| match target {
+                    Target::Redo(spec) if spec.glossary => {
+                        let n = llm_cfg.digest_batch_size.min(outdated.borrow().len());
+                        let next = RedoFilter {
+                            ids: outdated.borrow_mut().drain(..n).collect(),
+                            ..spec.filter.clone()
+                        };
+                        outdated_digests(db, redo_key(spec, backend, model), &next, llm_cfg, now)
+                    }
+                    Target::Pending { .. } => {
+                        db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)
+                    }
+                    Target::Redo(spec) => db.redo_digest(
+                        redo_key(spec, backend, model),
+                        &spec.filter,
+                        now,
+                        llm_cfg.digest_batch_size,
+                    ),
                 },
-            },
-            now,
-            cancel,
-        )
-        .await?;
-        summary.calls += 1;
-        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
-        let key = |article_id| StageKey {
-            article_id,
-            stage: STAGE,
-            backend,
-            model,
-        };
-        let response = match outcome {
-            Outcome::Response(response) => response,
-            Outcome::Cancelled => {
-                summary.cancelled = true;
-                break;
-            }
-            Outcome::Halted(halt) => {
-                if let Halt::LlmFailed(message) = &halt {
-                    summary.failed +=
-                        record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
+                |b| b.article_id,
+            )?;
+            if batch.is_empty() {
+                // 先頭の分がほかの実行に作り直されていたら、残りに進む
+                if glossary_redo && !outdated.borrow().is_empty() {
+                    continue;
                 }
-                summary.halted = Some(halt);
                 break;
             }
-        };
-        let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                let message = errors::error_chain(&e);
-                tracing::warn!("digest output rejected: {message}");
-                summary.failed +=
-                    record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
-                continue;
-            }
-        };
-        for (id, payload) in &parsed.items {
-            if !held.contains(id) {
-                tracing::warn!(
-                    article_id = *id,
-                    "{STAGE} result dropped: the claim was taken over"
-                );
-                continue;
-            }
-            let input = batch.iter().find(|b| b.article_id == *id);
-            let inputs: Vec<i64> = input
-                .map(|b| b.contents.iter().map(|c| c.id).collect())
-                .unwrap_or_default();
-            // 時点はバッチ全体ではなく、その記事の部分に当たった訳語から決める
-            let glossary_at = input.and_then(|b| {
-                let own =
-                    prompt::digest::build_prompt(std::slice::from_ref(b), llm_cfg.max_input_chars);
-                glossary::relevant(&entries, &own).glossary_at
-            });
-            db.insert_artifact(
-                &NewArtifact {
-                    article_id: *id,
-                    kind: ArtifactKind::Digest,
-                    backend,
-                    model,
-                    prompt_version: prompt::digest::PROMPT_VERSION,
-                    payload,
-                    inputs: &inputs,
-                    glossary_at: glossary_at.as_deref(),
+            let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+            let prompt = prompt::digest::build_prompt(&batch, llm_cfg.max_input_chars);
+            // 前のバッチで提案された語も選べるよう、語彙はバッチごとに読み直す
+            let vocab = db.topics()?;
+            let entries = db.glossary_entries()?;
+            let system =
+                prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
+            let schema = prompt::digest::schema(&vocab);
+            let outcome = call_recorded(
+                db,
+                llm,
+                &shared,
+                Call {
+                    stage: STAGE,
+                    n_items: batch.len(),
+                    req: LlmRequest {
+                        system: &system,
+                        prompt: &prompt,
+                        schema: &schema,
+                        model,
+                    },
                 },
                 now,
+                cancel,
+            )
+            .await?;
+            summary.calls += 1;
+            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let key = |article_id| StageKey {
+                article_id,
+                stage: STAGE,
+                backend,
+                model,
+            };
+            let response = match outcome {
+                Outcome::Response(response) => response,
+                Outcome::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Outcome::Halted(halt) => {
+                    if let Halt::LlmFailed(message) = &halt {
+                        summary.failed +=
+                            record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
+                    }
+                    summary.halted = Some(halt);
+                    break;
+                }
+            };
+            let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let message = errors::error_chain(&e);
+                    tracing::warn!("digest output rejected: {message}");
+                    summary.failed +=
+                        record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
+                    continue;
+                }
+            };
+            for (id, payload) in &parsed.items {
+                if !held.contains(id) {
+                    tracing::warn!(
+                        article_id = *id,
+                        "{STAGE} result dropped: the claim was taken over"
+                    );
+                    continue;
+                }
+                let input = batch.iter().find(|b| b.article_id == *id);
+                let inputs: Vec<i64> = input
+                    .map(|b| b.contents.iter().map(|c| c.id).collect())
+                    .unwrap_or_default();
+                // 時点はバッチ全体ではなく、その記事の部分に当たった訳語から決める
+                let glossary_at = input.and_then(|b| {
+                    let own = prompt::digest::build_prompt(
+                        std::slice::from_ref(b),
+                        llm_cfg.max_input_chars,
+                    );
+                    glossary::relevant(&entries, &own).glossary_at
+                });
+                db.insert_artifact(
+                    &NewArtifact {
+                        article_id: *id,
+                        kind: ArtifactKind::Digest,
+                        backend,
+                        model,
+                        prompt_version: prompt::digest::PROMPT_VERSION,
+                        payload,
+                        inputs: &inputs,
+                        glossary_at: glossary_at.as_deref(),
+                    },
+                    now,
+                )?;
+                db.clear_stage_failure(key(*id))?;
+                summary.digested += 1;
+            }
+            summary.failed += record_failures(
+                db,
+                held_missing(&parsed.missing, &held).map(key),
+                MISSING,
+                now,
             )?;
-            db.clear_stage_failure(key(*id))?;
-            summary.digested += 1;
         }
-        summary.failed += record_failures(
-            db,
-            held_missing(&parsed.missing, &held).map(key),
-            MISSING,
-            now,
-        )?;
-    }
-    Ok(summary)
+        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
+        if summary.halted.is_some() || summary.cancelled {
+            shared.stop();
+        }
+        Ok::<_, DigestStageError>(summary)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(DigestSummary::default(), DigestSummary::merge))
 }
 
 /// このモデルの最新の要約が、記事に当たる訳語の変更より前に作られた記事。時点は要約するときと

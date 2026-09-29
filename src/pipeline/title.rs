@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
-    record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
+    permit, record_failures, reserve, run_workers,
 };
 use crate::config::LlmConfig;
 use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
@@ -30,6 +30,18 @@ pub struct TitleSummary {
     pub cancelled: bool,
 }
 
+impl TitleSummary {
+    /// 作業者ごとの集計を合わせる。
+    fn merge(mut self, other: TitleSummary) -> TitleSummary {
+        self.translated += other.translated;
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted, other.halted);
+        self.cancelled |= other.cancelled;
+        self
+    }
+}
+
 pub async fn translate_titles<L: Llm>(
     LlmStage {
         db,
@@ -50,132 +62,154 @@ pub async fn translate_titles<L: Llm>(
         backend,
         model,
     };
-    let mut summary = TitleSummary::default();
-    loop {
-        if cancel.is_requested() {
-            summary.cancelled = true;
-            break;
-        }
-        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-        let _slot = match reserve(llm, cancel).await {
-            Reserved::Slot(slot) => slot,
-            Reserved::Cancelled => {
+    let shared = Shared::new(quota);
+    // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
+    let parts = run_workers(llm_cfg.concurrency, |_| async {
+        let mut summary = TitleSummary::default();
+        loop {
+            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+            tokio::task::yield_now().await;
+            if shared.stopped() {
+                break;
+            }
+            if cancel.is_requested() {
                 summary.cancelled = true;
                 break;
             }
-            Reserved::Failed(message) => {
-                summary.halted = Some(Halt::LlmFailed(message));
-                break;
-            }
-        };
-        if let Err(stop) = permit(db, quota, clock(), 0)? {
-            tracing::info!("title stops: {stop}");
-            summary.halted = Some(Halt::Quota(stop));
-            break;
-        }
-        // 予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (batch, claim) = db.claim_selected(
-            ClaimKey {
-                stage: STAGE,
-                backend,
-                model,
-            },
-            clock(),
-            claim_ttl(llm_cfg),
-            |db| db.pending_titles(now, backend, model, llm_cfg.title_batch_size),
-            |b| b.article_id,
-        )?;
-        if batch.is_empty() {
-            break;
-        }
-        let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
-        let prompt = prompt::title::build_prompt(&batch);
-        let entries = db.glossary_entries()?;
-        let system = prompt::title::system_prompt(&glossary::relevant(&entries, &prompt).terms);
-        let outcome = call_recorded(
-            db,
-            llm,
-            quota,
-            Call {
-                stage: STAGE,
-                n_items: batch.len(),
-                req: LlmRequest {
-                    system: &system,
-                    prompt: &prompt,
-                    schema: &schema,
-                    model,
-                },
-            },
-            now,
-            cancel,
-        )
-        .await?;
-        summary.calls += 1;
-        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
-        let response = match outcome {
-            Outcome::Response(response) => response,
-            Outcome::Cancelled => {
-                summary.cancelled = true;
-                break;
-            }
-            Outcome::Halted(halt) => {
-                if let Halt::LlmFailed(message) = &halt {
-                    summary.failed +=
-                        record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
+            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+            let _slot = match reserve(llm, cancel).await {
+                Reserved::Slot(slot) => slot,
+                Reserved::Cancelled => {
+                    summary.cancelled = true;
+                    break;
                 }
-                summary.halted = Some(halt);
+                Reserved::Failed(message) => {
+                    summary.halted = Some(Halt::LlmFailed(message));
+                    break;
+                }
+            };
+            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+            if shared.stopped() {
                 break;
             }
-        };
-        let parsed = match prompt::title::parse(&response.output, &ids) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                let message = errors::error_chain(&e);
-                tracing::warn!("title output rejected: {message}");
-                summary.failed +=
-                    record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
-                continue;
+            if let Err(stop) = permit(db, &shared, clock(), 0)? {
+                tracing::info!("title stops: {stop}");
+                summary.halted = Some(Halt::Quota(stop));
+                break;
             }
-        };
-        for (id, title_ja) in &parsed.items {
-            if !held.contains(id) {
-                tracing::warn!(
-                    article_id = *id,
-                    "{STAGE} result dropped: the claim was taken over"
-                );
-                continue;
-            }
-            // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
-            let glossary_at = batch.iter().find(|b| b.article_id == *id).and_then(|b| {
-                let own = prompt::title::build_prompt(std::slice::from_ref(b));
-                glossary::relevant(&entries, &own).glossary_at
-            });
-            db.insert_artifact(
-                &NewArtifact {
-                    article_id: *id,
-                    kind: ArtifactKind::Title,
+            // 予約は処理を終える（この周の終わりで drop する）まで持つ
+            let (batch, claim) = db.claim_selected(
+                ClaimKey {
+                    stage: STAGE,
                     backend,
                     model,
-                    prompt_version: prompt::title::PROMPT_VERSION,
-                    payload: &serde_json::json!({ "title_ja": title_ja }),
-                    inputs: &[],
-                    glossary_at: glossary_at.as_deref(),
+                },
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| db.pending_titles(now, backend, model, llm_cfg.title_batch_size),
+                |b| b.article_id,
+            )?;
+            if batch.is_empty() {
+                break;
+            }
+            let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
+            let prompt = prompt::title::build_prompt(&batch);
+            let entries = db.glossary_entries()?;
+            let system = prompt::title::system_prompt(&glossary::relevant(&entries, &prompt).terms);
+            let outcome = call_recorded(
+                db,
+                llm,
+                &shared,
+                Call {
+                    stage: STAGE,
+                    n_items: batch.len(),
+                    req: LlmRequest {
+                        system: &system,
+                        prompt: &prompt,
+                        schema: &schema,
+                        model,
+                    },
                 },
                 now,
+                cancel,
+            )
+            .await?;
+            summary.calls += 1;
+            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let response = match outcome {
+                Outcome::Response(response) => response,
+                Outcome::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Outcome::Halted(halt) => {
+                    if let Halt::LlmFailed(message) = &halt {
+                        summary.failed +=
+                            record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
+                    }
+                    summary.halted = Some(halt);
+                    break;
+                }
+            };
+            let parsed = match prompt::title::parse(&response.output, &ids) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let message = errors::error_chain(&e);
+                    tracing::warn!("title output rejected: {message}");
+                    summary.failed +=
+                        record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
+                    continue;
+                }
+            };
+            for (id, title_ja) in &parsed.items {
+                if !held.contains(id) {
+                    tracing::warn!(
+                        article_id = *id,
+                        "{STAGE} result dropped: the claim was taken over"
+                    );
+                    continue;
+                }
+                // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
+                let glossary_at = batch.iter().find(|b| b.article_id == *id).and_then(|b| {
+                    let own = prompt::title::build_prompt(std::slice::from_ref(b));
+                    glossary::relevant(&entries, &own).glossary_at
+                });
+                db.insert_artifact(
+                    &NewArtifact {
+                        article_id: *id,
+                        kind: ArtifactKind::Title,
+                        backend,
+                        model,
+                        prompt_version: prompt::title::PROMPT_VERSION,
+                        payload: &serde_json::json!({ "title_ja": title_ja }),
+                        inputs: &[],
+                        glossary_at: glossary_at.as_deref(),
+                    },
+                    now,
+                )?;
+                db.clear_stage_failure(key(*id))?;
+                summary.translated += 1;
+            }
+            summary.failed += record_failures(
+                db,
+                held_missing(&parsed.missing, &held).map(key),
+                MISSING,
+                now,
             )?;
-            db.clear_stage_failure(key(*id))?;
-            summary.translated += 1;
         }
-        summary.failed += record_failures(
-            db,
-            held_missing(&parsed.missing, &held).map(key),
-            MISSING,
-            now,
-        )?;
-    }
-    Ok(summary)
+        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
+        if summary.halted.is_some() || summary.cancelled {
+            shared.stop();
+        }
+        Ok::<_, TitleStageError>(summary)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(TitleSummary::default(), TitleSummary::merge))
 }
 
 #[cfg(test)]
@@ -402,6 +436,48 @@ mod tests {
         assert!(
             matches!(summary.halted, Some(Halt::Quota(_))),
             "{summary:?}"
+        );
+    }
+
+    /// 同時に `llm.concurrency` 本まで呼び出す。同じ記事は取り合わない。
+    #[tokio::test]
+    async fn calls_concurrently_up_to_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        articles(&db, 4);
+        let llm = FakeLlm::responding(std::time::Duration::from_millis(50), |req| {
+            let id: i64 = req
+                .prompt
+                .split("<article id=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap()
+                .parse()
+                .unwrap();
+            ok(&[id])
+        });
+        let summary = translate_titles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &LlmConfig {
+                title_batch_size: 1,
+                concurrency: 2,
+                ..LlmConfig::default()
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.translated, summary.calls), (4, 4));
+        assert_eq!(llm.max_in_flight(), 2);
+        assert_eq!(
+            db.query_i64("SELECT count(DISTINCT article_id) FROM artifacts WHERE kind = 'title'")
+                .unwrap(),
+            4
         );
     }
 }

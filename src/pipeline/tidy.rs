@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, Reserved, call_recorded, permit, reserve};
+use super::llm_call::{Call, LlmStage, Outcome, Reserved, Shared, call_recorded, permit, reserve};
 use crate::config::LlmConfig;
 use crate::db::DbError;
 use crate::errors;
@@ -40,6 +40,7 @@ pub async fn tidy_topics<L: Llm>(
     force: bool,
     now: DateTime<Utc>,
 ) -> Result<TidySummary, TidyStageError> {
+    let shared = Shared::new(quota);
     let mut summary = TidySummary::default();
     let interval = chrono::Duration::days(i64::from(cfg.tidy_interval_days));
     if !force && db.llm_succeeded_since(STAGE, now - interval)? {
@@ -63,7 +64,7 @@ pub async fn tidy_topics<L: Llm>(
             return Ok(summary);
         }
     };
-    if let Err(stop) = permit(db, quota, clock(), 0)? {
+    if let Err(stop) = permit(db, &shared, clock(), 0)? {
         tracing::info!("tidy stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);
@@ -73,7 +74,7 @@ pub async fn tidy_topics<L: Llm>(
     let outcome = call_recorded(
         db,
         llm,
-        quota,
+        &shared,
         Call {
             stage: STAGE,
             n_items: proposed,

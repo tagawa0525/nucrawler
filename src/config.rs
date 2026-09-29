@@ -382,6 +382,12 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         .and_then(|()| config.llm.validate())
         .and_then(|()| config.web.validate())
         .and_then(|()| config.recommend.validate())
+        .and_then(|()| {
+            config
+                .copilot_quota
+                .as_ref()
+                .map_or(Ok(()), crate::quota::CreditsConfig::validate)
+        })
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,

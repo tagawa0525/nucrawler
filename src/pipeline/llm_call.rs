@@ -110,7 +110,11 @@ pub fn permit(
     reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
     let mut quota = shared.quota.borrow_mut();
-    quota.observe(db.latest_rate_limit(now)?);
+    if quota.counts_credits() {
+        quota.observe_credits(db.credits_since(crate::quota::month_start(now))?);
+    } else {
+        quota.observe(db.latest_rate_limit(now)?);
+    }
     Ok(quota.permit_reserving(now, reserve))
 }
 

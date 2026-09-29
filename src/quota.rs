@@ -6,8 +6,11 @@
 //! - 1 回の実行あたりの呼び出し回数の上限。
 //!
 //! 使用率は直前の呼び出しで得た値（`rate_limit_event`）を使う。リセット時刻を過ぎた枠は 0 とみなす。
+//!
+//! Copilot（copilot-cli）は使用率が分からないので、代わりに月の消費クレジットで判定する（`with_credits`）。
+//! 今月（UTC の暦月）の消費を、月のクレジット × 月の経過割合 × `pace` までに抑える。
 
-use chrono::{DateTime, TimeDelta, Timelike, Utc};
+use chrono::{DateTime, Datelike, TimeDelta, Timelike, Utc};
 use serde::Deserialize;
 
 use crate::llm::{RateLimit, Window};
@@ -111,13 +114,39 @@ fn default_credits_pace() -> f64 {
 impl CreditsConfig {
     /// 月のクレジットは正、`pace` は 0 より大きく 1 以下。
     pub fn validate(&self) -> Result<(), String> {
-        todo!()
+        if !(self.monthly_credits.is_finite() && self.monthly_credits > 0.0) {
+            return Err(format!(
+                "copilot_quota.monthly_credits must be positive and finite, got {}",
+                self.monthly_credits
+            ));
+        }
+        if !(self.pace.is_finite() && self.pace > 0.0 && self.pace <= 1.0) {
+            return Err(format!(
+                "copilot_quota.pace must be greater than 0 and at most 1, got {}",
+                self.pace
+            ));
+        }
+        Ok(())
+    }
+
+    /// 今の時点で使ってよい月の消費（クレジット）。
+    fn allowance(&self, now: DateTime<Utc>) -> f64 {
+        let start = month_start(now);
+        let next = start
+            .checked_add_months(chrono::Months::new(1))
+            .expect("the next month of a valid date exists");
+        let elapsed = (now - start).as_seconds_f64() / (next - start).as_seconds_f64();
+        self.monthly_credits * elapsed * self.pace
     }
 }
 
 /// 月の始まり（UTC の暦月の 1 日 0 時。Copilot の AI Credits はここで戻る）。
-pub fn month_start(_now: DateTime<Utc>) -> DateTime<Utc> {
-    todo!()
+pub fn month_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    now.date_naive()
+        .with_day(1)
+        .expect("every month has a first day")
+        .and_time(chrono::NaiveTime::MIN)
+        .and_utc()
 }
 
 /// 呼び出しを止める理由。
@@ -195,6 +224,8 @@ impl std::fmt::Display for Stop {
 pub struct Quota {
     cfg: QuotaConfig,
     usage: Option<RateLimit>,
+    /// 月の消費クレジットで判定するとき（copilot-cli）の予算と、今月の消費（10^-9 クレジット単位）
+    credits: Option<(CreditsConfig, i64)>,
     calls: u32,
     max_calls: u32,
 }
@@ -207,6 +238,7 @@ impl Quota {
         Self {
             cfg,
             usage,
+            credits: None,
             calls: 0,
             max_calls,
         }
@@ -214,22 +246,24 @@ impl Quota {
 
     /// Copilot の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`
     /// （`max_calls` を指定すればそちら）を使う。使用率（5 時間枠・週次枠）は見ない。
-    pub fn with_credits(
-        _cfg: QuotaConfig,
-        _credits: CreditsConfig,
-        _max_calls: Option<u32>,
-    ) -> Self {
-        todo!()
+    pub fn with_credits(cfg: QuotaConfig, credits: CreditsConfig, max_calls: Option<u32>) -> Self {
+        Self {
+            credits: Some((credits, 0)),
+            ..Self::new(cfg, None, max_calls)
+        }
     }
 
     /// 月の消費クレジットで判定するか（`with_credits`）。
     pub fn counts_credits(&self) -> bool {
-        todo!()
+        self.credits.is_some()
     }
 
     /// ほかの実行を含めた今月の消費（10^-9 クレジット単位、DB の llm_calls の合計）を取り込む。
-    pub fn observe_credits(&mut self, _used_nano: i64) {
-        todo!()
+    /// 月の消費クレジットで判定しないときは何もしない。
+    pub fn observe_credits(&mut self, used_nano: i64) {
+        if let Some((_, used)) = &mut self.credits {
+            *used = used_nano;
+        }
     }
 
     /// 次の呼び出しをしてよいか。
@@ -238,6 +272,14 @@ impl Quota {
             return Err(Stop::MaxCalls {
                 limit: self.max_calls,
             });
+        }
+        if let Some((credits, used_nano)) = &self.credits {
+            let used = *used_nano as f64 / 1e9;
+            let limit = credits.allowance(now);
+            if used >= limit {
+                return Err(Stop::MonthlyCredits { used, limit });
+            }
+            return Ok(());
         }
         let usage = self.usage.unwrap_or_default();
         if let Some(w) = active(usage.five_hour, now) {

@@ -188,8 +188,12 @@ impl Db {
     }
 
     /// `since` 以降の呼び出しで消費した AI Credits の合計（10^-9 クレジット単位）。
-    pub fn credits_since(&self, _since: chrono::DateTime<chrono::Utc>) -> Result<i64, DbError> {
-        todo!()
+    pub fn credits_since(&self, since: chrono::DateTime<chrono::Utc>) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT coalesce(sum(credits_nano), 0) FROM llm_calls WHERE at >= ?1",
+            [timestamp(since)],
+            |r| r.get(0),
+        )?)
     }
 
     /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。

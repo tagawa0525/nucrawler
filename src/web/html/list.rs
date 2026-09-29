@@ -347,9 +347,9 @@ pub(super) fn matches(i: &ListItem) -> String {
 
 /// 推薦点の印。LLM の点数と違えば、title に LLM の点数と補正を出す（例：`LLM 72・補正 +9`）。
 pub(super) fn score_badge(i: &ListItem) -> String {
-    // 未採点も、数字の無い印を置いてカードの並びをそろえる
+    // 未採点も、数字の無い印を置いてカードの並びをそろえる（色だけでは伝わらないので読み上げの名前を付ける）
     let Some(score) = i.score else {
-        return "<span class=\"score\" title=\"未採点\">&nbsp;</span>".to_string();
+        return "<span class=\"score\" role=\"img\" aria-label=\"未採点\" title=\"未採点\">&nbsp;</span>".to_string();
     };
     match i.llm_score.filter(|llm| *llm != score) {
         Some(llm) => format!(

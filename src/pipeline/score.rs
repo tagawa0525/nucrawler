@@ -54,7 +54,7 @@ impl ScoreSummary {
         self.scored += other.scored;
         self.failed += other.failed;
         self.calls += other.calls;
-        self.halted = self.halted.or(other.halted);
+        self.halted = Halt::most_severe(self.halted, other.halted);
         self.cancelled |= other.cancelled;
         self.no_profile |= other.no_profile;
         self

@@ -42,7 +42,7 @@ impl TranslateSummary {
         self.translated += other.translated;
         self.failed += other.failed;
         self.calls += other.calls;
-        self.halted = self.halted.or(other.halted);
+        self.halted = Halt::most_severe(self.halted, other.halted);
         self.cancelled |= other.cancelled;
         self
     }

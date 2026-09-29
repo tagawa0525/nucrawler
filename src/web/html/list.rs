@@ -226,6 +226,36 @@ mod tests {
         assert!(earlier.is_empty());
     }
 
+    /// スワイプで付ける印が既に付いていれば、取り消しで外さない（付けたのはこのスワイプではない）。
+    /// そのため、カードは今の印（ブックマーク・既読）を持つ。
+    #[test]
+    fn swipe_cards_carry_their_marks() {
+        let mut bookmarked = item(1, "2026-09-27T05:00:00.000Z");
+        bookmarked.bookmarked = true;
+        let mut read = item(2, "2026-09-27T05:00:00.000Z");
+        read.read_at = Some("2026-09-27T06:00:00.000Z".into());
+        let html = list_page(
+            &[bookmarked, read],
+            &[],
+            ListView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="card" data-id="1" data-bookmarked="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="card read" data-id="2" tabindex="0">"#),
+            "{html}"
+        );
+        // 取り消しは、スワイプの前に付いていなかった印だけを外す
+        assert!(html.contains("card.dataset.bookmarked"), "{html}");
+        assert!(
+            html.contains(r#"card.classList.contains("read")"#),
+            "{html}"
+        );
+    }
+
     #[test]
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());

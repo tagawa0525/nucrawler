@@ -491,6 +491,40 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    /// 使用率を知らせた後に止まってタイムアウトしても、その使用率を失敗に付けて返す。
+    #[tokio::test]
+    async fn timeout_after_a_rate_limit_event_keeps_the_rate_limit() {
+        let rate = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "resetsAt": 1790457000,
+            "unifiedWindows": {"five_hour": {"utilization": 0.4, "resetsAt": 1790457000}}}});
+        let (script, dir) = fake_claude(
+            "cli-hang",
+            &format!("cat >/dev/null\nprintf '%s\\n' '{rate}'\nsleep 5"),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_millis(500),
+            slots: dir.clone(),
+            concurrency: 1,
+        };
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Timeout { .. }),
+            "{}",
+            failure.error
+        );
+        assert_eq!(
+            failure
+                .usage
+                .and_then(|u| u.rate_limit())
+                .and_then(|r| r.five_hour)
+                .map(|w| w.utilization),
+            Some(0.4)
+        );
+    }
+
     /// SIGINT・SIGTERM で終わったかどうか（止める指示によるものかの判断に使う）。
     #[tokio::test]
     async fn exit_tells_whether_claude_was_interrupted() {

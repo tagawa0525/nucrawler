@@ -518,6 +518,30 @@ mod tests {
         eprintln!("{:?} {:?}", parsed.items, resp.usage);
     }
 
+    /// 消費を知らせた後に止まってタイムアウトしても、消費した分を失敗に付けて返す。
+    #[tokio::test]
+    async fn timeout_after_a_checkpoint_keeps_the_consumed_credits() {
+        let (script, dir) = fake_copilot(
+            "copilot-hang",
+            &format!(
+                "cat >/dev/null\nprintf '%s' '{}'\nsleep 5",
+                checkpoint(7).trim()
+            ),
+        );
+        let cli = cli(script, &dir, Duration::from_millis(500));
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Timeout { .. }),
+            "{}",
+            failure.error
+        );
+        assert_eq!(
+            failure.usage,
+            Some(crate::llm::Usage::Credits { nano_aiu: 7 })
+        );
+    }
+
     #[tokio::test]
     async fn slow_process_times_out() {
         let (script, dir) = fake_copilot("copilot-slow", "cat >/dev/null\nsleep 5");

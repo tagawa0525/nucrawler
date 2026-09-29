@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-
+use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
@@ -53,7 +52,7 @@ impl Llm for ClaudeCli {
     async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
-        let mut child = tokio::process::Command::new(&self.command)
+        let child = tokio::process::Command::new(&self.command)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
             .args(["--json-schema", &schema])
             .args(["--tools", ""])
@@ -76,29 +75,22 @@ impl Llm for ClaudeCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let prompt = req.prompt.as_bytes();
-        let run = async {
-            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
-            let write = async {
-                match stdin.write_all(prompt).await {
-                    // 子が入力を読まずに終了した（認証エラーなど）。原因は終了コードと stderr で報告する
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-                    r => r?,
-                }
-                drop(stdin);
-                Ok::<_, std::io::Error>(())
-            };
-            let (written, output) = tokio::join!(write, child.wait_with_output());
-            written?;
-            output
-        };
-        let output = tokio::time::timeout(self.timeout, run)
+        let output = match super::process::run(child, req.prompt.as_bytes(), self.timeout)
             .await
-            .map_err(|_| LlmError::Timeout {
-                secs: self.timeout.as_secs(),
-            })?
-            .map_err(LlmError::Io)?;
+            .map_err(LlmError::Io)?
+        {
+            Ran::Exited(output) => output,
+            // 使用率を知らせた後に止まっても、その使用率を次回の判定に使う
+            Ran::TimedOut { stdout } => {
+                let (_, rate_limit) = parse_stream(&String::from_utf8_lossy(&stdout));
+                return Err(LlmFailure {
+                    error: LlmError::Timeout {
+                        secs: self.timeout.as_secs(),
+                    },
+                    usage: rate_limit.map(Usage::Subscription),
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (parsed, rate_limit) = parse_stream(&stdout);
@@ -123,7 +115,7 @@ impl Llm for ClaudeCli {
 
 /// SIGINT・SIGTERM で終わったか。シグナルで殺された場合と、シグナルを受けて 128 + 番号で
 /// 終了した場合の両方を含む。
-fn interrupted(status: std::process::ExitStatus) -> bool {
+pub(super) fn interrupted(status: std::process::ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt;
     const SIGINT: i32 = 2;
     const SIGTERM: i32 = 15;
@@ -513,6 +505,40 @@ mod tests {
         let err = cli.call(request(&schema)).await.unwrap_err().error;
         assert!(matches!(err, LlmError::Timeout { .. }), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// 使用率を知らせた後に止まってタイムアウトしても、その使用率を失敗に付けて返す。
+    #[tokio::test]
+    async fn timeout_after_a_rate_limit_event_keeps_the_rate_limit() {
+        let rate = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "resetsAt": 1790457000,
+            "unifiedWindows": {"five_hour": {"utilization": 0.4, "resetsAt": 1790457000}}}});
+        let (script, dir) = fake_claude(
+            "cli-hang",
+            &format!("cat >/dev/null\nprintf '%s\\n' '{rate}'\nsleep 5"),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_millis(500),
+            slots: dir.clone(),
+            concurrency: 1,
+        };
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Timeout { .. }),
+            "{}",
+            failure.error
+        );
+        assert_eq!(
+            failure
+                .usage
+                .and_then(|u| u.rate_limit())
+                .and_then(|r| r.five_hour)
+                .map(|w| w.utilization),
+            Some(0.4)
+        );
     }
 
     /// SIGINT・SIGTERM で終わったかどうか（止める指示によるものかの判断に使う）。

@@ -2,6 +2,8 @@
 //! サブスクリプションの枠内で動かす。将来 API などを足せるよう `Llm` トレイトで抽象化する。
 
 pub mod claude_cli;
+pub mod copilot_cli;
+mod process;
 
 use serde::Serialize;
 

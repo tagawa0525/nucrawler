@@ -1,0 +1,8 @@
+{"type":"session.info","data":{"infoType":"configuration","message":"Unknown tool name in the tool allowlist: \"nucrawler-no-tools\""},"ephemeral":true}
+{"type":"user.message","data":{"content":"PROMPT","turnId":"0"}}
+{"type":"assistant.turn_start","data":{"turnId":"0"}}
+{"type":"assistant.message_delta","data":{"deltaContent":"{\"items\"","messageId":"m1"},"ephemeral":true}
+{"type":"assistant.message","data":{"messageId":"m1","model":"gpt-6-luna","content":"{\"items\": [{\"id\": 1, \"ok\": true}]}","toolRequests":[],"turnId":"0","phase":"final_answer"}}
+{"type":"assistant.turn_end","data":{"turnId":"0"}}
+{"type":"session.usage_checkpoint","data":{"totalNanoAiu":37405000,"totalPremiumRequests":1,"promptCacheBreakState":[{"conversation":"main","models":{"gpt-6-luna":{"model":"gpt-6-luna","tool_count":0,"tool_tokens":0,"tools":[]}}}]}}
+{"type":"result","timestamp":"2026-09-29T18:44:26.026Z","sessionId":"448fc898-b156-4289-87e8-f9326eef251f","exitCode":0,"usage":{"premiumRequests":1,"totalApiDurationMs":1111,"sessionDurationMs":2190}}

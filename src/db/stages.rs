@@ -352,6 +352,48 @@ mod tests {
     }
 
     #[test]
+    fn records_consumed_credits_without_a_rate_limit() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "title",
+                backend: "copilot-cli",
+                model: "gpt-6-luna",
+                n_items: 1,
+                ok: true,
+                duration_ms: 2835,
+                error: None,
+                usage: Some(&crate::llm::Usage::Credits {
+                    nano_aiu: 159_762_400,
+                }),
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "title",
+                backend: "copilot-cli",
+                model: "gpt-6-luna",
+                n_items: 1,
+                ok: false,
+                duration_ms: 10,
+                error: Some("timeout"),
+                usage: None,
+            },
+            t("2026-09-27T01:05:00Z"),
+        )
+        .unwrap();
+        let rows = db
+            .query_strings(
+                "SELECT coalesce(credits_nano, '-') || '|' || coalesce(rate_limit, '-')
+                 FROM llm_calls ORDER BY id",
+            )
+            .unwrap();
+        assert_eq!(rows, ["159762400|-", "-|-"]);
+    }
+
+    #[test]
     fn latest_rate_limit_skips_calls_without_usage() {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(

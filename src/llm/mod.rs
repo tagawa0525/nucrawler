@@ -25,6 +25,8 @@ pub struct LlmResponse {
 pub enum Usage {
     /// サブスクリプションの枠の使用率（claude-cli）
     Subscription(RateLimit),
+    /// 消費した AI Credits（copilot-cli）。10^-9 クレジット単位
+    Credits { nano_aiu: i64 },
 }
 
 impl Usage {
@@ -32,6 +34,7 @@ impl Usage {
     pub fn rate_limit(&self) -> Option<RateLimit> {
         match self {
             Usage::Subscription(r) => Some(*r),
+            Usage::Credits { .. } => None,
         }
     }
 }

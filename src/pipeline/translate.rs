@@ -1,11 +1,13 @@
 //! 和訳ステージ：依頼された記事と、点数の高い英語記事の本文を 1 件ずつ全文和訳する。
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, Outcome, Reserved, call_recorded, claim_ttl, permit, record_failures, reserve,
+    Call, LlmStage, Outcome, Reserved, Shared, call_recorded, claim_ttl, permit, record_failures,
+    reserve, run_workers,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -32,6 +34,18 @@ pub struct TranslateSummary {
     pub calls: usize,
     pub halted: Option<Halt>,
     pub cancelled: bool,
+}
+
+impl TranslateSummary {
+    /// 作業者ごとの集計を合わせる。
+    fn merge(mut self, other: TranslateSummary) -> TranslateSummary {
+        self.translated += other.translated;
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = self.halted.or(other.halted);
+        self.cancelled |= other.cancelled;
+        self
+    }
 }
 
 /// 通常は依頼と先回りの対象を、`requests_only` なら依頼だけを、`Redo` なら条件に合う記事を和訳する。
@@ -67,12 +81,11 @@ pub async fn translate_articles<L: Llm>(
     };
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let schema = prompt::translate::schema();
-    let mut summary = TranslateSummary::default();
     // 訳語集の変更による作り直しは、対象の記事を最初に 1 回だけ洗い出し、毎回その先頭の分だけを
     // 予約と同じトランザクションの中で判定し直す（毎回すべてを洗い直すと件数の 2 乗の読み込みになり、
     // 先に決めた一覧をそのまま使うと、ほかの実行が作り直し終えた記事をもう一度作り直してしまう）
     let glossary_redo = matches!(target, Target::Redo(spec) if spec.glossary);
-    let mut outdated: VecDeque<i64> = match target {
+    let outdated: VecDeque<i64> = match target {
         Target::Redo(spec) if spec.glossary => outdated_translations(
             db,
             redo_key(spec, backend, model),
@@ -85,149 +98,172 @@ pub async fn translate_articles<L: Llm>(
         .collect(),
         _ => VecDeque::new(),
     };
-    loop {
-        if cancel.is_requested() {
-            summary.cancelled = true;
-            break;
-        }
-        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-        let _slot = match reserve(llm, cancel).await {
-            Reserved::Slot(slot) => slot,
-            Reserved::Cancelled => {
+    let shared = Shared::new(quota);
+    let outdated = RefCell::new(outdated);
+    // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
+    let parts = run_workers(llm_cfg.concurrency, |_| async {
+        let mut summary = TranslateSummary::default();
+        loop {
+            if shared.stopped() {
+                break;
+            }
+            if cancel.is_requested() {
                 summary.cancelled = true;
                 break;
             }
-            Reserved::Failed(message) => {
-                summary.halted = Some(Halt::LlmFailed(message));
+            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+            let _slot = match reserve(llm, cancel).await {
+                Reserved::Slot(slot) => slot,
+                Reserved::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Reserved::Failed(message) => {
+                    summary.halted = Some(Halt::LlmFailed(message));
+                    break;
+                }
+            };
+            if let Err(stop) = permit(db, &shared, clock(), 0)? {
+                tracing::info!("translate stops: {stop}");
+                summary.halted = Some(Halt::Quota(stop));
                 break;
             }
-        };
-        if let Err(stop) = permit(db, quota, clock(), 0)? {
-            tracing::info!("translate stops: {stop}");
-            summary.halted = Some(Halt::Quota(stop));
-            break;
-        }
-        let claim_key = ClaimKey {
-            stage: STAGE,
-            backend,
-            model,
-        };
-        // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ。
-        // 対象は毎回、予約と同じトランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を
-        // 作ると、ほかの実行が作り直し終えた記事をもう一度訳してしまう）
-        let (inputs, claim) = db.claim_selected(
-            claim_key,
-            clock(),
-            claim_ttl(llm_cfg),
-            |db| match target {
-                Target::Redo(spec) if spec.glossary => {
-                    let next = RedoFilter {
-                        ids: outdated.pop_front().into_iter().collect(),
-                        ..spec.filter.clone()
-                    };
-                    outdated_translations(db, redo_key(spec, backend, model), &next, llm_cfg, now)
-                }
-                Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1),
-                Target::Redo(spec) => {
-                    db.redo_translate(redo_key(spec, backend, model), &spec.filter, now, 1)
-                }
-            },
-            |i| i.article_id,
-        )?;
-        let Some(input) = inputs.into_iter().next() else {
-            // 先頭の記事がほかの実行に作り直されていたら、残りに進む
-            if glossary_redo && !outdated.is_empty() {
-                continue;
-            }
-            break;
-        };
-        let key = StageKey {
-            article_id: input.article_id,
-            stage: STAGE,
-            backend,
-            model,
-        };
-        let prompt = prompt::translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
-        let relevant = glossary::relevant(&db.glossary_entries()?, &prompt);
-        let system = prompt::translate::system_prompt(&relevant.terms);
-        let outcome = call_recorded(
-            db,
-            llm,
-            quota,
-            Call {
+            let claim_key = ClaimKey {
                 stage: STAGE,
-                n_items: 1,
-                req: LlmRequest {
-                    system: &system,
-                    prompt: &prompt,
-                    schema: &schema,
-                    model,
-                },
-            },
-            now,
-            cancel,
-        )
-        .await?;
-        summary.calls += 1;
-        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-        let held = claim
-            .renew(clock(), claim_ttl(llm_cfg))?
-            .contains(&input.article_id);
-        let response = match outcome {
-            Outcome::Response(response) => response,
-            Outcome::Cancelled => {
-                summary.cancelled = true;
-                break;
-            }
-            Outcome::Halted(halt) => {
-                if let Halt::LlmFailed(message) = &halt
-                    && held
-                {
-                    summary.failed += record_failures(db, std::iter::once(key), message, now)?;
-                }
-                summary.halted = Some(halt);
-                break;
-            }
-        };
-        if !held {
-            tracing::warn!(
-                article_id = input.article_id,
-                "{STAGE} result dropped: the claim was taken over"
-            );
-            continue;
-        }
-        let body_ja = match prompt::translate::parse(&response.output) {
-            Ok(body_ja) => body_ja,
-            Err(e) => {
-                let message = errors::error_chain(&e);
-                tracing::warn!(
-                    article_id = input.article_id,
-                    "translation rejected: {message}"
-                );
-                summary.failed += record_failures(db, std::iter::once(key), &message, now)?;
-                continue;
-            }
-        };
-        let inputs: Vec<i64> = input.contents.iter().map(|c| c.id).collect();
-        // 保存と依頼の完了は同じトランザクションで行う
-        db.insert_translation(
-            &NewArtifact {
-                article_id: input.article_id,
-                kind: ArtifactKind::Translation,
                 backend,
                 model,
-                prompt_version: prompt::translate::PROMPT_VERSION,
-                payload: &serde_json::json!({ "body_ja": body_ja }),
-                inputs: &inputs,
-                glossary_at: relevant.glossary_at.as_deref(),
-            },
-            now,
-        )?;
-        db.clear_stage_failure(key)?;
-        summary.translated += 1;
-    }
-    Ok(summary)
+            };
+            // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ。
+            // 対象は毎回、予約と同じトランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を
+            // 作ると、ほかの実行が作り直し終えた記事をもう一度訳してしまう）
+            let (inputs, claim) = db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| match target {
+                    Target::Redo(spec) if spec.glossary => {
+                        let next = RedoFilter {
+                            ids: outdated.borrow_mut().pop_front().into_iter().collect(),
+                            ..spec.filter.clone()
+                        };
+                        outdated_translations(
+                            db,
+                            redo_key(spec, backend, model),
+                            &next,
+                            llm_cfg,
+                            now,
+                        )
+                    }
+                    Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1),
+                    Target::Redo(spec) => {
+                        db.redo_translate(redo_key(spec, backend, model), &spec.filter, now, 1)
+                    }
+                },
+                |i| i.article_id,
+            )?;
+            let Some(input) = inputs.into_iter().next() else {
+                // 先頭の記事がほかの実行に作り直されていたら、残りに進む
+                if glossary_redo && !outdated.borrow().is_empty() {
+                    continue;
+                }
+                break;
+            };
+            let key = StageKey {
+                article_id: input.article_id,
+                stage: STAGE,
+                backend,
+                model,
+            };
+            let prompt = prompt::translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
+            let relevant = glossary::relevant(&db.glossary_entries()?, &prompt);
+            let system = prompt::translate::system_prompt(&relevant.terms);
+            let outcome = call_recorded(
+                db,
+                llm,
+                &shared,
+                Call {
+                    stage: STAGE,
+                    n_items: 1,
+                    req: LlmRequest {
+                        system: &system,
+                        prompt: &prompt,
+                        schema: &schema,
+                        model,
+                    },
+                },
+                now,
+                cancel,
+            )
+            .await?;
+            summary.calls += 1;
+            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+            let held = claim
+                .renew(clock(), claim_ttl(llm_cfg))?
+                .contains(&input.article_id);
+            let response = match outcome {
+                Outcome::Response(response) => response,
+                Outcome::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Outcome::Halted(halt) => {
+                    if let Halt::LlmFailed(message) = &halt
+                        && held
+                    {
+                        summary.failed += record_failures(db, std::iter::once(key), message, now)?;
+                    }
+                    summary.halted = Some(halt);
+                    break;
+                }
+            };
+            if !held {
+                tracing::warn!(
+                    article_id = input.article_id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
+            let body_ja = match prompt::translate::parse(&response.output) {
+                Ok(body_ja) => body_ja,
+                Err(e) => {
+                    let message = errors::error_chain(&e);
+                    tracing::warn!(
+                        article_id = input.article_id,
+                        "translation rejected: {message}"
+                    );
+                    summary.failed += record_failures(db, std::iter::once(key), &message, now)?;
+                    continue;
+                }
+            };
+            let inputs: Vec<i64> = input.contents.iter().map(|c| c.id).collect();
+            // 保存と依頼の完了は同じトランザクションで行う
+            db.insert_translation(
+                &NewArtifact {
+                    article_id: input.article_id,
+                    kind: ArtifactKind::Translation,
+                    backend,
+                    model,
+                    prompt_version: prompt::translate::PROMPT_VERSION,
+                    payload: &serde_json::json!({ "body_ja": body_ja }),
+                    inputs: &inputs,
+                    glossary_at: relevant.glossary_at.as_deref(),
+                },
+                now,
+            )?;
+            db.clear_stage_failure(key)?;
+            summary.translated += 1;
+        }
+        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
+        if summary.halted.is_some() || summary.cancelled {
+            shared.stop();
+        }
+        Ok::<_, TranslateStageError>(summary)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(TranslateSummary::default(), TranslateSummary::merge))
 }
 
 /// このモデルの最新の和訳が、記事に当たる訳語の変更より前に作られた記事。時点は訳すときと同じ

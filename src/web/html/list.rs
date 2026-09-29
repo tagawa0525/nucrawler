@@ -1093,6 +1093,31 @@ mod tests {
         assert!(!stars.contains(r#"name="read""#), "{stars}");
     }
 
+    /// JavaScript が無いとき、一覧から評価の選択で絞り込みへ移っても、ブックマークなしだけの条件は引き継ぐ
+    /// （JavaScript のときの行き先と同じ）。最低点と 👁 は絞り込みの既定にするので送らない。
+    #[test]
+    fn no_js_rating_keeps_the_bookmark_condition() {
+        let view = ListView {
+            bookmarked: Some(false),
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], view, &Page::default());
+        let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
+        let stars = stars.split("</form>").next().unwrap();
+        assert!(
+            stars.contains(r#"<input type="hidden" name="bookmarked" value="0">"#),
+            "{stars}"
+        );
+        assert!(
+            !stars.contains(r#"name="read""#) && !stars.contains(r#"name="min""#),
+            "{stars}"
+        );
+        assert!(
+            stars.contains(r#"data-href="/?rating=4&amp;bookmarked=0""#),
+            "{stars}"
+        );
+    }
+
     /// 👁 と 🔖 は押すたびに 絞らない（白）→ 印のある記事だけ（緑）→ 印の無い記事だけ（赤・斜線）と切り替える。
     /// 一覧の 👁 の既定は未読だけ（赤）、絞り込みの既定は絞らない（白）。今の状態と押したときの次を名前に出す。
     #[test]

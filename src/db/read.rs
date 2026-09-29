@@ -1093,8 +1093,8 @@ mod tests {
                 unread: true,
                 ..search_query(&db)
             }),
-            // 評価した記事は既読
-            [unscored, translated]
+            // 評価しただけの記事は未読
+            [unscored, disliked, liked, translated]
         );
         assert_eq!(
             with(SearchQuery {

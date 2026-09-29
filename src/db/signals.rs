@@ -378,9 +378,9 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM events").unwrap(), 0);
     }
 
-    /// 評価すると既読になる。評価なしに戻しても既読は残る。
+    /// 評価と既読は別の印で、評価しても既読にはならない。評価なしに戻しても既読は変わらない。
     #[test]
-    fn rating_marks_read() {
+    fn rating_leaves_read_alone() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
         let a = scored_article(
@@ -392,12 +392,14 @@ mod tests {
         );
         db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
             .unwrap();
+        assert_eq!(item(&db, a).read_at, None);
+        db.set_read(owner, a, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.rate(owner, a, None, t("2026-09-27T02:00:00Z")).unwrap();
         assert_eq!(
             item(&db, a).read_at.as_deref(),
-            Some("2026-09-27T00:00:00.000Z")
+            Some("2026-09-27T01:00:00.000Z")
         );
-        db.rate(owner, a, None, t("2026-09-27T01:00:00Z")).unwrap();
-        assert!(item(&db, a).read_at.is_some());
     }
 
     /// ブックマークは付け外しでき、付けても一覧に残り、評価のラベルにはならない。

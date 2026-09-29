@@ -215,4 +215,45 @@ mod tests {
         drop(held);
         assert_eq!(db.claim(KEY, &[a, b], now, ttl()).unwrap().ids(), [a, b]);
     }
+
+    /// 期限切れの予約を持っていた実行が後から外しても、取り直した実行の予約は残る。
+    #[test]
+    fn releasing_an_expired_claim_keeps_the_successor() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let stale = db
+            .claim(KEY, &[a], t("2026-09-27T00:00:00Z"), ttl())
+            .unwrap();
+        let later = t("2026-09-27T00:10:00Z");
+        let successor = db.claim(KEY, &[a], later, ttl()).unwrap();
+        assert_eq!(successor.ids(), [a]);
+        drop(stale);
+        assert!(db.claim(KEY, &[a], later, ttl()).unwrap().ids().is_empty());
+        drop(successor);
+        assert_eq!(db.claim(KEY, &[a], later, ttl()).unwrap().ids(), [a]);
+    }
+
+    /// 選ぶ前に、今の時刻で期限を過ぎた予約を消す。選ぶクエリが古い時刻（ステージの開始時）を
+    /// 使っていても、期限切れの予約で記事を取りこぼさない。
+    #[test]
+    fn claim_selected_drops_expired_claims_before_selecting() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let stage_start = t("2026-09-27T00:00:00Z");
+        let title = ClaimKey {
+            stage: "title",
+            ..KEY
+        };
+        std::mem::forget(db.claim(title, &[a], stage_start, ttl()).unwrap());
+        let (items, _held) = db
+            .claim_selected(
+                title,
+                t("2026-09-27T00:10:00Z"),
+                ttl(),
+                |db| db.pending_titles(stage_start, "claude-cli", "sonnet", 10),
+                |i| i.article_id,
+            )
+            .unwrap();
+        assert_eq!(items.iter().map(|i| i.article_id).collect::<Vec<_>>(), [a]);
+    }
 }

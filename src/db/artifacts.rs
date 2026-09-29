@@ -523,7 +523,7 @@ mod tests {
         );
     }
 
-    /// ほかの実行が予約している記事は選ばない（期限を過ぎれば選ぶ）。
+    /// ほかの実行が予約している記事は選ばない（期限切れの予約は、予約するときに今の時刻で消す）。
     #[test]
     fn pending_digest_and_titles_skip_claimed_articles() {
         let db = Db::open_in_memory().unwrap();
@@ -555,9 +555,6 @@ mod tests {
             .unwrap();
         assert!(digest_ids(&db, now).is_empty());
         assert!(title_ids(&db, now).is_empty());
-        let later = "2026-09-27T00:10:00Z";
-        assert_eq!(digest_ids(&db, later), [with_body]);
-        assert_eq!(title_ids(&db, later), [no_body]);
     }
 
     #[test]

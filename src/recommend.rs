@@ -427,11 +427,19 @@ mod tests {
         let t = topic("規制・審査");
         let model = Model::fit(&repeat(5, example(50, std::slice::from_ref(&t), 3)), 1.0);
         assert!(model.weights[&t].abs() < 1e-9, "{model:?}");
-        assert!(
-            (model.a - 1.0).abs() < 1e-9 && model.b.abs() < 1e-9,
-            "{model:?}"
-        );
         assert_eq!(model.score(50, std::slice::from_ref(&t)), 50);
+    }
+
+    /// 補正は特徴ごとにだけ学ぶ。評価した記事と特徴を共有しない記事の推薦点は、評価がいくつあっても LLM 点のまま
+    /// （全体の傾きやずれを学ぶと、評価 1 件で全記事の点数が動いてしまう）。
+    #[test]
+    fn ratings_do_not_move_articles_without_their_features() {
+        let market = topic("電力市場");
+        let model = Model::fit(&[example(95, std::slice::from_ref(&market), 2)], 1.0);
+        for llm in [20, 50, 70, 90] {
+            assert_eq!(model.score(llm, &[topic("燃料")]), llm, "{llm}");
+        }
+        assert!(model.score(95, std::slice::from_ref(&market)) < 95);
     }
 
     /// 同じ入力なら同じ結果。同じ特徴が重なっても 1 つとして数える。

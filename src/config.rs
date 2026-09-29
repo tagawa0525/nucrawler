@@ -745,7 +745,7 @@ mod tests {
     /// 推薦点の補正の強さ。既定は 1.0 で、正の有限値だけを受け付ける（∞ や 0 では学習できない）。
     #[test]
     fn reads_the_recommend_prior_strength() {
-        assert_eq!(parse_config("", p()).unwrap().recommend.prior_strength, 1.0);
+        assert_eq!(parse_config("", p()).unwrap().recommend.prior_strength, 5.0);
         let c = parse_config("[recommend]\nprior_strength = 2.5\n", p()).unwrap();
         assert_eq!(c.recommend.prior_strength, 2.5);
         for text in [

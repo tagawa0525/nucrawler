@@ -1,5 +1,6 @@
-//! LLM の呼び出し口。今の実装は Claude Code の headless モード（`claude -p`）だけで、
-//! サブスクリプションの枠内で動かす。将来 API などを足せるよう `Llm` トレイトで抽象化する。
+//! LLM の呼び出し口。Claude Code の headless モード（`claude -p`、サブスクリプションの枠）と
+//! GitHub Copilot CLI（`copilot`、AI Credits の月の予算）を `Llm` トレイトで抽象化し、設定
+//! （`llm.backend`）で選ぶ（`Backend`）。
 
 pub mod claude_cli;
 pub mod copilot_cli;
@@ -106,6 +107,54 @@ pub enum LlmError {
     Reported { subtype: String, message: String },
     #[error("llm returned no structured output")]
     NoStructuredOutput,
+}
+
+/// 設定で選んだバックエンド（`llm.backend`）。
+pub enum Backend {
+    Claude(claude_cli::ClaudeCli),
+    Copilot(copilot_cli::CopilotCli),
+}
+
+impl Backend {
+    /// 設定のバックエンドを、データディレクトリ `data` の下を作業場所にして作る。
+    /// 作業ディレクトリは `llm-cwd`、呼び出しの枠は `data` に置き、バックエンドによらず同じ場所で数える。
+    pub fn from_config(c: &crate::config::LlmConfig, data: &std::path::Path) -> Self {
+        let cwd = data.join("llm-cwd");
+        let slots = data.to_path_buf();
+        match c.backend {
+            crate::config::LlmBackend::ClaudeCli => {
+                Self::Claude(claude_cli::ClaudeCli::from_config(c, cwd, slots))
+            }
+            crate::config::LlmBackend::CopilotCli => Self::Copilot(
+                copilot_cli::CopilotCli::from_config(c, cwd, data.join("copilot-home"), slots),
+            ),
+        }
+    }
+}
+
+impl Llm for Backend {
+    type Slot = crate::pipeline::lock::Slot;
+
+    fn backend(&self) -> &'static str {
+        match self {
+            Self::Claude(c) => c.backend(),
+            Self::Copilot(c) => c.backend(),
+        }
+    }
+
+    async fn reserve(&self) -> Result<Self::Slot, LlmError> {
+        match self {
+            Self::Claude(c) => c.reserve().await,
+            Self::Copilot(c) => c.reserve().await,
+        }
+    }
+
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
+        match self {
+            Self::Claude(c) => c.call(req).await,
+            Self::Copilot(c) => c.call(req).await,
+        }
+    }
 }
 
 /// 失敗した呼び出し。失敗しても、それまでに分かった使用量を運ぶ（消費した分をクォータに数えるため）。
@@ -305,5 +354,41 @@ pub mod fake {
                 .pop_front()
                 .expect("FakeLlm ran out of prepared responses")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LlmBackend, LlmConfig};
+
+    #[test]
+    fn builds_the_configured_backend() {
+        let data = std::path::Path::new("/data");
+        let claude = Backend::from_config(&LlmConfig::default(), data);
+        assert_eq!(claude.backend(), "claude-cli");
+        let Backend::Claude(c) = &claude else {
+            panic!("expected claude");
+        };
+        assert_eq!(c.command, std::path::PathBuf::from("claude"));
+        assert_eq!(c.cwd, data.join("llm-cwd"));
+
+        let copilot = Backend::from_config(
+            &LlmConfig {
+                backend: LlmBackend::CopilotCli,
+                ..LlmConfig::default()
+            },
+            data,
+        );
+        assert_eq!(copilot.backend(), "copilot-cli");
+        let Backend::Copilot(c) = &copilot else {
+            panic!("expected copilot");
+        };
+        assert_eq!(c.command, std::path::PathBuf::from("copilot"));
+        assert_eq!(c.cwd, data.join("llm-cwd"));
+        assert_eq!(c.homes, data.join("copilot-home"));
+        // 呼び出しの枠はバックエンドによらず同じ場所で数える
+        assert_eq!(c.slots, data);
+        assert_eq!(c.timeout, std::time::Duration::from_secs(300));
     }
 }

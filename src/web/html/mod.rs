@@ -128,17 +128,21 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
             escape(page.source(source_id)),
         ),
         // `LlmError::RateLimited` の表示。上限は失敗ではなく、枠が戻れば次の実行で再開する
-        Warning::LlmFailed { error, at } if error.starts_with("usage limit reached") => format!(
-            "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",
-            crate::jst::format_local(at),
-        ),
-        Warning::LlmFailed { error, at } => {
-            // 認証切れは利用者にしか直せないので、対処を案内する
+        Warning::LlmFailed { error, at, .. } if error.starts_with("usage limit reached") => {
+            format!(
+                "<div class=\"warn\">⏸ 利用上限に達したため、要約・採点・和訳を止めています（{}）。枠が戻ると次の実行で再開します</div>",
+                crate::jst::format_local(at),
+            )
+        }
+        Warning::LlmFailed { error, backend, at } => {
+            // 認証切れは利用者にしか直せないので、失敗したバックエンドに合わせて対処を案内する
             let lower = error.to_lowercase();
-            let hint = if lower.contains("logged in") || lower.contains("authenticat") {
-                "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
-            } else {
+            let hint = if !(lower.contains("logged in") || lower.contains("authenticat")) {
                 ""
+            } else if backend == crate::llm::copilot_cli::BACKEND {
+                "（copilot の認証が切れているようです。端末で copilot login を実行してログインしてください）"
+            } else {
+                "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
             };
             format!(
                 "<div class=\"warn\">⚠ 要約・採点・和訳が失敗しています（{}）：{}{hint}</div>",
@@ -196,6 +200,7 @@ mod tests {
                     },
                     Warning::LlmFailed {
                         error: "llm reported an error (error): Not logged in".into(),
+                        backend: "claude-cli".into(),
                         at: "2026-09-27T01:00:00.000Z".into(),
                     },
                 ],
@@ -289,6 +294,7 @@ mod tests {
             &Page {
                 warnings: &[Warning::LlmFailed {
                     error,
+                    backend: "claude-cli".into(),
                     at: "2026-09-27T01:00:00.000Z".into(),
                 }],
                 ..Page::default()
@@ -306,6 +312,7 @@ mod tests {
             &Page {
                 warnings: &[Warning::LlmFailed {
                     error: "llm process exited with exit status: 1: Authentication required".into(),
+                    backend: "claude-cli".into(),
                     at: "2026-09-27T01:00:00.000Z".into(),
                 }],
                 ..Page::default()
@@ -313,6 +320,25 @@ mod tests {
             "",
         );
         assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// 認証切れの対処は、失敗した呼び出しのバックエンドに合わせて案内する。
+    #[test]
+    fn auth_hint_follows_the_backend() {
+        let html = layout(
+            "一覧",
+            &Page {
+                warnings: &[Warning::LlmFailed {
+                    error: "llm process exited with exit status: 1: Not logged in".into(),
+                    backend: "copilot-cli".into(),
+                    at: "2026-09-27T01:00:00.000Z".into(),
+                }],
+                ..Page::default()
+            },
+            "",
+        );
+        assert!(html.contains("copilot login"), "{html}");
+        assert!(!html.contains("claude"), "{html}");
     }
 
     /// ソースは ID ではなく表示名で出す（設定に無い ID はそのまま）。

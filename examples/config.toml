@@ -16,11 +16,16 @@ backlog_days = 14
 extract_max_per_run = 100
 
 [llm]
-# Claude Code の実行ファイル（サブスクリプションの枠内で headless 実行する）
-command = "claude"
+# LLM を呼ぶバックエンド。"claude-cli"（Claude Code の headless 実行、サブスクリプションの枠。[quota] で抑える）か
+# "copilot-cli"（GitHub Copilot CLI、AI Credits。[copilot_quota] で抑える）。切り替えるときは、下のステージごとの
+# モデル名もそのバックエンドの名前にする（copilot-cli なら "gpt-6-luna" など）
+backend = "claude-cli"
+# バックエンドの実行ファイル。省けばバックエンドに合わせて "claude" か "copilot"（PATH から探す）。
+# PATH に無いときだけ指定する（指定するとバックエンドを切り替えてもこのコマンドを使う）
+# command = "/path/to/claude"
 # 1 回の呼び出しのタイムアウト（秒）
 timeout_secs = 300
-# 同時に動かす claude の数の上限（crawl・redo などの実行をまたいで数える）。1 つの実行の中でも、
+# 同時に動かすバックエンド（claude・copilot）の数の上限（crawl・redo などの実行をまたいで数える）。1 つの実行の中でも、
 # 各ステージがこの数まで同時に呼ぶ
 concurrency = 2
 # 要約に使うモデル、1 回の呼び出しで要約する記事数、本文の部分ごとの最大文字数
@@ -58,6 +63,15 @@ weekly_max = 0.70
 pace_ahead_days = 1.0
 # 1 回の実行で呼び出してよい回数
 max_calls_per_run = 30
+
+# copilot-cli で呼ぶときの AI Credits の月の予算（backend = "copilot-cli" なら必須）。今月（UTC の暦月。JST では
+# 毎月 1 日 9 時に戻る）の消費を、monthly_credits × 月の経過割合 × pace までに抑える。1 回の実行の呼び出し回数の上限は
+# [quota] の max_calls_per_run を使う
+# [copilot_quota]
+# プランの月のクレジット（Pro は 1500、Pro+ は 7000）。プランで大きく違うので既定値は無い
+# monthly_credits = 1500
+# 月の経過割合のうち使ってよい割合。対話で使う Copilot の消費は nucrawler から見えないので、その分の余裕を残す
+# pace = 0.8
 
 [web]
 # 待ち受けるアドレス。スマホから Tailscale 経由で見るなら tailnet の IP（100.x.y.z:8080 など）にする

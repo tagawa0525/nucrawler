@@ -68,7 +68,9 @@ Copilot のために変えない。
 
 - `Llm` トレイトは `impl Future` を返すので `dyn` にできない。`enum Backend { Claude(ClaudeCli), Copilot(CopilotCli) }` に
   `Llm` を実装して振り分ける。`Slot` はどちらも `pipeline::lock::Slot`
-- `src/cmd/crawl.rs`・`redo.rs`・`suggest.rs` は `ClaudeCli::from_config` の代わりに `Backend::from_config` を使う
+- `src/cmd/crawl.rs`・`redo.rs`・`suggest.rs`・`eval.rs` は `ClaudeCli::from_config` の代わりに `Backend::from_config` を、
+  `Quota::new` の代わりに `Quota::from_config`（バックエンドに合わせて使用率か月の消費クレジットで判定する）を使う
+- Web UI の認証切れの案内は、失敗した呼び出しの backend に合わせる（copilot-cli なら `copilot login`）
 - 設定：`llm.backend` を足す。`llm.command` の既定はバックエンドに合わせる（`claude` / `copilot`）。
   ステージごとのモデル名（`digest_model` など）はそのまま使う。切り替えるときはモデル名も書き換える
 - 成果物（`artifacts`）・失敗の記録（`stage_errors`）・作業の予約（`work_claims`）は backend と model をキーに持つので、

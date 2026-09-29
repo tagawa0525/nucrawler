@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use nucrawler::config;
 use nucrawler::db::Db;
-use nucrawler::llm::claude_cli::ClaudeCli;
+use nucrawler::llm::Backend;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv, Suggested};
@@ -55,8 +55,8 @@ pub(crate) async fn suggest(
     }
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.clone());
-    let mut quota = Quota::new(config.quota.clone(), None, max_llm_calls);
+    let llm = Backend::from_config(&config.llm, &data);
+    let mut quota = Quota::from_config(&config, max_llm_calls);
     let (report, suggestion) = run::suggest_profile(
         RunEnv {
             db: &db,

@@ -18,6 +18,9 @@ use std::time::Duration;
 use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
 
+/// `llm_calls` などに記録する名前
+pub const BACKEND: &str = "copilot-cli";
+
 /// `--available-tools` に渡す、存在しないツールの名前。これだけを許可してツールを 0 個にする。
 const NO_TOOLS: &str = "nucrawler-no-tools";
 
@@ -36,11 +39,31 @@ pub struct CopilotCli {
     pub concurrency: usize,
 }
 
+impl CopilotCli {
+    /// 設定のコマンド・タイムアウト・同時に動かす数で、`cwd` を作業ディレクトリにし、呼び出しごとの
+    /// `COPILOT_HOME` を `homes` の下に作って呼ぶ。
+    pub fn from_config(
+        c: &crate::config::LlmConfig,
+        cwd: PathBuf,
+        homes: PathBuf,
+        slots: PathBuf,
+    ) -> Self {
+        Self {
+            command: c.command().into(),
+            cwd,
+            homes,
+            timeout: Duration::from_secs(c.timeout_secs),
+            slots,
+            concurrency: c.concurrency,
+        }
+    }
+}
+
 impl Llm for CopilotCli {
     type Slot = crate::pipeline::lock::Slot;
 
     fn backend(&self) -> &'static str {
-        "copilot-cli"
+        BACKEND
     }
 
     async fn reserve(&self) -> Result<Self::Slot, LlmError> {

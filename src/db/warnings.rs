@@ -29,8 +29,12 @@ pub enum Warning {
         /// 普段の新着の間隔（日）
         typical_gap_days: i64,
     },
-    /// 直近の LLM の呼び出しが失敗している
-    LlmFailed { error: String, at: String },
+    /// 直近の LLM の呼び出しが失敗している。`backend` は失敗した呼び出しのバックエンド（対処の案内に使う）
+    LlmFailed {
+        error: String,
+        backend: String,
+        at: String,
+    },
 }
 
 /// 件数の急減の判定に使う、最新の回より前の回の数の上限（既定の 1 日 4 回で約 5 日分。週末をまたぐ）
@@ -134,17 +138,17 @@ impl Db {
         warnings.extend(self.stale_warnings(since, now)?.into_iter().filter(
             |w| !matches!(w, Warning::SourceStale { source_id, .. } if flagged.contains(source_id)),
         ));
-        let latest: Option<(bool, Option<String>, String)> = self
+        let latest: Option<(bool, Option<String>, String, String)> = self
             .conn
             .query_row(
-                "SELECT ok, error, at FROM llm_calls WHERE at >= ?1
+                "SELECT ok, error, backend, at FROM llm_calls WHERE at >= ?1
                  ORDER BY at DESC, id DESC LIMIT 1",
                 [timestamp(since)],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        if let Some((false, Some(error), at)) = latest {
-            warnings.push(Warning::LlmFailed { error, at });
+        if let Some((false, Some(error), backend, at)) = latest {
+            warnings.push(Warning::LlmFailed { error, backend, at });
         }
         Ok(warnings)
     }
@@ -316,7 +320,9 @@ mod tests {
             if source_id == "nei" && error == "HTTP 403")
         );
         assert!(
-            matches!(&warnings[1], Warning::LlmFailed { error, .. } if error == "Not logged in")
+            matches!(&warnings[1], Warning::LlmFailed { error, backend, .. }
+                if error == "Not logged in" && backend == "claude-cli"),
+            "{warnings:?}"
         );
         // 失敗の後に成功した呼び出しがあれば、LLM の警告は出さない
         db.record_llm_call(

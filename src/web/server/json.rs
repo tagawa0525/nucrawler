@@ -6,18 +6,18 @@ pub(super) fn json(body: String) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// Web の一覧と同じ記事（`all=1` ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
+/// Web の一覧と同じ記事（`min` で最低点を選べ、0 ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, AppError> {
-    let show_all = params.all.as_deref() == Some("1");
+    let min = params.min(&state.web)?;
     let web = state.web.clone();
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,
         ))?)
@@ -95,7 +95,7 @@ mod tests {
         server.assert_no_views();
     }
 
-    /// API の一覧は既定では Web と同じ記事を出し、`all=1` ですべてを出す。閲覧としては記録しない。
+    /// API の一覧は既定では Web と同じ記事を出し、`min` で最低点を選べる（0 ですべて）。閲覧としては記録しない。
     #[tokio::test]
     async fn api_lists_the_same_articles_as_the_web() {
         let db = Db::open_in_memory().unwrap();
@@ -112,8 +112,13 @@ mod tests {
         assert_eq!(a["score"], 90);
         assert_eq!(a["url"], "https://e.com/good?a=1&b=2");
 
-        let (_, json) = server.get_json("/api/articles?all=1").await;
+        let (_, json) = server.get_json("/api/articles?min=0").await;
         assert_eq!(json["articles"].as_array().unwrap().len(), 5, "{json}");
+        let (_, json) = server.get_json("/api/articles?min=5").await;
+        // 低い点（10 点）も出る。評価 2・無関係・未採点は 0 のときだけ
+        assert_eq!(json["articles"].as_array().unwrap().len(), 2, "{json}");
+        let (status, _) = server.get_json("/api/articles?min=x").await;
+        assert_eq!(status, 400);
         server.assert_no_views();
     }
 

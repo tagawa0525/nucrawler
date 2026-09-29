@@ -2,20 +2,21 @@
 
 use super::*;
 
-/// Web の一覧の条件（設定の期間・件数・最低点）。
+/// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が 0 なら、評価 1〜2・未採点・
+/// 軽水炉と無関係の記事も出す（すべて）。
 fn list_query<'a>(
     web: &WebConfig,
     user: i64,
     profile_hash: Option<&'a str>,
     now: chrono::DateTime<Utc>,
-    show_all: bool,
+    min_score: u8,
 ) -> ListQuery<'a> {
     ListQuery {
         user_id: user,
         profile_hash,
-        min_score: web.min_score,
+        min_score,
         since: now - Duration::days(web.list_days.into()),
-        show_all,
+        show_all: min_score == 0,
         limit: web.list_limit,
     }
 }
@@ -27,9 +28,9 @@ pub(super) fn list_items(
     user: i64,
     profile_hash: Option<&str>,
     now: chrono::DateTime<Utc>,
-    show_all: bool,
+    min_score: u8,
 ) -> Result<Vec<crate::db::ListItem>, DbError> {
-    db.list_articles(list_query(web, user, profile_hash, now, show_all))
+    db.list_articles(list_query(web, user, profile_hash, now, min_score))
 }
 
 /// 警告は直近 24 時間のものだけ出す。
@@ -40,16 +41,30 @@ pub(super) fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
 
 #[derive(serde::Deserialize)]
 pub(super) struct ListParams {
-    pub(super) all: Option<String>,
+    /// 表示する最低点（0〜100）。無ければ設定の `web.min_score`
+    min: Option<String>,
     /// Web の一覧だけが使う（過去の欄に既読も出す）
     read: Option<String>,
+}
+
+impl ListParams {
+    pub(super) fn min(&self, web: &WebConfig) -> Result<u8, AppError> {
+        match self.min.as_deref() {
+            None => Ok(web.min_score),
+            Some(v) => v
+                .parse()
+                .ok()
+                .filter(|min| *min <= 100)
+                .ok_or(AppError::BadRequest("min must be 0..=100")),
+        }
+    }
 }
 
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Html<String>, AppError> {
-    let show_all = params.all.as_deref() == Some("1");
+    let min = params.min(&state.web)?;
     let show_read = params.read.as_deref() == Some("1");
     let web = state.web.clone();
     let labels = state.labels.clone();
@@ -58,18 +73,31 @@ pub(super) async fn list(
         let (user, hash) = viewer(db)?;
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, show_all)?;
+        let view = html::ListView {
+            min,
+            default_min: web.min_score,
+            read: show_read,
+        };
+        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref(), show_read);
-        // 「すべて表示」では閾値未満も並んでいるので、確認枠は出さない
-        let explore = if show_all {
+        // 「すべて」では閾値未満も並んでいるので、確認枠は出さない
+        let explore = if view.shows_all() {
             Vec::new()
         } else {
+            // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく設定の最低点
             let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
             let picks = db.explore(
-                list_query(&web, user, hash.as_deref(), now, false),
+                list_query(&web, user, hash.as_deref(), now, web.min_score),
                 web.explore_per_day as usize,
                 &today.to_string(),
             )?;
+            // 最低点を下げて一覧に既に出ている記事は重ねない
+            let listed: std::collections::HashSet<i64> =
+                new.iter().chain(&earlier).map(|i| i.article_id).collect();
+            let picks = picks
+                .into_iter()
+                .filter(|i| !listed.contains(&i.article_id))
+                .collect();
             // 一覧の過去の欄と同じく、前の訪問までに既読にした記事は出さない
             html::hide_read_before(picks, boundary.as_deref(), show_read)
         };
@@ -77,10 +105,6 @@ pub(super) async fn list(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-        };
-        let view = html::ListView {
-            all: show_all,
-            read: show_read,
         };
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
@@ -106,7 +130,7 @@ pub(super) async fn feed(
     let xml = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, false)?;
+        let items = list_items(db, &web, user, hash.as_deref(), now, web.min_score)?;
         Ok(feed::atom(
             &items,
             &base,
@@ -273,8 +297,49 @@ mod tests {
         for hidden in ["評価 2", "無関係", "未採点"] {
             assert!(!section.contains(hidden), "{hidden}: {html}");
         }
-        let (_, all) = server.get("/?all=1").await;
+        let (_, all) = server.get("/?min=0").await;
         assert!(!all.contains("確認枠"), "{all}");
+    }
+
+    /// 表示する最低点は `min` で選べる。0 は未採点なども含めてすべて。
+    /// 確認枠は設定の最低点で選び、一覧に既に出ている記事は重ねて出さない。
+    #[tokio::test]
+    async fn list_takes_the_minimum_score() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, digest) = seed(&db, "https://e.com/forty", "四十点");
+        score(&db, digest, 40);
+        let (_, digest) = seed(&db, "https://e.com/twenty", "二十点");
+        score(&db, digest, 20);
+        seed(&db, "https://e.com/unscored", "未採点");
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/?min=30").await;
+        assert_eq!(status, 200);
+        assert!(html.contains("四十点"), "{html}");
+        assert!(!html.contains("未採点"), "{html}");
+        // 二十点は一覧に無く、確認枠（設定の 50 点未満）にだけ出うる。四十点は確認枠に重ねない
+        let explore = html.split("<h2>確認枠</h2>").nth(1).unwrap_or("");
+        assert!(!explore.contains("四十点"), "{html}");
+        assert!(
+            !html
+                .split("<h2>確認枠</h2>")
+                .next()
+                .unwrap()
+                .contains("二十点"),
+            "{html}"
+        );
+        assert_eq!(html.matches("四十点").count(), 1, "{html}");
+        assert!(
+            html.contains(r#"<option value="30" selected>30</option>"#),
+            "{html}"
+        );
+        let (_, html) = server.get("/?min=0").await;
+        for title in ["四十点", "二十点", "未採点"] {
+            assert!(html.contains(title), "{title}: {html}");
+        }
+        for bad in ["x", "101", "-1"] {
+            let (status, _) = server.get(&format!("/?min={bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
     }
 
     /// 確認枠の記事も一覧と同じく、今回の訪問で既読にしたものは残し、前の訪問までに既読になったものは出さない。
@@ -447,7 +512,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let (status, html) = server.get("/?all=1").await;
+        let (status, html) = server.get("/?min=0").await;
         assert_eq!(status, 200);
         assert!(html.contains("見出しA"), "{html}");
         assert_eq!(
@@ -463,11 +528,14 @@ mod tests {
     #[tokio::test]
     async fn list_reads_the_read_toggle() {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
-        let (status, html) = server.get("/?all=1&read=1").await;
+        let (status, html) = server.get("/?min=0&read=1").await;
         assert_eq!(status, 200);
         assert!(html.contains("過去の既読も表示：ON"), "{html}");
-        assert!(html.contains(r#"href="/?all=1""#), "{html}");
-        assert!(html.contains(r#"href="/?read=1""#), "{html}");
+        assert!(html.contains(r#"href="/?min=0""#), "{html}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="read" value="1">"#),
+            "{html}"
+        );
     }
 
     #[tokio::test]
@@ -584,7 +652,7 @@ mod tests {
         server
             .post(&format!("/articles/{id}/bookmark"), "on=1")
             .await;
-        let (_, html) = server.get("/?all=1").await;
+        let (_, html) = server.get("/?min=0").await;
         assert!(html.contains("見出しA"), "{html}");
         let (_, html) = server.get("/search?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");

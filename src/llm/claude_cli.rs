@@ -38,15 +38,19 @@ impl ClaudeCli {
 }
 
 impl Llm for ClaudeCli {
+    type Slot = crate::pipeline::lock::Slot;
+
     fn backend(&self) -> &'static str {
         "claude-cli"
     }
 
-    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
-        // 枠は claude が終わるまで持つ（止められて future を捨てれば、子プロセスとともに空く）
-        let _slot = crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
+    async fn reserve(&self) -> Result<Self::Slot, LlmError> {
+        crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
             .await
-            .map_err(LlmError::Slot)?;
+            .map_err(LlmError::Slot)
+    }
+
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
         let mut child = tokio::process::Command::new(&self.command)

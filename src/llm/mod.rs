@@ -69,8 +69,15 @@ pub enum LlmError {
 
 /// LLM のバックエンド。
 pub trait Llm {
+    /// 呼び出しの枠。持っている間だけ呼び出してよい（drop すると空く）
+    type Slot;
+
     /// `llm_calls` などに記録する名前（例 "claude-cli"）
     fn backend(&self) -> &'static str;
+
+    /// 呼び出しの枠を取る。埋まっていれば空くまで待つ。枠はクォータの判定と作業の予約の前に取り、
+    /// 呼び出しを終えるまで持つ（枠を待つ間に使用率が上がっても、判定し直してから呼ぶように）。
+    fn reserve(&self) -> impl std::future::Future<Output = Result<Self::Slot, LlmError>>;
 
     fn call(
         &self,
@@ -146,8 +153,22 @@ pub mod fake {
     }
 
     impl Llm for FakeLlm {
+        type Slot = ();
+
         fn backend(&self) -> &'static str {
             "fake"
+        }
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            let n = {
+                let mut reserved = self.reserved.lock().unwrap();
+                *reserved += 1;
+                *reserved - 1
+            };
+            if let Some(hook) = self.reserve_hook.lock().unwrap().as_mut() {
+                hook(n);
+            }
+            Ok(())
         }
 
         async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {

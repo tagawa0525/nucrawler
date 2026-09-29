@@ -46,6 +46,31 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
     missing.iter().copied().filter(|id| held.contains(id))
 }
 
+/// 呼び出しの枠を取った結果。
+pub enum Reserved<S> {
+    Slot(S),
+    /// 止める指示で待つのをやめた
+    Cancelled,
+    /// 枠を取れなかった（ロックファイルを開けないなど）
+    Failed(String),
+}
+
+/// 呼び出しの枠を取る。止める指示が出れば待つのをやめる。ステージは周の最初に枠を取り、
+/// クォータの判定・作業の予約・呼び出しをその中で行う。
+pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
+    if cancel.is_requested() {
+        return Reserved::Cancelled;
+    }
+    tokio::select! {
+        biased;
+        slot = llm.reserve() => match slot {
+            Ok(slot) => Reserved::Slot(slot),
+            Err(e) => Reserved::Failed(errors::error_chain(&e)),
+        },
+        () = cancel.requested() => Reserved::Cancelled,
+    }
+}
+
 /// 次の呼び出しをしてよいか。LLM を呼ぶ実行は並行して動くので、判定の前に DB の最新の使用率を
 /// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
 pub fn permit(

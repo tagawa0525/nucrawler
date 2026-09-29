@@ -6,8 +6,8 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, permit,
-    record_failures,
+    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
+    record_failures, reserve,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -76,6 +76,18 @@ pub async fn digest_articles<L: Llm>(
             break;
         }
         // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
+        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+        let _slot = match reserve(llm, cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
+            Reserved::Failed(message) => {
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
         if let Err(stop) = permit(db, quota, now, llm_cfg.score_reserved_calls)? {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
@@ -789,6 +801,12 @@ mod tests {
     struct Hanging;
 
     impl Llm for Hanging {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -802,6 +820,12 @@ mod tests {
     struct KilledWithCancel(Cancel);
 
     impl Llm for KilledWithCancel {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -893,6 +917,12 @@ mod tests {
     struct AnswerWithCancel(Cancel);
 
     impl Llm for AnswerWithCancel {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }

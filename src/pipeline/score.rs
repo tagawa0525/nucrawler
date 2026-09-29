@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, permit,
-    record_failures,
+    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
+    record_failures, reserve,
 };
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
@@ -104,6 +104,18 @@ pub async fn score_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
+        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+        let _slot = match reserve(llm, cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
+            Reserved::Failed(message) => {
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
         if let Err(stop) = permit(db, quota, now, 0)? {
             tracing::info!("score stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));

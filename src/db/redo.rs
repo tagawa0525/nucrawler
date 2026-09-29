@@ -43,7 +43,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -88,7 +88,7 @@ impl Db {
              WHERE EXISTS (
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -144,7 +144,7 @@ impl Db {
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                    AND c.access_membership_id IS NULL)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -189,7 +189,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -213,11 +213,16 @@ impl Db {
     }
 }
 
-/// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事を除く条件。
-const REDO_NOT_BACKING_OFF: &str = "NOT EXISTS (
+/// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事と、ほかの実行が予約している
+/// 記事を除く条件。
+const REDO_AVAILABLE: &str = "NOT EXISTS (
     SELECT 1 FROM stage_errors AS e
     WHERE e.article_id = a.id AND e.stage = :stage AND e.backend = :backend
-      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))";
+      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))
+    AND NOT EXISTS (
+    SELECT 1 FROM work_claims AS w
+    WHERE w.article_id = a.id AND w.stage = :stage AND w.backend = :backend
+      AND w.model = :model AND w.expires_at > :now)";
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
 /// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。

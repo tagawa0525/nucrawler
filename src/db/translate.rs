@@ -110,6 +110,10 @@ impl Db {
                    WHERE e.article_id = a.id AND e.stage = 'translate'
                      AND e.backend = ?3 AND e.model = ?4
                      AND (e.attempts >= ?5 OR e.next_retry_at > ?6))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM work_claims AS w
+                   WHERE w.article_id = a.id AND w.stage = 'translate'
+                     AND w.backend = ?3 AND w.model = ?4 AND w.expires_at > ?6)
              ),
              candidates AS (
                SELECT b.*,

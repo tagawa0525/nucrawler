@@ -1,6 +1,91 @@
 //! 作業の予約。LLM を呼ぶ処理が同じ記事を同時に処理しないよう、対象を選んだら予約してから処理し、
 //! 終われば外す。プロセスが落ちても、期限を過ぎた予約はほかの実行が取り直せる。
 
+use super::*;
+
+/// 予約のキー（記事を除く）。`stage_errors` と同じく、ステージ・backend・model ごとに分ける。
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimKey<'a> {
+    pub stage: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+}
+
+/// 取れた予約。drop すると外す（外せなければ期限で外れる）。
+pub struct Claim<'a> {
+    db: &'a Db,
+    stage: String,
+    backend: String,
+    model: String,
+    ids: Vec<i64>,
+}
+
+impl Claim<'_> {
+    /// 予約できた記事（依頼した順）
+    pub fn ids(&self) -> &[i64] {
+        &self.ids
+    }
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if self.ids.is_empty() {
+            return;
+        }
+        let ids = serde_json::to_string(&self.ids).expect("ids serialize");
+        if let Err(e) = self.db.conn.execute(
+            "DELETE FROM work_claims
+             WHERE article_id IN (SELECT value FROM json_each(?1))
+               AND stage = ?2 AND backend = ?3 AND model = ?4",
+            rusqlite::params![ids, self.stage, self.backend, self.model],
+        ) {
+            tracing::warn!(stage = %self.stage, "failed to release work claims (they expire): {e}");
+        }
+    }
+}
+
+impl Db {
+    /// `ids` の記事を `ttl` の間予約し、取れた記事だけを持つ予約を返す。ほかの実行が期限内の予約を
+    /// 持つ記事は取れない。期限を過ぎた予約は取り直す。
+    pub fn claim(
+        &self,
+        key: ClaimKey,
+        ids: &[i64],
+        now: chrono::DateTime<chrono::Utc>,
+        ttl: chrono::Duration,
+    ) -> Result<Claim<'_>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO work_claims (article_id, stage, backend, model, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (article_id, stage, backend, model) DO UPDATE
+               SET expires_at = excluded.expires_at
+               WHERE work_claims.expires_at <= ?6",
+        )?;
+        let (expires_at, now) = (timestamp(now + ttl), timestamp(now));
+        let mut claimed = Vec::new();
+        for &id in ids {
+            let changed = stmt.execute(rusqlite::params![
+                id,
+                key.stage,
+                key.backend,
+                key.model,
+                expires_at,
+                now
+            ])?;
+            if changed == 1 {
+                claimed.push(id);
+            }
+        }
+        Ok(Claim {
+            db: self,
+            stage: key.stage.to_string(),
+            backend: key.backend.to_string(),
+            model: key.model.to_string(),
+            ids: claimed,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

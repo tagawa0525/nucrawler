@@ -105,6 +105,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0021_score_matches.sql"),
     include_str!("migrations/0022_explore_picks.sql"),
     include_str!("migrations/0023_title_artifacts.sql"),
+    include_str!("migrations/0024_work_claims.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

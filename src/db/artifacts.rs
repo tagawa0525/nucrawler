@@ -113,6 +113,10 @@ impl Db {
                  WHERE e.article_id = a.id AND e.stage = 'digest'
                    AND e.backend = ?3 AND e.model = ?4
                    AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = a.id AND w.stage = 'digest'
+                   AND w.backend = ?3 AND w.model = ?4 AND w.expires_at > ?5)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?6",
         )?;
@@ -170,6 +174,10 @@ impl Db {
                  WHERE e.article_id = a.id AND e.stage = 'title'
                    AND e.backend = ?2 AND e.model = ?3
                    AND (e.attempts >= ?1 OR e.next_retry_at > ?4))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = a.id AND w.stage = 'title'
+                   AND w.backend = ?2 AND w.model = ?3 AND w.expires_at > ?4)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?5",
         )?;

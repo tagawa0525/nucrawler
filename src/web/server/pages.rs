@@ -65,11 +65,13 @@ pub(super) async fn list(
             Vec::new()
         } else {
             let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
-            db.explore(
+            let picks = db.explore(
                 list_query(&web, user, hash.as_deref(), now, false),
                 web.explore_per_day as usize,
                 &today.to_string(),
-            )?
+            )?;
+            // 一覧の過去の欄と同じく、前の訪問までに既読にした記事は出さない
+            html::hide_read_before(picks, boundary.as_deref(), show_read)
         };
         let warnings = warnings(db)?;
         let page = Page {
@@ -190,16 +192,15 @@ pub(super) async fn detail(
                 ..ReportFilter::default()
             },
         )?;
-        // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
-        // 採点に渡す直近の反応が偏る）
+        // 開いたことだけを記録し、版の切り替えは数えない（開いた回数を、読んだ回数として数えられるように）
         let opened = if view.show_translation {
             (view.translation.is_none() && !detail.translations.is_empty())
-                .then_some(SignalKind::OpenTranslation)
+                .then_some(OpenKind::Translation)
         } else {
-            view.digest.is_none().then_some(SignalKind::OpenDetail)
+            view.digest.is_none().then_some(OpenKind::Detail)
         };
         if let Some(kind) = opened {
-            db.record_event(user, id, kind, Utc::now())?;
+            db.record_open(user, id, kind, Utc::now())?;
         }
         let warnings = warnings(db)?;
         let page = Page {
@@ -262,6 +263,39 @@ mod tests {
         }
         let (_, all) = server.get("/?all=1").await;
         assert!(!all.contains("確認枠"), "{all}");
+    }
+
+    /// 確認枠の記事も一覧と同じく、今回の訪問で既読にしたものは残し、前の訪問までに既読になったものは出さない。
+    #[tokio::test]
+    async fn explore_hides_picks_read_before_this_visit() {
+        let db = Db::open_in_memory().unwrap();
+        let (low, digest) = seed(&db, "https://e.com/low", "低い点");
+        score(&db, digest, 10);
+        let server = Server::start(db).await;
+        let in_explore = |html: &str| {
+            html.split("<h2>確認枠</h2>")
+                .nth(1)
+                .is_some_and(|s| s.contains("低い点"))
+        };
+        let (_, html) = server.get("/").await;
+        assert!(in_explore(&html), "{html}");
+        server.post(&format!("/articles/{low}/read"), "on=1").await;
+        let (_, html) = server.get("/").await;
+        assert!(in_explore(&html), "{html}");
+        // 次の訪問：既読と前回の閲覧を過去にずらす
+        server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(
+                "UPDATE reads SET read_at = '2000-01-01T00:00:00.000Z';
+                 UPDATE users SET last_seen_at = '2000-01-02T00:00:00.000Z';",
+            )
+            .unwrap();
+        let (_, html) = server.get("/").await;
+        assert!(!html.contains("低い点"), "{html}");
     }
 
     /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
@@ -451,6 +485,8 @@ mod tests {
         assert!(html.contains("和訳の本文"), "{html}");
         assert_eq!(events("open_translation"), 1);
         assert_eq!(events("open_detail"), 1);
+        // 開いた記事は既読
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 1);
     }
 
     #[tokio::test]
@@ -479,17 +515,17 @@ mod tests {
         assert_eq!(server.count("SELECT count(*) FROM events"), 0);
     }
 
-    /// 一覧でブックマークした記事は、振り分け済みとして一覧から外れる。
+    /// ブックマークは印なので、付けても一覧に残る。
     #[tokio::test]
-    async fn list_leaves_out_bookmarked_articles() {
+    async fn list_keeps_bookmarked_articles() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         server
-            .post(&format!("/articles/{id}/feedback"), "kind=bookmark")
+            .post(&format!("/articles/{id}/bookmark"), "on=1")
             .await;
         let (_, html) = server.get("/?all=1").await;
-        assert!(!html.contains("見出しA"), "{html}");
+        assert!(html.contains("見出しA"), "{html}");
         let (_, html) = server.get("/search?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");
     }

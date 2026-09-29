@@ -251,21 +251,16 @@ fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String 
             )
         })
         .collect();
-    let bookmark = |value: &str, on: bool| {
-        format!(
-            "<form method=\"post\" action=\"/articles/{id}/feedback\">\
-             <button name=\"kind\" value=\"{value}\"{}>🔖</button></form>",
-            if on { " class=\"on\"" } else { "" }
-        )
-    };
+    // 押すと、今の印の逆にする
+    let bookmark = format!(
+        "<form method=\"post\" action=\"/articles/{id}/bookmark\">\
+         <button name=\"on\" value=\"{}\"{}>🔖</button></form>",
+        if bookmarked { "0" } else { "1" },
+        if bookmarked { " class=\"on\"" } else { "" }
+    );
     format!(
         "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
-         {stars}</form>{}</div>",
-        if bookmarked {
-            bookmark("unbookmark", true)
-        } else {
-            bookmark("bookmark", false)
-        }
+         {stars}</form>{bookmark}</div>"
     )
 }
 
@@ -343,7 +338,7 @@ mod tests {
             "switch to older version"
         );
         assert!(html.contains("sonnet"));
-        assert!(html.contains(r#"action="/articles/7/feedback""#));
+        assert!(html.contains(r#"action="/articles/7/bookmark""#), "{html}");
         // 評価は 1〜5 の星で、今の評価（4）まで塗る。今の評価を押すと評価なしに戻る
         assert!(html.contains(r#"action="/articles/7/rating""#), "{html}");
         assert!(
@@ -364,7 +359,7 @@ mod tests {
         );
         assert!(!html.contains("👍") && !html.contains("👎"), "{html}");
         assert!(
-            html.contains(r#"<button name="kind" value="bookmark">🔖</button>"#),
+            html.contains(r#"<button name="on" value="1">🔖</button>"#),
             "{html}"
         );
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
@@ -405,7 +400,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<button name="kind" value="unbookmark" class="on">🔖</button>"#),
+            html.contains(r#"<button name="on" value="0" class="on">🔖</button>"#),
             "{html}"
         );
     }

@@ -8,7 +8,6 @@ mod articles;
 mod artifacts;
 mod claims;
 mod eval;
-mod feedback;
 mod notes;
 mod read;
 mod redo;
@@ -26,7 +25,6 @@ pub use articles::*;
 pub use artifacts::*;
 pub use claims::*;
 pub use eval::*;
-pub use feedback::*;
 pub use notes::*;
 pub use read::*;
 pub use redo::*;
@@ -109,6 +107,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0023_title_artifacts.sql"),
     include_str!("migrations/0024_work_claims.sql"),
     include_str!("migrations/0025_ratings.sql"),
+    include_str!("migrations/0026_marks.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1079,24 +1078,88 @@ mod tests {
             .unwrap(),
             [
                 "bookmarks_by_article",
-                "bookmarks_by_event",
                 "events_by_article",
                 "events_by_user"
             ]
         );
-        db.record_event(1, 1, SignalKind::Dismiss, t("2026-09-27T01:00:00Z"))
+        db.record_open(1, 1, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
             .unwrap();
-        db.record_event(1, 1, SignalKind::Bookmark, t("2026-09-27T02:00:00Z"))
+        for kind in ["unknown", "bookmark", "dismiss"] {
+            let err = db
+                .conn
+                .execute(
+                    "INSERT INTO events (user_id, article_id, kind, created_at)
+                     VALUES (1, 1, ?1, '2026-09-27T00:00:00.000Z')",
+                    [kind],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("CHECK"), "{kind}: {err}");
+        }
+    }
+
+    /// 既読は、開いた記録・見送り・評価のうち最初の時刻で作る。ブックマークは付けた行動の時刻を持ち、
+    /// 行動（events）には開いた記録だけを残す。
+    #[test]
+    fn migration_turns_reads_and_bookmarks_into_marks() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE reads"))
             .unwrap();
-        let err = db
-            .conn
-            .execute(
-                "INSERT INTO events (user_id, article_id, kind, created_at)
-                 VALUES (1, 1, 'unknown', '2026-09-27T00:00:00.000Z')",
-                [],
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (2, 's', 'https://e.example/b', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (3, 's', 'https://e.example/c', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (4, 's', 'https://e.example/d', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO events (id, user_id, article_id, kind, created_at) VALUES
+               (1, 1, 1, 'open_detail', '2026-09-27T03:00:00.000Z'),
+               (2, 1, 1, 'dismiss', '2026-09-27T02:00:00.000Z'),
+               (3, 1, 2, 'open_translation', '2026-09-27T05:00:00.000Z'),
+               (4, 1, 3, 'bookmark', '2026-09-27T06:00:00.000Z'),
+               (5, 1, 4, 'bookmark', '2026-09-27T07:00:00.000Z');
+             INSERT INTO bookmarks (user_id, article_id, event_id) VALUES (1, 3, 4);
+             INSERT INTO ratings (user_id, article_id, value, rated_at)
+               VALUES (1, 2, 4, '2026-09-27T04:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings("SELECT article_id || ':' || read_at FROM reads ORDER BY article_id")
+                .unwrap(),
+            ["1:2026-09-27T02:00:00.000Z", "2:2026-09-27T04:00:00.000Z"]
+        );
+        // 外したブックマーク（4）は戻さない。ブックマークは既読にしない
+        assert_eq!(
+            db.query_strings("SELECT article_id || ':' || bookmarked_at FROM bookmarks")
+                .unwrap(),
+            ["3:2026-09-27T06:00:00.000Z"]
+        );
+        assert_eq!(
+            db.query_strings("SELECT id || kind FROM events ORDER BY id")
+                .unwrap(),
+            ["1open_detail", "3open_translation"]
+        );
+        assert_eq!(
+            db.query_strings(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = 'reads' AND sql IS NOT NULL"
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("CHECK"), "{err}");
+            .unwrap(),
+            ["reads_by_article"]
+        );
+        // 記事を消すと既読とブックマークも消える
+        db.conn
+            .execute("DELETE FROM articles WHERE id IN (1, 3)", [])
+            .unwrap();
+        assert_eq!(db.query_i64("SELECT count(*) FROM reads").unwrap(), 1);
+        assert_eq!(db.query_i64("SELECT count(*) FROM bookmarks").unwrap(), 0);
     }
 
     /// 👍/👎 は、記事ごとに最後のものを評価 4/2 として移し、行動からは消す。ほかの行動は残す。
@@ -1143,10 +1206,11 @@ mod tests {
                 "2:1:2:2026-09-27T04:00:00.000Z",
             ]
         );
+        // 見送りは後のマイグレーションで既読に移る
         assert_eq!(
             db.query_strings("SELECT kind FROM events ORDER BY id")
                 .unwrap(),
-            ["dismiss", "open_detail"]
+            ["open_detail"]
         );
         for value in [0, 6] {
             let err = db

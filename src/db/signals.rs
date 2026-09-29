@@ -1,4 +1,5 @@
-//! 利用者の評価（1〜5）。評価のラベル（`eval`・確認枠・`profile suggest`）はこれだけから決める。
+//! 利用者の反応：評価（1〜5）と、既読・ブックマークの印、開いた記録。
+//! 評価のラベル（`eval`・確認枠・`profile suggest`）は評価だけから決め、印と開いた記録は使わない。
 
 use super::*;
 
@@ -67,8 +68,101 @@ impl rusqlite::ToSql for Rating {
     }
 }
 
+/// 開いたものの種類（`events.kind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenKind {
+    /// 詳細を開いた
+    Detail,
+    /// 全文和訳を開いた
+    Translation,
+}
+
+impl OpenKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Detail => "open_detail",
+            Self::Translation => "open_translation",
+        }
+    }
+}
+
+/// 既読にする（既に既読なら、最初に既読になった時刻のまま）。
+fn mark_read(
+    conn: &Connection,
+    user_id: i64,
+    article_id: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO reads (user_id, article_id, read_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![user_id, article_id, timestamp(now)],
+    )?;
+    Ok(())
+}
+
 impl Db {
-    /// 評価を付ける（付け直すと置き換わる）。`None` なら評価なしに戻す。
+    /// 開いたことを記録し、既読にする。
+    pub fn record_open(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: OpenKind,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
+        )?;
+        mark_read(&tx, user_id, article_id, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 既読の印を付け外しする。
+    pub fn set_read(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        read: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        if read {
+            mark_read(&self.conn, user_id, article_id, now)
+        } else {
+            self.conn.execute(
+                "DELETE FROM reads WHERE user_id = ?1 AND article_id = ?2",
+                rusqlite::params![user_id, article_id],
+            )?;
+            Ok(())
+        }
+    }
+
+    /// ブックマーク（後で読む）の印を付け外しする。既に付いていれば、付けた時刻のまま。
+    pub fn set_bookmark(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        bookmarked: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        if bookmarked {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, bookmarked_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![user_id, article_id, timestamp(now)],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
+                rusqlite::params![user_id, article_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 評価を付ける（付け直すと置き換わる）。評価すると既読になる（処理済み）。
+    /// `None` なら評価なしに戻す（既読はそのまま）。
     pub fn rate(
         &self,
         user_id: i64,
@@ -76,18 +170,26 @@ impl Db {
         rating: Option<Rating>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
         match rating {
-            Some(rating) => self.conn.execute(
-                "INSERT INTO ratings (user_id, article_id, value, rated_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (user_id, article_id)
-                 DO UPDATE SET value = excluded.value, rated_at = excluded.rated_at",
-                rusqlite::params![user_id, article_id, rating, timestamp(now)],
-            )?,
-            None => self.conn.execute(
-                "DELETE FROM ratings WHERE user_id = ?1 AND article_id = ?2",
-                rusqlite::params![user_id, article_id],
-            )?,
-        };
+            Some(rating) => {
+                tx.execute(
+                    "INSERT INTO ratings (user_id, article_id, value, rated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (user_id, article_id)
+                     DO UPDATE SET value = excluded.value, rated_at = excluded.rated_at",
+                    rusqlite::params![user_id, article_id, rating, timestamp(now)],
+                )?;
+                mark_read(&tx, user_id, article_id, now)?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM ratings WHERE user_id = ?1 AND article_id = ?2",
+                    rusqlite::params![user_id, article_id],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 }
@@ -169,6 +271,173 @@ mod tests {
                 }
             ),
             [unrated, three]
+        );
+    }
+
+    fn item(db: &Db, article_id: i64) -> ListItem {
+        db.search_articles(&search_query(db))
+            .unwrap()
+            .into_iter()
+            .find(|i| i.article_id == article_id)
+            .unwrap()
+    }
+
+    /// 開くと既読になり、既読の時刻は最初に既読になったときのまま。開いた記録は開くたびに残す。
+    #[test]
+    fn opening_marks_read_once() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        assert_eq!(item(&db, a).read_at, None);
+        db.record_open(owner, a, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_open(owner, a, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        assert_eq!(
+            db.query_strings("SELECT kind FROM events ORDER BY id")
+                .unwrap(),
+            ["open_detail", "open_translation"]
+        );
+    }
+
+    /// 既読は開かなくても付け外しでき、付け直すとその時刻になる。
+    #[test]
+    fn read_mark_is_toggled() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.set_read(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_read(owner, a, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        db.set_read(owner, a, false, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert_eq!(item(&db, a).read_at, None);
+        db.set_read(owner, a, true, t("2026-09-27T03:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T03:00:00.000Z")
+        );
+        // 開いた記録は残さない（開いたわけではない）
+        assert_eq!(db.query_i64("SELECT count(*) FROM events").unwrap(), 0);
+    }
+
+    /// 評価すると既読になる。評価なしに戻しても既読は残る。
+    #[test]
+    fn rating_marks_read() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        db.rate(owner, a, None, t("2026-09-27T01:00:00Z")).unwrap();
+        assert!(item(&db, a).read_at.is_some());
+    }
+
+    /// ブックマークは付け外しでき、付けても一覧に残り、評価のラベルにはならない。
+    #[test]
+    fn bookmark_is_a_mark_kept_in_the_list() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.set_bookmark(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_bookmark(owner, a, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert!(item(&db, a).bookmarked);
+        assert_eq!(
+            db.query_strings("SELECT bookmarked_at FROM bookmarks")
+                .unwrap(),
+            ["2026-09-27T00:00:00.000Z"]
+        );
+        assert_eq!(list_ids(&db, false), [a]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    bookmarked: true,
+                    ..search_query(&db)
+                }
+            ),
+            [a]
+        );
+        assert!(db.eval_labels(owner).unwrap().is_empty());
+        db.set_bookmark(owner, a, false, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert!(!item(&db, a).bookmarked);
+        // ブックマークは既読にしない（後で読むため）
+        assert_eq!(item(&db, a).read_at, None);
+    }
+
+    /// 既読は一覧の既定では隠さない（前の訪問より前に既読になった記事を隠すのは画面の区切り）。
+    /// 未読の検索は既読を除く。
+    #[test]
+    fn read_articles_stay_in_the_list_and_leave_unread_search() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let b = scored_article(
+            &db,
+            "https://e.com/b",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.set_read(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(list_ids(&db, false), [a, b]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    unread: true,
+                    ..search_query(&db)
+                }
+            ),
+            [b]
         );
     }
 

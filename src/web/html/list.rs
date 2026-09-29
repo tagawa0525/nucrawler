@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
-/// `include_read` なら後者に既読の記事も残す。
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。後者からは、前回の訪問までに
+/// 既読になった記事を除く（今回の訪問で既読にした記事は残す）。`include_read` なら後者に既読の記事も残す。
 /// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
@@ -16,19 +16,29 @@ pub fn split_sections(
     let (new, earlier): (Vec<_>, Vec<_>) = items
         .into_iter()
         .partition(|i| i.fetched_at.as_str() > boundary);
-    (
-        new,
-        earlier
-            .into_iter()
-            .filter(|i| include_read || !i.read)
-            .collect(),
-    )
+    (new, hide_read_before(earlier, Some(boundary), include_read))
+}
+
+/// 前の訪問までに既読になった記事を除く（`include_read` なら除かない）。今回の訪問で既読にした記事は、
+/// 再読み込みしても残す。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、除かない。
+pub fn hide_read_before(
+    items: Vec<ListItem>,
+    boundary: Option<&str>,
+    include_read: bool,
+) -> Vec<ListItem> {
+    let Some(boundary) = boundary.filter(|_| !include_read) else {
+        return items;
+    };
+    items
+        .into_iter()
+        .filter(|i| i.read_at.as_deref().is_none_or(|at| at > boundary))
+        .collect()
 }
 
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
 #[derive(Clone, Copy, Default)]
 pub struct ListView {
-    /// 👎・見ない・低い点・未採点の記事も出す
+    /// 評価 1〜2・低い点・未採点の記事も出す
     pub all: bool,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
@@ -104,7 +114,7 @@ pub fn list_page_with_explore(
     if !explore.is_empty() {
         body.push_str(
             "<h2>確認枠</h2><p class=\"meta\">おすすめの閾値に届かなかった記事から無作為に選んでいます。\
-             関心があれば 🔖、無ければ見送ってください</p>",
+             開いて ★ で評価してください（似た記事を読んだだけなら、左のスワイプで既読に）</p>",
         );
         body.extend(explore.iter().map(|i| card(i, true, page)));
     }
@@ -112,7 +122,7 @@ pub fn list_page_with_explore(
     layout("一覧", page, &body)
 }
 
-/// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
+/// 一覧のカードを左右にスワイプして印を付ける（右でブックマーク、左で既読）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
@@ -161,9 +171,17 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
          <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
-        read = if i.read { " read" } else { "" },
+        read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
-            format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
+            format!(
+                " data-id=\"{}\"{} tabindex=\"0\"",
+                i.article_id,
+                if i.bookmarked {
+                    " data-bookmarked=\"1\""
+                } else {
+                    ""
+                }
+            )
         } else {
             String::new()
         },
@@ -183,31 +201,67 @@ mod tests {
 
     #[test]
     fn splits_new_and_earlier_unread() {
-        let mut read = item(3, "2026-09-26T00:00:00.000Z");
-        read.read = true;
+        let read_at = |id: i64, at: &str| {
+            let mut i = item(id, "2026-09-26T00:00:00.000Z");
+            i.read_at = Some(at.into());
+            i
+        };
         let items = vec![
             item(1, "2026-09-27T05:00:00.000Z"),
             item(2, "2026-09-26T00:00:00.000Z"),
-            read,
+            // 前の訪問より前に既読
+            read_at(3, "2026-09-26T12:00:00.000Z"),
+            // 今回の訪問で既読（印を付けたカードは再読み込みしても残る）
+            read_at(4, "2026-09-27T06:00:00.000Z"),
         ];
         let boundary = Some("2026-09-27T00:00:00.000Z");
         let (new, earlier) = split_sections(items.clone(), boundary, false);
         assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
-        // 前回より前の記事は、未読のものだけを残す
+        // 前回より前の記事は、前の訪問までに既読になったものを除く
         assert_eq!(
             earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
-            [2]
+            [2, 4]
         );
         // 既読も出すなら、前回より前の記事をすべて残す
         let (new, earlier) = split_sections(items.clone(), boundary, true);
         assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
         assert_eq!(
             earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
-            [2, 3]
+            [2, 3, 4]
         );
         let (new, earlier) = split_sections(items, None, false);
-        assert_eq!(new.len(), 3);
+        assert_eq!(new.len(), 4);
         assert!(earlier.is_empty());
+    }
+
+    /// スワイプで付ける印が既に付いていれば、取り消しで外さない（付けたのはこのスワイプではない）。
+    /// そのため、カードは今の印（ブックマーク・既読）を持つ。
+    #[test]
+    fn swipe_cards_carry_their_marks() {
+        let mut bookmarked = item(1, "2026-09-27T05:00:00.000Z");
+        bookmarked.bookmarked = true;
+        let mut read = item(2, "2026-09-27T05:00:00.000Z");
+        read.read_at = Some("2026-09-27T06:00:00.000Z".into());
+        let html = list_page(
+            &[bookmarked, read],
+            &[],
+            ListView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="card" data-id="1" data-bookmarked="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="card read" data-id="2" tabindex="0">"#),
+            "{html}"
+        );
+        // 取り消しは、スワイプの前に付いていなかった印だけを外す
+        assert!(html.contains("card.dataset.bookmarked"), "{html}");
+        assert!(
+            html.contains(r#"card.classList.contains("read")"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -224,7 +278,7 @@ mod tests {
         assert!(search < liked && liked < bookmarked, "{html}");
     }
 
-    /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。
+    /// 一覧のカードは左右のスワイプで印を付けられる（ブックマーク・既読）。
     #[test]
     fn list_page_cards_can_be_swiped() {
         let html = list_page(
@@ -239,7 +293,12 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<script>"), "{html}");
-        assert!(html.contains("/feedback/undo"), "{html}");
+        // 左は既読の印（見送りではない）
+        assert!(html.contains(r#"h: "read""#), "{html}");
+        assert!(
+            !html.contains("dismiss") && !html.contains("/feedback"),
+            "{html}"
+        );
         // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
@@ -318,7 +377,7 @@ mod tests {
     #[test]
     fn list_page_names_the_earlier_section_by_whether_read_is_shown() {
         let mut read = item(2, "2026-09-26T00:00:00.000Z");
-        read.read = true;
+        read.read_at = Some("2026-09-26T12:00:00.000Z".into());
         let earlier = [read];
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
@@ -395,6 +454,9 @@ mod tests {
             &Page::default(),
         );
         assert!(html.contains("<h2>確認枠</h2>"), "{html}");
+        // 確認枠は評価を集めるためのもの。見送り（今は既読の印）では集まらない
+        assert!(html.contains("開いて ★ で評価してください"), "{html}");
+        assert!(!html.contains("見送"), "{html}");
         assert!(html.contains("無作為"), "{html}");
         // 他のカードと同じく振り分けられる
         assert!(html.contains("data-id=\"9\""), "{html}");

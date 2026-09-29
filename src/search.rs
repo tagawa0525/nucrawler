@@ -353,7 +353,7 @@ mod tests {
             reason: None,
             matched: Vec::new(),
             excluded: Vec::new(),
-            read: false,
+            read_at: None,
             rating: None,
             has_translation: false,
             translation_requested: false,

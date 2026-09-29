@@ -56,10 +56,10 @@ enum Error {
     },
     #[error("no profile yet; run `nucrawler profile import FILE` first")]
     NoProfile,
-    #[error("no reactions yet; 👍, bookmark, 👎 or dismiss articles in the web UI first")]
+    #[error("no ratings yet; rate articles (★1-5) in the web UI first")]
     NoLabels,
     #[error(
-        "no reacted article has a digest you can view, so there is nothing to base a suggestion on"
+        "no rated article has a digest you can view, so there is nothing to base a suggestion on"
     )]
     NoEvidence,
     #[error("{0} already exists; choose a new file for the suggestion")]

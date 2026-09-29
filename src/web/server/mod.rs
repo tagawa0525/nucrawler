@@ -1,5 +1,5 @@
 //! Web UI の HTTP サーバー。画面の描画は `html`、データは `Db` に任せ、ここではルーティングと
-//! 行動の記録（詳細・和訳を開いた、👍/👎、和訳の依頼）だけを行う。フィードは `feed`、JSON API の応答の形は `api` が決める。
+//! 反応の記録（詳細・和訳を開いた、評価、既読・ブックマークの印、和訳の依頼）だけを行う。フィードは `feed`、JSON API の応答の形は `api` が決める。
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 
 use crate::db::{
-    Db, DbError, ListQuery, NewReport, Rating, ReportFilter, ReportKind, ReportStatus, SignalKind,
+    Db, DbError, ListQuery, NewReport, OpenKind, Rating, ReportFilter, ReportKind, ReportStatus,
     Visibility,
 };
 
@@ -78,9 +78,9 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/articles/{id}", get(api_detail))
         .route("/search", get(search))
         .route("/api/search", get(api_search))
-        .route("/articles/{id}/feedback", post(feedback))
         .route("/articles/{id}/rating", post(rating))
-        .route("/articles/{id}/feedback/undo", post(undo_feedback))
+        .route("/articles/{id}/bookmark", post(bookmark))
+        .route("/articles/{id}/read", post(read))
         .route(
             "/articles/{id}/translation-request",
             post(translation_request),

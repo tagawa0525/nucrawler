@@ -31,7 +31,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .card[data-id] { touch-action: pan-y; transition: transform 0.2s; }
 .card[data-id]:focus { outline: 2px solid #0b57a4; outline-offset: 2px; }
 .card[data-dir=bookmark] { box-shadow: inset 5px 0 #2e7d32; }
-.card[data-dir=dismiss] { box-shadow: inset -5px 0 #b3261e; }
+.card[data-dir=read] { box-shadow: inset -5px 0 #b3261e; }
 .toast { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); background: #1d1d1b;
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
 .toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }

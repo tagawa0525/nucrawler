@@ -144,4 +144,25 @@
       if (moved) { e.preventDefault(); moved = false; }
     }, true);
   }
+  // 戻るボタンで戻ると、ブラウザは詳細を開く前のページを出す（詳細で付いた既読や評価が映らない）。
+  // 同じページを読み直し、カードの印と既読の見た目だけを今の状態に置き換える
+  const resync = async () => {
+    const html = await fetch(location.href, { cache: "no-store" })
+      .then((res) => (res.ok ? res.text() : null))
+      .catch(() => null);
+    if (!html) return;
+    const fresh = new DOMParser().parseFromString(html, "text/html");
+    for (const card of document.querySelectorAll(".card[data-id]")) {
+      const now = fresh.querySelector(`.card[data-id="${card.dataset.id}"]`);
+      const marks = card.querySelector(".marks");
+      const nowMarks = now && now.querySelector(".marks");
+      if (!marks || !nowMarks) continue;
+      marks.replaceWith(document.importNode(nowMarks, true));
+      card.classList.toggle("read", now.classList.contains("read"));
+    }
+  };
+  addEventListener("pageshow", (e) => {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (e.persisted || (nav && nav.type === "back_forward")) resync();
+  });
 })();

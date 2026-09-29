@@ -3,7 +3,7 @@
 use super::*;
 
 /// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が 0 なら、評価 1〜2・未採点・
-/// 軽水炉と無関係の記事も出す（すべて）。
+/// 軽水炉と無関係の記事も出す（すべて）。既読の記事は出さない（一覧の `read=1` でだけ出す）。
 fn list_query<'a>(
     web: &WebConfig,
     user: i64,
@@ -17,6 +17,7 @@ fn list_query<'a>(
         min_score,
         since: now - Duration::days(web.list_days.into()),
         show_all: min_score == 0,
+        unread: true,
         limit: web.list_limit,
     }
 }
@@ -78,8 +79,12 @@ pub(super) async fn list(
             default_min: web.min_score,
             read: show_read,
         };
-        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
-        let (new, earlier) = html::split_sections(items, boundary.as_deref(), show_read);
+        // 既読は件数の上限より前に除く（上位が既読で埋まっても、下の未読が出るように）
+        let items = db.list_articles(ListQuery {
+            unread: !show_read,
+            ..list_query(&web, user, hash.as_deref(), now, min)
+        })?;
+        let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない
         let explore = if view.shows_all() {
             Vec::new()
@@ -98,8 +103,8 @@ pub(super) async fn list(
                 .into_iter()
                 .filter(|i| !listed.contains(&i.article_id))
                 .collect();
-            // 一覧の過去の欄と同じく、前の訪問までに既読にした記事は出さない
-            html::hide_read_before(picks, boundary.as_deref(), show_read)
+            // 一覧と同じく、既読の記事は出さない
+            html::hide_read(picks, show_read)
         };
         let warnings = warnings(db)?;
         let page = Page {
@@ -342,9 +347,9 @@ mod tests {
         }
     }
 
-    /// 確認枠の記事も一覧と同じく、今回の訪問で既読にしたものは残し、前の訪問までに既読になったものは出さない。
+    /// 確認枠の記事も一覧と同じく、既読にしたものは出さない（`read=1` なら出す）。
     #[tokio::test]
-    async fn explore_hides_picks_read_before_this_visit() {
+    async fn explore_hides_read_picks() {
         let db = Db::open_in_memory().unwrap();
         let (low, digest) = seed(&db, "https://e.com/low", "低い点");
         score(&db, digest, 10);
@@ -358,21 +363,9 @@ mod tests {
         assert!(in_explore(&html), "{html}");
         server.post(&format!("/articles/{low}/read"), "on=1").await;
         let (_, html) = server.get("/").await;
-        assert!(in_explore(&html), "{html}");
-        // 次の訪問：既読と前回の閲覧を過去にずらす
-        server
-            .state
-            .db
-            .lock()
-            .unwrap()
-            .conn()
-            .execute_batch(
-                "UPDATE reads SET read_at = '2000-01-01T00:00:00.000Z';
-                 UPDATE users SET last_seen_at = '2000-01-02T00:00:00.000Z';",
-            )
-            .unwrap();
-        let (_, html) = server.get("/").await;
         assert!(!html.contains("低い点"), "{html}");
+        let (_, html) = server.get("/?read=1").await;
+        assert!(in_explore(&html), "{html}");
     }
 
     /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
@@ -524,13 +517,47 @@ mod tests {
         assert!(!html.contains("見出しA"), "{html}");
     }
 
+    /// 既読にした記事は、同じ訪問のうちでも「前回から」の欄でも、次に一覧を出したときには出さない。
+    #[tokio::test]
+    async fn list_hides_articles_read_in_this_visit() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, digest) = seed(&db, "https://e.com/a", "見出しA");
+        score(&db, digest, 80);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/").await;
+        assert!(html.contains("見出しA"), "{html}");
+        server.post(&format!("/articles/{id}/read"), "on=1").await;
+        let (_, html) = server.get("/").await;
+        assert!(!html.contains("見出しA"), "{html}");
+        let (_, html) = server.get("/?read=1").await;
+        assert!(html.contains("見出しA"), "{html}");
+    }
+
+    /// フィードと JSON の一覧は既定の一覧と同じ記事なので、既読の記事は出さない。
+    #[tokio::test]
+    async fn feed_and_api_leave_out_read_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, digest) = seed(&db, "https://e.com/a", "見出しA");
+        score(&db, digest, 80);
+        let server = Server::start(db).await;
+        for path in ["/feed.xml", "/api/articles"] {
+            let (_, body) = server.get(path).await;
+            assert!(body.contains("見出しA"), "{path}: {body}");
+        }
+        server.post(&format!("/articles/{id}/read"), "on=1").await;
+        for path in ["/feed.xml", "/api/articles"] {
+            let (_, body) = server.get(path).await;
+            assert!(!body.contains("見出しA"), "{path}: {body}");
+        }
+    }
+
     /// `read=1` を受け取り、切り替えのリンクに反映する。
     #[tokio::test]
     async fn list_reads_the_read_toggle() {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
         let (status, html) = server.get("/?min=0&read=1").await;
         assert_eq!(status, 200);
-        assert!(html.contains("過去の既読も表示：ON"), "{html}");
+        assert!(html.contains("既読も表示：ON"), "{html}");
         assert!(html.contains(r#"href="/?min=0""#), "{html}");
         assert!(
             html.contains(r#"<input type="hidden" name="read" value="1">"#),

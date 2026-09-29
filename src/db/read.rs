@@ -50,6 +50,8 @@ pub struct ListQuery<'a> {
     pub since: chrono::DateTime<chrono::Utc>,
     /// 評価 1〜2、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
+    /// 未読の記事だけ（件数の上限より前に既読を除く）
+    pub unread: bool,
     pub limit: usize,
 }
 
@@ -130,6 +132,7 @@ enum ItemScope<'a> {
         since: chrono::DateTime<chrono::Utc>,
         show_all: bool,
         min_score: u8,
+        unread: bool,
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
@@ -365,6 +368,7 @@ impl Db {
                 since: q.since,
                 show_all: q.show_all,
                 min_score: q.min_score,
+                unread: q.unread,
                 limit: q.limit,
             },
         )
@@ -535,6 +539,7 @@ impl Db {
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
             }
+            ItemScope::List { unread: true, .. } => "AND rows.read_at IS NULL",
             _ => "",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
@@ -544,6 +549,7 @@ impl Db {
                 show_all,
                 min_score,
                 limit,
+                ..
             } => (None, Some(since), show_all, min_score, limit, BY_SCORE),
             // 既定の条件（:all = 0 のときの絞り込み）は使わず、list_filter で絞る
             ItemScope::Explore {
@@ -805,6 +811,42 @@ mod tests {
         );
     }
 
+    /// 未読だけの一覧は、件数の上限より前に既読を除く（上位が既読で埋まっても、下の未読が出る）。
+    #[test]
+    fn unread_list_filters_before_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let read = scored_article(
+            &db,
+            "https://e.com/read",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        let unread = scored_article(
+            &db,
+            "https://e.com/unread",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.set_read(owner, read, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let q = |unread| ListQuery {
+            limit: 1,
+            unread,
+            ..list_query(&db, false)
+        };
+        let ids = |q| {
+            db.list_articles(q)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(q(false)), [read]);
+        assert_eq!(ids(q(true)), [unread]);
+    }
     #[test]
     fn list_marks_read_translation_and_locks() {
         let db = Db::open_in_memory().unwrap();

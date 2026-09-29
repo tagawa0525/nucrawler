@@ -27,7 +27,8 @@ impl BarView for SearchView {
         }
     }
     fn min(&self) -> u8 {
-        self.0.min_score.parse().unwrap_or(0)
+        // 検索の条件と同じく、前後の空白を除いて読む
+        self.0.min_score.trim().parse().unwrap_or(0)
     }
     fn extra_min(&self) -> Option<u8> {
         None
@@ -36,7 +37,7 @@ impl BarView for SearchView {
         if self.0.unrated {
             Some(0)
         } else {
-            self.0.min_rating.parse().ok()
+            self.0.min_rating.trim().parse().ok()
         }
     }
     fn read(&self) -> bool {

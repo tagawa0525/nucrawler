@@ -279,6 +279,16 @@ mod tests {
         );
     }
 
+    /// バーは、検索と同じく前後の空白を除いた値を読む（検索の条件とバーの表示を合わせる）。
+    #[test]
+    fn search_bar_reads_trimmed_values() {
+        let params = Params::from_query("min_score=%2060%20&min_rating=%204");
+        let html = search_page(&params, Some(&[]), &[], None, &Page::default());
+        let bar = html.split("</nav>").next().unwrap();
+        assert!(bar.contains(r#"selected>60</option>"#), "{bar}");
+        assert!(bar.contains(r#"selected>★4</option>"#), "{bar}");
+    }
+
     /// 検索の画面のバーは、点数・評価・既読・ブックマークの検索の条件を持つ（フォームには重ねない）。
     /// バーを変えるとほかの条件はそのままに検索し直し、フォームで送るときはバーの条件を引き継ぐ。
     /// 👁 は既定で ON（既読も出す）、OFF で未読だけ。評価の ☆ は評価の無い記事だけ。

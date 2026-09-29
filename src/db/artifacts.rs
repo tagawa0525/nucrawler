@@ -116,7 +116,7 @@ impl Db {
                AND NOT EXISTS (
                  SELECT 1 FROM work_claims AS w
                  WHERE w.article_id = a.id AND w.stage = 'digest'
-                   AND w.backend = ?3 AND w.model = ?4 AND w.expires_at > ?5)
+                   AND w.backend = ?3 AND w.model = ?4)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?6",
         )?;
@@ -177,7 +177,7 @@ impl Db {
                AND NOT EXISTS (
                  SELECT 1 FROM work_claims AS w
                  WHERE w.article_id = a.id AND w.stage = 'title'
-                   AND w.backend = ?2 AND w.model = ?3 AND w.expires_at > ?4)
+                   AND w.backend = ?2 AND w.model = ?3)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?5",
         )?;

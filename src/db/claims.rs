@@ -11,13 +11,21 @@ pub struct ClaimKey<'a> {
     pub model: &'a str,
 }
 
-/// 取れた予約。drop すると外す（外せなければ期限で外れる）。
+/// 取れた予約。drop すると外す（外せなければ期限で外れる）。外すのは自分の token の行だけ。
 pub struct Claim<'a> {
     db: &'a Db,
     stage: String,
     backend: String,
     model: String,
+    token: String,
     ids: Vec<i64>,
+}
+
+/// 予約ごとに違う値。プロセス・予約した時刻・プロセスの中の通し番号で、ほかの予約と重ならない。
+fn new_token(now: chrono::DateTime<chrono::Utc>) -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{}-{seq}", std::process::id(), timestamp(now))
 }
 
 impl Claim<'_> {
@@ -36,8 +44,8 @@ impl Drop for Claim<'_> {
         if let Err(e) = self.db.conn.execute(
             "DELETE FROM work_claims
              WHERE article_id IN (SELECT value FROM json_each(?1))
-               AND stage = ?2 AND backend = ?3 AND model = ?4",
-            rusqlite::params![ids, self.stage, self.backend, self.model],
+               AND stage = ?2 AND backend = ?3 AND model = ?4 AND token = ?5",
+            rusqlite::params![ids, self.stage, self.backend, self.model, self.token],
         ) {
             tracing::warn!(stage = %self.stage, "failed to release work claims (they expire): {e}");
         }
@@ -46,7 +54,7 @@ impl Drop for Claim<'_> {
 
 impl Db {
     /// `ids` の記事を `ttl` の間予約し、取れた記事だけを持つ予約を返す。ほかの実行が期限内の予約を
-    /// 持つ記事は取れない。期限を過ぎた予約は取り直す。
+    /// 持つ記事は取れない。期限を過ぎた予約は取り直す（`now` は今の時刻）。
     pub fn claim(
         &self,
         key: ClaimKey,
@@ -55,12 +63,13 @@ impl Db {
         ttl: chrono::Duration,
     ) -> Result<Claim<'_>, DbError> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO work_claims (article_id, stage, backend, model, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO work_claims (article_id, stage, backend, model, token, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (article_id, stage, backend, model) DO UPDATE
-               SET expires_at = excluded.expires_at
-               WHERE work_claims.expires_at <= ?6",
+               SET token = excluded.token, expires_at = excluded.expires_at
+               WHERE work_claims.expires_at <= ?7",
         )?;
+        let token = new_token(now);
         let (expires_at, now) = (timestamp(now + ttl), timestamp(now));
         let mut claimed = Vec::new();
         for &id in ids {
@@ -69,6 +78,7 @@ impl Db {
                 key.stage,
                 key.backend,
                 key.model,
+                token,
                 expires_at,
                 now
             ])?;
@@ -81,11 +91,14 @@ impl Db {
             stage: key.stage.to_string(),
             backend: key.backend.to_string(),
             model: key.model.to_string(),
+            token,
             ids: claimed,
         })
     }
 
-    /// `select` で対象を選び、その記事を予約して、予約できたものだけを返す。選ぶのと予約するのを
+    /// `select` で対象を選び、その記事を予約して、予約できたものだけを返す。選ぶ前に、今の時刻
+    /// （`now`）で期限を過ぎた予約を消す。選ぶクエリは予約の有無だけを見るので、ステージの開始時の
+    /// 古い時刻で選んでも、期限切れの予約で記事を取りこぼさない。選ぶのと予約するのを
     /// 1 つの書き込みトランザクション（IMMEDIATE）で行う。別々に行うと、選んでから予約するまでの間に
     /// ほかの実行がその記事を処理し終えて予約を外したとき、同じ記事をもう一度処理してしまう
     /// （処理する側は成果物を保存してから予約を外すので、トランザクションの中で選べば処理済みか予約中に見える）。
@@ -100,6 +113,10 @@ impl Db {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
+        )?;
+        self.conn.execute(
+            "DELETE FROM work_claims WHERE expires_at <= ?1",
+            [timestamp(now)],
         )?;
         let items = select(self)?;
         let ids: Vec<i64> = items.iter().map(&article_id).collect();

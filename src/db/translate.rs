@@ -113,7 +113,7 @@ impl Db {
                  AND NOT EXISTS (
                    SELECT 1 FROM work_claims AS w
                    WHERE w.article_id = a.id AND w.stage = 'translate'
-                     AND w.backend = ?3 AND w.model = ?4 AND w.expires_at > ?6)
+                     AND w.backend = ?3 AND w.model = ?4)
              ),
              candidates AS (
                SELECT b.*,

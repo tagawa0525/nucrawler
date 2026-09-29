@@ -105,7 +105,7 @@ impl Db {
                AND NOT EXISTS (
                  SELECT 1 FROM work_claims AS w
                  WHERE w.article_id = l.article_id AND w.stage = ?9
-                   AND w.backend = ?4 AND w.model = ?5 AND w.expires_at > ?7)
+                   AND w.backend = ?4 AND w.model = ?5)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
             linked = linked_topics("l"),

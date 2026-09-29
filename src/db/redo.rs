@@ -222,7 +222,7 @@ const REDO_AVAILABLE: &str = "NOT EXISTS (
     AND NOT EXISTS (
     SELECT 1 FROM work_claims AS w
     WHERE w.article_id = a.id AND w.stage = :stage AND w.backend = :backend
-      AND w.model = :model AND w.expires_at > :now)";
+      AND w.model = :model)";
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
 /// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。

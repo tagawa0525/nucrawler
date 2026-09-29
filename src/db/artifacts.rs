@@ -23,7 +23,8 @@ impl ArtifactKind {
 }
 
 /// 登録する成果物。`inputs` は元にした本文の部分（contents.id）で、空は許さない（閲覧できる範囲を
-/// 入力の本文から決めるため）。見出しの和訳だけは、公開の見出しから作るので入力を持たない。
+/// 入力の本文から決めるため）。見出しの和訳だけは、公開の見出しから作るので入力を持たせない
+/// （表示のときに閲覧の制限を確かめないため、本文を入力にしたものは拒む）。
 #[derive(Debug)]
 pub struct NewArtifact<'a> {
     pub article_id: i64,
@@ -197,10 +198,18 @@ pub(super) fn write_artifact(
     a: &NewArtifact,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<i64, DbError> {
-    if a.inputs.is_empty() && a.kind != ArtifactKind::Title {
-        return Err(DbError::NoArtifactInputs {
-            article_id: a.article_id,
-        });
+    match (a.kind, a.inputs.is_empty()) {
+        (ArtifactKind::Title, false) => {
+            return Err(DbError::TitleWithInputs {
+                article_id: a.article_id,
+            });
+        }
+        (ArtifactKind::Title, true) | (_, false) => {}
+        (_, true) => {
+            return Err(DbError::NoArtifactInputs {
+                article_id: a.article_id,
+            });
+        }
     }
     let mut codes = std::collections::BTreeSet::new();
     for &content_id in a.inputs {

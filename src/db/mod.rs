@@ -57,6 +57,9 @@ pub enum DbError {
     /// 入力の無い成果物は閲覧資格を導出できず、公開扱いになってしまうので登録しない。
     #[error("artifact for article {article_id} has no input contents")]
     NoArtifactInputs { article_id: i64 },
+    /// 見出しの和訳は公開のものとして閲覧の制限を確かめずに表示するので、本文を入力にしない。
+    #[error("title for article {article_id} must not have input contents")]
+    TitleWithInputs { article_id: i64 },
     /// 要約に付いているトピックは語彙から消せない
     #[error("topics in use cannot be removed: {}", .0.join(", "))]
     TopicsInUse(Vec<String>),

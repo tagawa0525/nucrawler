@@ -379,6 +379,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.join("slots"),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let resp = cli.call(request(&schema)).await.unwrap();
@@ -393,6 +395,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.join("slots"),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let err = cli.call(request(&schema)).await.unwrap_err();
@@ -411,6 +415,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.join("slots"),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         // パイプのバッファより大きいので、書き込みの途中で子プロセスが終わる
@@ -457,6 +463,8 @@ mod tests {
                 command: script,
                 cwd: dir.join("cwd"),
                 timeout: Duration::from_secs(10),
+                slots: dir.join("slots"),
+                concurrency: 1,
             };
             let schema = serde_json::json!({});
             let err = cli.call(request(&schema)).await.unwrap_err();
@@ -477,5 +485,41 @@ mod tests {
         let schema = serde_json::json!({});
         let err = cli.call(request(&schema)).await.unwrap_err();
         assert!(matches!(err, LlmError::Spawn { .. }), "{err}");
+    }
+
+    /// 呼び出しの枠が空くまで claude を起動しない（枠はプロセスをまたいで数える）。
+    #[tokio::test]
+    async fn waits_for_a_free_call_slot() {
+        let (script, dir) = fake_claude(
+            "cli-slot",
+            &format!(
+                "cat >/dev/null\necho '{}'",
+                result_line(false, "success", "")
+            ),
+        );
+        let slots = dir.join("slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+            slots: slots.clone(),
+            concurrency: 1,
+        };
+        let held = crate::pipeline::lock::acquire_slot(&slots, 1)
+            .await
+            .unwrap();
+        let schema = serde_json::json!({});
+        let call = cli.call(request(&schema));
+        tokio::pin!(call);
+        let short = Duration::from_millis(300);
+        assert!(
+            tokio::time::timeout(short, &mut call).await.is_err(),
+            "must wait"
+        );
+        drop(held);
+        let _ = tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("runs once the slot is free");
     }
 }

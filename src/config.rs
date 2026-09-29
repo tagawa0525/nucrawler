@@ -532,6 +532,7 @@ mod tests {
             ("[llm]\ntranslate_min_score = 0\n", "translate_min_score"),
             ("[llm]\ntidy_interval_days = 0\n", "tidy_interval_days"),
             ("[llm]\ntitle_batch_size = 0\n", "title_batch_size"),
+            ("[llm]\nconcurrency = 0\n", "concurrency"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -558,6 +559,7 @@ mod tests {
         assert_eq!(d.tidy_model, "sonnet");
         assert_eq!(d.tidy_interval_days, 7);
         assert_eq!((d.title_model.as_str(), d.title_batch_size), ("sonnet", 30));
+        assert_eq!(d.concurrency, 2);
     }
 
     #[test]

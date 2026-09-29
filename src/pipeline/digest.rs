@@ -1156,4 +1156,56 @@ mod tests {
             );
         }
     }
+
+    /// ほかの実行の呼び出しで使用率が上限を超えたら、次のバッチの前に止まる（使用率は判定の
+    /// たびに DB から読む）。
+    #[tokio::test]
+    async fn stops_when_another_run_used_up_the_quota() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-other-usage",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 4);
+        let resets_at = now().timestamp() + 3600;
+        let llm = FakeLlm::with_hook(
+            [Ok(LlmResponse {
+                output: serde_json::json!({"items": ids[..2].iter().map(|&id| item(id)).collect::<Vec<_>>()}),
+                rate_limit: None,
+            })],
+            move |_| {
+                let other = Db::open(&path).unwrap();
+                other
+                    .record_llm_call(
+                        &crate::db::LlmCall {
+                            stage: "translate",
+                            backend: "claude-cli",
+                            model: "sonnet",
+                            n_items: 1,
+                            ok: true,
+                            duration_ms: 1,
+                            error: None,
+                            rate_limit: Some(&RateLimit {
+                                five_hour: Some(Window {
+                                    utilization: 0.99,
+                                    resets_at,
+                                }),
+                                seven_day: None,
+                            }),
+                        },
+                        now(),
+                    )
+                    .unwrap();
+            },
+        );
+        let summary = run(&db, &llm, &mut quota(10), 2).await;
+        assert_eq!((summary.digested, summary.calls), (2, 1));
+        assert!(
+            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            "{summary:?}"
+        );
+    }
 }

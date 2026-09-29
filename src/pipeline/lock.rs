@@ -126,15 +126,15 @@ mod tests {
     #[test]
     fn second_acquire_fails_until_first_is_dropped() {
         let dir = temp_dir("lock");
-        let first = acquire(&dir, LockKind::Llm).unwrap();
-        let err = acquire(&dir, LockKind::Llm).unwrap_err();
+        let first = acquire(&dir, LockKind::Fetch).unwrap();
+        let err = acquire(&dir, LockKind::Fetch).unwrap_err();
         assert!(matches!(err, LockError::Held { .. }), "{err}");
         drop(first);
         // 並行するテストが子プロセスを fork すると、exec までの一瞬だけロックの fd を引き継ぎ、
         // 解放後もロックが残って見える（flock はオープンファイル記述単位）。その間だけ待つ。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            match acquire(&dir, LockKind::Llm) {
+            match acquire(&dir, LockKind::Fetch) {
                 Ok(_) => break,
                 Err(LockError::Held { .. }) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -148,9 +148,9 @@ mod tests {
     #[tokio::test]
     async fn acquire_waiting_waits_until_released() {
         let dir = temp_dir("lock-wait");
-        let first = acquire(&dir, LockKind::Llm).unwrap();
+        let first = acquire(&dir, LockKind::Fetch).unwrap();
         let cancel = Cancel::default();
-        let waiting = acquire_waiting(&dir, LockKind::Llm, &cancel);
+        let waiting = acquire_waiting(&dir, LockKind::Fetch, &cancel);
         tokio::pin!(waiting);
         let short = std::time::Duration::from_millis(200);
         let early = tokio::time::timeout(short, &mut waiting).await;
@@ -166,9 +166,9 @@ mod tests {
     #[tokio::test]
     async fn acquire_waiting_stops_when_cancelled() {
         let dir = temp_dir("lock-wait-cancel");
-        let _first = acquire(&dir, LockKind::Llm).unwrap();
+        let _first = acquire(&dir, LockKind::Fetch).unwrap();
         let cancel = Cancel::default();
-        let waiting = acquire_waiting(&dir, LockKind::Llm, &cancel);
+        let waiting = acquire_waiting(&dir, LockKind::Fetch, &cancel);
         tokio::pin!(waiting);
         let short = std::time::Duration::from_millis(200);
         assert!(tokio::time::timeout(short, &mut waiting).await.is_err());
@@ -195,7 +195,7 @@ mod tests {
         let dir = temp_dir("lock-legacy");
         let legacy = File::create(dir.join("crawl.lock")).unwrap();
         legacy.try_lock().unwrap();
-        for kind in [LockKind::Fetch, LockKind::Llm] {
+        for kind in [LockKind::Fetch, LockKind::Fetch] {
             let err = acquire(&dir, kind).unwrap_err();
             assert!(matches!(err, LockError::Held { .. }), "{err}");
         }
@@ -204,7 +204,57 @@ mod tests {
     #[test]
     fn missing_dir_is_io_error() {
         let dir = temp_dir("lock-missing").join("nope");
-        let err = acquire(&dir, LockKind::Llm).unwrap_err();
+        let err = acquire(&dir, LockKind::Fetch).unwrap_err();
         assert!(matches!(err, LockError::Io { .. }), "{err}");
+    }
+
+    /// LLM を呼ぶ実行どうしは待たない（同じ記事は作業の予約で分ける）。ロックを分ける前の版の
+    /// 実行（llm.lock を排他で取る）とは重ならない。
+    #[test]
+    fn llm_runs_share_the_lock_but_not_with_the_previous_version() {
+        let dir = temp_dir("lock-llm-shared");
+        let first = acquire(&dir, LockKind::Llm).unwrap();
+        let second = acquire(&dir, LockKind::Llm).unwrap();
+        drop((first, second));
+        let previous = File::create(dir.join("llm.lock")).unwrap();
+        previous.try_lock().unwrap();
+        let err = acquire(&dir, LockKind::Llm).unwrap_err();
+        assert!(matches!(err, LockError::Held { .. }), "{err}");
+    }
+
+    /// 語彙の整理は同時に 1 つだけ。LLM を呼ぶほかの実行とは並行する。
+    #[test]
+    fn tidy_runs_one_at_a_time_alongside_other_llm_runs() {
+        let dir = temp_dir("lock-tidy");
+        let _llm = acquire(&dir, LockKind::Llm).unwrap();
+        let _tidy = acquire(&dir, LockKind::Tidy).unwrap();
+        let err = acquire(&dir, LockKind::Tidy).unwrap_err();
+        assert!(matches!(err, LockError::Held { .. }), "{err}");
+    }
+
+    /// 呼び出しの枠は `n` 個まで。空けば次が取れる。
+    #[tokio::test]
+    async fn slots_limit_concurrent_calls() {
+        let dir = temp_dir("lock-slots");
+        let short = std::time::Duration::from_millis(200);
+        let first = tokio::time::timeout(short, acquire_slot(&dir, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let _second = tokio::time::timeout(short, acquire_slot(&dir, 2))
+            .await
+            .unwrap()
+            .unwrap();
+        let third = acquire_slot(&dir, 2);
+        tokio::pin!(third);
+        assert!(
+            tokio::time::timeout(short, &mut third).await.is_err(),
+            "must wait"
+        );
+        drop(first);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), third)
+            .await
+            .unwrap();
+        assert!(got.is_ok(), "{got:?}");
     }
 }

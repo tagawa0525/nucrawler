@@ -446,4 +446,21 @@ mod tests {
         q.record_call(Some(usage(0.1, 0.1, now, 5.0)));
         assert_eq!(q.permit(now), Err(Stop::MaxCalls { limit: 1 }));
     }
+
+    /// ほかの実行が記録した使用率を取り込めば、それで判定する。
+    #[test]
+    fn observed_usage_from_other_runs_counts() {
+        let now = jst("2026-09-28T11:00:00");
+        let mut q = Quota::new(QuotaConfig::default(), None, None);
+        assert!(q.permit(now).is_ok());
+        q.observe(Some(usage(0.9, 0.1, now, 3.0)));
+        assert!(
+            matches!(q.permit(now), Err(Stop::FiveHour { .. })),
+            "{:?}",
+            q.permit(now)
+        );
+        // 取り込めるものが無ければ、それまでの値を残す
+        q.observe(None);
+        assert!(q.permit(now).is_err());
+    }
 }

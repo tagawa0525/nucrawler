@@ -55,8 +55,9 @@ pub(super) async fn run(
             stderr,
         })),
         Err(_) => {
+            // 止めて回収まで待つ（ゾンビを残さず、呼び出し側の後片付けを子プロセスの終了後にする）。
             // 読みかけの stdout は、読み取りを捨てても読んだ分が残る
-            if let Err(e) = child.start_kill() {
+            if let Err(e) = child.kill().await {
                 tracing::warn!("failed to kill the timed-out llm process: {e}");
             }
             Ok(Ran::TimedOut { stdout })

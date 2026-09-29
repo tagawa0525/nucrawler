@@ -141,6 +141,26 @@ impl Server {
         (res.status().as_u16(), res.text().await.unwrap())
     }
 
+    /// HEAD（リンクの確かめなど、開いたわけではない問い合わせ）。
+    pub(super) async fn head(&self, path: &str) -> u16 {
+        self.client
+            .head(format!("{}{path}", self.base))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    /// 応答をそのまま返す GET（リダイレクトを確かめる）。
+    pub(super) async fn get_raw(&self, path: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}{path}", self.base))
+            .send()
+            .await
+            .unwrap()
+    }
+
     /// フォームの送信（`body` は application/x-www-form-urlencoded）。
     pub(super) fn form(&self, path: &str, body: &'static str) -> reqwest::RequestBuilder {
         self.client

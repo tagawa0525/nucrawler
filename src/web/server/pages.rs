@@ -249,6 +249,7 @@ pub(super) struct DetailParams {
 
 pub(super) async fn detail(
     State(state): State<AppState>,
+    method: Method,
     Path(id): Path<i64>,
     Query(params): Query<DetailParams>,
 ) -> Result<Html<String>, AppError> {
@@ -258,7 +259,8 @@ pub(super) async fn detail(
         translation: params.translation,
         reported: params.reported.is_some(),
     };
-    let returned = params.back.is_some();
+    // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
+    let returned = params.back.is_some() || method == Method::HEAD;
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let now = Utc::now();
@@ -305,6 +307,26 @@ pub(super) async fn detail(
     })
     .await?;
     Ok(Html(page))
+}
+
+/// 原文へ移る。開いたことを記録してから、元の記事の URL へリダイレクトする。
+pub(super) async fn source(
+    State(state): State<AppState>,
+    method: Method,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let url = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        // 移るだけなので、詳細の中身（要約・和訳・本文）は読まない
+        let url = db.article_url(id)?.ok_or(AppError::NotFound)?;
+        // HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
+        if method != Method::HEAD {
+            db.record_open(user, id, OpenKind::Source, Utc::now())?;
+        }
+        Ok(url)
+    })
+    .await?;
+    Ok(Redirect::to(&url).into_response())
 }
 
 pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
@@ -611,6 +633,38 @@ mod tests {
             html.contains(r#"<input type="hidden" name="read" value="1">"#),
             "{html}"
         );
+    }
+
+    /// 原文へは、開いたことを記録してから元の記事へ移す。無い記事は 404。
+    #[tokio::test]
+    async fn source_link_records_the_open_and_redirects() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a?x=1&y=2", "見出しA");
+        let server = Server::start(db).await;
+        let res = server.get_raw(&format!("/articles/{id}/source")).await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "https://e.com/a?x=1&y=2");
+        assert_eq!(
+            server.count(&format!(
+                "SELECT count(*) FROM events WHERE article_id = {id} AND kind = 'open_source'"
+            )),
+            1
+        );
+        // 原文を開いても既読は変えない（既読は詳細の既読だけ）
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 0);
+        assert_eq!(server.get("/articles/999/source").await.0, 404);
+    }
+
+    /// HEAD（リンクの確かめなど）は開いたわけではないので、詳細も原文も開いた記録・既読を残さない。
+    #[tokio::test]
+    async fn head_requests_are_not_opens() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        assert_eq!(server.head(&format!("/articles/{id}")).await, 200);
+        assert_eq!(server.head(&format!("/articles/{id}/source")).await, 303);
+        assert_eq!(server.count("SELECT count(*) FROM events"), 0);
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 0);
     }
 
     #[tokio::test]

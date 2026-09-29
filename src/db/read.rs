@@ -385,6 +385,19 @@ impl Db {
         self.query_items(q.user_id, q.profile_hash, ItemScope::Search(q))
     }
 
+    /// 記事の URL（原文へ移るとき）。記事が無ければ None。
+    pub fn article_url(&self, article_id: i64) -> Result<Option<String>, DbError> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT url FROM articles WHERE id = ?1",
+                [article_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// 詳細画面の内容。記事が無ければ None。
     pub fn article_detail(
         &self,
@@ -920,6 +933,18 @@ mod tests {
         assert!(item.translation_requested);
         assert!(!item.has_translation);
         assert_eq!(item.locked_by, ["日本原子力学会"]);
+    }
+
+    /// 原文へ移るときは、記事の URL だけを読む（無い記事は None）。
+    #[test]
+    fn article_url_reads_only_the_url() {
+        let db = Db::open_in_memory().unwrap();
+        let id = page_article(&db, "https://e.com/a?x=1", "2026-09-26T00:00:00.000Z");
+        assert_eq!(
+            db.article_url(id).unwrap().as_deref(),
+            Some("https://e.com/a?x=1")
+        );
+        assert_eq!(db.article_url(id + 1).unwrap(), None);
     }
 
     #[test]

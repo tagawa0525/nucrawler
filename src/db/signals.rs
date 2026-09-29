@@ -84,6 +84,8 @@ pub enum OpenKind {
     Detail,
     /// 全文和訳を開いた
     Translation,
+    /// 詳細の「原文」のリンクから元の記事を開いた
+    Source,
 }
 
 impl OpenKind {
@@ -91,6 +93,16 @@ impl OpenKind {
         match self {
             Self::Detail => "open_detail",
             Self::Translation => "open_translation",
+            Self::Source => "open_source",
+        }
+    }
+
+    /// 開いたら既読にするか。既読は詳細（要約）の既読だけで、原文は詳細からしか開けないので数えない
+    fn marks_read(self) -> bool {
+        // 種類を足したときに既読を付けるかを決め忘れないよう、すべての種類を書く
+        match self {
+            Self::Detail | Self::Translation => true,
+            Self::Source => false,
         }
     }
 }
@@ -136,7 +148,7 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// 開いたことを記録し、既読にする。
+    /// 開いたことを記録する。詳細・全文和訳を開いたら既読にする（原文は既読を変えない）。
     pub fn record_open(
         &self,
         user_id: i64,
@@ -149,7 +161,9 @@ impl Db {
             "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
         )?;
-        mark_read(&tx, user_id, article_id, now)?;
+        if kind.marks_read() {
+            mark_read(&tx, user_id, article_id, now)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -329,9 +343,15 @@ mod tests {
             90,
         );
         assert_eq!(item(&db, a).read_at, None);
+        // 原文を開いても既読にはしない（既読は詳細の既読だけ）
+        db.record_open(owner, a, OpenKind::Source, t("2026-09-26T12:00:00Z"))
+            .unwrap();
+        assert_eq!(item(&db, a).read_at, None);
         db.record_open(owner, a, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
             .unwrap();
         db.record_open(owner, a, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.record_open(owner, a, OpenKind::Source, t("2026-09-27T02:00:00Z"))
             .unwrap();
         assert_eq!(
             item(&db, a).read_at.as_deref(),
@@ -340,7 +360,12 @@ mod tests {
         assert_eq!(
             db.query_strings("SELECT kind FROM events ORDER BY id")
                 .unwrap(),
-            ["open_detail", "open_translation"]
+            [
+                "open_source",
+                "open_detail",
+                "open_translation",
+                "open_source"
+            ]
         );
     }
 

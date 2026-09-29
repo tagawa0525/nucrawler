@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{Form, Path, Query, RawQuery, State};
 
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 
 use axum::response::{Html, IntoResponse, Redirect, Response};
 
@@ -73,6 +73,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/", get(list))
         .route("/articles/{id}", get(detail))
+        .route("/articles/{id}/source", get(source))
         .route("/feed.xml", get(feed))
         .route("/api/articles", get(api_list))
         .route("/api/articles/{id}", get(api_detail))

@@ -110,8 +110,8 @@ pub fn permit(
     reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
     let mut quota = shared.quota.borrow_mut();
-    if quota.counts_credits() {
-        quota.observe_credits(db.credits_since(crate::quota::month_start(now))?);
+    if let Some(backend) = quota.credits_backend() {
+        quota.observe_credits(db.credits_since(backend, crate::quota::month_start(now))?);
     } else {
         quota.observe(db.latest_rate_limit(now)?);
     }
@@ -308,7 +308,7 @@ mod tests {
             monthly_credits: 1000.0,
             pace: 0.8,
         };
-        let mut quota = Quota::with_credits(QuotaConfig::default(), credits, None);
+        let mut quota = Quota::with_credits(QuotaConfig::default(), credits, "copilot-cli", None);
         let shared = Shared::new(&mut quota);
         assert_eq!(permit(&db, &shared, now, 0).unwrap(), Ok(()));
         record(NANO, "2026-09-15T00:00:00Z");

@@ -149,6 +149,16 @@ pub fn month_start(now: DateTime<Utc>) -> DateTime<Utc> {
         .and_utc()
 }
 
+/// あるバックエンドの月のクレジットの予算と、今月の消費。
+#[derive(Debug)]
+struct Credits {
+    cfg: CreditsConfig,
+    /// 予算を使うバックエンド（`llm_calls` の backend）。ほかのバックエンドの消費は数えない
+    backend: &'static str,
+    /// 今月の消費（10^-9 クレジット単位）
+    used_nano: i64,
+}
+
 /// 呼び出しを止める理由。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -224,8 +234,8 @@ impl std::fmt::Display for Stop {
 pub struct Quota {
     cfg: QuotaConfig,
     usage: Option<RateLimit>,
-    /// 月の消費クレジットで判定するとき（copilot-cli）の予算と、今月の消費（10^-9 クレジット単位）
-    credits: Option<(CreditsConfig, i64)>,
+    /// 月の消費クレジットで判定するとき（copilot-cli）の予算
+    credits: Option<Credits>,
     calls: u32,
     max_calls: u32,
 }
@@ -244,25 +254,34 @@ impl Quota {
         }
     }
 
-    /// Copilot の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`
+    /// `backend` の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`
     /// （`max_calls` を指定すればそちら）を使う。使用率（5 時間枠・週次枠）は見ない。
-    pub fn with_credits(cfg: QuotaConfig, credits: CreditsConfig, max_calls: Option<u32>) -> Self {
+    pub fn with_credits(
+        cfg: QuotaConfig,
+        credits: CreditsConfig,
+        backend: &'static str,
+        max_calls: Option<u32>,
+    ) -> Self {
         Self {
-            credits: Some((credits, 0)),
+            credits: Some(Credits {
+                cfg: credits,
+                backend,
+                used_nano: 0,
+            }),
             ..Self::new(cfg, None, max_calls)
         }
     }
 
-    /// 月の消費クレジットで判定するか（`with_credits`）。
-    pub fn counts_credits(&self) -> bool {
-        self.credits.is_some()
+    /// 月の消費クレジットで判定するなら、その予算を使うバックエンド（`with_credits`）。
+    pub fn credits_backend(&self) -> Option<&'static str> {
+        self.credits.as_ref().map(|c| c.backend)
     }
 
     /// ほかの実行を含めた今月の消費（10^-9 クレジット単位、DB の llm_calls の合計）を取り込む。
     /// 月の消費クレジットで判定しないときは何もしない。
     pub fn observe_credits(&mut self, used_nano: i64) {
-        if let Some((_, used)) = &mut self.credits {
-            *used = used_nano;
+        if let Some(credits) = &mut self.credits {
+            credits.used_nano = used_nano;
         }
     }
 
@@ -273,9 +292,9 @@ impl Quota {
                 limit: self.max_calls,
             });
         }
-        if let Some((credits, used_nano)) = &self.credits {
-            let used = *used_nano as f64 / 1e9;
-            let limit = credits.allowance(now);
+        if let Some(credits) = &self.credits {
+            let used = credits.used_nano as f64 / 1e9;
+            let limit = credits.cfg.allowance(now);
             if used >= limit {
                 return Err(Stop::MonthlyCredits { used, limit });
             }
@@ -477,8 +496,9 @@ mod tests {
             "2026-12-16T12:00:00Z", // 31 日の月の 15.5 日経過
         ] {
             let now = utc(now);
-            let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), None);
-            assert!(q.counts_credits());
+            let mut q =
+                Quota::with_credits(QuotaConfig::default(), credits(1000.0), "copilot-cli", None);
+            assert_eq!(q.credits_backend(), Some("copilot-cli"));
             q.observe_credits(399 * NANO);
             assert!(q.permit(now).is_ok(), "{now}");
             q.observe_credits(400 * NANO);
@@ -512,17 +532,26 @@ mod tests {
     #[test]
     fn credits_ignore_subscription_usage() {
         let now = utc("2026-09-16T00:00:00Z");
-        let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), None);
+        let mut q =
+            Quota::with_credits(QuotaConfig::default(), credits(1000.0), "copilot-cli", None);
         q.observe(Some(usage(1.0, 1.0, now, 6.9)));
         q.observe_credits(0);
         assert!(q.permit(now).is_ok());
-        assert!(!Quota::new(QuotaConfig::default(), None, None).counts_credits());
+        assert_eq!(
+            Quota::new(QuotaConfig::default(), None, None).credits_backend(),
+            None
+        );
     }
 
     #[test]
     fn credits_still_limit_calls_per_run() {
         let now = utc("2026-09-16T00:00:00Z");
-        let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), Some(1));
+        let mut q = Quota::with_credits(
+            QuotaConfig::default(),
+            credits(1000.0),
+            "copilot-cli",
+            Some(1),
+        );
         q.observe_credits(0);
         assert!(q.permit(now).is_ok());
         q.record_call(None);

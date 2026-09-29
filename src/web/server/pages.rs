@@ -819,6 +819,15 @@ mod tests {
             !html.contains("星四つ") && html.contains("星二つ"),
             "{html}"
         );
+        // 絞り込みの既定は既読も出す。`read=0` なら既読を隠す
+        server.post(&format!("/articles/{four}/read"), "on=1").await;
+        let (_, html) = server.get("/?rating=4").await;
+        assert!(html.contains("星四つ"), "{html}");
+        let (_, html) = server.get("/?rating=4&read=0").await;
+        assert!(
+            !html.contains("星四つ") && html.contains("該当する記事はありません"),
+            "{html}"
+        );
         let (_, html) = server.get("/?rating=4&bookmarked=1").await;
         assert!(html.contains("該当する記事はありません"), "{html}");
         assert_eq!(

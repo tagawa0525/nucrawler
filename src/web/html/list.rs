@@ -658,16 +658,22 @@ mod tests {
     /// 絞り込みはもう一方の状態を引き継ぎ、👍 を選び直すか 🔖 を外すと一覧に戻る。
     #[test]
     fn filtered_page_shows_the_bar_and_the_matches() {
+        // 絞り込んだ画面の既定は、既読も出す
         let view = ListView {
             rating: Some(4),
+            read: true,
             ..ListView::default()
         };
         let mut rated = item(1, "2026-09-27T05:00:00.000Z");
         rated.rating = Rating::new(4);
         let html = filtered_page(&[rated], view, &Page::default());
         assert!(!html.contains(r#"action="/search""#), "{html}");
+        // 最低点は効かないので出さない。👁 は既読も絞れる（OFF にすると `read=0`）
+        assert!(!html.contains(r#"name="min""#), "{html}");
         assert!(
-            !html.contains(r#"name="min""#) && !html.contains("既読も表示"),
+            html.contains(
+                r#"<a class="btn on" href="/?rating=4&amp;read=0" aria-label="既読も表示：ON" title="既読も表示：ON">"#
+            ),
             "{html}"
         );
         assert!(
@@ -704,6 +710,7 @@ mod tests {
         let view = ListView {
             rating: Some(4),
             bookmarked: true,
+            read: true,
             ..ListView::default()
         };
         let html = filtered_page(
@@ -729,6 +736,7 @@ mod tests {
         assert!(html.contains("該当する記事はありません"), "{html}");
         let view = ListView {
             bookmarked: true,
+            read: true,
             ..ListView::default()
         };
         let html = filtered_page(&[], view, &Page::default());
@@ -736,6 +744,56 @@ mod tests {
             html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
             "{html}"
         );
+
+        // 👁 を OFF にした絞り込みは、既読を隠し（その場でも隠す）、絞り込みを変えても OFF を引き継ぐ
+        let view = ListView {
+            rating: Some(4),
+            ..ListView::default()
+        };
+        let html = filtered_page(
+            &[item(3, "2026-09-27T05:00:00.000Z")],
+            view,
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"href="/?rating=4" aria-label="既読も表示：OFF""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-hide-read="1" data-min-rating="4">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"href="/?rating=4&amp;read=0&amp;bookmarked=1""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<input type="hidden" name="read" value="0">"#),
+            "{html}"
+        );
+        // 一覧と絞り込みを行き来するときは、👁 を行き先の既定に戻す（一覧は OFF、絞り込みは ON）
+        let bookmark_off = ListView {
+            bookmarked: true,
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], bookmark_off, &Page::default());
+        assert!(
+            html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
+            "{html}"
+        );
+        let from_list = ListView {
+            read: true,
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], from_list, &Page::default());
+        assert!(
+            html.contains(r#"href="/?bookmarked=1" aria-label="ブックマークだけ表示：OFF""#),
+            "{html}"
+        );
+        // 一覧の評価の選択は、一覧の 👁 を絞り込みへ持ち込まない
+        let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
+        let stars = stars.split("</form>").next().unwrap();
+        assert!(!stars.contains(r#"name="read""#), "{stars}");
     }
 
     #[test]

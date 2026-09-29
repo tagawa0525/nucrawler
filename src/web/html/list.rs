@@ -952,6 +952,13 @@ mod tests {
             BAR_SCRIPT.contains("dataset.closed") && BAR_SCRIPT.contains("pointerdown"),
             "{BAR_SCRIPT}"
         );
+        // キーボードで開いたとき（Alt+↓・F4・Space・Enter）も「-」にし、Escape・Tab で閉じたら戻す
+        assert!(
+            ["keydown", "ArrowDown", "F4", "Escape", "Tab"]
+                .iter()
+                .all(|k| BAR_SCRIPT.contains(k)),
+            "{BAR_SCRIPT}"
+        );
         let html = filtered_page(
             &[],
             ListView {

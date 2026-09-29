@@ -558,6 +558,27 @@ mod tests {
         );
     }
 
+    /// タイムアウトした子プロセスは、止めて回収してから返す（ゾンビを残さず、`COPILOT_HOME` は
+    /// 子プロセスが終わってから消す）。
+    #[tokio::test]
+    async fn timeout_reaps_the_process() {
+        let (script, dir) = fake_copilot(
+            "copilot-reap",
+            "cat >/dev/null\necho $$ > \"$PWD/pid.txt\"\nsleep 5",
+        );
+        let cli = cli(script, &dir, Duration::from_millis(300));
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Timeout { .. }),
+            "{}",
+            failure.error
+        );
+        let pid = std::fs::read_to_string(dir.join("cwd/pid.txt")).unwrap();
+        let proc = PathBuf::from(format!("/proc/{}", pid.trim()));
+        assert!(!proc.exists(), "{} is not reaped", proc.display());
+    }
+
     #[tokio::test]
     async fn slow_process_times_out() {
         let (script, dir) = fake_copilot("copilot-slow", "cat >/dev/null\nsleep 5");

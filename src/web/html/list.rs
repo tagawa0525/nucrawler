@@ -127,7 +127,8 @@ pub fn list_page_with_explore(
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、1〜5 で評価、0 で評価なし、l/→ でブックマーク、h/← で既読。
 /// スワイプ・キーはカードのボタンと同じ送信を通す。
-const MARKS_SCRIPT: &str = concat!("<script>\n", include_str!("assets/marks.js"), "</script>");
+pub(super) const MARKS_SCRIPT: &str =
+    concat!("<script>\n", include_str!("assets/marks.js"), "</script>");
 
 /// 評価（1〜5 の星）とブックマーク・既読の印。一覧のカードと詳細で共有する。
 /// 星は今の評価まで塗り、今の評価の星を押すと評価なしに戻る。星は記号だけなので、段階の意味を

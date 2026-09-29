@@ -61,14 +61,12 @@ pub(super) async fn add_report(
         Ok(db.add_report(user, id, &report, Utc::now())?)
     })
     .await?;
-    let view = if form.view.as_deref() == Some("translation") {
-        "view=translation&"
-    } else {
-        ""
-    };
-    Ok(Redirect::to(&format!(
-        "/articles/{id}?{view}reported=1#reports"
-    )))
+    Ok(back_to_detail(
+        id,
+        form.view.as_deref() == Some("translation"),
+        "reported=1&",
+        "#reports",
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -102,12 +100,7 @@ impl CommentForm {
 
 /// 記事のコメントの欄へ戻る。和訳を読んでいたなら和訳のまま。
 fn back_to_comments(article_id: i64, view: Option<&str>) -> Redirect {
-    let view = if view == Some("translation") {
-        "?view=translation"
-    } else {
-        ""
-    };
-    Redirect::to(&format!("/articles/{article_id}{view}#comments"))
+    back_to_detail(article_id, view == Some("translation"), "", "#comments")
 }
 
 pub(super) async fn add_comment(

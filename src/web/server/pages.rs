@@ -166,6 +166,8 @@ pub(super) struct DetailParams {
     digest: Option<i64>,
     translation: Option<i64>,
     reported: Option<String>,
+    /// 書き込みの後に戻った（`back_to_detail`）。開いたとは数えない
+    back: Option<String>,
 }
 
 pub(super) async fn detail(
@@ -179,10 +181,12 @@ pub(super) async fn detail(
         translation: params.translation,
         reported: params.reported.is_some(),
     };
+    let returned = params.back.is_some();
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
+        let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let detail = db
+        let mut detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
         let reports = db.reports(
@@ -192,15 +196,23 @@ pub(super) async fn detail(
                 ..ReportFilter::default()
             },
         )?;
-        // 開いたことだけを記録し、版の切り替えは数えない（開いた回数を、読んだ回数として数えられるように）
-        let opened = if view.show_translation {
+        // 開いたことだけを記録し、版の切り替えと書き込みの後の戻りは数えない
+        // （開いた回数を、読んだ回数として数えられるように）
+        let opened = if returned {
+            None
+        } else if view.show_translation {
             (view.translation.is_none() && !detail.translations.is_empty())
                 .then_some(OpenKind::Translation)
         } else {
             view.digest.is_none().then_some(OpenKind::Detail)
         };
         if let Some(kind) = opened {
-            db.record_open(user, id, kind, Utc::now())?;
+            db.record_open(user, id, kind, now)?;
+            // 開いたので既読になった（読み出したのは記録の前なので、表示に合わせる）
+            detail
+                .item
+                .read_at
+                .get_or_insert_with(|| crate::db::timestamp(now));
         }
         let warnings = warnings(db)?;
         let page = Page {

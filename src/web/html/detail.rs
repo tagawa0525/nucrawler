@@ -96,6 +96,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     let has_japanese = !d.digests.is_empty() || !d.translations.is_empty();
     body.push_str(&comment_section(id, notes.comments, view));
     body.push_str(&report_section(id, notes.reports, has_japanese, view));
+    // 評価・印は一覧と同じく、ページを移らずにその場で付け外しする
+    body.push_str(super::list::MARKS_SCRIPT);
     layout(&title, page, &body)
 }
 

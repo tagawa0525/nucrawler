@@ -114,7 +114,7 @@ pub fn list_page_with_explore(
     if !explore.is_empty() {
         body.push_str(
             "<h2>確認枠</h2><p class=\"meta\">おすすめの閾値に届かなかった記事から無作為に選んでいます。\
-             関心があれば 🔖、無ければ見送ってください</p>",
+             開いて ★ で評価してください（似た記事を読んだだけなら、左のスワイプで既読に）</p>",
         );
         body.extend(explore.iter().map(|i| card(i, true, page)));
     }
@@ -122,7 +122,7 @@ pub fn list_page_with_explore(
     layout("一覧", page, &body)
 }
 
-/// 一覧のカードを左右にスワイプして振り分ける（右でブックマーク、左で見ない）。
+/// 一覧のカードを左右にスワイプして印を付ける（右でブックマーク、左で既読）。
 /// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
@@ -278,7 +278,7 @@ mod tests {
         assert!(search < liked && liked < bookmarked, "{html}");
     }
 
-    /// 一覧のカードは左右のスワイプで振り分けられる（ブックマーク・見ない）。
+    /// 一覧のカードは左右のスワイプで印を付けられる（ブックマーク・既読）。
     #[test]
     fn list_page_cards_can_be_swiped() {
         let html = list_page(

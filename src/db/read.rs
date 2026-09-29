@@ -23,7 +23,7 @@ pub struct ListItem {
     pub matched: Vec<String>,
     /// その点数が当たった推薦しない話題（プロファイルの exclude）
     pub excluded: Vec<String>,
-    /// 既読になった時刻（開いた・評価した・既読の印を付けた。未読なら None）
+    /// 既読になった時刻（開いた・既読の印を付けた。未読なら None）
     pub read_at: Option<String>,
     pub rating: Option<Rating>,
     pub bookmarked: bool,
@@ -1093,8 +1093,8 @@ mod tests {
                 unread: true,
                 ..search_query(&db)
             }),
-            // 評価した記事は既読
-            [unscored, translated]
+            // 評価しただけの記事は未読
+            [unscored, disliked, liked, translated]
         );
         assert_eq!(
             with(SearchQuery {

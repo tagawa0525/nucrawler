@@ -230,6 +230,7 @@ fn report_summary(r: &Report) -> String {
 }
 
 /// 評価（1〜5 の星）とブックマーク。今の評価までの星を塗り、今の評価の星を押すと評価なしに戻る。
+/// 星は記号だけなので、段階の意味を読み上げの名前（aria-label）にも付ける。
 /// ブックマーク済みなら、同じボタンで外す。
 fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String {
     let stars: String = Rating::all()
@@ -244,7 +245,7 @@ fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String 
                 (r.get().to_string(), format!("{} {}", r.get(), r.meaning()))
             };
             format!(
-                "<button name=\"value\" value=\"{value}\" title=\"{title}\"{}>{}</button>",
+                "<button name=\"value\" value=\"{value}\" aria-label=\"{title}\" title=\"{title}\"{}>{}</button>",
                 if on { " class=\"on\"" } else { "" },
                 if on { '★' } else { '☆' }
             )

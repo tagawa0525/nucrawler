@@ -57,6 +57,9 @@ pub enum DbError {
     /// 入力の無い成果物は閲覧資格を導出できず、公開扱いになってしまうので登録しない。
     #[error("artifact for article {article_id} has no input contents")]
     NoArtifactInputs { article_id: i64 },
+    /// 見出しの和訳は公開のものとして閲覧の制限を確かめずに表示するので、本文を入力にしない。
+    #[error("title for article {article_id} must not have input contents")]
+    TitleWithInputs { article_id: i64 },
     /// 要約に付いているトピックは語彙から消せない
     #[error("topics in use cannot be removed: {}", .0.join(", "))]
     TopicsInUse(Vec<String>),
@@ -99,6 +102,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0020_articles_by_source_at.sql"),
     include_str!("migrations/0021_score_matches.sql"),
     include_str!("migrations/0022_explore_picks.sql"),
+    include_str!("migrations/0023_title_artifacts.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -373,6 +377,79 @@ mod tests {
         assert_eq!(
             count("SELECT count(*) FROM search_docs WHERE artifact_id = 1"),
             0
+        );
+    }
+
+    /// 見出しの和訳（title）を保存できるよう作り直しても、行・参照している側の行・訳語集の時点・
+    /// 全文検索を保つ。見出しの和訳も検索に当たる。
+    #[test]
+    fn migration_allows_title_artifacts() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("'title'"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload,
+                created_at, glossary_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"title_ja\": \"題\", \"summary_ja\": \"要約\"}', '2026-09-27T00:00:00.000Z',
+                       '2026-09-26T00:00:00.000Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1);
+             INSERT INTO artifact_topics (artifact_id, topic_id) VALUES (1, 1);
+             INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, created_at)
+               VALUES (1, 1, 'h', 'b', 'm', 1, 50, '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let count = |sql: &str| db.query_i64(sql).unwrap();
+        for table in ["artifact_inputs", "artifact_topics", "scores"] {
+            assert_eq!(
+                count(&format!("SELECT count(*) FROM {table}")),
+                1,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM artifacts
+                 WHERE id = 1 AND glossary_at = '2026-09-26T00:00:00.000Z' AND title_ja = '題'"
+            ),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id = 1"),
+            1
+        );
+
+        db.conn()
+            .execute(
+                "INSERT INTO artifacts
+                   (id, article_id, kind, backend, model, prompt_version, input_scope, payload,
+                    created_at)
+                 VALUES (2, 1, 'title', 'b', 'm', 1, 'public', '{\"title_ja\": \"見出しの和訳\"}',
+                         '2026-09-28T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM search_docs
+                 WHERE artifact_id = 2 AND text = '見出しの和訳'"
+            ),
+            1
         );
     }
 

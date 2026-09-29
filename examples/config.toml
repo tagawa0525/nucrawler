@@ -36,6 +36,9 @@ translate_max_input_chars = 20000
 # 語彙の整理（LLM が足したトピックの表記揺れの統合）に使うモデルと、整理の間隔（日）
 tidy_model = "sonnet"
 tidy_interval_days = 7
+# 本文が無く要約できない英語記事の見出しの和訳に使うモデルと、1 回の呼び出しで訳す見出しの数
+title_model = "sonnet"
+title_batch_size = 30
 
 [quota]
 # 時間帯の判定に使う時差（JST）

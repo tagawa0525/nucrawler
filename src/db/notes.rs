@@ -299,7 +299,7 @@ impl Db {
     }
 
     /// 受付箱（新しい順）。記事の見出しは、利用者 `user_id` が閲覧できる最新の要約から取る
-    /// （無ければ原題）。
+    /// （無ければ見出しの和訳、それも無ければ原題）。
     pub fn reports(&self, user_id: i64, filter: &ReportFilter) -> Result<Vec<Report>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.article_id,
@@ -307,6 +307,9 @@ impl Db {
                                           WHERE d.article_id = a.id AND d.kind = 'digest'
                                             AND {viewable}
                                           ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
+                             (SELECT tt.title_ja FROM artifacts AS tt
+                              WHERE tt.article_id = a.id AND tt.kind = 'title'
+                              ORDER BY tt.created_at DESC, tt.id DESC LIMIT 1),
                              a.title),
                     r.kind, r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
                     r.reply, r.reported_at, r.resolved_at
@@ -654,6 +657,36 @@ mod tests {
         assert_eq!(
             db.reports(owner, &ReportFilter::default()).unwrap()[0].article_title,
             "t"
+        );
+    }
+
+    /// 要約の無い記事は、受付箱でも見出しの和訳を見出しに使う。
+    #[test]
+    fn reports_use_the_title_translation_without_a_digest() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Title,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({ "title_ja": "見出しの和訳" }),
+                inputs: &[],
+                glossary_at: None,
+            },
+            t("2026-09-26T00:00:00Z"),
+        )
+        .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.reports(owner, &ReportFilter::default()).unwrap()[0].article_title,
+            "見出しの和訳"
         );
     }
 

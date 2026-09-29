@@ -96,6 +96,11 @@ impl OpenKind {
             Self::Source => "open_source",
         }
     }
+
+    /// 開いたら既読にするか。既読は詳細（要約）の既読だけで、原文は詳細からしか開けないので数えない
+    fn marks_read(self) -> bool {
+        !matches!(self, Self::Source)
+    }
 }
 
 /// 既読にする（既に既読なら、最初に既読になった時刻のまま）。
@@ -139,7 +144,7 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// 開いたことを記録し、既読にする。
+    /// 開いたことを記録する。詳細・全文和訳を開いたら既読にする（原文は既読を変えない）。
     pub fn record_open(
         &self,
         user_id: i64,
@@ -152,7 +157,9 @@ impl Db {
             "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
         )?;
-        mark_read(&tx, user_id, article_id, now)?;
+        if kind.marks_read() {
+            mark_read(&tx, user_id, article_id, now)?;
+        }
         tx.commit()?;
         Ok(())
     }

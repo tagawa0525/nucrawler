@@ -99,7 +99,11 @@ impl OpenKind {
 
     /// 開いたら既読にするか。既読は詳細（要約）の既読だけで、原文は詳細からしか開けないので数えない
     fn marks_read(self) -> bool {
-        !matches!(self, Self::Source)
+        // 種類を足したときに既読を付けるかを決め忘れないよう、すべての種類を書く
+        match self {
+            Self::Detail | Self::Translation => true,
+            Self::Source => false,
+        }
     }
 }
 

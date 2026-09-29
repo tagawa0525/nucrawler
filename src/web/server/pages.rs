@@ -629,6 +629,34 @@ mod tests {
         }
     }
 
+    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。選択のフォームは値を選べないので、
+    /// 👍 を「👍」に戻すと `rating=` や、絞り込みの `read=0` が残る。正規の形なら移らない。
+    #[tokio::test]
+    async fn list_redirects_to_the_canonical_url() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        for (from, to) in [
+            ("/?rating=", "/"),
+            ("/?rating=&read=0", "/"),
+            ("/?rating=&read=0&bookmarked=1", "/?read=0&bookmarked=1"),
+            ("/?min=50", "/"),
+            ("/?read=1&min=30", "/?min=30&read=1"),
+            ("/?rating=4&read=1", "/?rating=4"),
+        ] {
+            let res = server.get_raw(from).await;
+            assert_eq!(res.status().as_u16(), 303, "{from}");
+            assert_eq!(res.headers()["location"], to, "{from}");
+        }
+        for canonical in ["/", "/?min=30&read=1", "/?rating=4&read=0&bookmarked=1"] {
+            assert_eq!(
+                server.get_raw(canonical).await.status().as_u16(),
+                200,
+                "{canonical}"
+            );
+        }
+        // 誤った値は移さずに 400 のまま
+        assert_eq!(server.get_raw("/?rating=9").await.status().as_u16(), 400);
+    }
+
     /// `read=1` を受け取り、切り替えのリンクに反映する。
     #[tokio::test]
     async fn list_reads_the_read_toggle() {

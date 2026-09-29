@@ -26,7 +26,8 @@ pub fn hide_read(items: Vec<ListItem>, include_read: bool) -> Vec<ListItem> {
     items.into_iter().filter(|i| !i.is_read()).collect()
 }
 
-/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、過去の既読は `read=1` で持つ。
+/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1` で持つ。
+/// 評価（`rating=N`）・ブックマーク（`bookmarked=1`）で絞るときは、一覧の代わりに該当する記事を出す。
 #[derive(Clone, Copy)]
 pub struct ListView {
     /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）
@@ -35,6 +36,10 @@ pub struct ListView {
     pub default_min: u8,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
+    /// この評価（1〜5）以上の記事に絞る
+    pub rating: Option<u8>,
+    /// ブックマークした記事に絞る
+    pub bookmarked: bool,
 }
 
 impl Default for ListView {
@@ -44,6 +49,8 @@ impl Default for ListView {
             min,
             default_min: min,
             read: false,
+            rating: None,
+            bookmarked: false,
         }
     }
 }
@@ -57,12 +64,21 @@ impl ListView {
         self.min == 0
     }
 
-    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
+    /// 評価・ブックマークで絞っているか。
+    pub fn filtered(self) -> bool {
+        self.rating.is_some() || self.bookmarked
+    }
+
+    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。絞り込みの画面では、最低点と既読は効かないので付けない。
     fn href(self) -> String {
         let min = format!("min={}", self.min);
+        let rating = format!("rating={}", self.rating.unwrap_or_default());
+        let filtered = self.filtered();
         let query: Vec<&str> = [
-            (self.min != self.default_min, min.as_str()),
-            (self.read, "read=1"),
+            (!filtered && self.min != self.default_min, min.as_str()),
+            (!filtered && self.read, "read=1"),
+            (self.rating.is_some(), rating.as_str()),
+            (self.bookmarked, "bookmarked=1"),
         ]
         .into_iter()
         .filter_map(|(on, q)| on.then_some(q))
@@ -80,7 +96,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 }
 
 /// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
-/// （JavaScript が無ければ「表示」のボタンで）。過去の既読の表示は引き継ぐ。
+/// （JavaScript が無ければ「表示」のボタンで）。既読の表示は引き継ぐ。
 fn min_select(view: ListView) -> String {
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend([view.default_min, view.min]);
@@ -105,6 +121,83 @@ fn min_select(view: ListView) -> String {
     )
 }
 
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（「👍」は絞らない）。
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。ブックマークの絞り込みは引き継ぐ。
+fn rating_select(view: ListView) -> String {
+    let current = view.rating.map(|r| r.to_string()).unwrap_or_default();
+    let options: String = [
+        ("", "👍"),
+        ("5", "★5"),
+        ("4", "★4↑"),
+        ("3", "★3↑"),
+        ("2", "★2↑"),
+        ("1", "★1↑"),
+    ]
+    .iter()
+    .map(|(v, label)| {
+        let selected = if *v == current { " selected" } else { "" };
+        format!("<option value=\"{v}\"{selected}>{label}</option>")
+    })
+    .collect();
+    let bookmarked = if view.bookmarked {
+        "<input type=\"hidden\" name=\"bookmarked\" value=\"1\">"
+    } else {
+        ""
+    };
+    format!(
+        "<form class=\"stars{}\" method=\"get\" action=\"/\"><select name=\"rating\" aria-label=\"評価で絞る\" \
+         title=\"評価で絞る\" onchange=\"this.form.submit()\">{options}</select>{bookmarked}\
+         <noscript><button>表示</button></noscript></form>",
+        if view.rating.is_some() { " on" } else { "" },
+    )
+}
+
+/// 一覧の上部のバー。絞り込みの画面では、効かない最低点と 👁 を出さない。
+fn bar(view: ListView) -> String {
+    let bookmark_toggle = ListView {
+        bookmarked: !view.bookmarked,
+        ..view
+    };
+    let bookmark = button(
+        &bookmark_toggle.href(),
+        "ブックマークだけ表示",
+        "🔖",
+        Some(view.bookmarked),
+    );
+    let list_controls = if view.filtered() {
+        String::new()
+    } else {
+        let read_toggle = ListView {
+            read: !view.read,
+            ..view
+        };
+        format!(
+            "{}{}",
+            min_select(view),
+            button(&read_toggle.href(), "既読も表示", "👁", Some(view.read))
+        )
+    };
+    format!(
+        "<nav class=\"bar\">{}{}{bookmark}{list_controls}{}</nav>",
+        button("/search", "検索", "🔍", None),
+        rating_select(view),
+        button("/settings", "設定", "⚙️", None),
+    )
+}
+
+/// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
+pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
+    let mut body = bar(view);
+    if items.is_empty() {
+        body.push_str("<p class=\"meta\">該当する記事はありません</p>");
+    } else {
+        body.push_str(&format!("<h2>{} 件</h2>", items.len()));
+        body.extend(items.iter().map(|i| card(i, true, page)));
+    }
+    body.push_str(MARKS_SCRIPT);
+    layout("一覧", page, &body)
+}
+
 /// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）を添える。
 pub fn list_page_with_explore(
     new: &[ListItem],
@@ -113,19 +206,7 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let read_toggle = ListView {
-        read: !view.read,
-        ..view
-    };
-    let mut body = format!(
-        "<nav class=\"bar\">{}{}{}{}{}{}</nav>",
-        button("/search", "検索", "🔍", None),
-        button("/search?min_rating=4", "評価 4 以上", "👍", None),
-        button("/search?bookmarked=1", "ブックマーク", "🔖", None),
-        min_select(view),
-        button(&read_toggle.href(), "既読も表示", "👁", Some(view.read)),
-        button("/settings", "設定", "⚙️", None),
-    );
+    let mut body = bar(view);
     // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
     body.push_str(if view.read {
         "<div class=\"sections\">"

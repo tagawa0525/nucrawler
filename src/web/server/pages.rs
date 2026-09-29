@@ -46,6 +46,10 @@ pub(super) struct ListParams {
     min: Option<String>,
     /// Web の一覧だけが使う（過去の欄に既読も出す）
     read: Option<String>,
+    /// Web の一覧だけが使う（この評価（1〜5）以上に絞る。空なら絞らない）
+    rating: Option<String>,
+    /// Web の一覧だけが使う（ブックマークに絞る）
+    bookmarked: Option<String>,
 }
 
 impl ListParams {
@@ -59,6 +63,18 @@ impl ListParams {
                 .ok_or(AppError::BadRequest("min must be 0..=100")),
         }
     }
+
+    fn rating(&self) -> Result<Option<u8>, AppError> {
+        match self.rating.as_deref().filter(|v| !v.is_empty()) {
+            None => Ok(None),
+            Some(v) => v
+                .parse()
+                .ok()
+                .filter(|r| (1..=5).contains(r))
+                .map(Some)
+                .ok_or(AppError::BadRequest("rating must be 1..=5")),
+        }
+    }
 }
 
 pub(super) async fn list(
@@ -67,18 +83,23 @@ pub(super) async fn list(
 ) -> Result<Html<String>, AppError> {
     let min = params.min(&state.web)?;
     let show_read = params.read.as_deref() == Some("1");
+    let view = html::ListView {
+        min,
+        default_min: state.web.min_score,
+        read: show_read,
+        rating: params.rating()?,
+        bookmarked: params.bookmarked.as_deref() == Some("1"),
+    };
     let web = state.web.clone();
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
+        if view.filtered() {
+            return filtered(db, &web, &labels, user, hash.as_deref(), view);
+        }
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
-        let view = html::ListView {
-            min,
-            default_min: web.min_score,
-            read: show_read,
-        };
         // 既読は件数の上限より前に除く（上位が既読で埋まっても、下の未読が出るように）
         let items = db.list_articles(ListQuery {
             unread: !show_read,
@@ -117,6 +138,33 @@ pub(super) async fn list(
     })
     .await?;
     Ok(Html(page))
+}
+
+/// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す。
+/// 検索と同じく閲覧ではないので、訪問は始めない。
+fn filtered(
+    db: &Db,
+    web: &WebConfig,
+    labels: &html::SourceLabels,
+    user: i64,
+    hash: Option<&str>,
+    view: html::ListView,
+) -> Result<String, AppError> {
+    let params = Params {
+        min_rating: view.rating.map(|r| r.to_string()).unwrap_or_default(),
+        bookmarked: view.bookmarked,
+        ..Params::default()
+    };
+    let query = params
+        .to_query(user, hash, web.list_limit)
+        .map_err(|_| AppError::BadRequest("rating must be 1..=5"))?;
+    let items = db.search_articles(&query)?;
+    let warnings = warnings(db)?;
+    let page = Page {
+        warnings: &warnings,
+        labels,
+    };
+    Ok(html::filtered_page(&items, view, &page))
 }
 
 /// Web の既定の一覧と同じ記事の Atom フィード。閲覧ではないので、訪問も開いたことも記録しない。

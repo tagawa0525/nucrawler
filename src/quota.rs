@@ -469,4 +469,25 @@ mod tests {
         q.observe(None);
         assert!(q.permit(now).is_err());
     }
+
+    /// 並行した呼び出しの結果は順が前後するので、同じ枠（リセット時刻が同じ）の中では使用率を
+    /// 下げない。新しい枠なら置き換え、古い枠は無視する。
+    #[test]
+    fn observed_usage_never_drops_within_a_window() {
+        let now = jst("2026-09-28T11:00:00");
+        let resets = now + chrono::Duration::hours(2);
+        let five = |utilization, resets_at| RateLimit {
+            five_hour: window(utilization, resets_at),
+            seven_day: None,
+        };
+        let mut q = Quota::new(QuotaConfig::default(), Some(five(0.9, resets)), None);
+        q.observe(Some(five(0.2, resets)));
+        assert!(q.permit(now).is_err(), "a stale lower reading is ignored");
+        q.observe(Some(five(0.1, resets - chrono::Duration::hours(5))));
+        assert!(q.permit(now).is_err(), "an older window is ignored");
+        q.record_call(Some(five(0.3, resets)));
+        assert!(q.permit(now).is_err(), "own stale response is ignored too");
+        q.observe(Some(five(0.1, resets + chrono::Duration::hours(5))));
+        assert!(q.permit(now).is_ok(), "a newer window replaces it");
+    }
 }

@@ -345,7 +345,10 @@ mod tests {
     #[test]
     fn latest_rate_limit_skips_calls_without_usage() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.latest_rate_limit().unwrap(), None);
+        assert_eq!(
+            db.latest_rate_limit(t("2026-09-27T04:00:00Z")).unwrap(),
+            None
+        );
         fn call(rate: Option<&crate::llm::RateLimit>) -> LlmCall<'_> {
             LlmCall {
                 stage: "digest",
@@ -378,7 +381,77 @@ mod tests {
             .unwrap();
         db.record_llm_call(&call(None), t("2026-09-27T03:00:00Z"))
             .unwrap();
-        assert_eq!(db.latest_rate_limit().unwrap(), Some(newer));
+        assert_eq!(
+            db.latest_rate_limit(t("2026-09-27T04:00:00Z")).unwrap(),
+            Some(newer)
+        );
+    }
+
+    /// 呼び出しは並行して終わる順が前後するので、最後の行ではなく、枠ごとにリセット時刻が最も新しい枠の
+    /// 最も高い使用率を使う（同じ枠の中で使用率は下がらない）。
+    #[test]
+    fn latest_rate_limit_keeps_the_highest_usage_of_the_newest_window() {
+        let db = Db::open_in_memory().unwrap();
+        let window = |utilization, resets_at| {
+            Some(crate::llm::Window {
+                utilization,
+                resets_at,
+            })
+        };
+        let record = |rate: crate::llm::RateLimit, at: &str| {
+            db.record_llm_call(
+                &LlmCall {
+                    stage: "digest",
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    n_items: 1,
+                    ok: true,
+                    duration_ms: 1,
+                    error: None,
+                    rate_limit: Some(&rate),
+                },
+                t(at),
+            )
+            .unwrap();
+        };
+        let now = t("2026-09-27T04:00:00Z");
+        record(
+            crate::llm::RateLimit {
+                five_hour: window(0.6, 100),
+                seven_day: window(0.3, 1000),
+            },
+            "2026-09-27T01:00:00Z",
+        );
+        // 先に始めた呼び出しが後から終わり、古い（低い）使用率を記録する
+        record(
+            crate::llm::RateLimit {
+                five_hour: window(0.4, 100),
+                seven_day: window(0.35, 1000),
+            },
+            "2026-09-27T02:00:00Z",
+        );
+        assert_eq!(
+            db.latest_rate_limit(now).unwrap(),
+            Some(crate::llm::RateLimit {
+                five_hour: window(0.6, 100),
+                seven_day: window(0.35, 1000),
+            })
+        );
+        // 新しい枠になれば、使用率が低くてもそちらを使う
+        record(
+            crate::llm::RateLimit {
+                five_hour: window(0.1, 200),
+                seven_day: None,
+            },
+            "2026-09-27T03:00:00Z",
+        );
+        assert_eq!(
+            db.latest_rate_limit(now).unwrap(),
+            Some(crate::llm::RateLimit {
+                five_hour: window(0.1, 200),
+                seven_day: window(0.35, 1000),
+            })
+        );
     }
 
     #[test]

@@ -805,8 +805,8 @@ mod tests {
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
         assert_eq!(
-            (h.score, h.title_ja.as_deref(), h.read),
-            (Some(90), Some("題"), false)
+            (h.score, h.title_ja.as_deref(), h.read_at.as_deref()),
+            (Some(90), Some("題"), None)
         );
     }
 
@@ -821,7 +821,7 @@ mod tests {
             "2026-09-26T00:00:00.000Z",
             90,
         );
-        db.record_event(owner, a, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+        db.record_open(owner, a, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
             .unwrap();
         db.request_translation(owner, a, t("2026-09-27T00:00:00Z"))
             .unwrap();
@@ -835,7 +835,7 @@ mod tests {
             .execute("INSERT INTO article_access VALUES (?1, ?2)", [a, aesj])
             .unwrap();
         let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
-        assert!(item.read);
+        assert_eq!(item.read_at.as_deref(), Some("2026-09-27T00:00:00.000Z"));
         assert!(item.translation_requested);
         assert!(!item.has_translation);
         assert_eq!(item.locked_by, ["日本原子力学会"]);
@@ -1065,13 +1065,8 @@ mod tests {
             "2026-09-03T00:00:00.000Z",
             70,
         );
-        db.record_event(
-            owner,
-            read,
-            SignalKind::OpenDetail,
-            t("2026-09-27T00:00:00Z"),
-        )
-        .unwrap();
+        db.record_open(owner, read, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
         let disliked = scored_article(
             &db,
             "https://e.com/down",
@@ -1103,7 +1098,8 @@ mod tests {
                 unread: true,
                 ..search_query(&db)
             }),
-            [unscored, disliked, liked, translated]
+            // 評価した記事は既読
+            [unscored, translated]
         );
         assert_eq!(
             with(SearchQuery {
@@ -1489,7 +1485,7 @@ mod tests {
         assert!(unscored.matched.is_empty() && unscored.excluded.is_empty());
     }
 
-    /// 確認枠は閾値未満・軽水炉・採点済み・評価も振り分けもなし・未選択の記事から選び、同じ日は同じ記事を返す。
+    /// 確認枠は閾値未満・軽水炉・採点済み・未評価・未読・未選択の記事から選び、同じ日は同じ記事を返す。
     #[test]
     fn explore_picks_below_threshold_articles_once() {
         let db = Db::open_in_memory().unwrap();
@@ -1505,7 +1501,7 @@ mod tests {
                 )
             })
             .collect();
-        // 閾値以上、評価済み、見送り済みの記事は選ばない
+        // 閾値以上、評価済み、既読の記事は選ばない
         scored_article(
             &db,
             "https://e.com/high",
@@ -1520,13 +1516,8 @@ mod tests {
             "2026-09-26T00:00:00.000Z",
             20,
         );
-        db.record_event(
-            owner,
-            reacted,
-            SignalKind::Dismiss,
-            t("2026-09-26T05:00:00Z"),
-        )
-        .unwrap();
+        db.set_read(owner, reacted, true, t("2026-09-26T05:00:00Z"))
+            .unwrap();
         let rated = scored_article(
             &db,
             "https://e.com/rated",
@@ -1553,13 +1544,8 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert!(!first.contains(&second[0]));
         // 評価が付いた記事は枠から消える（ブックマークは評価ではないので残る）
-        db.record_event(
-            owner,
-            first[1],
-            SignalKind::Bookmark,
-            t("2026-09-27T06:00:00Z"),
-        )
-        .unwrap();
+        db.set_bookmark(owner, first[1], true, t("2026-09-27T06:00:00Z"))
+            .unwrap();
         db.rate(owner, first[0], Rating::new(2), t("2026-09-27T06:00:00Z"))
             .unwrap();
         assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), [first[1]]);
@@ -1588,44 +1574,5 @@ mod tests {
         assert_eq!(picked, [a]);
         rescore_with_version(&db, a, 2, 90);
         assert!(db.explore(q, 1, "2026-09-27").unwrap().is_empty());
-    }
-
-    /// ブックマークした記事は振り分け済みなので、「すべて表示」でも一覧に出さない。
-    /// 件数の上限は除いた後にかける（ブックマークが上位を占めても一覧が減らない）。
-    #[test]
-    fn list_leaves_out_bookmarked_articles_before_the_limit() {
-        let db = Db::open_in_memory().unwrap();
-        let owner = db.owner_id().unwrap();
-        let top = scored_article(
-            &db,
-            "https://e.com/top",
-            Lang::En,
-            "2026-09-26T00:00:00.000Z",
-            95,
-        );
-        let next = scored_article(
-            &db,
-            "https://e.com/next",
-            Lang::En,
-            "2026-09-26T00:00:00.000Z",
-            80,
-        );
-        db.record_event(owner, top, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
-            .unwrap();
-        for show_all in [false, true] {
-            let ids: Vec<i64> = db
-                .list_articles(ListQuery {
-                    limit: 1,
-                    ..list_query(&db, show_all)
-                })
-                .unwrap()
-                .into_iter()
-                .map(|i| i.article_id)
-                .collect();
-            assert_eq!(ids, [next], "show_all = {show_all}");
-        }
-        // 外せば一覧に戻る
-        db.unbookmark(owner, top).unwrap();
-        assert_eq!(list_ids(&db, false), [top, next]);
     }
 }

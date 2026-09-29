@@ -172,6 +172,173 @@ mod tests {
         );
     }
 
+    fn item(db: &Db, article_id: i64) -> ListItem {
+        db.search_articles(&search_query(db))
+            .unwrap()
+            .into_iter()
+            .find(|i| i.article_id == article_id)
+            .unwrap()
+    }
+
+    /// 開くと既読になり、既読の時刻は最初に既読になったときのまま。開いた記録は開くたびに残す。
+    #[test]
+    fn opening_marks_read_once() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        assert_eq!(item(&db, a).read_at, None);
+        db.record_open(owner, a, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_open(owner, a, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        assert_eq!(
+            db.query_strings("SELECT kind FROM events ORDER BY id")
+                .unwrap(),
+            ["open_detail", "open_translation"]
+        );
+    }
+
+    /// 既読は開かなくても付け外しでき、付け直すとその時刻になる。
+    #[test]
+    fn read_mark_is_toggled() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.set_read(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_read(owner, a, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        db.set_read(owner, a, false, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert_eq!(item(&db, a).read_at, None);
+        db.set_read(owner, a, true, t("2026-09-27T03:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T03:00:00.000Z")
+        );
+        // 開いた記録は残さない（開いたわけではない）
+        assert_eq!(db.query_i64("SELECT count(*) FROM events").unwrap(), 0);
+    }
+
+    /// 評価すると既読になる。評価なしに戻しても既読は残る。
+    #[test]
+    fn rating_marks_read() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            item(&db, a).read_at.as_deref(),
+            Some("2026-09-27T00:00:00.000Z")
+        );
+        db.rate(owner, a, None, t("2026-09-27T01:00:00Z")).unwrap();
+        assert!(item(&db, a).read_at.is_some());
+    }
+
+    /// ブックマークは付け外しでき、付けても一覧に残り、評価のラベルにはならない。
+    #[test]
+    fn bookmark_is_a_mark_kept_in_the_list() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        db.set_bookmark(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_bookmark(owner, a, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert!(item(&db, a).bookmarked);
+        assert_eq!(
+            db.query_strings("SELECT bookmarked_at FROM bookmarks")
+                .unwrap(),
+            ["2026-09-27T00:00:00.000Z"]
+        );
+        assert_eq!(list_ids(&db, false), [a]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    bookmarked: true,
+                    ..search_query(&db)
+                }
+            ),
+            [a]
+        );
+        assert!(db.eval_labels(owner).unwrap().is_empty());
+        db.set_bookmark(owner, a, false, t("2026-09-27T02:00:00Z"))
+            .unwrap();
+        assert!(!item(&db, a).bookmarked);
+        // ブックマークは既読にしない（後で読むため）
+        assert_eq!(item(&db, a).read_at, None);
+    }
+
+    /// 既読は一覧の既定では隠さない（前の訪問より前に既読になった記事を隠すのは画面の区切り）。
+    /// 未読の検索は既読を除く。
+    #[test]
+    fn read_articles_stay_in_the_list_and_leave_unread_search() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let b = scored_article(
+            &db,
+            "https://e.com/b",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.set_read(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(list_ids(&db, false), [a, b]);
+        assert_eq!(
+            found(
+                &db,
+                SearchQuery {
+                    unread: true,
+                    ..search_query(&db)
+                }
+            ),
+            [b]
+        );
+    }
+
     /// 検索は、指定した評価以上の記事に絞れる（評価なしは除く）。
     #[test]
     fn search_filters_by_minimum_rating() {

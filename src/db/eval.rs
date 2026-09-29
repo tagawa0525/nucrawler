@@ -194,11 +194,11 @@ mod tests {
         rate(a, 2, "2026-09-27T00:00:00Z");
         rate(a, 5, "2026-09-27T01:00:00Z");
         // 開いただけ・ブックマーク・見送り → ラベルなし
-        db.record_event(owner, b, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+        db.record_open(owner, b, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
             .unwrap();
-        db.record_event(owner, b, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+        db.set_bookmark(owner, b, true, t("2026-09-27T00:00:00Z"))
             .unwrap();
-        db.record_event(owner, c, SignalKind::Dismiss, t("2026-09-27T00:00:00Z"))
+        db.set_read(owner, c, true, t("2026-09-27T00:00:00Z"))
             .unwrap();
         // 評価なしに戻した → ラベルなし
         rate(d, 4, "2026-09-27T00:00:00Z");

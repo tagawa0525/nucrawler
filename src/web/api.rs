@@ -167,7 +167,7 @@ mod tests {
             reason: Some("理由".into()),
             matched: vec!["燃料".into()],
             excluded: vec!["核融合".into()],
-            read: false,
+            read_at: None,
             rating: crate::db::Rating::new(4),
             bookmarked: false,
             has_translation: false,

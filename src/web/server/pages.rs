@@ -451,6 +451,8 @@ mod tests {
         assert!(html.contains("和訳の本文"), "{html}");
         assert_eq!(events("open_translation"), 1);
         assert_eq!(events("open_detail"), 1);
+        // 開いた記事は既読
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 1);
     }
 
     #[tokio::test]
@@ -479,17 +481,17 @@ mod tests {
         assert_eq!(server.count("SELECT count(*) FROM events"), 0);
     }
 
-    /// 一覧でブックマークした記事は、振り分け済みとして一覧から外れる。
+    /// ブックマークは印なので、付けても一覧に残る。
     #[tokio::test]
-    async fn list_leaves_out_bookmarked_articles() {
+    async fn list_keeps_bookmarked_articles() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         server
-            .post(&format!("/articles/{id}/feedback"), "kind=bookmark")
+            .post(&format!("/articles/{id}/bookmark"), "on=1")
             .await;
         let (_, html) = server.get("/?all=1").await;
-        assert!(!html.contains("見出しA"), "{html}");
+        assert!(html.contains("見出しA"), "{html}");
         let (_, html) = server.get("/search?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");
     }

@@ -161,10 +161,19 @@ impl Server {
         self.state.db.lock().unwrap().query_strings(sql).unwrap()
     }
 
-    /// 閲覧の行動（開いた記録と訪問の区切り）が 1 つも記録されていない。
+    /// 閲覧の行動（開いた記録・既読・訪問の区切り）が 1 つも記録されていない。
     pub(super) fn assert_no_views(&self) {
         assert_eq!(
             self.count("SELECT count(*) FROM events WHERE kind LIKE 'open_%'"),
+            0
+        );
+        // 評価した記事は既読になるので、種の評価で付いた既読は除く
+        assert_eq!(
+            self.count(
+                "SELECT count(*) FROM reads AS rd WHERE NOT EXISTS (
+                   SELECT 1 FROM ratings AS rt
+                   WHERE rt.user_id = rd.user_id AND rt.article_id = rd.article_id)"
+            ),
             0
         );
         assert_eq!(

@@ -183,30 +183,36 @@ mod tests {
 
     #[test]
     fn splits_new_and_earlier_unread() {
-        let mut read = item(3, "2026-09-26T00:00:00.000Z");
-        read.read = true;
+        let read_at = |id: i64, at: &str| {
+            let mut i = item(id, "2026-09-26T00:00:00.000Z");
+            i.read_at = Some(at.into());
+            i
+        };
         let items = vec![
             item(1, "2026-09-27T05:00:00.000Z"),
             item(2, "2026-09-26T00:00:00.000Z"),
-            read,
+            // 前の訪問より前に既読
+            read_at(3, "2026-09-26T12:00:00.000Z"),
+            // 今回の訪問で既読（印を付けたカードは再読み込みしても残る）
+            read_at(4, "2026-09-27T06:00:00.000Z"),
         ];
         let boundary = Some("2026-09-27T00:00:00.000Z");
         let (new, earlier) = split_sections(items.clone(), boundary, false);
         assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
-        // 前回より前の記事は、未読のものだけを残す
+        // 前回より前の記事は、前の訪問までに既読になったものを除く
         assert_eq!(
             earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
-            [2]
+            [2, 4]
         );
         // 既読も出すなら、前回より前の記事をすべて残す
         let (new, earlier) = split_sections(items.clone(), boundary, true);
         assert_eq!(new.iter().map(|i| i.article_id).collect::<Vec<_>>(), [1]);
         assert_eq!(
             earlier.iter().map(|i| i.article_id).collect::<Vec<_>>(),
-            [2, 3]
+            [2, 3, 4]
         );
         let (new, earlier) = split_sections(items, None, false);
-        assert_eq!(new.len(), 3);
+        assert_eq!(new.len(), 4);
         assert!(earlier.is_empty());
     }
 
@@ -239,7 +245,12 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<script>"), "{html}");
-        assert!(html.contains("/feedback/undo"), "{html}");
+        // 左は既読の印（見送りではない）
+        assert!(html.contains(r#"h: "read""#), "{html}");
+        assert!(
+            !html.contains("dismiss") && !html.contains("/feedback"),
+            "{html}"
+        );
         // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
@@ -318,7 +329,7 @@ mod tests {
     #[test]
     fn list_page_names_the_earlier_section_by_whether_read_is_shown() {
         let mut read = item(2, "2026-09-26T00:00:00.000Z");
-        read.read = true;
+        read.read_at = Some("2026-09-26T12:00:00.000Z".into());
         let earlier = [read];
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");

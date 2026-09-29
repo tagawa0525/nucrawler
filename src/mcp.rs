@@ -694,7 +694,7 @@ mod tests {
         let listed = run_search(&db, SearchParams::default()).unwrap();
         assert_eq!(ids(&listed), [id]);
         assert!(
-            !db.list_articles(ListQuery {
+            db.list_articles(ListQuery {
                 user_id: db.owner_id().unwrap(),
                 profile_hash: Some(&hash),
                 min_score: 0,
@@ -703,7 +703,8 @@ mod tests {
                 limit: 10,
             })
             .unwrap()[0]
-                .read
+                .read_at
+                .is_none()
         );
     }
 

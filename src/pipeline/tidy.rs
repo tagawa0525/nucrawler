@@ -85,7 +85,7 @@ pub async fn tidy_topics<L: Llm>(
                 model: &cfg.tidy_model,
             },
         },
-        now,
+        clock,
         cancel,
     )
     .await?;

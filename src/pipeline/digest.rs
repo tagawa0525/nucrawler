@@ -183,7 +183,7 @@ pub async fn digest_articles<L: Llm>(
                         model,
                     },
                 },
-                now,
+                clock,
                 cancel,
             )
             .await?;

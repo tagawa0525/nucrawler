@@ -1,8 +1,6 @@
 //! プロファイルの更新案（`profile suggest`）：反応を根拠に、LLM にプロファイルの更新案を 1 回で作らせる。
 //! 案は保存しない（人が差分を読み、`eval --profile` で比べてから取り込む）。
 
-use chrono::{DateTime, Utc};
-
 use super::Halt;
 use super::llm_call::{Call, LlmStage, Outcome, Reserved, Shared, call_recorded, permit, reserve};
 use crate::config::LlmConfig;
@@ -43,7 +41,6 @@ pub async fn suggest_profile<L: Llm>(
     cfg: &LlmConfig,
     profile: &Profile,
     evidence: &[Evidence],
-    now: DateTime<Utc>,
 ) -> Result<SuggestSummary, SuggestStageError> {
     let shared = Shared::new(quota);
     let mut summary = SuggestSummary::default();
@@ -80,7 +77,7 @@ pub async fn suggest_profile<L: Llm>(
                 model: &cfg.score_model,
             },
         },
-        now,
+        clock,
         cancel,
     )
     .await?;
@@ -109,6 +106,7 @@ mod tests {
     use crate::llm::{LlmError, LlmResponse};
     use crate::pipeline::Cancel;
     use crate::quota::{Quota, QuotaConfig};
+    use chrono::{DateTime, Utc};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-09-28T02:00:00Z")
@@ -157,7 +155,6 @@ mod tests {
             &LlmConfig::default(),
             &profile(),
             &evidence(),
-            now(),
         )
         .await
     }

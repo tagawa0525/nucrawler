@@ -155,7 +155,7 @@ pub async fn call_recorded<L: Llm>(
         n_items,
         req,
     }: Call<'_>,
-    now: DateTime<Utc>,
+    clock: &dyn Fn() -> DateTime<Utc>,
     cancel: &Cancel,
 ) -> Result<Outcome, DbError> {
     // 既に止める指示が出ていれば呼ばない（応答を優先する下の select は、先に呼び出しを始めてしまう）
@@ -163,6 +163,9 @@ pub async fn call_recorded<L: Llm>(
         return Ok(Outcome::Cancelled);
     }
     shared.quota.borrow_mut().start_call();
+    // 記録する時刻は呼び出しを始めた時刻（ステージを始めた時刻では、長いステージの呼び出しがすべて
+    // 同じ時刻になり、呼び出しの時系列を組み立てられない）
+    let at = clock();
     let started = std::time::Instant::now();
     // 応答を待たずに止める。呼び出しの future を捨てると子プロセスも止まる（kill_on_drop）
     let result = tokio::select! {
@@ -206,7 +209,7 @@ pub async fn call_recorded<L: Llm>(
             error: error.as_deref(),
             rate_limit: rate_limit.as_ref(),
         },
-        now,
+        at,
     )?;
     Ok(match result {
         Ok(response) => Outcome::Response(response),
@@ -254,7 +257,7 @@ mod tests {
                     model: "m",
                 },
             },
-            Utc::now(),
+            &Utc::now,
             &cancel,
         )
         .await
@@ -293,7 +296,7 @@ mod tests {
                     model: "m",
                 },
             },
-            Utc::now(),
+            &Utc::now,
             &cancel,
         )
         .await
@@ -327,7 +330,7 @@ mod tests {
                     model: "m",
                 },
             },
-            Utc::now(),
+            &Utc::now,
             &cancel,
         )
         .await

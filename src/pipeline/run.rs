@@ -301,9 +301,7 @@ pub async fn suggest_profile<L: Llm>(
     evidence: &[Evidence],
 ) -> Result<(RunReport, Suggested), RunError> {
     let mut report = RunReport::default();
-    let now = (env.clock)();
-    let summary =
-        suggest::suggest_profile(env.stage(), &config.llm, profile, evidence, now).await?;
+    let summary = suggest::suggest_profile(env.stage(), &config.llm, profile, evidence).await?;
     // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
     let reason = match &summary.halted {
         Some(Halt::Quota(stop)) => stop.to_string(),

@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use url::Url;
 
 use super::Cancel;
+use super::workers::{group_by_host, run_workers};
 use crate::config::{PipelineConfig, Source};
-use crate::db::{ContentKind, ContentOrigin, Db, DbError, StageKey};
+use crate::db::{ContentKind, ContentOrigin, Db, DbError, PendingPage, StageKey};
 use crate::extract::{self, ExtractError};
 use crate::http::{Fetcher, HttpError};
 use crate::{errors, text};
@@ -42,8 +43,43 @@ pub async fn extract_pages(
 ) -> Result<ExtractSummary, ExtractStageError> {
     let cutoff = now - chrono::Duration::days(i64::from(cfg.backlog_days));
     let pending = db.pending_extract(cutoff, now, cfg.extract_max_per_run)?;
+    // ホストごとに 1 つの作業者が順に取り、ホストどうしは並行する（同じホストへの間隔は `Fetcher` が
+    // 守る）。1 件ずつ順に取ると、間隔待ちの間も空いているほかのホストにアクセスしない
+    let groups = group_by_host(pending, |p| p.url.as_str());
+    if groups.is_empty() {
+        return Ok(ExtractSummary::default());
+    }
+    let parts = run_workers(groups.len(), |i| {
+        extract_host(db, fetcher, sources, &groups[i], now, cancel)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(ExtractSummary::default(), ExtractSummary::merge))
+}
+
+impl ExtractSummary {
+    /// ホストごとの集計を合わせる。
+    fn merge(mut self, other: ExtractSummary) -> ExtractSummary {
+        self.extracted += other.extracted;
+        self.failed += other.failed;
+        self.gave_up += other.gave_up;
+        self.cancelled |= other.cancelled;
+        self
+    }
+}
+
+/// 1 つのホストの記事を順に取る。
+async fn extract_host(
+    db: &Db,
+    fetcher: &Fetcher,
+    sources: &[Source],
+    pages: &[PendingPage],
+    now: DateTime<Utc>,
+    cancel: &Cancel,
+) -> Result<ExtractSummary, ExtractStageError> {
     let mut summary = ExtractSummary::default();
-    for page in pending {
+    for page in pages {
         if cancel.is_requested() {
             summary.cancelled = true;
             break;
@@ -490,5 +526,55 @@ mod tests {
         .unwrap();
         assert!(summary.cancelled);
         assert!(bodies(&db).is_empty());
+    }
+
+    /// ホストが違えば並行して取得する（同じホストへの間隔は `Fetcher` が守る）。1 件ずつ順に取ると、
+    /// 間隔待ちの間も空いているほかのホストにアクセスしない。
+    #[tokio::test]
+    async fn fetches_different_hosts_concurrently() {
+        let (a, b) = (server(), server());
+        let db = Db::open_in_memory().unwrap();
+        // 新しい順に a の 2 件、b の 2 件（順に取れば a が終わるまで b に行かない）
+        for (i, (server, path)) in [
+            (&a, "/news/1"),
+            (&a, "/news/2"),
+            (&b, "/news/1"),
+            (&b, "/news/2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let published = format!("2026-09-26T{:02}:00:00.000Z", 23 - i);
+            db.insert_article(&NewArticle {
+                source_id: "u",
+                url: &server.url(path),
+                title: path,
+                lang: Lang::En,
+                published_at: Some(&published),
+            })
+            .unwrap()
+            .unwrap();
+        }
+        let fetcher = Fetcher::new(
+            "t",
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            1 << 20,
+        )
+        .unwrap();
+        let summary = extract_pages(
+            &db,
+            &fetcher,
+            &[source("u", None)],
+            &cfg(10),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.extracted, 4);
+        let first_b = b.requests().iter().map(|r| r.at).min().unwrap();
+        let last_a = a.requests().iter().map(|r| r.at).max().unwrap();
+        assert!(first_b < last_a, "b must not wait for a to finish");
     }
 }

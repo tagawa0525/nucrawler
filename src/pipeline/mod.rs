@@ -12,6 +12,7 @@ pub mod suggest;
 pub mod tidy;
 pub mod title;
 pub mod translate;
+pub mod workers;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

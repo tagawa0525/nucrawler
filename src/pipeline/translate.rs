@@ -7,8 +7,9 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::{
     Call, LlmStage, Outcome, Reserved, Shared, call_recorded, claim_ttl, permit, record_failures,
-    reserve, run_workers,
+    reserve,
 };
+use super::workers::run_workers;
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{

@@ -98,6 +98,11 @@
     busy.delete(form);
     if (!ok) {
       notify("記録できませんでした");
+      // 未読にできなかったカード（元に戻す）は既読のままなので隠し直す。読み直しで未読と分かれば出る
+      if (form.action.endsWith("/read") && value === "0") {
+        const card = marks.closest(".card[data-id]");
+        if (card) setVisibility(card, true);
+      }
       // 送れたか分からないので、印を今の状態に合わせ直す。この読み直しは押した後に始まるので、
       // 押した印もサーバーの状態で上書きする（押した印を残すのは、押す前に始まった読み直しだけ）
       resync();

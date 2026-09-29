@@ -46,12 +46,28 @@
     if (card) card.classList.toggle("read", on);
   };
   const shownCards = () => [...document.querySelectorAll(".card[data-id]")].filter((c) => !c.hidden);
-  // 既読を隠す一覧（data-hide-read）のカードを、既読なら隠し、未読なら出す。隠したカードを
-  // 選んでいたなら隣を選び、隠したかどうかを返す
-  const setVisibility = (card, read) => {
-    if (!card.closest("[data-hide-read]")) return false;
-    if (!read) {
-      card.hidden = false;
+  const pressed = (card, selector) =>
+    card.querySelector(selector)?.getAttribute("aria-pressed") === "true";
+  // カードの今の印が、欄（.sections）の条件に合うか。既読を隠す一覧（data-hide-read）では未読、
+  // 評価で絞った画面（data-min-rating）ではその評価以上、ブックマークで絞った画面（data-bookmarked）では
+  // ブックマーク中
+  const matches = (card) => {
+    const f = card.closest(".sections")?.dataset ?? {};
+    if (f.hideRead && pressed(card, READ)) return false;
+    if (f.bookmarked && !pressed(card, BOOKMARK)) return false;
+    const rating = card.querySelectorAll(".rating button.on").length;
+    if (f.minRating && rating < Number(f.minRating)) return false;
+    return true;
+  };
+  // 絞った画面の件数（.count）を、出ているカードの数に合わせる
+  const updateCount = () => {
+    const count = document.querySelector(".count");
+    if (count) count.textContent = `${shownCards().length} 件`;
+  };
+  // カードを出すか隠す。隠したカードを選んでいたなら隣を選び、隠したかどうかを返す
+  const setVisibility = (card, shown) => {
+    if (shown) {
+      if (card.hidden) { card.hidden = false; updateCount(); }
       return false;
     }
     if (card.hidden) return false;
@@ -62,19 +78,18 @@
       if (next) next.focus();
     }
     card.hidden = true;
+    updateCount();
     return true;
   };
-  // 既読の印で既読にしたカードを隠し、しばらく「元に戻す」を出す
-  const hideRead = (marks) => {
-    const card = marks.closest(".card[data-id]");
-    if (!card) return;
+  // 印を付け外しして欄の条件から外れたカードを隠し、しばらく「元に戻す」を出す。
+  // `restore` は押す前の印に戻す送信
+  const hideUnmatched = (card, text, restore) => {
     const focused = card.contains(document.activeElement);
-    if (!setVisibility(card, true)) return;
-    notify("既読にしました", () => {
-      card.hidden = false;
+    if (!setVisibility(card, matches(card))) return;
+    notify(text, () => {
+      setVisibility(card, true);
       if (focused) card.focus();
-      const button = card.querySelector(READ);
-      if (button) button.form.requestSubmit(button);
+      restore();
     });
   };
   // 送っている間は同じ印を送り直さない（押した結果が前後する）
@@ -87,6 +102,9 @@
     if (busy.has(form)) return;
     busy.add(form);
     const { name, value } = e.submitter;
+    const card = marks.closest(".card[data-id]");
+    // 元に戻すときに送る、押す前の評価（評価なしは 0）
+    const previous = form.querySelectorAll("button.on").length;
     // 読み直し（resync）が、この送信より前の状態で上書きしないように、押した印ごとに時刻を残す
     form.dataset.changed = String(performance.now());
     const ok = await fetch(form.action, {
@@ -98,30 +116,35 @@
     busy.delete(form);
     if (!ok) {
       notify("記録できませんでした");
-      // 未読にできなかったカード（元に戻す）は既読のままなので隠し直す。読み直しで未読と分かれば出る
-      if (form.action.endsWith("/read") && value === "0") {
-        const card = marks.closest(".card[data-id]");
-        if (card) setVisibility(card, true);
-      }
+      // 印は押す前のままなので、条件に合わなければ隠し直す（元に戻すで先に出したカードなど）。
+      // 読み直しで条件に合うと分かれば出る
+      if (card) setVisibility(card, matches(card));
       // 送れたか分からないので、印を今の状態に合わせ直す。この読み直しは押した後に始まるので、
       // 押した印もサーバーの状態で上書きする（押した印を残すのは、押す前に始まった読み直しだけ）
       resync();
       return;
     }
+    let text, restore;
     if (form.classList.contains("rating")) {
       setStars(form, value === "" ? 0 : Number(value));
-    } else if (form.action.endsWith("/read")) {
-      setRead(marks, value === "1");
-      if (value === "1") {
-        hideRead(marks);
-      } else {
-        // 元に戻すの送信中に始まった読み直しが、古い既読の状態でカードを隠していても出し直す
-        const card = marks.closest(".card[data-id]");
-        if (card) setVisibility(card, false);
-      }
+      text = value === "" ? "評価を外しました" : `★${value} にしました`;
+      // 押す前の星（評価なしなら、今の評価の星）を押し直す
+      restore = () => form.requestSubmit(
+        form.querySelector(previous ? `button:nth-child(${previous})` : 'button[value=""]'));
     } else {
-      setToggle(e.submitter, value === "1");
+      const read = form.action.endsWith("/read");
+      if (read) setRead(marks, value === "1");
+      else setToggle(e.submitter, value === "1");
+      text = read
+        ? (value === "1" ? "既読にしました" : "未読にしました")
+        : (value === "1" ? "ブックマークしました" : "ブックマークを外しました");
+      // 付け外しのボタンは押すと今の逆にするので、もう一度押せば戻る
+      restore = () => form.requestSubmit(form.querySelector("button"));
     }
+    if (!card) return;
+    // 条件に合えば出す（元に戻すの送信中に始まった読み直しが隠していても）。外れたら隠して元に戻すを出す
+    if (matches(card)) setVisibility(card, true);
+    else hideUnmatched(card, text, restore);
   });
   // カードの印のボタンを押す（スワイプ・キーもこの送信を通す）
   const press = (card, selector) => {
@@ -238,9 +261,9 @@
       if (untouched(bookmark)) setToggle(bookmark.querySelector("button"), m.bookmarked);
       if (untouched(marks.querySelector('form[action$="/read"]'))) {
         setRead(marks, m.read);
-        // 詳細を開いて既読になった記事は、戻ったときに隠す
-        setVisibility(card, m.read);
       }
+      // 詳細を開いて既読になった記事や、詳細で評価・ブックマークを外した記事は、戻ったときに隠す
+      setVisibility(card, matches(card));
     }
   };
   addEventListener("pageshow", (e) => {

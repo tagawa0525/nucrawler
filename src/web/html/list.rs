@@ -26,7 +26,8 @@ pub fn hide_read(items: Vec<ListItem>, include_read: bool) -> Vec<ListItem> {
     items.into_iter().filter(|i| !i.is_read()).collect()
 }
 
-/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、過去の既読は `read=1` で持つ。
+/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1` で持つ。
+/// 評価（`rating=N`）・ブックマーク（`bookmarked=1`）で絞るときは、一覧の代わりに該当する記事を出す。
 #[derive(Clone, Copy)]
 pub struct ListView {
     /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）
@@ -35,6 +36,10 @@ pub struct ListView {
     pub default_min: u8,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
+    /// この評価（1〜5）以上の記事に絞る
+    pub rating: Option<u8>,
+    /// ブックマークした記事に絞る
+    pub bookmarked: bool,
 }
 
 impl Default for ListView {
@@ -44,6 +49,8 @@ impl Default for ListView {
             min,
             default_min: min,
             read: false,
+            rating: None,
+            bookmarked: false,
         }
     }
 }
@@ -57,12 +64,21 @@ impl ListView {
         self.min == 0
     }
 
-    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
+    /// 評価・ブックマークで絞っているか。
+    pub fn filtered(self) -> bool {
+        self.rating.is_some() || self.bookmarked
+    }
+
+    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。絞り込みの画面では、最低点と既読は効かないので付けない。
     fn href(self) -> String {
         let min = format!("min={}", self.min);
+        let rating = format!("rating={}", self.rating.unwrap_or_default());
+        let filtered = self.filtered();
         let query: Vec<&str> = [
-            (self.min != self.default_min, min.as_str()),
-            (self.read, "read=1"),
+            (!filtered && self.min != self.default_min, min.as_str()),
+            (!filtered && self.read, "read=1"),
+            (self.rating.is_some(), rating.as_str()),
+            (self.bookmarked, "bookmarked=1"),
         ]
         .into_iter()
         .filter_map(|(on, q)| on.then_some(q))
@@ -80,7 +96,7 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 }
 
 /// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
-/// （JavaScript が無ければ「表示」のボタンで）。過去の既読の表示は引き継ぐ。
+/// （JavaScript が無ければ「表示」のボタンで）。既読の表示は引き継ぐ。
 fn min_select(view: ListView) -> String {
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend([view.default_min, view.min]);
@@ -105,6 +121,97 @@ fn min_select(view: ListView) -> String {
     )
 }
 
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（「👍」は絞らない）。
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。ブックマークの絞り込みは引き継ぐ。
+fn rating_select(view: ListView) -> String {
+    let current = view.rating.map(|r| r.to_string()).unwrap_or_default();
+    let options: String = [
+        ("", "👍"),
+        ("5", "★5"),
+        ("4", "★4↑"),
+        ("3", "★3↑"),
+        ("2", "★2↑"),
+        ("1", "★1↑"),
+    ]
+    .iter()
+    .map(|(v, label)| {
+        let selected = if *v == current { " selected" } else { "" };
+        format!("<option value=\"{v}\"{selected}>{label}</option>")
+    })
+    .collect();
+    let bookmarked = if view.bookmarked {
+        "<input type=\"hidden\" name=\"bookmarked\" value=\"1\">"
+    } else {
+        ""
+    };
+    format!(
+        "<form class=\"stars{}\" method=\"get\" action=\"/\"><select name=\"rating\" aria-label=\"評価で絞る\" \
+         title=\"評価で絞る\" onchange=\"this.form.submit()\">{options}</select>{bookmarked}\
+         <noscript><button>表示</button></noscript></form>",
+        if view.rating.is_some() { " on" } else { "" },
+    )
+}
+
+/// 一覧の上部のバー。絞り込みの画面では、効かない最低点と 👁 を出さない。
+fn bar(view: ListView) -> String {
+    let bookmark_toggle = ListView {
+        bookmarked: !view.bookmarked,
+        ..view
+    };
+    let bookmark = button(
+        &bookmark_toggle.href(),
+        "ブックマークだけ表示",
+        "🔖",
+        Some(view.bookmarked),
+    );
+    let list_controls = if view.filtered() {
+        String::new()
+    } else {
+        let read_toggle = ListView {
+            read: !view.read,
+            ..view
+        };
+        format!(
+            "{}{}",
+            min_select(view),
+            button(&read_toggle.href(), "既読も表示", "👁", Some(view.read))
+        )
+    };
+    format!(
+        "<nav class=\"bar\">{}{}{bookmark}{list_controls}{}</nav>",
+        button("/search", "検索", "🔍", None),
+        rating_select(view),
+        button("/settings", "設定", "⚙️", None),
+    )
+}
+
+/// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
+pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
+    let mut body = bar(view);
+    if items.is_empty() {
+        body.push_str("<p class=\"meta\">該当する記事はありません</p>");
+    } else {
+        // 欄に絞り込みの条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
+        let rating = view
+            .rating
+            .map(|r| format!(" data-min-rating=\"{r}\""))
+            .unwrap_or_default();
+        let bookmarked = if view.bookmarked {
+            " data-bookmarked=\"1\""
+        } else {
+            ""
+        };
+        body.push_str(&format!(
+            "<h2 class=\"count\">{} 件</h2><div class=\"sections\"{rating}{bookmarked}>",
+            items.len()
+        ));
+        body.extend(items.iter().map(|i| card(i, true, page)));
+        body.push_str("</div>");
+    }
+    body.push_str(MARKS_SCRIPT);
+    layout("一覧", page, &body)
+}
+
 /// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）を添える。
 pub fn list_page_with_explore(
     new: &[ListItem],
@@ -113,19 +220,7 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let read_toggle = ListView {
-        read: !view.read,
-        ..view
-    };
-    let mut body = format!(
-        "<nav class=\"bar\">{}{}{}{}{}{}</nav>",
-        button("/search", "検索", "🔍", None),
-        button("/search?min_rating=4", "評価 4 以上", "👍", None),
-        button("/search?bookmarked=1", "ブックマーク", "🔖", None),
-        min_select(view),
-        button(&read_toggle.href(), "既読も表示", "👁", Some(view.read)),
-        button("/settings", "設定", "⚙️", None),
-    );
+    let mut body = bar(view);
     // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
     body.push_str(if view.read {
         "<div class=\"sections\">"
@@ -158,7 +253,8 @@ pub fn list_page_with_explore(
 }
 
 /// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。既読を隠す一覧
-/// （`data-hide-read`）では、既読の印で既読にしたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
+/// （`data-hide-read`）や、評価・ブックマークで絞った画面（`data-min-rating`・`data-bookmarked`）では、印を付け外しして
+/// 欄の条件から外れたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
 /// 左右のスワイプでも印を付けられる（右でブックマーク、左で既読）。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、1〜5 で評価、0 で評価なし、l/→ でブックマーク、h/← で既読。
@@ -353,14 +449,10 @@ mod tests {
     #[test]
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
-        assert!(html.contains(r#"href="/search""#), "{html}");
-        assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
-        // 検索とブックマークの間に、評価 4 以上の記事へのボタンを置く
-        let search = html.find(r#"href="/search""#).unwrap();
-        let liked = html
-            .find(r#"<a class="btn" href="/search?min_rating=4" aria-label="評価 4 以上" title="評価 4 以上">👍</a>"#)
-            .expect(&html);
-        let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
+        // 検索とブックマークの間に、評価で絞る選択を置く
+        let search = html.find(r#"href="/search""#).expect(&html);
+        let liked = html.find(r#"name="rating""#).expect(&html);
+        let bookmarked = html.find(r#"href="/?bookmarked=1""#).expect(&html);
         assert!(search < liked && liked < bookmarked, "{html}");
     }
 
@@ -403,18 +495,17 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"e.key === "u""#), "{html}");
-        // 戻るボタンで戻ったときの読み直しでも、既読になっていたカード（詳細を開いた記事）を隠す。
-        // 元に戻す（未読にする）送信が失敗したら、読み直しの前に隠し直す（読み直しも失敗したときに、
-        // 既読のカードが出たまま残らないように）
-        assert_eq!(
-            html.matches("setVisibility(card, true)").count(),
-            2,
+        // カードは欄の条件（既読を隠す・評価・ブックマーク）に合うかで出し隠しする。印を付け外しした後、
+        // 送信に失敗した後（元に戻すが失敗したら隠し直す）、戻るボタンで戻ったときの読み直しの後のどれでも
+        assert!(
+            html.contains("f.hideRead")
+                && html.contains("f.minRating")
+                && html.contains("f.bookmarked"),
             "{html}"
         );
-        // 元に戻すの送信中に始まった読み直しが隠していても、未読にできたら出し直す
-        assert!(
-            html.contains("setVisibility(card, m.read)")
-                && html.contains("setVisibility(card, false)"),
+        assert_eq!(
+            html.matches("setVisibility(card, matches(card))").count(),
+            3,
             "{html}"
         );
         let shown = ListView {
@@ -519,7 +610,7 @@ mod tests {
         let odd = ListView {
             min: 55,
             default_min: 55,
-            read: false,
+            ..ListView::default()
         };
         let html = list_page(&[], &[], odd, &Page::default());
         let at = |v: &str| html.find(&format!(r#"<option value="{v}""#)).unwrap();
@@ -529,6 +620,110 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains(r#"name="read""#), "{html}");
+    }
+
+    /// 👍 は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
+    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示し、評価の星と同じ色の枠にする。
+    #[test]
+    fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(!html.contains("/search?"), "{html}");
+        assert!(
+            html.contains(
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>👍</option><option value="5">★5</option><option value="4">★4↑</option><option value="3">★3↑</option><option value="2">★2↑</option><option value="1">★1↑</option></select>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+            ),
+            "{html}"
+        );
+    }
+
+    /// 絞り込んだ画面は、上部のバーと該当する記事だけを出す。検索のフォームも、効かない最低点と 👁 も出さない。
+    /// 絞り込みはもう一方の状態を引き継ぎ、👍 を選び直すか 🔖 を外すと一覧に戻る。
+    #[test]
+    fn filtered_page_shows_the_bar_and_the_matches() {
+        let view = ListView {
+            rating: Some(4),
+            ..ListView::default()
+        };
+        let mut rated = item(1, "2026-09-27T05:00:00.000Z");
+        rated.rating = Rating::new(4);
+        let html = filtered_page(&[rated], view, &Page::default());
+        assert!(!html.contains(r#"action="/search""#), "{html}");
+        assert!(
+            !html.contains(r#"name="min""#) && !html.contains("既読も表示"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form class="stars on" method="get" action="/">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="4" selected>★4↑</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?rating=4&amp;bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+            ),
+            "{html}"
+        );
+        // 条件から外れたカードはその場で隠して「元に戻す」を出し、件数も合わせる（`MARKS_SCRIPT`）
+        assert!(
+            html.contains(
+                r#"<h2 class="count">1 件</h2><div class="sections" data-min-rating="4">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("評価を外しました") && html.contains("ブックマークを外しました"),
+            "{html}"
+        );
+        // 一覧と同じく、カードの印をその場で付け外しできる
+        assert!(
+            html.contains(r#"data-id="1""#) && html.contains(MARKS_SCRIPT),
+            "{html}"
+        );
+
+        let view = ListView {
+            rating: Some(4),
+            bookmarked: true,
+            ..ListView::default()
+        };
+        let html = filtered_page(
+            &[item(2, "2026-09-27T05:00:00.000Z")],
+            view,
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-min-rating="4" data-bookmarked="1">"#),
+            "{html}"
+        );
+        let html = filtered_page(&[], view, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="bookmarked" value="1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn on" href="/?rating=4" aria-label="ブックマークだけ表示：ON""#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("該当する記事はありません"), "{html}");
+        let view = ListView {
+            bookmarked: true,
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], view, &Page::default());
+        assert!(
+            html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
+            "{html}"
+        );
     }
 
     #[test]

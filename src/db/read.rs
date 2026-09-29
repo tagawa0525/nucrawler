@@ -50,6 +50,8 @@ pub struct ListQuery<'a> {
     pub since: chrono::DateTime<chrono::Utc>,
     /// 評価 1〜2、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
+    /// 未読の記事だけ（件数の上限より前に既読を除く）
+    pub unread: bool,
     pub limit: usize,
 }
 
@@ -130,6 +132,7 @@ enum ItemScope<'a> {
         since: chrono::DateTime<chrono::Utc>,
         show_all: bool,
         min_score: u8,
+        unread: bool,
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
@@ -365,6 +368,7 @@ impl Db {
                 since: q.since,
                 show_all: q.show_all,
                 min_score: q.min_score,
+                unread: q.unread,
                 limit: q.limit,
             },
         )
@@ -535,6 +539,7 @@ impl Db {
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
             }
+            ItemScope::List { unread: true, .. } => "AND rows.read_at IS NULL",
             _ => "",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
@@ -544,6 +549,7 @@ impl Db {
                 show_all,
                 min_score,
                 limit,
+                ..
             } => (None, Some(since), show_all, min_score, limit, BY_SCORE),
             // 既定の条件（:all = 0 のときの絞り込み）は使わず、list_filter で絞る
             ItemScope::Explore {

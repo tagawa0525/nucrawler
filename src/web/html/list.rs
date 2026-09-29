@@ -2,37 +2,28 @@
 
 use super::*;
 
-/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。後者からは、前回の訪問までに
-/// 既読になった記事を除く（今回の訪問で既読にした記事は残す）。`include_read` なら後者に既読の記事も残す。
-/// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の記事」に分ける。既読の記事は一覧の問い合わせで
+/// 除いておく（`ListQuery::unread`）。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、
+/// すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
     boundary: Option<&str>,
-    include_read: bool,
 ) -> (Vec<ListItem>, Vec<ListItem>) {
     let Some(boundary) = boundary else {
         return (items, Vec::new());
     };
-    let (new, earlier): (Vec<_>, Vec<_>) = items
-        .into_iter()
-        .partition(|i| i.fetched_at.as_str() > boundary);
-    (new, hide_read_before(earlier, Some(boundary), include_read))
-}
-
-/// 前の訪問までに既読になった記事を除く（`include_read` なら除かない）。今回の訪問で既読にした記事は、
-/// 再読み込みしても残す。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、除かない。
-pub fn hide_read_before(
-    items: Vec<ListItem>,
-    boundary: Option<&str>,
-    include_read: bool,
-) -> Vec<ListItem> {
-    let Some(boundary) = boundary.filter(|_| !include_read) else {
-        return items;
-    };
     items
         .into_iter()
-        .filter(|i| i.read_at.as_deref().is_none_or(|at| at > boundary))
-        .collect()
+        .partition(|i| i.fetched_at.as_str() > boundary)
+}
+
+/// 既読の記事を除く（`include_read` なら除かない）。確認枠はその日に選んだ記事を出し直すので、
+/// 選んだ後に既読にした記事をここで除く。
+pub fn hide_read(items: Vec<ListItem>, include_read: bool) -> Vec<ListItem> {
+    if include_read {
+        return items;
+    }
+    items.into_iter().filter(|i| !i.is_read()).collect()
 }
 
 /// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、過去の既読は `read=1` で持つ。
@@ -132,14 +123,15 @@ pub fn list_page_with_explore(
         button("/search?min_rating=4", "評価 4 以上", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
         min_select(view),
-        button(
-            &read_toggle.href(),
-            "過去の既読も表示",
-            "👁",
-            Some(view.read)
-        ),
+        button(&read_toggle.href(), "既読も表示", "👁", Some(view.read)),
         button("/settings", "設定", "⚙️", None),
     );
+    // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
+    body.push_str(if view.read {
+        "<div class=\"sections\">"
+    } else {
+        "<div class=\"sections\" data-hide-read=\"1\">"
+    });
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
@@ -160,11 +152,13 @@ pub fn list_page_with_explore(
         );
         body.extend(explore.iter().map(|i| card(i, true, page)));
     }
+    body.push_str("</div>");
     body.push_str(MARKS_SCRIPT);
     layout("一覧", page, &body)
 }
 
-/// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。カードは消さない。
+/// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。既読を隠す一覧
+/// （`data-hide-read`）では、既読の印で既読にしたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
 /// 左右のスワイプでも印を付けられる（右でブックマーク、左で既読）。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、1〜5 で評価、0 で評価なし、l/→ でブックマーク、h/← で既読。

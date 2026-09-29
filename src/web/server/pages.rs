@@ -3,7 +3,7 @@
 use super::*;
 
 /// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が 0 なら、評価 1〜2・未採点・
-/// 軽水炉と無関係の記事も出す（すべて）。
+/// 軽水炉と無関係の記事も出す（すべて）。既読の記事は出さない（一覧の `read=1` でだけ出す）。
 fn list_query<'a>(
     web: &WebConfig,
     user: i64,
@@ -17,6 +17,7 @@ fn list_query<'a>(
         min_score,
         since: now - Duration::days(web.list_days.into()),
         show_all: min_score == 0,
+        unread: true,
         limit: web.list_limit,
     }
 }
@@ -78,8 +79,12 @@ pub(super) async fn list(
             default_min: web.min_score,
             read: show_read,
         };
-        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
-        let (new, earlier) = html::split_sections(items, boundary.as_deref(), show_read);
+        // 既読は件数の上限より前に除く（上位が既読で埋まっても、下の未読が出るように）
+        let items = db.list_articles(ListQuery {
+            unread: !show_read,
+            ..list_query(&web, user, hash.as_deref(), now, min)
+        })?;
+        let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない
         let explore = if view.shows_all() {
             Vec::new()
@@ -98,8 +103,8 @@ pub(super) async fn list(
                 .into_iter()
                 .filter(|i| !listed.contains(&i.article_id))
                 .collect();
-            // 一覧の過去の欄と同じく、前の訪問までに既読にした記事は出さない
-            html::hide_read_before(picks, boundary.as_deref(), show_read)
+            // 一覧と同じく、既読の記事は出さない
+            html::hide_read(picks, show_read)
         };
         let warnings = warnings(db)?;
         let page = Page {

@@ -1,16 +1,25 @@
 (() => {
-  // 失敗だけを知らせる（成功はボタンの状態で分かる）。スクリーンリーダーにも伝える
+  // 失敗と、カードを隠したことを知らせる（ほかの成功はボタンの状態で分かる）。スクリーンリーダーにも伝える
   const toast = document.createElement("div");
   toast.className = "toast";
   toast.setAttribute("role", "status");
   toast.hidden = true;
   document.body.append(toast);
-  let timer;
-  const notify = (text) => {
+  let timer, undoLast = null;
+  const hideToast = () => { toast.hidden = true; undoLast = null; };
+  // `undo` があれば「元に戻す」を添える（u キーでも戻す）
+  const notify = (text, undo) => {
     clearTimeout(timer);
     toast.textContent = text;
+    undoLast = undo || null;
+    if (undo) {
+      const button = document.createElement("button");
+      button.textContent = "元に戻す";
+      button.onclick = () => { hideToast(); undo(); };
+      toast.append(button);
+    }
     toast.hidden = false;
-    timer = setTimeout(() => { toast.hidden = true; }, 6000);
+    timer = setTimeout(hideToast, 6000);
   };
   const setToggle = (button, on) => {
     button.classList.toggle("on", on);
@@ -35,6 +44,38 @@
     if (button) setToggle(button, on);
     const card = marks.closest(".card");
     if (card) card.classList.toggle("read", on);
+  };
+  const shownCards = () => [...document.querySelectorAll(".card[data-id]")].filter((c) => !c.hidden);
+  // 既読を隠す一覧（data-hide-read）のカードを、既読なら隠し、未読なら出す。隠したカードを
+  // 選んでいたなら隣を選び、隠したかどうかを返す
+  const setVisibility = (card, read) => {
+    if (!card.closest("[data-hide-read]")) return false;
+    if (!read) {
+      card.hidden = false;
+      return false;
+    }
+    if (card.hidden) return false;
+    if (card.contains(document.activeElement)) {
+      const cards = shownCards();
+      const at = cards.indexOf(card);
+      const next = cards[at + 1] || cards[at - 1];
+      if (next) next.focus();
+    }
+    card.hidden = true;
+    return true;
+  };
+  // 既読の印で既読にしたカードを隠し、しばらく「元に戻す」を出す
+  const hideRead = (marks) => {
+    const card = marks.closest(".card[data-id]");
+    if (!card) return;
+    const focused = card.contains(document.activeElement);
+    if (!setVisibility(card, true)) return;
+    notify("既読にしました", () => {
+      card.hidden = false;
+      if (focused) card.focus();
+      const button = card.querySelector(READ);
+      if (button) button.form.requestSubmit(button);
+    });
   };
   // 送っている間は同じ印を送り直さない（押した結果が前後する）
   const busy = new WeakSet();
@@ -66,6 +107,13 @@
       setStars(form, value === "" ? 0 : Number(value));
     } else if (form.action.endsWith("/read")) {
       setRead(marks, value === "1");
+      if (value === "1") {
+        hideRead(marks);
+      } else {
+        // 元に戻すの送信中に始まった読み直しが、古い既読の状態でカードを隠していても出し直す
+        const card = marks.closest(".card[data-id]");
+        if (card) setVisibility(card, false);
+      }
     } else {
       setToggle(e.submitter, value === "1");
     }
@@ -81,12 +129,18 @@
   const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
   document.addEventListener("keydown", (e) => {
     if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
-    const cards = [...document.querySelectorAll(".card[data-id]")];
+    const cards = shownCards();
     const current = e.target.closest(".card[data-id]");
     const at = cards.indexOf(current);
     if (e.key in MOVE_KEYS) {
       const next = cards[at < 0 ? 0 : Math.min(Math.max(at + MOVE_KEYS[e.key], 0), cards.length - 1)];
       if (next) { e.preventDefault(); next.focus(); }
+    } else if (e.key === "u" && undoLast) {
+      // 隠したカードを戻す（カードを選んでいなくても効く）
+      e.preventDefault();
+      const undo = undoLast;
+      hideToast();
+      undo();
     } else if (!current) {
       return;
     } else if (e.key in MARK_KEYS) {
@@ -127,7 +181,7 @@
       card.style.transform = `translateX(${dx}px)`;
       card.dataset.dir = dx > 0 ? "bookmark" : "read";
     });
-    // 離したら元の位置に戻し、十分に動かしていれば印を切り替える（カードは消さない）
+    // 離したら元の位置に戻し、十分に動かしていれば印を切り替える
     const end = (commit) => {
       const was = dragging;
       x0 = null; dragging = false;
@@ -177,7 +231,11 @@
       if (untouched(rating)) setStars(rating, m.rating ?? 0);
       const bookmark = marks.querySelector('form[action$="/bookmark"]');
       if (untouched(bookmark)) setToggle(bookmark.querySelector("button"), m.bookmarked);
-      if (untouched(marks.querySelector('form[action$="/read"]'))) setRead(marks, m.read);
+      if (untouched(marks.querySelector('form[action$="/read"]'))) {
+        setRead(marks, m.read);
+        // 詳細を開いて既読になった記事は、戻ったときに隠す
+        setVisibility(card, m.read);
+      }
     }
   };
   addEventListener("pageshow", (e) => {

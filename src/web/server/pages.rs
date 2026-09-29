@@ -54,8 +54,13 @@ pub(super) struct ListParams {
 
 impl ListParams {
     pub(super) fn min(&self, web: &WebConfig) -> Result<u8, AppError> {
+        self.min_or(web.min_score)
+    }
+
+    /// 表示する最低点。無ければ `default`。
+    fn min_or(&self, default: u8) -> Result<u8, AppError> {
         match self.min.as_deref() {
-            None => Ok(web.min_score),
+            None => Ok(default),
             Some(v) => v
                 .parse()
                 .ok()
@@ -70,9 +75,10 @@ impl ListParams {
             Some(v) => v
                 .parse()
                 .ok()
-                .filter(|r| (1..=5).contains(r))
+                // 0 は評価の無い記事だけ
+                .filter(|r| (0..=5).contains(r))
                 .map(Some)
-                .ok_or(AppError::BadRequest("rating must be 1..=5")),
+                .ok_or(AppError::BadRequest("rating must be 0..=5")),
         }
     }
 }
@@ -82,14 +88,16 @@ pub(super) async fn list(
     Query(params): Query<ListParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
-    let min = params.min(&state.web)?;
     let rating = params.rating()?;
     let bookmarked = params.bookmarked.as_deref() == Some("1");
+    let filtering = rating.is_some() || bookmarked;
+    // 最低点の既定は、一覧では設定の最低点、絞り込みでは 0（点数で絞らない）
+    let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
     // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す
     let show_read = match params.read.as_deref() {
         Some("1") => true,
         Some("0") => false,
-        _ => rating.is_some() || bookmarked,
+        _ => filtering,
     };
     let view = html::ListView {
         min,
@@ -98,8 +106,8 @@ pub(super) async fn list(
         rating,
         bookmarked,
     };
-    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。選択のフォームは
-    // 値を選べないので、👍 を「👍」に戻すと `rating=` や絞り込みの `read=0` が残る
+    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。JavaScript が無いときの
+    // 選択のフォームは、評価の「-」で `rating=` や、絞り込みを外したときの `read=0` を残す
     let canonical = view.url();
     let requested = match raw.as_deref() {
         None | Some("") => "/".to_string(),
@@ -169,9 +177,19 @@ fn filtered(
     view: html::ListView,
 ) -> Result<String, AppError> {
     let params = Params {
-        min_rating: view.rating.map(|r| r.to_string()).unwrap_or_default(),
+        min_rating: view
+            .rating
+            .filter(|r| *r > 0)
+            .map(|r| r.to_string())
+            .unwrap_or_default(),
+        unrated: view.rating == Some(0),
         bookmarked: view.bookmarked,
         unread: !view.read,
+        min_score: if view.min > 0 {
+            view.min.to_string()
+        } else {
+            String::new()
+        },
         ..Params::default()
     };
     let query = params
@@ -919,11 +937,12 @@ mod tests {
             server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             0
         );
-        // 👍 を選び直す（空）と一覧に戻る
+        // 評価の「-」（空）を選ぶと一覧に戻る
         let res = server.get_raw("/?rating=").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");
-        for bad in ["0", "6", "x"] {
+        // 0 は評価の無い記事だけなので誤りではない
+        for bad in ["-1", "6", "x"] {
             let (status, _) = server.get(&format!("/?rating={bad}")).await;
             assert_eq!(status, 400, "{bad}");
         }

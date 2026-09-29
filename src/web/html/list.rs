@@ -37,7 +37,7 @@ pub struct ListView {
     pub default_min: u8,
     /// 既読の記事も出す（一覧の既定は出さない、絞り込みの既定は出す）
     pub read: bool,
-    /// この評価（1〜5）以上の記事に絞る
+    /// この評価（1〜5）以上の記事に絞る。0 なら評価の無い記事だけ
     pub rating: Option<u8>,
     /// ブックマークした記事に絞る
     pub bookmarked: bool,
@@ -70,7 +70,12 @@ impl ListView {
         self.rating.is_some() || self.bookmarked
     }
 
-    /// 絞り込みを変えた表示。一覧と絞り込みを行き来するときは、既読の表示を行き先の既定に戻す。
+    /// この表示での最低点の既定。一覧は設定の最低点、絞り込みは 0（点数で絞らない）。
+    fn min_default(self) -> u8 {
+        if self.filtered() { 0 } else { self.default_min }
+    }
+
+    /// 絞り込みを変えた表示。一覧と絞り込みを行き来するときは、既読の表示と最低点を行き先の既定に戻す。
     fn with_filters(self, rating: Option<u8>, bookmarked: bool) -> Self {
         let mut next = Self {
             rating,
@@ -79,6 +84,7 @@ impl ListView {
         };
         if next.filtered() != self.filtered() {
             next.read = next.filtered();
+            next.min = next.min_default();
         }
         next
     }
@@ -88,14 +94,14 @@ impl ListView {
         escape(&self.url())
     }
 
-    /// この表示の一覧の正規の URL。既定と同じ値は付けない（既読の表示は既定と違うときだけ）。
-    /// 絞り込みの画面では、最低点は効かないので付けない。
+    /// この表示の一覧の正規の URL。既定と同じ値は付けない（最低点・既読の表示は、この表示での既定と
+    /// 違うときだけ）。
     pub fn url(self) -> String {
         let min = format!("min={}", self.min);
         let rating = format!("rating={}", self.rating.unwrap_or_default());
         let filtered = self.filtered();
         let query: Vec<&str> = [
-            (!filtered && self.min != self.default_min, min.as_str()),
+            (self.min != self.min_default(), min.as_str()),
             (!filtered && self.read, "read=1"),
             (self.rating.is_some(), rating.as_str()),
             (filtered && !self.read, "read=0"),
@@ -116,73 +122,101 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
     list_page_with_explore(new, earlier, &[], view, page)
 }
 
-/// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
-/// （JavaScript が無ければ「表示」のボタンで）。既読の表示は引き継ぐ。
-fn min_select(view: ListView) -> String {
-    let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
-    values.extend([view.default_min, view.min]);
-    values.sort_unstable();
-    values.dedup();
-    let options: String = values
-        .iter()
-        .map(|v| {
-            let selected = if *v == view.min { " selected" } else { "" };
-            // 桁をそろえる（0 は 00）
-            format!("<option value=\"{v}\"{selected}>{v:02}</option>")
-        })
-        .collect();
-    let read = if view.read {
-        "<input type=\"hidden\" name=\"read\" value=\"1\">"
-    } else {
-        ""
-    };
+/// 選択を選んだときに移る先。選択肢ごとに、その表示の正規の URL を `data-href` に持たせる
+/// （一覧と絞り込みを行き来するときに、既読の表示と最低点を行き先の既定に戻すため）。
+const JUMP: &str = "location.href=this.selectedOptions[0].dataset.href";
+
+/// JavaScript が無いときに選択と一緒に送る、今の表示のほかの条件（正規の URL の `except` 以外）。
+fn state_inputs(view: ListView, except: &str) -> String {
+    let url = view.url();
+    url.split_once('?')
+        .map_or("", |(_, query)| query)
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .filter(|(key, _)| *key != except)
+        .map(|(key, value)| format!("<input type=\"hidden\" name=\"{key}\" value=\"{value}\">"))
+        .collect()
+}
+
+/// 選択肢。今の選択なら `selected`。
+fn option(value: &str, target: ListView, selected: bool, label: &str) -> String {
     format!(
-        "<form class=\"min\" method=\"get\" action=\"/\"><select name=\"min\" aria-label=\"表示する最低点\" \
-         title=\"表示する最低点\" onchange=\"this.form.submit()\">{options}</select>{read}\
-         <noscript><button>表示</button></noscript></form>"
+        "<option value=\"{value}\" data-href=\"{}\"{}>{label}</option>",
+        target.href(),
+        if selected { " selected" } else { "" },
     )
 }
 
-/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（白抜きの「☆」は絞らない）。
-/// 最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。
-/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。ブックマークの絞り込みと、
-/// 絞り込みで既読を隠していること（`read=0`）は引き継ぐ。
+/// 表示する最低点の選択。「-」（0。点数で絞らない、すべて）と、10〜90 の 10 刻みと既定・今の最低点から選び、
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。「-」以外のあいだは緑にする。
+fn min_select(view: ListView) -> String {
+    let mut values: Vec<u8> = (MIN_STEP..100).step_by(MIN_STEP.into()).collect();
+    values.extend([view.default_min, view.min]);
+    values.retain(|v| *v != 0);
+    values.sort_unstable();
+    values.dedup();
+    let options: String = std::iter::once(0)
+        .chain(values)
+        .map(|v| {
+            // 桁をそろえる（1 桁は 0 を付ける）
+            let label = if v == 0 {
+                "-".to_string()
+            } else {
+                format!("{v:02}")
+            };
+            option(
+                &v.to_string(),
+                ListView { min: v, ..view },
+                v == view.min,
+                &label,
+            )
+        })
+        .collect();
+    format!(
+        "<form class=\"min{}\" method=\"get\" action=\"/\"><select name=\"min\" aria-label=\"表示する最低点\" \
+         title=\"表示する最低点\" onchange=\"{JUMP}\">{options}</select>{}\
+         <noscript><button>表示</button></noscript></form>",
+        if view.min == 0 { "" } else { " on" },
+        state_inputs(view, "min"),
+    )
+}
+
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」は絞らない、白抜きの「☆」は評価の無い記事だけ。
+/// 最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。「-」以外のあいだは緑にする。
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、絞り込みの中ならほかの条件も引き継ぐ）。
 fn rating_select(view: ListView) -> String {
-    let current = view.rating.map(|r| r.to_string()).unwrap_or_default();
-    let options: String = [
-        ("", "☆"),
-        ("1", "★1"),
-        ("2", "★2"),
-        ("3", "★3"),
-        ("4", "★4"),
-        ("5", "★5"),
-    ]
-    .iter()
-    .map(|(v, label)| {
-        let selected = if *v == current { " selected" } else { "" };
-        format!("<option value=\"{v}\"{selected}>{label}</option>")
-    })
-    .collect();
-    let bookmarked = if view.bookmarked {
-        "<input type=\"hidden\" name=\"bookmarked\" value=\"1\">"
+    let choices = [
+        (None, "-"),
+        (Some(0), "☆"),
+        (Some(1), "★1"),
+        (Some(2), "★2"),
+        (Some(3), "★3"),
+        (Some(4), "★4"),
+        (Some(5), "★5"),
+    ];
+    let options: String = choices
+        .iter()
+        .map(|(rating, label)| {
+            let value = rating.map(|r| r.to_string()).unwrap_or_default();
+            let target = view.with_filters(*rating, view.bookmarked);
+            option(&value, target, *rating == view.rating, label)
+        })
+        .collect();
+    // 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
+    let inputs = if view.filtered() {
+        state_inputs(view, "rating")
     } else {
-        ""
-    };
-    let read = if view.filtered() && !view.read {
-        "<input type=\"hidden\" name=\"read\" value=\"0\">"
-    } else {
-        ""
+        String::new()
     };
     format!(
         "<form class=\"stars{}\" method=\"get\" action=\"/\"><select name=\"rating\" aria-label=\"評価で絞る\" \
-         title=\"評価で絞る\" onchange=\"this.form.submit()\">{options}</select>{bookmarked}{read}\
+         title=\"評価で絞る\" onchange=\"{JUMP}\">{options}</select>{inputs}\
          <noscript><button>表示</button></noscript></form>",
         if view.rating.is_some() { " on" } else { "" },
     )
 }
 
 /// 一覧の上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
-/// 絞り込みの画面では、効かない最低点を出さない。
 fn bar(view: ListView) -> String {
     let bookmark = button(
         &view.with_filters(view.rating, !view.bookmarked).href(),
@@ -190,11 +224,7 @@ fn bar(view: ListView) -> String {
         "🔖",
         Some(view.bookmarked),
     );
-    let min = if view.filtered() {
-        String::new()
-    } else {
-        min_select(view)
-    };
+    let min = min_select(view);
     let read_toggle = ListView {
         read: !view.read,
         ..view
@@ -220,10 +250,11 @@ pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String 
         } else {
             " data-hide-read=\"1\""
         };
-        let rating = view
-            .rating
-            .map(|r| format!(" data-min-rating=\"{r}\""))
-            .unwrap_or_default();
+        let rating = match view.rating {
+            None => String::new(),
+            Some(0) => " data-unrated=\"1\"".to_string(),
+            Some(r) => format!(" data-min-rating=\"{r}\""),
+        };
         let bookmarked = if view.bookmarked {
             " data-bookmarked=\"1\""
         } else {

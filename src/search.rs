@@ -303,6 +303,12 @@ mod tests {
         // 評価の無い記事だけ
         assert!(Params::from_query("unrated=1").unrated);
         assert!(!Params::from_query("unrated=1").is_empty());
+        // 既読・ブックマークは、あり（1）となし（0）の両方で絞れる。unread=1 は read=0 と同じ
+        assert_eq!(Params::from_query("read=1").read, Some(true));
+        assert_eq!(Params::from_query("read=0").read, Some(false));
+        assert_eq!(Params::from_query("unread=1").read, Some(false));
+        assert_eq!(Params::from_query("bookmarked=0").bookmarked, Some(false));
+        assert!(!Params::from_query("bookmarked=0").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -315,14 +321,15 @@ mod tests {
         let p = Params {
             q: "炉心 NRC".into(),
             topics: vec!["燃料".into(), "PWR".into()],
-            unread: true,
+            read: Some(false),
+            bookmarked: Some(false),
             min_rating: "4".into(),
             min_score: "60".into(),
             ..Params::default()
         };
         assert_eq!(
             p.query_string(),
-            "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&unread=1&min_rating=4&min_score=60"
+            "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&read=0&bookmarked=0&min_rating=4&min_score=60"
         );
         assert_eq!(Params::from_query(&p.query_string()), p);
         assert_eq!(Params::default().query_string(), "");
@@ -338,8 +345,8 @@ mod tests {
             sources: vec!["nra".into()],
             lang: "en".into(),
             translated: true,
-            unread: true,
-            bookmarked: true,
+            read: Some(false),
+            bookmarked: Some(true),
             unrated: false,
             min_rating: "4".into(),
             min_score: "60".into(),
@@ -353,7 +360,8 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.unread && q.bookmarked && !q.unrated);
+        assert!(q.translated && !q.unrated);
+        assert_eq!((q.read, q.bookmarked), (Some(false), Some(true)));
         let unrated = Params {
             unrated: true,
             ..Params::default()

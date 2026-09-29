@@ -894,9 +894,9 @@ mod tests {
         );
         db.set_read(owner, read, true, t("2026-09-27T00:00:00Z"))
             .unwrap();
-        let q = |unread| ListQuery {
+        let q = |unread: bool| ListQuery {
             limit: 1,
-            unread,
+            read: unread.then_some(false),
             ..list_query(&db, false)
         };
         let ids = |q| {
@@ -908,6 +908,17 @@ mod tests {
         };
         assert_eq!(ids(q(false)), [read]);
         assert_eq!(ids(q(true)), [unread]);
+        // 既読だけ・ブックマークの有無でも、上限より前に絞る
+        let only = |read: Option<bool>, bookmarked: Option<bool>| ListQuery {
+            read,
+            bookmarked,
+            ..list_query(&db, false)
+        };
+        assert_eq!(ids(only(Some(true), None)), [read]);
+        db.set_bookmark(owner, unread, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(ids(only(None, Some(true))), [unread]);
+        assert_eq!(ids(only(None, Some(false))), [read]);
     }
     #[test]
     fn list_marks_read_translation_and_locks() {
@@ -1214,11 +1225,19 @@ mod tests {
         );
         assert_eq!(
             with(SearchQuery {
-                unread: true,
+                read: Some(false),
                 ..search_query(&db)
             }),
             // 評価しただけの記事は未読
             [unscored, disliked, liked, translated]
+        );
+        // 既読だけ
+        assert_eq!(
+            with(SearchQuery {
+                read: Some(true),
+                ..search_query(&db)
+            }),
+            [read]
         );
         assert_eq!(
             with(SearchQuery {

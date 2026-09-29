@@ -867,8 +867,8 @@ mod tests {
                     sources: vec!["nra".into()],
                     lang: "ja".into(),
                     translated: true,
-                    unread: true,
-                    bookmarked: true,
+                    read: Some(false),
+                    bookmarked: Some(true),
                     unrated: true,
                     min_rating: "4".into(),
                     min_score: "60".into(),
@@ -877,6 +877,11 @@ mod tests {
                 limit: Some(5),
             }
         );
+        // 既読だけ・ブックマークしていない記事だけ
+        let p = parse_search_args(&["--read".to_string(), "--unbookmarked".to_string()])
+            .unwrap()
+            .params;
+        assert_eq!((p.read, p.bookmarked), (Some(true), Some(false)));
         assert_eq!(
             parse_search_args(&[]).unwrap(),
             SearchArgs {

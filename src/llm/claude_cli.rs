@@ -18,22 +18,36 @@ pub struct ClaudeCli {
     /// 子プロセスの作業ディレクトリ（無ければ作る）
     pub cwd: PathBuf,
     pub timeout: Duration,
+    /// 呼び出しの枠（`llm-slot-N.lock`）を置くディレクトリ。同じディレクトリを使う実行の間で、
+    /// 同時に動く claude の数を `concurrency` までにする
+    pub slots: PathBuf,
+    pub concurrency: usize,
 }
 
 impl ClaudeCli {
-    /// 設定のコマンドとタイムアウトで、`cwd` を作業ディレクトリにして呼ぶ。
-    pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf) -> Self {
+    /// 設定のコマンド・タイムアウト・同時に動かす数で、`cwd` を作業ディレクトリにして呼ぶ。
+    pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf, slots: PathBuf) -> Self {
         Self {
             command: c.command.clone().into(),
             cwd,
             timeout: Duration::from_secs(c.timeout_secs),
+            slots,
+            concurrency: c.concurrency,
         }
     }
 }
 
 impl Llm for ClaudeCli {
+    type Slot = crate::pipeline::lock::Slot;
+
     fn backend(&self) -> &'static str {
         "claude-cli"
+    }
+
+    async fn reserve(&self) -> Result<Self::Slot, LlmError> {
+        crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
+            .await
+            .map_err(LlmError::Slot)
     }
 
     async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
@@ -326,6 +340,8 @@ mod tests {
             command: script,
             cwd: cwd.clone(),
             timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({"type": "object"});
         let resp = cli.call(request(&schema)).await.unwrap();
@@ -379,6 +395,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let resp = cli.call(request(&schema)).await.unwrap();
@@ -393,6 +411,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let err = cli.call(request(&schema)).await.unwrap_err();
@@ -411,6 +431,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         // パイプのバッファより大きいので、書き込みの途中で子プロセスが終わる
@@ -436,6 +458,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_millis(300),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let started = std::time::Instant::now();
@@ -457,6 +481,8 @@ mod tests {
                 command: script,
                 cwd: dir.join("cwd"),
                 timeout: Duration::from_secs(10),
+                slots: dir.clone(),
+                concurrency: 1,
             };
             let schema = serde_json::json!({});
             let err = cli.call(request(&schema)).await.unwrap_err();
@@ -473,9 +499,47 @@ mod tests {
             command: "/nonexistent/claude".into(),
             cwd: std::env::temp_dir(),
             timeout: Duration::from_secs(1),
+            slots: std::env::temp_dir(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let err = cli.call(request(&schema)).await.unwrap_err();
         assert!(matches!(err, LlmError::Spawn { .. }), "{err}");
+    }
+
+    /// 呼び出しの枠は、空くまで待って取る（枠はプロセスをまたいで数える）。
+    #[tokio::test]
+    async fn reserve_waits_for_a_free_call_slot() {
+        let (script, dir) = fake_claude(
+            "cli-slot",
+            &format!(
+                "cat >/dev/null\necho '{}'",
+                result_line(false, "success", "")
+            ),
+        );
+        let slots = dir.join("slots");
+        std::fs::create_dir_all(&slots).unwrap();
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+            slots: slots.clone(),
+            concurrency: 1,
+        };
+        let held = crate::pipeline::lock::acquire_slot(&slots, 1)
+            .await
+            .unwrap();
+        let reserve = cli.reserve();
+        tokio::pin!(reserve);
+        let short = Duration::from_millis(300);
+        assert!(
+            tokio::time::timeout(short, &mut reserve).await.is_err(),
+            "must wait"
+        );
+        drop(held);
+        let slot = tokio::time::timeout(Duration::from_secs(10), reserve)
+            .await
+            .expect("takes the slot once it is free");
+        assert!(slot.is_ok(), "{slot:?}");
     }
 }

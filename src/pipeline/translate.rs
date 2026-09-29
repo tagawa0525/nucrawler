@@ -4,7 +4,9 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, record_failures};
+use super::llm_call::{
+    Call, LlmStage, Outcome, Reserved, call_recorded, claim_ttl, permit, record_failures, reserve,
+};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
@@ -88,7 +90,19 @@ pub async fn translate_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+        let _slot = match reserve(llm, cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
+            Reserved::Failed(message) => {
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
+        if let Err(stop) = permit(db, quota, clock(), 0)? {
             tracing::info!("translate stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

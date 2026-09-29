@@ -33,6 +33,30 @@ pub struct RateLimit {
     pub seven_day: Option<Window>,
 }
 
+impl RateLimit {
+    /// 2 つの観測を合わせる。並行した呼び出しの結果は順が前後するので、枠ごとに、リセット時刻が
+    /// 新しい方を使い、同じ枠なら使用率の高い方を使う（同じ枠の中で使用率は下がらない）。
+    /// どちらかに無い枠は、ある方を使う。順によらず同じ結果になる。
+    pub fn merge(self, other: RateLimit) -> RateLimit {
+        RateLimit {
+            five_hour: Window::merge(self.five_hour, other.five_hour),
+            seven_day: Window::merge(self.seven_day, other.seven_day),
+        }
+    }
+}
+
+impl Window {
+    fn merge(a: Option<Window>, b: Option<Window>) -> Option<Window> {
+        match (a, b) {
+            (Some(a), Some(b)) if a.resets_at != b.resets_at => {
+                Some(if a.resets_at > b.resets_at { a } else { b })
+            }
+            (Some(a), Some(b)) => Some(if a.utilization >= b.utilization { a } else { b }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("failed to run {command}")]
@@ -42,6 +66,8 @@ pub enum LlmError {
     },
     #[error("failed to talk to the llm process")]
     Io(#[source] std::io::Error),
+    #[error("failed to take a call slot")]
+    Slot(#[source] crate::pipeline::lock::LockError),
     #[error("llm call timed out after {secs}s")]
     Timeout { secs: u64 },
     #[error("llm process exited with {status}: {stderr}")]
@@ -67,8 +93,15 @@ pub enum LlmError {
 
 /// LLM のバックエンド。
 pub trait Llm {
+    /// 呼び出しの枠。持っている間だけ呼び出してよい（drop すると空く）
+    type Slot;
+
     /// `llm_calls` などに記録する名前（例 "claude-cli"）
     fn backend(&self) -> &'static str;
+
+    /// 呼び出しの枠を取る。埋まっていれば空くまで待つ。枠はクォータの判定と作業の予約の前に取り、
+    /// 呼び出しを終えるまで持つ（枠を待つ間に使用率が上がっても、判定し直してから呼ぶように）。
+    fn reserve(&self) -> impl std::future::Future<Output = Result<Self::Slot, LlmError>>;
 
     fn call(
         &self,
@@ -101,6 +134,8 @@ pub mod fake {
         responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
         requests: Mutex<Vec<Recorded>>,
         hook: Mutex<Option<Hook>>,
+        reserve_hook: Mutex<Option<Hook>>,
+        reserved: Mutex<usize>,
     }
 
     impl FakeLlm {
@@ -109,6 +144,8 @@ pub mod fake {
                 responses: Mutex::new(responses.into_iter().collect()),
                 requests: Mutex::default(),
                 hook: Mutex::default(),
+                reserve_hook: Mutex::default(),
+                reserved: Mutex::default(),
             }
         }
 
@@ -122,14 +159,40 @@ pub mod fake {
             }
         }
 
+        /// 呼び出しの枠を取るたびに、何回目か（0 から）を渡して `hook` を実行する。枠を待つ間に
+        /// ほかの実行が DB を書き換える状況を作るのに使う。
+        pub fn with_reserve_hook(
+            responses: impl IntoIterator<Item = Result<LlmResponse, LlmError>>,
+            hook: impl FnMut(usize) + Send + 'static,
+        ) -> Self {
+            Self {
+                reserve_hook: Mutex::new(Some(Box::new(hook))),
+                ..Self::new(responses)
+            }
+        }
+
         pub fn requests(&self) -> Vec<Recorded> {
             self.requests.lock().unwrap().clone()
         }
     }
 
     impl Llm for FakeLlm {
+        type Slot = ();
+
         fn backend(&self) -> &'static str {
             "fake"
+        }
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            let n = {
+                let mut reserved = self.reserved.lock().unwrap();
+                *reserved += 1;
+                *reserved - 1
+            };
+            if let Some(hook) = self.reserve_hook.lock().unwrap().as_mut() {
+                hook(n);
+            }
+            Ok(())
         }
 
         async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {

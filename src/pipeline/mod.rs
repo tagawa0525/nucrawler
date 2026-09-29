@@ -129,9 +129,8 @@ impl Stage {
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy => {
-                LockKind::Llm
-            }
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title => LockKind::Llm,
+            Stage::Tidy => LockKind::Tidy,
         }
     }
 }
@@ -230,14 +229,9 @@ mod tests {
                 (LockKind::Fetch, vec![Stage::Fetch, Stage::Extract]),
                 (
                     LockKind::Llm,
-                    vec![
-                        Stage::Digest,
-                        Stage::Score,
-                        Stage::Translate,
-                        Stage::Title,
-                        Stage::Tidy
-                    ]
+                    vec![Stage::Digest, Stage::Score, Stage::Translate, Stage::Title]
                 ),
+                (LockKind::Tidy, vec![Stage::Tidy]),
             ]
         );
         assert_eq!(

@@ -69,6 +69,8 @@ pub struct LlmConfig {
     pub title_model: String,
     /// 1 回の呼び出しで和訳する見出しの数
     pub title_batch_size: usize,
+    /// 同時に動かす claude の数の上限（プロセスをまたいで数える）
+    pub concurrency: usize,
 }
 
 impl LlmConfig {
@@ -85,6 +87,7 @@ impl LlmConfig {
             ("timeout_secs", self.timeout_secs == 0),
             ("tidy_interval_days", self.tidy_interval_days == 0),
             ("title_batch_size", self.title_batch_size == 0),
+            ("concurrency", self.concurrency == 0),
         ] {
             if is_zero {
                 return Err(format!("llm.{name} must be at least 1"));
@@ -118,6 +121,7 @@ impl Default for LlmConfig {
             tidy_interval_days: 7,
             title_model: "sonnet".into(),
             title_batch_size: 30,
+            concurrency: 2,
         }
     }
 }
@@ -532,6 +536,7 @@ mod tests {
             ("[llm]\ntranslate_min_score = 0\n", "translate_min_score"),
             ("[llm]\ntidy_interval_days = 0\n", "tidy_interval_days"),
             ("[llm]\ntitle_batch_size = 0\n", "title_batch_size"),
+            ("[llm]\nconcurrency = 0\n", "concurrency"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
             assert!(
@@ -558,6 +563,7 @@ mod tests {
         assert_eq!(d.tidy_model, "sonnet");
         assert_eq!(d.tidy_interval_days, 7);
         assert_eq!((d.title_model.as_str(), d.title_batch_size), ("sonnet", 30));
+        assert_eq!(d.concurrency, 2);
     }
 
     #[test]

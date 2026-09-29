@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, Outcome, Reserved, call_recorded, permit, reserve};
 use crate::config::LlmConfig;
 use crate::db::{DbError, Evidence};
 use crate::llm::{Llm, LlmRequest};
@@ -38,7 +38,7 @@ pub async fn suggest_profile<L: Llm>(
         llm,
         quota,
         cancel,
-        ..
+        clock,
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,
@@ -46,7 +46,19 @@ pub async fn suggest_profile<L: Llm>(
     now: DateTime<Utc>,
 ) -> Result<SuggestSummary, SuggestStageError> {
     let mut summary = SuggestSummary::default();
-    if let Err(stop) = quota.permit(now) {
+    // 呼び出しの枠を先に取り、判定と呼び出しをその中で行う
+    let _slot = match reserve(llm, cancel).await {
+        Reserved::Slot(slot) => slot,
+        Reserved::Cancelled => {
+            summary.cancelled = true;
+            return Ok(summary);
+        }
+        Reserved::Failed(message) => {
+            summary.halted = Some(Halt::LlmFailed(message));
+            return Ok(summary);
+        }
+    };
+    if let Err(stop) = permit(db, quota, clock(), 0)? {
         tracing::info!("suggest stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

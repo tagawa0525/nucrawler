@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+    Call, LlmStage, MISSING, Outcome, Reserved, call_recorded, claim_ttl, held_missing, permit,
+    record_failures, reserve,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -75,7 +76,19 @@ pub async fn digest_articles<L: Llm>(
             break;
         }
         // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-        if let Err(stop) = quota.permit_reserving(now, llm_cfg.score_reserved_calls) {
+        // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+        let _slot = match reserve(llm, cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                summary.cancelled = true;
+                break;
+            }
+            Reserved::Failed(message) => {
+                summary.halted = Some(Halt::LlmFailed(message));
+                break;
+            }
+        };
+        if let Err(stop) = permit(db, quota, clock(), llm_cfg.score_reserved_calls)? {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;
@@ -607,7 +620,7 @@ mod tests {
         );
         // 拒否されたときの使用率も記録し、次回の判定に使えるようにする
         assert_eq!(
-            db.latest_rate_limit()
+            db.latest_rate_limit(now())
                 .unwrap()
                 .and_then(|r| r.five_hour)
                 .map(|w| w.utilization),
@@ -788,6 +801,12 @@ mod tests {
     struct Hanging;
 
     impl Llm for Hanging {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -801,6 +820,12 @@ mod tests {
     struct KilledWithCancel(Cancel);
 
     impl Llm for KilledWithCancel {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -892,6 +917,12 @@ mod tests {
     struct AnswerWithCancel(Cancel);
 
     impl Llm for AnswerWithCancel {
+        type Slot = ();
+
+        async fn reserve(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+
         fn backend(&self) -> &'static str {
             "fake"
         }
@@ -1155,5 +1186,104 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// ほかの実行の呼び出しで使用率が上限を超えたら、次のバッチの前に止まる（使用率は判定の
+    /// たびに DB から読む）。
+    #[tokio::test]
+    async fn stops_when_another_run_used_up_the_quota() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-other-usage",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 4);
+        let resets_at = now().timestamp() + 3600;
+        let llm = FakeLlm::with_hook(
+            [Ok(LlmResponse {
+                output: serde_json::json!({"items": ids[..2].iter().map(|&id| item(id)).collect::<Vec<_>>()}),
+                rate_limit: None,
+            })],
+            move |_| {
+                let other = Db::open(&path).unwrap();
+                other
+                    .record_llm_call(
+                        &crate::db::LlmCall {
+                            stage: "translate",
+                            backend: "claude-cli",
+                            model: "sonnet",
+                            n_items: 1,
+                            ok: true,
+                            duration_ms: 1,
+                            error: None,
+                            rate_limit: Some(&RateLimit {
+                                five_hour: Some(Window {
+                                    utilization: 0.99,
+                                    resets_at,
+                                }),
+                                seven_day: None,
+                            }),
+                        },
+                        now(),
+                    )
+                    .unwrap();
+            },
+        );
+        let summary = run(&db, &llm, &mut quota(10), 2).await;
+        assert_eq!((summary.digested, summary.calls), (2, 1));
+        assert!(
+            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            "{summary:?}"
+        );
+    }
+
+    /// 呼び出しの枠は判定と予約の前に取る。枠を待つ間にほかの実行が使用率を上限まで上げたら、
+    /// 枠を取った後の判定で止まり、呼び出さない。
+    #[tokio::test]
+    async fn rechecks_the_quota_after_taking_a_call_slot() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-slot-quota",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        articles(&db, 2);
+        let resets_at = now().timestamp() + 3600;
+        let llm = FakeLlm::with_reserve_hook([], move |_| {
+            Db::open(&path)
+                .unwrap()
+                .record_llm_call(
+                    &crate::db::LlmCall {
+                        stage: "translate",
+                        backend: "claude-cli",
+                        model: "sonnet",
+                        n_items: 1,
+                        ok: true,
+                        duration_ms: 1,
+                        error: None,
+                        rate_limit: Some(&RateLimit {
+                            five_hour: Some(Window {
+                                utilization: 0.99,
+                                resets_at,
+                            }),
+                            seven_day: None,
+                        }),
+                    },
+                    now(),
+                )
+                .unwrap();
+        });
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.calls, 0);
+        assert!(
+            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            "{summary:?}"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 0);
     }
 }

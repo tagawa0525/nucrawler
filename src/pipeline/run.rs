@@ -66,6 +66,9 @@ pub struct RunReport {
     /// 認証切れなど、利用者が対処すべき LLM の失敗
     pub llm_failure: Option<String>,
     pub cancelled: bool,
+    /// 利用上限や LLM の失敗で、この実行の後続の LLM ステージを呼ばない（crawl をロックの単位に
+    /// 分けて呼んでも引き継ぐ）
+    pub llm_blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -83,11 +86,9 @@ pub async fn crawl<L: Llm>(
     config: &Config,
     sources: &[Source],
     fetcher: &Fetcher,
-) -> Result<RunReport, RunError> {
+    report: &mut RunReport,
+) -> Result<(), RunError> {
     let db = env.db;
-    let mut report = RunReport::default();
-    // 上限到達や LLM の失敗の後は、同じ実行の中で後続の LLM ステージを試さない
-    let mut llm_blocked = false;
     for &stage in stages {
         if env.cancel.is_requested() {
             break;
@@ -104,7 +105,7 @@ pub async fn crawl<L: Llm>(
                 report.failed_sources += summary.failed_sources.len();
             }
             Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy
-                if llm_blocked =>
+                if report.llm_blocked =>
             {
                 tracing::warn!(
                     stage = stage.name(),
@@ -138,7 +139,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "digest stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Score => {
                 let now = (env.clock)();
@@ -157,7 +158,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "score stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Translate => {
                 let now = (env.clock)();
@@ -178,7 +179,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "translate stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Title => {
                 let now = (env.clock)();
@@ -189,7 +190,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "title stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Tidy => {
                 let now = (env.clock)();
@@ -200,7 +201,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "tidy stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Extract => {
                 let summary = extract::extract_pages(
@@ -222,7 +223,7 @@ pub async fn crawl<L: Llm>(
         }
     }
     report.cancelled = env.cancel.is_requested();
-    Ok(report)
+    Ok(())
 }
 
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の
@@ -451,11 +452,26 @@ mod tests {
         stages: &[Stage],
     ) -> RunReport {
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(max_calls));
+        let mut report = RunReport::default();
+        crawl_part(db, llm, &mut quota, cancel, stages, &mut report).await;
+        report
+    }
+
+    /// crawl はロックの単位ごとに分けて呼ぶ。クォータと報告（LLM が使えないことを含む）は
+    /// 呼び出し側が持ち、単位をまたいで引き継ぐ。
+    async fn crawl_part(
+        db: &Db,
+        llm: &FakeLlm,
+        quota: &mut Quota,
+        cancel: &Cancel,
+        stages: &[Stage],
+        report: &mut RunReport,
+    ) {
         crawl(
             RunEnv {
                 db,
                 llm,
-                quota: &mut quota,
+                quota,
                 cancel,
                 clock: &now,
             },
@@ -464,9 +480,10 @@ mod tests {
             &Config::default(),
             &[],
             &Fetcher::from_config(&HttpConfig::default()).unwrap(),
+            report,
         )
         .await
-        .unwrap()
+        .unwrap();
     }
 
     /// 要約済みで採点を待つ記事と、要約を待つ記事を 1 件ずつ用意し、採点を待つ記事の id を返す。
@@ -528,6 +545,53 @@ mod tests {
         let failure = report.llm_failure.expect("the failure is reported");
         assert!(failure.contains("Not logged in"), "{failure}");
         assert!(!report.cancelled);
+    }
+
+    /// ロックの単位に分けて呼んでも、前の単位で LLM が失敗していれば後の単位の LLM ステージは呼ばない。
+    #[tokio::test]
+    async fn llm_failure_carries_over_to_later_lock_groups() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        // 採点を待つ記事があるので、飛ばさなければ採点が呼び、用意した応答が尽きて panic する
+        let llm = FakeLlm::new([not_logged_in()]);
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(10));
+        let mut report = RunReport::default();
+        let cancel = Cancel::default();
+        crawl_part(
+            &db,
+            &llm,
+            &mut quota,
+            &cancel,
+            &[Stage::Digest],
+            &mut report,
+        )
+        .await;
+        crawl_part(&db, &llm, &mut quota, &cancel, &[Stage::Score], &mut report).await;
+        assert_eq!(llm.requests().len(), 1);
+        assert!(report.llm_failure.is_some());
+    }
+
+    /// 呼び出し回数の上限は、ロックの単位に分けて呼んでも実行全体に効く。
+    #[tokio::test]
+    async fn call_limit_spans_lock_groups() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        let pending = article(&db, 2);
+        let llm = FakeLlm::new([digest_ok(pending)]);
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(1));
+        let mut report = RunReport::default();
+        let cancel = Cancel::default();
+        crawl_part(
+            &db,
+            &llm,
+            &mut quota,
+            &cancel,
+            &[Stage::Digest],
+            &mut report,
+        )
+        .await;
+        crawl_part(&db, &llm, &mut quota, &cancel, &[Stage::Score], &mut report).await;
+        assert_eq!(llm.requests().len(), 1);
     }
 
     /// クォータで止まるのは正常な先送りなので、後続の LLM ステージは実行する。要約を待つ記事が

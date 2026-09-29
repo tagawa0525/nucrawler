@@ -223,13 +223,15 @@ impl Quota {
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
     pub fn record_call(&mut self, usage: Option<RateLimit>) {
         self.calls += 1;
-        // 応答に含まれない枠は、それまでの値を残す。
+        self.observe(usage);
+    }
+
+    /// ほかの実行を含めて分かった最新の使用率（DB の最新の llm_calls）を取り込む。LLM を呼ぶ実行は
+    /// 並行して動くので、判定の前に読んで、ほかの実行の呼び出しも判定に入れる。
+    /// 並行した呼び出しの結果は順が前後するので、同じ枠の中では使用率を下げない（`RateLimit::merge`）。
+    pub fn observe(&mut self, usage: Option<RateLimit>) {
         if let Some(new) = usage {
-            let old = self.usage.unwrap_or_default();
-            self.usage = Some(RateLimit {
-                five_hour: new.five_hour.or(old.five_hour),
-                seven_day: new.seven_day.or(old.seven_day),
-            });
+            self.usage = Some(self.usage.unwrap_or_default().merge(new));
         }
     }
 
@@ -445,5 +447,43 @@ mod tests {
         );
         q.record_call(Some(usage(0.1, 0.1, now, 5.0)));
         assert_eq!(q.permit(now), Err(Stop::MaxCalls { limit: 1 }));
+    }
+
+    /// ほかの実行が記録した使用率を取り込めば、それで判定する。
+    #[test]
+    fn observed_usage_from_other_runs_counts() {
+        let now = jst("2026-09-28T11:00:00");
+        let mut q = Quota::new(QuotaConfig::default(), None, None);
+        assert!(q.permit(now).is_ok());
+        q.observe(Some(usage(0.9, 0.1, now, 3.0)));
+        assert!(
+            matches!(q.permit(now), Err(Stop::FiveHour { .. })),
+            "{:?}",
+            q.permit(now)
+        );
+        // 取り込めるものが無ければ、それまでの値を残す
+        q.observe(None);
+        assert!(q.permit(now).is_err());
+    }
+
+    /// 並行した呼び出しの結果は順が前後するので、同じ枠（リセット時刻が同じ）の中では使用率を
+    /// 下げない。新しい枠なら置き換え、古い枠は無視する。
+    #[test]
+    fn observed_usage_never_drops_within_a_window() {
+        let now = jst("2026-09-28T11:00:00");
+        let resets = now + chrono::Duration::hours(2);
+        let five = |utilization, resets_at| RateLimit {
+            five_hour: window(utilization, resets_at),
+            seven_day: None,
+        };
+        let mut q = Quota::new(QuotaConfig::default(), Some(five(0.9, resets)), None);
+        q.observe(Some(five(0.2, resets)));
+        assert!(q.permit(now).is_err(), "a stale lower reading is ignored");
+        q.observe(Some(five(0.1, resets - chrono::Duration::hours(5))));
+        assert!(q.permit(now).is_err(), "an older window is ignored");
+        q.record_call(Some(five(0.3, resets)));
+        assert!(q.permit(now).is_err(), "own stale response is ignored too");
+        q.observe(Some(five(0.1, resets + chrono::Duration::hours(5))));
+        assert!(q.permit(now).is_ok(), "a newer window replaces it");
     }
 }

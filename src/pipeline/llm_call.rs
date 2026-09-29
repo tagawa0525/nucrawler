@@ -46,6 +46,45 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
     missing.iter().copied().filter(|id| held.contains(id))
 }
 
+/// 呼び出しの枠を取った結果。
+pub enum Reserved<S> {
+    Slot(S),
+    /// 止める指示で待つのをやめた
+    Cancelled,
+    /// 枠を取れなかった（ロックファイルを開けないなど）
+    Failed(String),
+}
+
+/// 呼び出しの枠を取る。止める指示が出れば待つのをやめる。ステージは周の最初に枠を取り、
+/// クォータの判定・作業の予約・呼び出しをその中で行う。
+pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
+    if cancel.is_requested() {
+        return Reserved::Cancelled;
+    }
+    tokio::select! {
+        biased;
+        slot = llm.reserve() => match slot {
+            Ok(slot) => Reserved::Slot(slot),
+            Err(e) => Reserved::Failed(errors::error_chain(&e)),
+        },
+        () = cancel.requested() => Reserved::Cancelled,
+    }
+}
+
+/// 次の呼び出しをしてよいか。LLM を呼ぶ実行は並行して動くので、判定の前に DB の最新の使用率を
+/// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
+/// `now` は判定する時点の時刻（`LlmStage::clock`）。ステージを始めた時刻を使うと、枠を待つ間や
+/// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
+pub fn permit(
+    db: &Db,
+    quota: &mut Quota,
+    now: DateTime<Utc>,
+    reserve: u32,
+) -> Result<Result<(), crate::quota::Stop>, DbError> {
+    quota.observe(db.latest_rate_limit(now)?);
+    Ok(quota.permit_reserving(now, reserve))
+}
+
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。
 pub const MISSING: &str = "missing or invalid in the llm output";
 

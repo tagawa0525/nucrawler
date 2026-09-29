@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{Form, Path, Query, RawQuery, State};
 
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 
 use axum::response::{Html, IntoResponse, Redirect, Response};
 

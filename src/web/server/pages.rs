@@ -249,6 +249,7 @@ pub(super) struct DetailParams {
 
 pub(super) async fn detail(
     State(state): State<AppState>,
+    method: Method,
     Path(id): Path<i64>,
     Query(params): Query<DetailParams>,
 ) -> Result<Html<String>, AppError> {
@@ -258,7 +259,8 @@ pub(super) async fn detail(
         translation: params.translation,
         reported: params.reported.is_some(),
     };
-    let returned = params.back.is_some();
+    // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
+    let returned = params.back.is_some() || method == Method::HEAD;
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
         let now = Utc::now();
@@ -310,13 +312,17 @@ pub(super) async fn detail(
 /// 原文へ移る。開いたことを記録してから、元の記事の URL へリダイレクトする。
 pub(super) async fn source(
     State(state): State<AppState>,
+    method: Method,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let url = with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         // 移るだけなので、詳細の中身（要約・和訳・本文）は読まない
         let url = db.article_url(id)?.ok_or(AppError::NotFound)?;
-        db.record_open(user, id, OpenKind::Source, Utc::now())?;
+        // HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
+        if method != Method::HEAD {
+            db.record_open(user, id, OpenKind::Source, Utc::now())?;
+        }
         Ok(url)
     })
     .await?;

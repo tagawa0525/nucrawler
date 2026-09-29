@@ -193,14 +193,11 @@ pub async fn call_recorded<L: Llm>(
     {
         return Ok(Outcome::Cancelled);
     }
-    // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。
+    // 失敗しても、それまでに分かった使用量（上限で拒否されたときの使用率、消費したクレジット）を
+    // 残して、次回の判定に使う。
     let usage = match &result {
         Ok(response) => response.usage,
-        Err(LlmFailure {
-            error: LlmError::RateLimited { .. },
-            usage,
-        }) => *usage,
-        Err(_) => None,
+        Err(failure) => failure.usage,
     };
     shared
         .quota

@@ -107,15 +107,16 @@ impl Llm for ClaudeCli {
             Ok(output) => Ok(LlmResponse { output, usage }),
             // 結果行が無い（途中で落ちた）ときだけ、終了コードと stderr で報告する。
             // 結果行があれば、終了コードに関わらずそちらが結果と原因を正確に表す。
-            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
-                status: output.status.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                interrupted: interrupted(output.status),
-            }
-            .into()),
-            // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う
-            Err(error @ LlmError::RateLimited { .. }) => Err(LlmFailure { error, usage }),
-            Err(error) => Err(error.into()),
+            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmFailure {
+                error: LlmError::Exit {
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    interrupted: interrupted(output.status),
+                },
+                usage,
+            }),
+            // 上限での拒否やエラーの報告でも、それまでに分かった使用率を残して次回の判定に使う
+            Err(error) => Err(LlmFailure { error, usage }),
         }
     }
 }

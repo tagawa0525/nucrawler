@@ -46,14 +46,8 @@
     if (busy.has(form)) return;
     busy.add(form);
     const { name, value } = e.submitter;
-    // 読み直し（resync）が、この送信より前の状態で上書きしないように、押した印ごとに時刻を残す。
-    // 評価すると既読にもなるので、既読の印にも残す
-    const now = String(performance.now());
-    form.dataset.changed = now;
-    if (form.classList.contains("rating") && value !== "") {
-      const read = marks.querySelector('form[action$="/read"]');
-      if (read) read.dataset.changed = now;
-    }
+    // 読み直し（resync）が、この送信より前の状態で上書きしないように、押した印ごとに時刻を残す
+    form.dataset.changed = String(performance.now());
     const ok = await fetch(form.action, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -70,8 +64,6 @@
     }
     if (form.classList.contains("rating")) {
       setStars(form, value === "" ? 0 : Number(value));
-      // 評価すると既読になる
-      if (value !== "") setRead(marks, true);
     } else if (form.action.endsWith("/read")) {
       setRead(marks, value === "1");
     } else {

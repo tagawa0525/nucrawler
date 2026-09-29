@@ -133,7 +133,8 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({"marks": [
-                {"id": a, "rating": 5, "bookmarked": false, "read": true},
+                // 評価しただけでは既読にならない
+                {"id": a, "rating": 5, "bookmarked": false, "read": false},
                 {"id": b, "rating": null, "bookmarked": false, "read": false},
             ]})
         );

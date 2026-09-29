@@ -167,15 +167,7 @@ impl Server {
             self.count("SELECT count(*) FROM events WHERE kind LIKE 'open_%'"),
             0
         );
-        // 評価した記事は既読になるので、種の評価で付いた既読は除く
-        assert_eq!(
-            self.count(
-                "SELECT count(*) FROM reads AS rd WHERE NOT EXISTS (
-                   SELECT 1 FROM ratings AS rt
-                   WHERE rt.user_id = rd.user_id AND rt.article_id = rd.article_id)"
-            ),
-            0
-        );
+        assert_eq!(self.count("SELECT count(*) FROM reads"), 0);
         assert_eq!(
             self.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             0

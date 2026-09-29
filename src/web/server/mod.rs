@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 
 use crate::db::{
-    Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+    Db, DbError, ListQuery, NewReport, Rating, ReportFilter, ReportKind, ReportStatus, SignalKind,
     Visibility,
 };
 
@@ -79,6 +79,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/search", get(search))
         .route("/api/search", get(api_search))
         .route("/articles/{id}/feedback", post(feedback))
+        .route("/articles/{id}/rating", post(rating))
         .route("/articles/{id}/feedback/undo", post(undo_feedback))
         .route(
             "/articles/{id}/translation-request",

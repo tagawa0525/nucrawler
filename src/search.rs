@@ -4,7 +4,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::config::Lang;
-use crate::db::{SearchOrder, SearchQuery};
+use crate::db::{Rating, SearchOrder, SearchQuery};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
@@ -14,6 +14,8 @@ pub enum SearchError {
     InvalidLang(String),
     #[error("min_score must be 0..=100, got {0:?}")]
     InvalidScore(String),
+    #[error("min_rating must be 1..=5, got {0:?}")]
+    InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
 }
@@ -29,9 +31,10 @@ pub struct Params {
     pub sources: Vec<String>,
     pub lang: String,
     pub translated: bool,
-    pub liked: bool,
     pub unread: bool,
     pub bookmarked: bool,
+    /// この評価（1〜5）以上
+    pub min_rating: String,
     pub min_score: String,
     /// `newest`（既定）か `score`
     pub sort: String,
@@ -51,9 +54,9 @@ impl Params {
                 "source" if !value.trim().is_empty() => p.sources.push(value),
                 "lang" => p.lang = value,
                 "translated" => p.translated = value == "1",
-                "liked" => p.liked = value == "1",
                 "unread" => p.unread = value == "1",
                 "bookmarked" => p.bookmarked = value == "1",
+                "min_rating" => p.min_rating = value,
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
                 _ => {}
@@ -69,13 +72,14 @@ impl Params {
             &self.since,
             &self.until,
             &self.lang,
+            &self.min_rating,
             &self.min_score,
         ]
         .iter()
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.liked || self.unread || self.bookmarked)
+            && !(self.translated || self.unread || self.bookmarked)
     }
 
     /// 検索の条件にする。一覧で隠す記事も含める。
@@ -99,6 +103,14 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidScore(v.to_string()))
             })
             .transpose()?;
+        let min_rating = given(&self.min_rating)
+            .map(|v| {
+                v.parse::<u8>()
+                    .ok()
+                    .and_then(Rating::new)
+                    .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
+            })
+            .transpose()?;
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -114,9 +126,9 @@ impl Params {
             sources: self.sources.clone(),
             lang,
             translated: self.translated,
-            liked: self.liked,
             unread: self.unread,
             bookmarked: self.bookmarked,
+            min_rating,
             min_score,
             hide_below: None,
             order,

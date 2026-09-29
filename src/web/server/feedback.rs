@@ -1,4 +1,4 @@
-//! 記事への操作（👍/👎・ブックマーク・取り消し・和訳の依頼）。
+//! 記事への操作（評価・ブックマーク・見送り・取り消し・和訳の依頼）。
 
 use super::*;
 
@@ -16,14 +16,12 @@ pub(super) async fn feedback(
     check_same_origin(&headers)?;
     // ブックマークを外すのは行動ではなく状態の変更（ブックマークした行動は残す）
     let kind = match form.kind.as_str() {
-        "up" => Some(SignalKind::Up),
-        "down" => Some(SignalKind::Down),
         "bookmark" => Some(SignalKind::Bookmark),
         "dismiss" => Some(SignalKind::Dismiss),
         "unbookmark" => None,
         _ => {
             return Err(AppError::BadRequest(
-                "kind must be up, down, bookmark, unbookmark or dismiss",
+                "kind must be bookmark, unbookmark or dismiss",
             ));
         }
     };
@@ -35,6 +33,38 @@ pub(super) async fn feedback(
             None => db.unbookmark(user, id)?,
         }
         Ok(())
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RatingForm {
+    value: String,
+}
+
+/// 評価を付ける（1〜5）。空の値なら評価なしに戻す。
+pub(super) async fn rating(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<RatingForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let rating = match form.value.as_str() {
+        "" => None,
+        value => Some(
+            value
+                .parse()
+                .ok()
+                .and_then(Rating::new)
+                .ok_or(AppError::BadRequest("value must be 1..=5 or empty"))?,
+        ),
+    };
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.rate(user, id, rating, Utc::now())?)
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))

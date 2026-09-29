@@ -19,7 +19,7 @@ pub enum ParseError {
     TopicsUsage,
     #[error(
         "usage: nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... \
-         [--lang en|ja] [--translated] [--liked] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] \
+         [--lang en|ja] [--translated] [--min-rating 1-5] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] \
          [--limit N] [WORD]...  (D: YYYY, YYYY-MM or YYYY-MM-DD)"
     )]
     SearchUsage,
@@ -392,10 +392,10 @@ pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
             "--topic" => params.topics.push(value(&mut it)?),
             "--source" => params.sources.push(value(&mut it)?),
             "--lang" => params.lang = value(&mut it)?,
+            "--min-rating" => params.min_rating = value(&mut it)?,
             "--min-score" => params.min_score = value(&mut it)?,
             "--sort" => params.sort = value(&mut it)?,
             "--translated" => params.translated = true,
-            "--liked" => params.liked = true,
             "--unread" => params.unread = true,
             "--bookmarked" => params.bookmarked = true,
             "--limit" => {

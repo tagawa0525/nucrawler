@@ -72,7 +72,7 @@ pub fn list_page_with_explore(
     let mut body = format!(
         "<nav class=\"bar\">{}{}{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
-        button("/search?liked=1", "いいね", "👍", None),
+        button("/search?min_rating=4", "評価 4 以上", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
         button(
             &all_toggle.href(),
@@ -142,11 +142,10 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     } else {
         format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
     };
-    let liked = if i.feedback == Some(crate::db::Feedback::Up) {
-        " 👍"
-    } else {
-        ""
-    };
+    let rating = i
+        .rating
+        .map(|r| format!(" ★{}", r.get()))
+        .unwrap_or_default();
     let bookmarked = if i.bookmarked { " 🔖" } else { "" };
     let translation = if i.has_translation {
         " ・和訳あり"
@@ -161,7 +160,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)

@@ -79,7 +79,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    body.push_str(&feedback_forms(id, i.feedback, i.bookmarked));
+    body.push_str(&feedback_forms(id, i.rating, i.bookmarked));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -229,24 +229,41 @@ fn report_summary(r: &Report) -> String {
     }
 }
 
-/// 👍/👎 とブックマーク。ブックマーク済みなら、同じボタンで外す。
-fn feedback_forms(id: i64, current: Option<crate::db::Feedback>, bookmarked: bool) -> String {
-    use crate::db::Feedback;
-    let button = |value: &str, label: &str, on: bool| {
+/// 評価（1〜5 の星）とブックマーク。今の評価までの星を塗り、今の評価の星を押すと評価なしに戻る。
+/// ブックマーク済みなら、同じボタンで外す。
+fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String {
+    let stars: String = Rating::all()
+        .map(|r| {
+            let on = current.is_some_and(|c| r <= c);
+            let (value, title) = if current == Some(r) {
+                (
+                    String::new(),
+                    format!("{} {}（押すと評価なし）", r.get(), r.meaning()),
+                )
+            } else {
+                (r.get().to_string(), format!("{} {}", r.get(), r.meaning()))
+            };
+            format!(
+                "<button name=\"value\" value=\"{value}\" title=\"{title}\"{}>{}</button>",
+                if on { " class=\"on\"" } else { "" },
+                if on { '★' } else { '☆' }
+            )
+        })
+        .collect();
+    let bookmark = |value: &str, on: bool| {
         format!(
             "<form method=\"post\" action=\"/articles/{id}/feedback\">\
-             <button name=\"kind\" value=\"{value}\"{}>{label}</button></form>",
+             <button name=\"kind\" value=\"{value}\"{}>🔖</button></form>",
             if on { " class=\"on\"" } else { "" }
         )
     };
     format!(
-        "<div class=\"actions\">{}{}{}</div>",
-        button("up", "👍", current == Some(Feedback::Up)),
-        button("down", "👎", current == Some(Feedback::Down)),
+        "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
+         {stars}</form>{}</div>",
         if bookmarked {
-            button("unbookmark", "🔖", true)
+            bookmark("unbookmark", true)
         } else {
-            button("bookmark", "🔖", false)
+            bookmark("bookmark", false)
         }
     )
 }

@@ -97,7 +97,7 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
          <details{topics_open}><summary>トピック</summary>{topics}</details>\
          <details{sources_open}><summary>ソース</summary>{sources}</details>\
          <p>言語 {lang} 並び {sort}</p>\
-         <p>{translated}{liked}{unread}{bookmarked}最低点 {min_score}</p>\
+         <p>{translated}{unread}{bookmarked}評価 {min_rating} 最低点 {min_score}</p>\
          <p><button type=\"submit\">検索</button></p></form>",
         q = text(
             "q",
@@ -121,9 +121,20 @@ fn search_form(p: &Params, vocabulary: &[TopicUsage], page: &Page) -> String {
             &[("newest", "新しい順"), ("score", "点数順")]
         ),
         translated = checkbox("translated", "1", p.translated, "和訳あり"),
-        liked = checkbox("liked", "1", p.liked, "👍"),
         unread = checkbox("unread", "1", p.unread, "未読"),
         bookmarked = checkbox("bookmarked", "1", p.bookmarked, "🔖"),
+        min_rating = select(
+            "min_rating",
+            &p.min_rating,
+            &[
+                ("", "問わない"),
+                ("5", "★5"),
+                ("4", "★4 以上"),
+                ("3", "★3 以上"),
+                ("2", "★2 以上"),
+                ("1", "★1 以上"),
+            ]
+        ),
         min_score = text(
             "min_score",
             &p.min_score,

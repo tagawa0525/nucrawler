@@ -17,7 +17,7 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::WebConfig;
-use crate::db::{ArtifactVersion, Db, DbError, Feedback, ListItem, SearchOrder, SearchQuery};
+use crate::db::{ArtifactVersion, Db, DbError, ListItem, Rating, SearchOrder, SearchQuery};
 use crate::web::html::SourceLabels;
 
 #[derive(Debug, thiserror::Error)]
@@ -113,8 +113,8 @@ pub struct ArticleSummary {
     pub excluded: Vec<String>,
     /// 軽水炉に関係する
     pub lwr_relevant: Option<bool>,
-    /// 最新の 👍/👎（"up" か "down"）
-    pub feedback: Option<String>,
+    /// 利用者の評価（1〜5。5 必読、4 読んでよかった、3 どちらでもない、2 不要、1 二度と出さないでほしい）。評価なしは null
+    pub rating: Option<u8>,
     pub has_translation: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前
     pub locked_by: Vec<String>,
@@ -324,13 +324,7 @@ fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
         matched: item.matched,
         excluded: item.excluded,
         lwr_relevant: item.lwr_relevant,
-        feedback: item.feedback.map(|f| {
-            match f {
-                Feedback::Up => "up",
-                Feedback::Down => "down",
-            }
-            .to_string()
-        }),
+        rating: item.rating.map(Rating::get),
         has_translation: item.has_translation,
         locked_by: item.locked_by,
     }

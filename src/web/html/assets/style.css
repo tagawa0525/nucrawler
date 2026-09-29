@@ -62,3 +62,5 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .term form, .add form { display: inline-block; margin: 0.2rem 0.5rem 0.2rem 0; }
 .term form:first-of-type, .add form { display: block; }
 .term button, .add button { font-size: 1rem; padding: 0.3rem 0.9rem; }
+.actions .rating button { padding: 0.4rem 0.15rem; border: none; background: none; color: #999; }
+.actions .rating button.on { background: none; color: #d08a00; }

@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::db::{ArticleDetail, ArtifactVersion, Feedback, ListItem};
+use crate::db::{ArticleDetail, ArtifactVersion, ListItem, Rating};
 use crate::web::html::SourceLabels;
 
 /// 記事の一覧（`GET /api/articles`）。
@@ -44,8 +44,8 @@ pub struct Article<'a> {
     /// 点数が当たった推薦しない話題（プロファイルの語）
     pub excluded: &'a [String],
     pub read: bool,
-    /// 最新の 👍/👎（"up" / "down"）
-    pub feedback: Option<&'static str>,
+    /// 評価（1〜5）。評価なしは null
+    pub rating: Option<Rating>,
     pub has_translation: bool,
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前
@@ -71,10 +71,7 @@ impl<'a> Article<'a> {
             matched: &i.matched,
             excluded: &i.excluded,
             read: i.read,
-            feedback: i.feedback.map(|f| match f {
-                Feedback::Up => "up",
-                Feedback::Down => "down",
-            }),
+            rating: i.rating,
             has_translation: i.has_translation,
             translation_requested: i.translation_requested,
             locked_by: &i.locked_by,

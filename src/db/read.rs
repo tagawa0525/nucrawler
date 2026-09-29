@@ -25,7 +25,7 @@ pub struct ListItem {
     pub excluded: Vec<String>,
     /// 詳細か和訳を開いたことがある
     pub read: bool,
-    pub feedback: Option<Feedback>,
+    pub rating: Option<Rating>,
     pub bookmarked: bool,
     pub has_translation: bool,
     pub translation_requested: bool,
@@ -42,7 +42,7 @@ pub struct ListQuery<'a> {
     pub min_score: u8,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
-    /// 👎、見ない、閾値未満、未採点、非軽水炉の記事も表示する
+    /// 評価 1〜2、見ない、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
     pub limit: usize,
 }
@@ -65,15 +65,15 @@ pub struct SearchQuery<'a> {
     pub lang: Option<Lang>,
     /// 閲覧できる和訳がある
     pub translated: bool,
-    /// 最新の評価が 👍
-    pub liked: bool,
+    /// この評価以上（評価なしは除く）
+    pub min_rating: Option<Rating>,
     /// 詳細も和訳も開いていない
     pub unread: bool,
     /// ブックマークしている
     pub bookmarked: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、👎・見ない・非軽水炉・未採点・この点数未満を隠す
+    /// 一覧の既定と同じく、評価 1〜2・見ない・非軽水炉・未採点・この点数未満を隠す
     pub hide_below: Option<u8>,
     pub order: SearchOrder,
     pub limit: usize,
@@ -127,7 +127,7 @@ enum ItemScope<'a> {
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
-    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、明示的な反応も確認枠の記録も無いもの。
+    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、評価・振り分けも確認枠の記録も無いもの。
     /// 無作為な順に `limit` 件
     Explore {
         since: chrono::DateTime<chrono::Utc>,
@@ -191,8 +191,9 @@ impl SearchFilters {
         if q.translated {
             f.rows.push_str(" AND rows.has_translation = 1");
         }
-        if q.liked {
-            f.rows.push_str(" AND rows.feedback = 'up'");
+        if let Some(min) = q.min_rating {
+            f.rows.push_str(" AND rows.rating >= :min_rating");
+            f.params.push((":min_rating".into(), Box::new(min)));
         }
         if q.unread {
             f.rows.push_str(" AND rows.read = 0");
@@ -450,7 +451,7 @@ impl Db {
 
     /// その日（日本時間の日付 `today`）の確認枠の記事。閾値（`q.min_score`）未満の記事から無作為に
     /// 選び、日ごとに `per_day` 件まで記録する。同じ日は同じ記事を返し、1 つの記事は 1 回しか選ばない。
-    /// 選んだ記事のうち、明示的な反応が付いたものは返さない。
+    /// 選んだ記事のうち、評価が付いたものは返さない。
     pub fn explore(
         &self,
         q: ListQuery,
@@ -524,11 +525,11 @@ impl Db {
             // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
             ItemScope::List { .. } => "AND rows.bookmarked = 0",
             ItemScope::Explore { .. } => {
-                "AND rows.relevant = 1 AND s.score < :min
+                "AND rows.relevant = 1 AND s.score < :min AND rows.rating IS NULL
                  AND NOT EXISTS (
                    SELECT 1 FROM events AS e
                    WHERE e.user_id = :user AND e.article_id = rows.id
-                     AND e.kind IN ('up', 'down', 'bookmark', 'dismiss'))
+                     AND e.kind IN ('bookmark', 'dismiss'))
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
@@ -603,9 +604,8 @@ impl Db {
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id
                           AND e.kind IN ('open_detail', 'open_translation')) AS read,
-                      (SELECT e.kind FROM events AS e
-                       WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
-                       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
+                      (SELECT rt.value FROM ratings AS rt
+                       WHERE rt.user_id = :user AND rt.article_id = i.id) AS rating,
                       EXISTS (
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id AND e.kind = 'dismiss')
@@ -634,7 +634,7 @@ impl Db {
              )
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
-                    s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
+                    s.score, s.reason, rows.read, rows.rating, rows.has_translation,
                     rows.requested, rows.locked_by, rows.bookmarked,
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
@@ -644,9 +644,9 @@ impl Db {
                        WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では 👎、見ない、非軽水炉、未採点、閾値未満を隠す
+             -- 既定では評価 1〜2、見ない、非軽水炉、未採点、閾値未満を隠す
              WHERE (:all = 1
-                OR (rows.feedback IS NOT 'down' AND rows.dismissed = 0
+                OR ((rows.rating IS NULL OR rows.rating > 2) AND rows.dismissed = 0
                     AND rows.relevant = 1 AND s.score >= :min))
                {rows_filter}
                {list_filter}
@@ -673,7 +673,6 @@ impl Db {
                 .map(|(name, value)| (name.as_str(), value.as_ref())),
         );
         let rows = stmt.query_map(params.as_slice(), |r| {
-            let feedback: Option<String> = r.get(13)?;
             let item = ListItem {
                 article_id: r.get(0)?,
                 source_id: r.get(1)?,
@@ -690,11 +689,7 @@ impl Db {
                 matched: Vec::new(),
                 excluded: Vec::new(),
                 read: r.get(12)?,
-                feedback: match feedback.as_deref() {
-                    Some("up") => Some(Feedback::Up),
-                    Some("down") => Some(Feedback::Down),
-                    _ => None,
-                },
+                rating: r.get(13)?,
                 bookmarked: r.get(17)?,
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,

@@ -711,6 +711,26 @@ mod tests {
         }
     }
 
+    /// 推薦点の補正の強さ。既定は 1.0 で、正の有限値だけを受け付ける（∞ や 0 では学習できない）。
+    #[test]
+    fn reads_the_recommend_prior_strength() {
+        assert_eq!(parse_config("", p()).unwrap().recommend.prior_strength, 1.0);
+        let c = parse_config("[recommend]\nprior_strength = 2.5\n", p()).unwrap();
+        assert_eq!(c.recommend.prior_strength, 2.5);
+        for text in [
+            "[recommend]\nprior_strength = 0.0\n",
+            "[recommend]\nprior_strength = -1.0\n",
+            "[recommend]\nprior_strength = inf\n",
+            "[recommend]\nprior_strength = nan\n",
+        ] {
+            let err = parse_config(text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains("recommend.prior_strength")),
+                "{text}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn source_label_falls_back_to_name() {
         let s = parse_sources(

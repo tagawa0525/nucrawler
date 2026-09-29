@@ -298,6 +298,44 @@ mod tests {
         assert!(model.weights.is_empty());
     }
 
+    /// 記事の特徴：ソース・要約のトピック・点数が当たった関心分野と推薦しない話題。
+    #[test]
+    fn features_of_an_article() {
+        let f = features(
+            "nrc",
+            &["燃料".to_string()],
+            &["燃料".to_string()],
+            &["核融合".to_string()],
+        );
+        let kind = |k| {
+            f.iter()
+                .filter(|x| x.kind == k)
+                .map(|x| x.key.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kind(FeatureKind::Source), ["nrc"]);
+        assert_eq!(kind(FeatureKind::Topic), ["燃料"]);
+        assert_eq!(kind(FeatureKind::Interest), ["燃料"]);
+        assert_eq!(kind(FeatureKind::Exclude), ["核融合"]);
+    }
+
+    /// 1 件ずつ外して学習し、外した 1 件を予測する。外した評価を使わないので、学習に使った場合より控えめになる。
+    /// 1 件だけなら、外すと評価が無いので LLM 点のまま。
+    #[test]
+    fn leave_one_out_predicts_without_the_held_out_rating() {
+        let market = topic("電力市場");
+        let examples = repeat(6, example(85, std::slice::from_ref(&market), 1));
+        let held_out = leave_one_out(&examples, 1.0);
+        let in_sample = Model::fit(&examples, 1.0).score(85, std::slice::from_ref(&market));
+        assert_eq!(held_out.len(), 6);
+        assert!(
+            held_out.iter().all(|&s| in_sample < s && s < 85),
+            "{held_out:?} {in_sample}"
+        );
+        assert_eq!(leave_one_out(&examples[..1], 1.0), [85]);
+        assert!(leave_one_out(&[], 1.0).is_empty());
+    }
+
     /// 正則化の強さは正の有限値だけ（∞ だと勾配が ∞·0 で NaN になる）。
     #[test]
     #[should_panic(expected = "prior_strength must be positive and finite")]

@@ -376,6 +376,53 @@ mod tests {
         );
     }
 
+    /// 推薦点の学習に使う特徴：記事のソース、採点した要約のトピック、その採点が当たった関心分野と推薦しない話題。
+    #[test]
+    fn scores_carry_the_features_of_the_scored_digest() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let key = score_key(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let digest = add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        db.insert_score_with_matches(
+            key,
+            digest,
+            70,
+            None,
+            ScoreMatches {
+                interests: &["規制・審査".to_string()],
+                excludes: &["核融合".to_string()],
+            },
+            t("2026-09-26T02:00:00Z"),
+        )
+        .unwrap();
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let scores = db.eval_scores(owner).unwrap();
+        let feature = |kind, key: &str| crate::recommend::Feature {
+            kind,
+            key: key.into(),
+        };
+        use crate::recommend::FeatureKind::*;
+        let mut features = scores[0].features.clone();
+        features.sort();
+        let source: String = db
+            .conn()
+            .query_row("SELECT source_id FROM articles WHERE id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            features,
+            [
+                feature(Topic, "規制・審査"),
+                feature(Source, &source),
+                feature(Interest, "規制・審査"),
+                feature(Exclude, "核融合"),
+            ]
+        );
+    }
+
     #[test]
     fn scores_use_the_latest_digest_scored_by_each_key() {
         let db = Db::open_in_memory().unwrap();

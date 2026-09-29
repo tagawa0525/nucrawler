@@ -25,7 +25,7 @@ pub struct ListItem {
     pub excluded: Vec<String>,
     /// 詳細か和訳を開いたことがある
     pub read: bool,
-    pub feedback: Option<Feedback>,
+    pub rating: Option<Rating>,
     pub bookmarked: bool,
     pub has_translation: bool,
     pub translation_requested: bool,
@@ -42,7 +42,7 @@ pub struct ListQuery<'a> {
     pub min_score: u8,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
-    /// 👎、見ない、閾値未満、未採点、非軽水炉の記事も表示する
+    /// 評価 1〜2、見ない、閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
     pub limit: usize,
 }
@@ -65,15 +65,15 @@ pub struct SearchQuery<'a> {
     pub lang: Option<Lang>,
     /// 閲覧できる和訳がある
     pub translated: bool,
-    /// 最新の評価が 👍
-    pub liked: bool,
+    /// この評価以上（評価なしは除く）
+    pub min_rating: Option<Rating>,
     /// 詳細も和訳も開いていない
     pub unread: bool,
     /// ブックマークしている
     pub bookmarked: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、👎・見ない・非軽水炉・未採点・この点数未満を隠す
+    /// 一覧の既定と同じく、評価 1〜2・見ない・非軽水炉・未採点・この点数未満を隠す
     pub hide_below: Option<u8>,
     pub order: SearchOrder,
     pub limit: usize,
@@ -127,7 +127,7 @@ enum ItemScope<'a> {
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
-    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、明示的な反応も確認枠の記録も無いもの。
+    /// 確認枠の候補：期間内の軽水炉の記事で、採点済みで閾値未満、評価・振り分けも確認枠の記録も無いもの。
     /// 無作為な順に `limit` 件
     Explore {
         since: chrono::DateTime<chrono::Utc>,
@@ -191,8 +191,9 @@ impl SearchFilters {
         if q.translated {
             f.rows.push_str(" AND rows.has_translation = 1");
         }
-        if q.liked {
-            f.rows.push_str(" AND rows.feedback = 'up'");
+        if let Some(min) = q.min_rating {
+            f.rows.push_str(" AND rows.rating >= :min_rating");
+            f.params.push((":min_rating".into(), Box::new(min)));
         }
         if q.unread {
             f.rows.push_str(" AND rows.read = 0");
@@ -450,7 +451,7 @@ impl Db {
 
     /// その日（日本時間の日付 `today`）の確認枠の記事。閾値（`q.min_score`）未満の記事から無作為に
     /// 選び、日ごとに `per_day` 件まで記録する。同じ日は同じ記事を返し、1 つの記事は 1 回しか選ばない。
-    /// 選んだ記事のうち、明示的な反応が付いたものは返さない。
+    /// 選んだ記事のうち、評価が付いたものは返さない。
     pub fn explore(
         &self,
         q: ListQuery,
@@ -524,11 +525,11 @@ impl Db {
             // ブックマークした記事は振り分け済みなので、一覧には（すべて表示でも）出さない
             ItemScope::List { .. } => "AND rows.bookmarked = 0",
             ItemScope::Explore { .. } => {
-                "AND rows.relevant = 1 AND s.score < :min
+                "AND rows.relevant = 1 AND s.score < :min AND rows.rating IS NULL
                  AND NOT EXISTS (
                    SELECT 1 FROM events AS e
                    WHERE e.user_id = :user AND e.article_id = rows.id
-                     AND e.kind IN ('up', 'down', 'bookmark', 'dismiss'))
+                     AND e.kind IN ('bookmark', 'dismiss'))
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
@@ -603,9 +604,8 @@ impl Db {
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id
                           AND e.kind IN ('open_detail', 'open_translation')) AS read,
-                      (SELECT e.kind FROM events AS e
-                       WHERE e.user_id = :user AND e.article_id = i.id AND e.kind IN ('up', 'down')
-                       ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS feedback,
+                      (SELECT rt.value FROM ratings AS rt
+                       WHERE rt.user_id = :user AND rt.article_id = i.id) AS rating,
                       EXISTS (
                         SELECT 1 FROM events AS e
                         WHERE e.user_id = :user AND e.article_id = i.id AND e.kind = 'dismiss')
@@ -634,7 +634,7 @@ impl Db {
              )
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
-                    s.score, s.reason, rows.read, rows.feedback, rows.has_translation,
+                    s.score, s.reason, rows.read, rows.rating, rows.has_translation,
                     rows.requested, rows.locked_by, rows.bookmarked,
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
@@ -644,9 +644,9 @@ impl Db {
                        WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded
              FROM rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では 👎、見ない、非軽水炉、未採点、閾値未満を隠す
+             -- 既定では評価 1〜2、見ない、非軽水炉、未採点、閾値未満を隠す
              WHERE (:all = 1
-                OR (rows.feedback IS NOT 'down' AND rows.dismissed = 0
+                OR ((rows.rating IS NULL OR rows.rating > 2) AND rows.dismissed = 0
                     AND rows.relevant = 1 AND s.score >= :min))
                {rows_filter}
                {list_filter}
@@ -673,7 +673,6 @@ impl Db {
                 .map(|(name, value)| (name.as_str(), value.as_ref())),
         );
         let rows = stmt.query_map(params.as_slice(), |r| {
-            let feedback: Option<String> = r.get(13)?;
             let item = ListItem {
                 article_id: r.get(0)?,
                 source_id: r.get(1)?,
@@ -690,11 +689,7 @@ impl Db {
                 matched: Vec::new(),
                 excluded: Vec::new(),
                 read: r.get(12)?,
-                feedback: match feedback.as_deref() {
-                    Some("up") => Some(Feedback::Up),
-                    Some("down") => Some(Feedback::Down),
-                    _ => None,
-                },
+                rating: r.get(13)?,
                 bookmarked: r.get(17)?,
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
@@ -787,7 +782,7 @@ mod tests {
             "2026-09-26T00:00:00.000Z",
             95,
         );
-        db.record_event(owner, disliked, SignalKind::Down, t("2026-09-27T00:00:00Z"))
+        db.rate(owner, disliked, Rating::new(2), t("2026-09-27T00:00:00Z"))
             .unwrap();
         let unscored = page_article(&db, "https://e.com/new", "2026-09-26T00:00:00.000Z");
         let old = scored_article(
@@ -807,7 +802,7 @@ mod tests {
 
         let items = db.list_articles(list_query(&db, true)).unwrap();
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
-        assert_eq!(d.feedback, Some(Feedback::Down));
+        assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
         assert_eq!(
             (h.score, h.title_ja.as_deref(), h.read),
@@ -1061,7 +1056,7 @@ mod tests {
             "2026-09-02T00:00:00.000Z",
             50,
         );
-        db.record_event(owner, liked, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+        db.rate(owner, liked, Rating::new(4), t("2026-09-27T00:00:00Z"))
             .unwrap();
         let read = scored_article(
             &db,
@@ -1084,7 +1079,7 @@ mod tests {
             "2026-09-04T00:00:00.000Z",
             95,
         );
-        db.record_event(owner, disliked, SignalKind::Down, t("2026-09-27T00:00:00Z"))
+        db.rate(owner, disliked, Rating::new(2), t("2026-09-27T00:00:00Z"))
             .unwrap();
         let unscored = dated_article(&db, "https://e.com/unscored", "t", "2026-09-05T00:00:00Z");
 
@@ -1098,7 +1093,7 @@ mod tests {
         );
         assert_eq!(
             with(SearchQuery {
-                liked: true,
+                min_rating: Rating::new(4),
                 ..search_query(&db)
             }),
             [liked]
@@ -1117,7 +1112,7 @@ mod tests {
             }),
             [disliked, read, translated]
         );
-        // 一覧の既定と同じく隠す：👎・未採点・閾値未満
+        // 一覧の既定と同じく隠す：評価 1〜2・未採点・閾値未満
         assert_eq!(
             with(SearchQuery {
                 hide_below: Some(60),
@@ -1494,7 +1489,7 @@ mod tests {
         assert!(unscored.matched.is_empty() && unscored.excluded.is_empty());
     }
 
-    /// 確認枠は閾値未満・軽水炉・採点済み・反応なし・未選択の記事から選び、同じ日は同じ記事を返す。
+    /// 確認枠は閾値未満・軽水炉・採点済み・評価も振り分けもなし・未選択の記事から選び、同じ日は同じ記事を返す。
     #[test]
     fn explore_picks_below_threshold_articles_once() {
         let db = Db::open_in_memory().unwrap();
@@ -1510,7 +1505,7 @@ mod tests {
                 )
             })
             .collect();
-        // 閾値以上、👎 済み、見送り済みの記事は選ばない
+        // 閾値以上、評価済み、見送り済みの記事は選ばない
         scored_article(
             &db,
             "https://e.com/high",
@@ -1532,6 +1527,15 @@ mod tests {
             t("2026-09-26T05:00:00Z"),
         )
         .unwrap();
+        let rated = scored_article(
+            &db,
+            "https://e.com/rated",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            20,
+        );
+        db.rate(owner, rated, Rating::new(3), t("2026-09-26T05:00:00Z"))
+            .unwrap();
         let q = list_query(&db, false);
         let ids = |items: Vec<ListItem>| -> Vec<i64> {
             let mut ids: Vec<i64> = items.into_iter().map(|i| i.article_id).collect();
@@ -1548,14 +1552,16 @@ mod tests {
         let second = ids(db.explore(q, 2, "2026-09-28").unwrap());
         assert_eq!(second.len(), 1);
         assert!(!first.contains(&second[0]));
-        // 反応が付いた記事は枠から消える
+        // 評価が付いた記事は枠から消える（ブックマークは評価ではないので残る）
         db.record_event(
             owner,
-            first[0],
+            first[1],
             SignalKind::Bookmark,
             t("2026-09-27T06:00:00Z"),
         )
         .unwrap();
+        db.rate(owner, first[0], Rating::new(2), t("2026-09-27T06:00:00Z"))
+            .unwrap();
         assert_eq!(ids(db.explore(q, 2, "2026-09-27").unwrap()), [first[1]]);
         // 0 件なら選ばない
         assert!(db.explore(q, 0, "2026-09-29").unwrap().is_empty());

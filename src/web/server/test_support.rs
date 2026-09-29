@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::config::{Lang, WebConfig};
-use crate::db::{ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact};
+use crate::db::{ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, Rating};
 
 /// 英語の記事に本文と digest を付ける。
 pub(super) fn seed(db: &Db, url: &str, title_ja: &str) -> (i64, i64) {
@@ -73,9 +73,9 @@ pub(super) fn seed_recommended_and_hidden(db: &Db) -> i64 {
     score(db, digest, 90);
     let (_, digest) = seed(db, "https://e.com/low", "低い点");
     score(db, digest, 10);
-    let (down, digest) = seed(db, "https://e.com/down", "👎した");
+    let (down, digest) = seed(db, "https://e.com/down", "評価 2");
     score(db, digest, 90);
-    db.record_event(db.owner_id().unwrap(), down, SignalKind::Down, Utc::now())
+    db.rate(db.owner_id().unwrap(), down, Rating::new(2), Utc::now())
         .unwrap();
     let (_, digest) = seed_with(db, "https://e.com/unrelated", "無関係", false);
     score(db, digest, 90);

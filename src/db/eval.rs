@@ -1,22 +1,14 @@
-//! オフライン評価（`nucrawler eval`）：明示的な反応を正解ラベルにして、採点と突き合わせる材料。
+//! オフライン評価（`nucrawler eval`）：評価（1〜5）を正解ラベルにして、採点と突き合わせる材料。
 
 use super::*;
 
-/// 記事の正解ラベル。残っている明示的な反応（up・down・bookmark・dismiss）のうち最後のもので決める。
+/// 記事の正解ラベル：利用者の評価。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label {
     pub article_id: i64,
-    /// ラベルを決めた反応
-    pub kind: SignalKind,
-    /// その反応の時刻
+    pub rating: Rating,
+    /// 評価した時刻
     pub at: String,
-}
-
-impl Label {
-    /// up・bookmark は正例、down・dismiss は負例。
-    pub fn positive(&self) -> bool {
-        matches!(self.kind, SignalKind::Up | SignalKind::Bookmark)
-    }
 }
 
 /// 採点のキー（どのプロファイル・バックエンド・モデル・プロンプトの版で採点したか）。
@@ -38,105 +30,78 @@ pub struct LabeledScore {
     pub scored_at: String,
 }
 
-/// 正解ラベルに使う明示的な反応の種類（SQL の IN 句）
-const EXPLICIT: &str = "('up', 'down', 'bookmark', 'dismiss')";
-
-/// 利用者（`:user`）の記事ごとの正解ラベル：残っている明示的な反応のうち最後のもの。
-fn labels() -> String {
-    format!(
-        "SELECT e.id, e.article_id, e.kind, e.created_at FROM events AS e
-         WHERE e.user_id = :user AND e.kind IN {EXPLICIT}
-           AND NOT EXISTS (
-             SELECT 1 FROM events AS f
-             WHERE f.user_id = e.user_id AND f.article_id = e.article_id
-               AND f.kind IN {EXPLICIT}
-               AND (f.created_at > e.created_at
-                    OR (f.created_at = e.created_at AND f.id > e.id)))"
-    )
-}
-
-/// プロファイルの見直しの根拠：ラベルの付いた記事の見出しとトピック。
+/// プロファイルの見直しの根拠：評価した記事の見出しとトピック。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evidence {
     pub article_id: i64,
-    /// 関心（up・bookmark）なら真、不要（down・dismiss）なら偽
-    pub positive: bool,
+    pub rating: Rating,
     pub title_ja: String,
     pub topics: Vec<String>,
-    /// ラベルを決めた反応の時刻
+    /// 評価した時刻
     pub at: String,
 }
 
-/// 確認枠（閾値未満から無作為に選んだ記事）の反応の内訳。
+/// 確認枠（閾値未満から無作為に選んだ記事）の評価の内訳。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExploreStats {
     /// 確認枠に選んだ記事の数
     pub picked: usize,
-    /// そのうち関心（up・bookmark）が最後の反応の記事
+    /// そのうち関心（評価 4〜5）の記事
     pub positive: usize,
-    /// そのうち不要（down・dismiss）が最後の反応の記事
+    /// そのうち中立（評価 3）の記事
+    pub neutral: usize,
+    /// そのうち不要（評価 1〜2）の記事
     pub negative: usize,
 }
 
 impl Db {
-    /// 利用者の反応から決めた正解ラベル（article_id 順）。
+    /// 利用者の評価から決めた正解ラベル（article_id 順）。
     pub fn eval_labels(&self, user_id: i64) -> Result<Vec<Label>, DbError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT article_id, kind, created_at FROM ({labels}) ORDER BY article_id",
-            labels = labels(),
-        ))?;
-        let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (article_id, kind, at) = row?;
+        let mut stmt = self.conn.prepare(
+            "SELECT article_id, value, rated_at FROM ratings WHERE user_id = ?1 ORDER BY article_id",
+        )?;
+        let rows = stmt.query_map([user_id], |r| {
             Ok(Label {
-                article_id,
-                kind: SignalKind::parse(&kind)?,
-                at,
+                article_id: r.get(0)?,
+                rating: r.get(1)?,
+                at: r.get(2)?,
             })
-        })
-        .collect()
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// ラベルの付いた記事に、利用者が閲覧できる最新の digest の見出しとトピックを付けて、反応の
+    /// 評価した記事に、利用者が閲覧できる最新の digest の見出しとトピックを付けて、評価の
     /// 新しい順に返す。digest の無い記事は含めない。
     pub fn label_evidence(&self, user_id: i64) -> Result<Vec<Evidence>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
-            "WITH labels AS ({labels}),
-             digests AS (
-               SELECT l.id AS event_id, l.article_id, l.kind, l.created_at,
+            "WITH digests AS (
+               SELECT rt.article_id, rt.value, rt.rated_at,
                       (SELECT r.id FROM artifacts AS r
-                       WHERE r.article_id = l.article_id AND r.kind = 'digest' AND {viewable}
+                       WHERE r.article_id = rt.article_id AND r.kind = 'digest' AND {viewable}
                        ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
-               FROM labels AS l)
-             SELECT d.article_id, d.kind, d.created_at, r.title_ja, {topics}
+               FROM ratings AS rt
+               WHERE rt.user_id = :user)
+             SELECT d.article_id, d.value, d.rated_at, r.title_ja, {topics}
              FROM digests AS d
              JOIN artifacts AS r ON r.id = d.digest_id
-             ORDER BY d.created_at DESC, d.event_id DESC",
-            labels = labels(),
+             ORDER BY d.rated_at DESC, d.article_id DESC",
             viewable = super::read::viewable("r"),
             topics = super::read::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
             Ok((
                 r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
+                r.get::<_, Rating>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
             ))
         })?;
         rows.map(|row| {
-            let (article_id, kind, at, title_ja, topics) = row?;
-            let kind = SignalKind::parse(&kind)?;
+            let (article_id, rating, at, title_ja, topics) = row?;
             Ok(Evidence {
                 article_id,
-                positive: matches!(kind, SignalKind::Up | SignalKind::Bookmark),
+                rating,
                 title_ja,
                 topics: serde_json::from_str(&topics)?,
                 at,
@@ -145,7 +110,7 @@ impl Db {
         .collect()
     }
 
-    /// 確認枠に選んだ記事と、そのラベルの内訳。
+    /// 確認枠に選んだ記事と、その評価の内訳。
     pub fn explore_stats(&self, user_id: i64) -> Result<ExploreStats, DbError> {
         let picked: std::collections::HashSet<i64> = {
             let mut stmt = self
@@ -162,10 +127,12 @@ impl Db {
             if !picked.contains(&label.article_id) {
                 continue;
             }
-            if label.positive() {
+            if label.rating.is_positive() {
                 stats.positive += 1;
-            } else {
+            } else if label.rating.is_negative() {
                 stats.negative += 1;
+            } else {
+                stats.neutral += 1;
             }
         }
         Ok(stats)
@@ -174,10 +141,8 @@ impl Db {
     /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う
     /// （キー・article_id 順）。
     pub fn eval_scores(&self, user_id: i64) -> Result<Vec<LabeledScore>, DbError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "WITH labeled AS (
-               SELECT DISTINCT article_id FROM events
-               WHERE user_id = ?1 AND kind IN {EXPLICIT}),
+        let mut stmt = self.conn.prepare(
+            "WITH labeled AS (SELECT article_id FROM ratings WHERE user_id = ?1),
              ranked AS (
                SELECT s.profile_hash, s.backend, s.model, s.prompt_version, r.article_id,
                       s.score, s.created_at,
@@ -191,8 +156,8 @@ impl Db {
                WHERE s.user_id = ?1)
              SELECT profile_hash, backend, model, prompt_version, article_id, score, created_at
              FROM ranked WHERE rn = 1
-             ORDER BY profile_hash, backend, model, prompt_version, article_id"
-        ))?;
+             ORDER BY profile_hash, backend, model, prompt_version, article_id",
+        )?;
         let rows = stmt.query_map([user_id], |r| {
             Ok(LabeledScore {
                 key: EvalKey {
@@ -215,28 +180,30 @@ mod tests {
     use super::*;
     use crate::db::test_support::*;
 
+    /// ラベルは評価だけから決める。ブックマーク・見送り・開いた記録はラベルにしない。
     #[test]
-    fn labels_come_from_the_last_explicit_reaction() {
+    fn labels_come_from_ratings() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
         let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
         let c = page_article(&db, "https://e.com/c", "2026-09-26T00:00:00.000Z");
         let d = page_article(&db, "https://e.com/d", "2026-09-26T00:00:00.000Z");
-        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
-        // 見送った後でブックマークした → 正例
-        event(a, SignalKind::Dismiss, "2026-09-27T00:00:00Z");
-        event(a, SignalKind::Bookmark, "2026-09-27T01:00:00Z");
-        // 開いただけ → ラベルなし
-        event(b, SignalKind::OpenDetail, "2026-09-27T00:00:00Z");
-        // 👍 を取り消して 👎 → 負例
-        event(c, SignalKind::Up, "2026-09-27T00:00:00Z");
-        db.undo_event(owner, c, SignalKind::Up).unwrap();
-        event(c, SignalKind::Down, "2026-09-27T02:00:00Z");
-        // ブックマークを外しても、ブックマークした反応は残る → 正例
-        event(d, SignalKind::Bookmark, "2026-09-27T00:00:00Z");
-        db.unbookmark(owner, d).unwrap();
-        // 別の利用者の反応は使わない
+        let rate = |article, value, at| db.rate(owner, article, Rating::new(value), t(at)).unwrap();
+        // 付け直した評価 → 最後の評価
+        rate(a, 2, "2026-09-27T00:00:00Z");
+        rate(a, 5, "2026-09-27T01:00:00Z");
+        // 開いただけ・ブックマーク・見送り → ラベルなし
+        db.record_event(owner, b, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, c, SignalKind::Dismiss, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 評価なしに戻した → ラベルなし
+        rate(d, 4, "2026-09-27T00:00:00Z");
+        db.rate(owner, d, None, t("2026-09-27T01:00:00Z")).unwrap();
+        // 別の利用者の評価は使わない
         let other = db
             .conn()
             .query_row(
@@ -245,21 +212,17 @@ mod tests {
                 |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        db.record_event(other, b, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+        db.rate(other, b, Rating::new(5), t("2026-09-27T00:00:00Z"))
             .unwrap();
 
         let labels = db.eval_labels(owner).unwrap();
-        let summary: Vec<_> = labels
-            .iter()
-            .map(|l| (l.article_id, l.positive(), l.at.as_str()))
-            .collect();
         assert_eq!(
-            summary,
-            [
-                (a, true, "2026-09-27T01:00:00.000Z"),
-                (c, false, "2026-09-27T02:00:00.000Z"),
-                (d, true, "2026-09-27T00:00:00.000Z"),
-            ]
+            labels,
+            [Label {
+                article_id: a,
+                rating: Rating::new(5).unwrap(),
+                at: "2026-09-27T01:00:00.000Z".into(),
+            }]
         );
     }
 
@@ -278,20 +241,13 @@ mod tests {
             "2026-09-26T02:00:00Z",
         );
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
-        add_digest(
-            &db,
-            b,
-            "sonnet",
-            "見送った記事",
-            true,
-            "2026-09-26T01:00:00Z",
-        );
+        add_digest(&db, b, "sonnet", "不要な記事", true, "2026-09-26T01:00:00Z");
         // digest の無い記事は根拠にできない
         let bare = page_article(&db, "https://e.com/bare", "2026-09-26T00:00:00.000Z");
-        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
-        event(a, SignalKind::Up, "2026-09-27T00:00:00Z");
-        event(b, SignalKind::Dismiss, "2026-09-27T01:00:00Z");
-        event(bare, SignalKind::Up, "2026-09-27T02:00:00Z");
+        let rate = |article, value, at| db.rate(owner, article, Rating::new(value), t(at)).unwrap();
+        rate(a, 4, "2026-09-27T00:00:00Z");
+        rate(b, 2, "2026-09-27T01:00:00Z");
+        rate(bare, 5, "2026-09-27T02:00:00Z");
 
         let evidence = db.label_evidence(owner).unwrap();
         assert_eq!(
@@ -299,14 +255,14 @@ mod tests {
             [
                 Evidence {
                     article_id: b,
-                    positive: false,
-                    title_ja: "見送った記事".into(),
+                    rating: Rating::new(2).unwrap(),
+                    title_ja: "不要な記事".into(),
                     topics: vec!["規制・審査".into()],
                     at: "2026-09-27T01:00:00.000Z".into(),
                 },
                 Evidence {
                     article_id: a,
-                    positive: true,
+                    rating: Rating::new(4).unwrap(),
                     title_ja: "新しい見出し".into(),
                     topics: vec!["規制・審査".into()],
                     at: "2026-09-27T00:00:00.000Z".into(),
@@ -362,7 +318,7 @@ mod tests {
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
         gated_digest(b, "会員限定だけ", "2026-09-26T01:00:00Z");
         for article in [a, b] {
-            db.record_event(owner, article, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+            db.rate(owner, article, Rating::new(4), t("2026-09-27T00:00:00Z"))
                 .unwrap();
         }
         let titles: Vec<String> = db
@@ -395,19 +351,26 @@ mod tests {
                 )
                 .unwrap();
         }
-        let event = |article, kind| {
-            db.record_event(owner, article, kind, t("2026-09-27T01:00:00Z"))
-                .unwrap()
+        let rate = |article, value| {
+            db.rate(
+                owner,
+                article,
+                Rating::new(value),
+                t("2026-09-27T01:00:00Z"),
+            )
+            .unwrap()
         };
-        event(ids[0], SignalKind::Bookmark);
-        event(ids[1], SignalKind::Dismiss);
-        // 確認枠に選んでいない記事の反応は数えない
-        event(ids[3], SignalKind::Up);
+        rate(ids[0], 5);
+        rate(ids[1], 3);
+        rate(ids[2], 1);
+        // 確認枠に選んでいない記事の評価は数えない
+        rate(ids[3], 4);
         assert_eq!(
             db.explore_stats(owner).unwrap(),
             ExploreStats {
                 picked: 3,
                 positive: 1,
+                neutral: 1,
                 negative: 1,
             }
         );
@@ -455,7 +418,7 @@ mod tests {
             .unwrap();
         db.insert_score(key, translation, 5, None, t("2026-09-26T07:00:00Z"))
             .unwrap();
-        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
             .unwrap();
 
         let scores = db.eval_scores(owner).unwrap();

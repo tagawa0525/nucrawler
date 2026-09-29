@@ -257,7 +257,7 @@ mod tests {
             .expect("explore section");
         assert!(section.contains("低い点"), "{html}");
         // 👎・無関係・未採点は候補にしない
-        for hidden in ["👎した", "無関係", "未採点"] {
+        for hidden in ["評価 2", "無関係", "未採点"] {
             assert!(!section.contains(hidden), "{hidden}: {html}");
         }
         let (_, all) = server.get("/?all=1").await;
@@ -285,7 +285,7 @@ mod tests {
             "{xml}"
         );
         assert_eq!(xml.matches("<entry>").count(), 1, "{xml}");
-        for hidden in ["低い点", "👎した", "無関係", "未採点"] {
+        for hidden in ["低い点", "評価 2", "無関係", "未採点"] {
             assert!(!xml.contains(hidden), "{hidden}: {xml}");
         }
         // 和訳タイトル・要約・元記事と詳細ページへのリンク・日付
@@ -472,7 +472,7 @@ mod tests {
     async fn unknown_article_is_not_found() {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
         assert_eq!(server.get("/articles/999").await.0, 404);
-        let res = server.post("/articles/999/feedback", "kind=up").await;
+        let res = server.post("/articles/999/rating", "value=4").await;
         assert_eq!(res.status().as_u16(), 404);
         let res = server.post("/articles/999/translation-request", "").await;
         assert_eq!(res.status().as_u16(), 404);

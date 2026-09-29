@@ -1,28 +1,37 @@
-//! `eval`：明示的な反応を正解ラベルにして、採点のキーごとに点数が正例と負例をどれだけ分けているかを表示する。
+//! `eval`：評価（1〜5）を正解ラベルにして、採点のキーごとに点数が評価の順にどれだけ並んでいるかを表示する。
 
 use std::fmt::Write as _;
 
-use crate::db::{EvalKey, ExploreStats, Label, LabeledScore, SignalKind};
+use crate::db::{EvalKey, ExploreStats, Label, LabeledScore, Rating};
 
-/// 正例・負例のどちらかがこれより少なければ、指標は参考値と注記する
+/// 関心（評価 4〜5）・不要（評価 1〜2）のどちらかがこれより少なければ、指標は参考値と注記する
 const FEW_LABELS: usize = 5;
 
-/// 正例と負例の組のうち、正例の点数が高い割合（同点は半分と数える）。どちらかが空なら `None`。
-pub fn auc(positive: &[u8], negative: &[u8]) -> Option<f64> {
-    if positive.is_empty() || negative.is_empty() {
-        return None;
-    }
+/// 一致率：評価の違う記事の組のうち、評価の高い方の点数が高い割合（同点は半分と数える）。
+/// 評価が 2 通りだけなら AUC と同じ。評価の違う組が無ければ `None`。
+pub fn concordance(pairs: &[(u8, Rating)]) -> Option<f64> {
     // 同点を半分と数えるため、2 倍で数える
-    let twice: usize = positive
-        .iter()
-        .flat_map(|p| negative.iter().map(move |n| p.cmp(n)))
-        .map(|o| match o {
-            std::cmp::Ordering::Greater => 2,
-            std::cmp::Ordering::Equal => 1,
-            std::cmp::Ordering::Less => 0,
-        })
-        .sum();
-    Some(twice as f64 / (2 * positive.len() * negative.len()) as f64)
+    let (mut twice, mut total) = (0usize, 0usize);
+    for (i, (score_a, rating_a)) in pairs.iter().enumerate() {
+        for (score_b, rating_b) in &pairs[i + 1..] {
+            if rating_a == rating_b {
+                continue;
+            }
+            // 評価の高い方の点数から見た順
+            let (high, low) = if rating_a > rating_b {
+                (score_a, score_b)
+            } else {
+                (score_b, score_a)
+            };
+            twice += match high.cmp(low) {
+                std::cmp::Ordering::Greater => 2,
+                std::cmp::Ordering::Equal => 1,
+                std::cmp::Ordering::Less => 0,
+            };
+            total += 1;
+        }
+    }
+    (total > 0).then(|| twice as f64 / (2 * total) as f64)
 }
 
 /// 10 点刻みの点数帯の下限。100 点は 90 帯に入れる。
@@ -42,19 +51,25 @@ pub fn render(
 ) -> String {
     let current = current.map(|hash| (hash, version));
     let mut out = String::new();
-    let count = |kind| labels.iter().filter(|l| l.kind == kind).count();
-    let (up, bookmark) = (count(SignalKind::Up), count(SignalKind::Bookmark));
-    let (down, dismiss) = (count(SignalKind::Down), count(SignalKind::Dismiss));
+    let per_rating: Vec<String> = Rating::all()
+        .rev()
+        .map(|r| {
+            let n = labels.iter().filter(|l| l.rating == r).count();
+            format!("★{} {n}", r.get())
+        })
+        .collect();
     let _ = writeln!(
         out,
-        "labels: {} positive (up {up}, bookmark {bookmark}), {} negative (down {down}, dismiss {dismiss})",
-        up + bookmark,
-        down + dismiss
+        "labels: {} rated ({})",
+        labels.len(),
+        per_rating.join(", ")
     );
-    if up + bookmark < FEW_LABELS || down + dismiss < FEW_LABELS {
+    let positive = labels.iter().filter(|l| l.rating.is_positive()).count();
+    let negative = labels.iter().filter(|l| l.rating.is_negative()).count();
+    if positive < FEW_LABELS || negative < FEW_LABELS {
         let _ = writeln!(
             out,
-            "note: fewer than {FEW_LABELS} positive or negative labels; treat the numbers as rough"
+            "note: fewer than {FEW_LABELS} ratings of 4-5 or of 1-2; treat the numbers as rough"
         );
     }
     let is_current = |k: &EvalKey| {
@@ -101,27 +116,27 @@ pub fn render(
     out
 }
 
-/// 確認枠の反応の内訳。反応した記事のうち関心の割合を、閾値未満での見逃し率の見積もりとして示す。
+/// 確認枠の評価の内訳。評価した記事のうち関心（評価 4〜5）の割合を、閾値未満での見逃し率の見積もりとして示す。
 pub fn render_explore(stats: ExploreStats) -> String {
     if stats.picked == 0 {
         return String::new();
     }
-    let reacted = stats.positive + stats.negative;
+    let rated = stats.positive + stats.neutral + stats.negative;
     let mut out = format!(
-        "\nexplore: {} picked below the threshold, {reacted} with reactions ({} positive, {} negative)\n",
-        stats.picked, stats.positive, stats.negative
+        "\nexplore: {} picked below the threshold, {rated} rated ({} of interest, {} neutral, {} not)\n",
+        stats.picked, stats.positive, stats.neutral, stats.negative
     );
-    if reacted > 0 {
+    if rated > 0 {
         let _ = writeln!(
             out,
-            "  about {:.0}% of the reacted picks were of interest (misses below the threshold)",
-            stats.positive as f64 * 100.0 / reacted as f64
+            "  about {:.0}% of the rated picks were of interest (misses below the threshold)",
+            stats.positive as f64 * 100.0 / rated as f64
         );
     }
     out
 }
 
-/// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、AUC、反応より後に採点した件数、点数帯ごとの正例と負例。
+/// 1 つのキーの結果（`role` は現行・候補の印）：カバー率、一致率、評価より後に採点した件数、点数帯ごとの評価の件数。
 fn render_key(
     out: &mut String,
     key: &EvalKey,
@@ -135,26 +150,20 @@ fn render_key(
         "profile {hash}  {}/{}  prompt v{}{role}",
         key.backend, key.model, key.prompt_version,
     );
-    // ラベルと突き合わせた (点数, 正例か, 反応より後に採点したか)
-    let matched: Vec<(u8, bool, bool)> = scores
+    // ラベルと突き合わせた (点数, 評価, 評価より後に採点したか)
+    let matched: Vec<(u8, Rating, bool)> = scores
         .iter()
         .filter(|s| &s.key == key)
         .filter_map(|s| {
             let label = labels.iter().find(|l| l.article_id == s.article_id)?;
-            Some((s.score, label.positive(), s.scored_at > label.at))
+            Some((s.score, label.rating, s.scored_at > label.at))
         })
         .collect();
-    let pick = |positive: bool| -> Vec<u8> {
-        matched
-            .iter()
-            .filter(|m| m.1 == positive)
-            .map(|m| m.0)
-            .collect()
-    };
-    let auc = auc(&pick(true), &pick(false)).map_or_else(|| "-".to_string(), |a| format!("{a:.2}"));
+    let pairs: Vec<(u8, Rating)> = matched.iter().map(|m| (m.0, m.1)).collect();
+    let concordance = concordance(&pairs).map_or_else(|| "-".to_string(), |c| format!("{c:.2}"));
     let _ = writeln!(
         out,
-        "  scored {}/{}  AUC {auc}",
+        "  scored {}/{}  concordance {concordance}",
         matched.len(),
         labels.len()
     );
@@ -163,19 +172,17 @@ fn render_key(
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,
-            "  note: {late} scored after the reaction; the article's own title may have been a signal, so AUC may be high"
+            "  note: {late} scored after the reaction; the article's own title may have been a signal, so concordance may be high"
         );
     }
-    let _ = writeln!(out, "  {:<8}{:>5}{:>6}", "score", "pos", "neg");
+    let mut header = format!("  {:<8}", "score");
+    for r in Rating::all() {
+        let _ = write!(header, "{:>4}", format!("★{}", r.get()));
+    }
+    let _ = writeln!(out, "{header}");
     for b in (0..10).rev().map(|i| i * 10) {
-        let in_band = |positive: bool| {
-            matched
-                .iter()
-                .filter(|m| band(m.0) == b && m.1 == positive)
-                .count()
-        };
-        let (pos, neg) = (in_band(true), in_band(false));
-        if pos + neg == 0 {
+        let in_band: Vec<&(u8, Rating, bool)> = matched.iter().filter(|m| band(m.0) == b).collect();
+        if in_band.is_empty() {
             continue;
         }
         let label = if b == 90 {
@@ -183,7 +190,11 @@ fn render_key(
         } else {
             format!("{b}-{}", b + 9)
         };
-        let _ = writeln!(out, "  {label:<8}{pos:>5}{neg:>6}");
+        let mut row = format!("  {label:<8}");
+        for r in Rating::all() {
+            let _ = write!(row, "{:>4}", in_band.iter().filter(|m| m.1 == r).count());
+        }
+        let _ = writeln!(out, "{row}");
     }
 }
 
@@ -191,16 +202,25 @@ fn render_key(
 mod tests {
     use super::*;
 
+    fn pair(score: u8, rating: u8) -> (u8, Rating) {
+        (score, Rating::new(rating).unwrap())
+    }
+
+    /// 評価の違う組のうち、評価の高い方の点数が高い割合（同点は半分）。2 値なら AUC と同じ。
     #[test]
-    fn auc_is_the_share_of_correctly_ordered_pairs() {
-        assert_eq!(auc(&[90, 80], &[10, 20]), Some(1.0));
-        assert_eq!(auc(&[10], &[90]), Some(0.0));
-        assert_eq!(auc(&[50], &[50]), Some(0.5));
-        // 組は (90,50) 正、(90,70) 正、(40,50) 誤、(40,70) 誤
-        assert_eq!(auc(&[90, 40], &[50, 70]), Some(0.5));
-        assert_eq!(auc(&[80, 60], &[60]), Some(0.75));
-        assert_eq!(auc(&[], &[10]), None);
-        assert_eq!(auc(&[10], &[]), None);
+    fn concordance_is_the_share_of_correctly_ordered_pairs() {
+        assert_eq!(concordance(&[pair(90, 5), pair(10, 1)]), Some(1.0));
+        assert_eq!(concordance(&[pair(10, 5), pair(90, 1)]), Some(0.0));
+        assert_eq!(concordance(&[pair(50, 4), pair(50, 2)]), Some(0.5));
+        // 組は (5,3) 正、(5,1) 正、(3,1) 誤。同じ評価どうし（4 と 4）は数えない
+        let three = [pair(90, 5), pair(10, 3), pair(50, 1)];
+        assert_eq!(concordance(&three), Some(2.0 / 3.0));
+        assert_eq!(
+            concordance(&[pair(90, 5), pair(10, 3), pair(50, 1), pair(20, 3)]),
+            Some(0.6)
+        );
+        assert_eq!(concordance(&[pair(90, 4), pair(10, 4)]), None);
+        assert_eq!(concordance(&[]), None);
     }
 
     #[test]
@@ -212,10 +232,10 @@ mod tests {
         assert_eq!(band(100), 90);
     }
 
-    fn label(article_id: i64, kind: SignalKind) -> Label {
+    fn label(article_id: i64, rating: u8) -> Label {
         Label {
             article_id,
-            kind,
+            rating: Rating::new(rating).unwrap(),
             at: "2026-09-27T00:00:00.000Z".into(),
         }
     }
@@ -240,11 +260,7 @@ mod tests {
 
     #[test]
     fn renders_labels_and_the_current_key() {
-        let labels = [
-            label(1, SignalKind::Up),
-            label(2, SignalKind::Bookmark),
-            label(3, SignalKind::Dismiss),
-        ];
+        let labels = [label(1, 5), label(2, 4), label(3, 2)];
         let current = key("0123456789abcdef", 1);
         let old = key("fedcba9876543210", 1);
         let before = "2026-09-26T00:00:00.000Z";
@@ -257,9 +273,7 @@ mod tests {
         ];
         let out = render(&labels, &scores, Some("0123456789abcdef"), None, 1, false);
         assert!(
-            out.starts_with(
-                "labels: 2 positive (up 1, bookmark 1), 1 negative (down 0, dismiss 1)\n"
-            ),
+            out.starts_with("labels: 3 rated (★5 1, ★4 1, ★3 0, ★2 1, ★1 0)\n"),
             "{out}"
         );
         assert!(out.contains("fewer than 5"), "{out}");
@@ -267,11 +281,12 @@ mod tests {
             out.contains("profile 01234567  claude-cli/sonnet  prompt v1  (current)"),
             "{out}"
         );
-        assert!(out.contains("scored 3/3  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 3/3  concordance 1.00"), "{out}");
         assert!(out.contains("1 scored after the reaction"), "{out}");
-        assert!(out.contains("90-100      1     0"), "{out}");
-        assert!(out.contains("70-79       1     0"), "{out}");
-        assert!(out.contains("40-49       0     1"), "{out}");
+        assert!(out.contains("  score     ★1  ★2  ★3  ★4  ★5\n"), "{out}");
+        assert!(out.contains("  90-100     0   0   0   0   1\n"), "{out}");
+        assert!(out.contains("  70-79      0   0   0   1   0\n"), "{out}");
+        assert!(out.contains("  40-49      0   1   0   0   0\n"), "{out}");
         // 既定では現行のキーだけ
         assert!(!out.contains("fedcba98"), "{out}");
         let all = render(&labels, &scores, Some("0123456789abcdef"), None, 1, true);
@@ -279,24 +294,24 @@ mod tests {
             all.contains("profile fedcba98  claude-cli/sonnet  prompt v1\n"),
             "{all}"
         );
-        assert!(all.contains("scored 1/3  AUC -"), "{all}");
+        assert!(all.contains("scored 1/3  concordance -"), "{all}");
     }
 
     /// 反応の見出しをプロンプトに入れていたのは版 1 だけなので、それ以降の版には注記しない。
     #[test]
     fn notes_late_scores_only_for_prompt_v1() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let v2 = key("h", 2);
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
         let out = render(&labels, &scores, Some("h"), None, 2, false);
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
     #[test]
     fn shows_the_candidate_next_to_the_current_key() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let current = key("aaaaaaaaaaaa", 2);
         let candidate = key("bbbbbbbbbbbb", 2);
         let other = key("cccccccccccc", 2);
@@ -320,15 +335,15 @@ mod tests {
         let candidate_at = out.find("profile bbbbbbbb").unwrap();
         assert!(current_at < candidate_at, "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 0.00"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 0.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("cccccccc"), "{out}");
     }
 
     /// 候補だけ採点済みでも、現行のキーの採点が無いことを示す（比べる相手が黙って消えないように）。
     #[test]
     fn says_when_only_the_candidate_has_scores() {
-        let labels = [label(1, SignalKind::Up)];
+        let labels = [label(1, 4)];
         let candidate = key("bbbbbbbbbbbb", 2);
         let scores = [scored(&candidate, 1, 90, "2026-09-26T00:00:00.000Z")];
         let out = render(
@@ -346,14 +361,14 @@ mod tests {
     /// プロファイルをまだ取り込んでいなくても、候補の結果は出す。
     #[test]
     fn shows_the_candidate_without_a_saved_profile() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let candidate = key("bbbbbbbbbbbb", 2);
         let at = "2026-09-26T00:00:00.000Z";
         let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
         let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false);
         assert!(out.contains("no profile"), "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
     }
 
     #[test]
@@ -361,32 +376,32 @@ mod tests {
         let out = render_explore(ExploreStats {
             picked: 12,
             positive: 1,
-            negative: 4,
+            neutral: 1,
+            negative: 3,
         });
         assert_eq!(
             out,
-            "\nexplore: 12 picked below the threshold, 5 with reactions (1 positive, 4 negative)\n\
-             \x20 about 20% of the reacted picks were of interest (misses below the threshold)\n"
+            "\nexplore: 12 picked below the threshold, 5 rated (1 of interest, 1 neutral, 3 not)\n\
+             \x20 about 20% of the rated picks were of interest (misses below the threshold)\n"
         );
         let none = render_explore(ExploreStats {
             picked: 3,
-            positive: 0,
-            negative: 0,
+            ..ExploreStats::default()
         });
         assert_eq!(
             none,
-            "\nexplore: 3 picked below the threshold, 0 with reactions (0 positive, 0 negative)\n"
+            "\nexplore: 3 picked below the threshold, 0 rated (0 of interest, 0 neutral, 0 not)\n"
         );
         assert_eq!(render_explore(ExploreStats::default()), "");
     }
 
     #[test]
     fn says_when_the_current_key_has_no_scores() {
-        let labels = [label(1, SignalKind::Up)];
+        let labels = [label(1, 4)];
         let out = render(&labels, &[], Some("h"), None, 1, false);
         assert!(out.contains("no scores for the current profile"), "{out}");
         let out = render(&[], &[], None, None, 1, false);
-        assert!(out.starts_with("labels: 0 positive"), "{out}");
+        assert!(out.starts_with("labels: 0 rated"), "{out}");
         assert!(out.contains("no profile"), "{out}");
     }
 }

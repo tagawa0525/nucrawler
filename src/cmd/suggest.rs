@@ -39,18 +39,18 @@ pub(crate) async fn suggest(
     let (current, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
     let evidence = db.label_evidence(owner)?;
     if evidence.is_empty() {
-        // 反応はあっても、どの記事にも閲覧できる要約が無ければ根拠にできない
+        // 評価はあっても、どの記事にも閲覧できる要約が無ければ根拠にできない
         return Err(if db.eval_labels(owner)?.is_empty() {
             Error::NoLabels
         } else {
             Error::NoEvidence
         });
     }
-    let positive = evidence.iter().filter(|e| e.positive).count();
-    if positive < FEW_LABELS || evidence.len() - positive < FEW_LABELS {
+    let positive = evidence.iter().filter(|e| e.rating.is_positive()).count();
+    let negative = evidence.iter().filter(|e| e.rating.is_negative()).count();
+    if positive < FEW_LABELS || negative < FEW_LABELS {
         println!(
-            "note: {positive} positive and {} negative reactions; treat the suggestion as rough",
-            evidence.len() - positive
+            "note: {positive} ratings of 4-5 and {negative} of 1-2; treat the suggestion as rough"
         );
     }
     let cancel = Cancel::default();

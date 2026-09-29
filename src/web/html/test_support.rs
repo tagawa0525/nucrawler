@@ -1,7 +1,7 @@
 //! 画面のテストで共有する補助。
 
 use super::*;
-use crate::db::{ArtifactVersion, Feedback};
+use crate::db::{ArtifactVersion, Rating};
 
 pub(super) fn item(id: i64, fetched_at: &str) -> ListItem {
     ListItem {
@@ -20,7 +20,7 @@ pub(super) fn item(id: i64, fetched_at: &str) -> ListItem {
         matched: Vec::new(),
         excluded: Vec::new(),
         read: false,
-        feedback: None,
+        rating: None,
         has_translation: false,
         translation_requested: false,
         bookmarked: false,
@@ -41,7 +41,7 @@ pub(super) fn detail() -> ArticleDetail {
         }),
     };
     let mut i = item(7, "2026-09-26T00:00:00.000Z");
-    i.feedback = Some(Feedback::Up);
+    i.rating = Rating::new(4);
     ArticleDetail {
         item: i,
         digests: vec![digest(11, "opus", "新版"), digest(10, "sonnet", "旧版")],

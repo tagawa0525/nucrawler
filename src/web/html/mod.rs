@@ -3,8 +3,8 @@
 //! だけ使い、無くても読める。
 
 use crate::db::{
-    ArticleDetail, Comment, ListItem, Report, ReportFilter, ReportKind, ReportStatus, TopicUsage,
-    Visibility, Warning,
+    ArticleDetail, Comment, ListItem, Rating, Report, ReportFilter, ReportKind, ReportStatus,
+    TopicUsage, Visibility, Warning,
 };
 
 use crate::search::Params;

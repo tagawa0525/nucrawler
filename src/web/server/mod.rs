@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 
 use crate::db::{
-    Db, DbError, ListQuery, NewReport, ReportFilter, ReportKind, ReportStatus, SignalKind,
+    Db, DbError, ListQuery, NewReport, Rating, ReportFilter, ReportKind, ReportStatus, SignalKind,
     Visibility,
 };
 
@@ -79,6 +79,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/search", get(search))
         .route("/api/search", get(api_search))
         .route("/articles/{id}/feedback", post(feedback))
+        .route("/articles/{id}/rating", post(rating))
         .route("/articles/{id}/feedback/undo", post(undo_feedback))
         .route(
             "/articles/{id}/translation-request",
@@ -227,13 +228,13 @@ mod tests {
             (server.base.as_str(), 303),
         ] {
             let res = server
-                .form(&format!("/articles/{id}/feedback"), "kind=up")
+                .form(&format!("/articles/{id}/rating"), "value=4")
                 .header("origin", origin)
                 .send()
                 .await
                 .unwrap();
             assert_eq!(res.status().as_u16(), expected, "{origin}");
         }
-        assert_eq!(server.count("SELECT count(*) FROM events"), 1);
+        assert_eq!(server.count("SELECT count(*) FROM ratings"), 1);
     }
 }

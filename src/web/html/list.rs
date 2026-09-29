@@ -72,7 +72,7 @@ pub fn list_page_with_explore(
     let mut body = format!(
         "<nav class=\"bar\">{}{}{}{}{}{}</nav>",
         button("/search", "検索", "🔍", None),
-        button("/search?liked=1", "いいね", "👍", None),
+        button("/search?min_rating=4", "評価 4 以上", "👍", None),
         button("/search?bookmarked=1", "ブックマーク", "🔖", None),
         button(
             &all_toggle.href(),
@@ -142,11 +142,10 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     } else {
         format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
     };
-    let liked = if i.feedback == Some(crate::db::Feedback::Up) {
-        " 👍"
-    } else {
-        ""
-    };
+    let rating = i
+        .rating
+        .map(|r| format!(" ★{}", r.get()))
+        .unwrap_or_default();
     let bookmarked = if i.bookmarked { " 🔖" } else { "" };
     let translation = if i.has_translation {
         " ・和訳あり"
@@ -161,7 +160,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{liked}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
         read = if i.read { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
@@ -179,7 +178,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Feedback;
+    use crate::db::Rating;
     use crate::web::html::test_support::*;
 
     #[test]
@@ -216,10 +215,10 @@ mod tests {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
         assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
-        // 検索とブックマークの間に、いいねした記事へのボタンを置く
+        // 検索とブックマークの間に、評価 4 以上の記事へのボタンを置く
         let search = html.find(r#"href="/search""#).unwrap();
         let liked = html
-            .find(r#"<a class="btn" href="/search?liked=1" aria-label="いいね" title="いいね">👍</a>"#)
+            .find(r#"<a class="btn" href="/search?min_rating=4" aria-label="評価 4 以上" title="評価 4 以上">👍</a>"#)
             .expect(&html);
         let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
         assert!(search < liked && liked < bookmarked, "{html}");
@@ -404,17 +403,21 @@ mod tests {
     }
 
     #[test]
-    fn card_marks_liked_and_bookmarked_articles() {
+    fn card_marks_rated_and_bookmarked_articles() {
         let mut marked = item(1, "2026-09-27T05:00:00.000Z");
-        marked.feedback = Some(Feedback::Up);
+        marked.rating = Rating::new(4);
         marked.bookmarked = true;
         let html = card(&marked, false, &Page::default());
-        assert!(html.contains(" 👍 🔖</div>"), "{html}");
-        let mut disliked = item(2, "2026-09-27T05:00:00.000Z");
-        disliked.feedback = Some(Feedback::Down);
-        for i in [item(3, "2026-09-27T05:00:00.000Z"), disliked] {
-            let html = card(&i, false, &Page::default());
-            assert!(!html.contains('👍') && !html.contains('🔖'), "{html}");
-        }
+        assert!(html.contains(" ★4 🔖</div>"), "{html}");
+        let mut low = item(2, "2026-09-27T05:00:00.000Z");
+        low.rating = Rating::new(1);
+        let html = card(&low, false, &Page::default());
+        assert!(html.contains(" ★1</div>"), "{html}");
+        let html = card(
+            &item(3, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(!html.contains('★') && !html.contains('🔖'), "{html}");
     }
 }

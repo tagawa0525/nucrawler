@@ -266,7 +266,7 @@ mod tests {
     use super::*;
     use crate::config::Lang;
     use crate::db::{
-        ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, SignalKind,
+        ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, Rating,
     };
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
@@ -375,8 +375,7 @@ mod tests {
     #[tokio::test]
     async fn scores_digests_with_profile_only() {
         let (db, owner, ids) = setup(3);
-        db.record_event(owner, ids[2], SignalKind::Down, now())
-            .unwrap();
+        db.rate(owner, ids[2], Rating::new(2), now()).unwrap();
         let llm = FakeLlm::new([ok(&[(ids[0], 90), (ids[1], 40)]), ok(&[(ids[2], 5)])]);
         let summary = run(&db, owner, &llm, &mut quota(10), 2).await;
         assert_eq!((summary.scored, summary.failed, summary.calls), (3, 0, 2));

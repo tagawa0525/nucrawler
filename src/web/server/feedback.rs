@@ -1,4 +1,4 @@
-//! 記事への操作（👍/👎・ブックマーク・取り消し・和訳の依頼）。
+//! 記事への操作（評価・ブックマーク・見送り・取り消し・和訳の依頼）。
 
 use super::*;
 
@@ -16,14 +16,12 @@ pub(super) async fn feedback(
     check_same_origin(&headers)?;
     // ブックマークを外すのは行動ではなく状態の変更（ブックマークした行動は残す）
     let kind = match form.kind.as_str() {
-        "up" => Some(SignalKind::Up),
-        "down" => Some(SignalKind::Down),
         "bookmark" => Some(SignalKind::Bookmark),
         "dismiss" => Some(SignalKind::Dismiss),
         "unbookmark" => None,
         _ => {
             return Err(AppError::BadRequest(
-                "kind must be up, down, bookmark, unbookmark or dismiss",
+                "kind must be bookmark, unbookmark or dismiss",
             ));
         }
     };
@@ -35,6 +33,38 @@ pub(super) async fn feedback(
             None => db.unbookmark(user, id)?,
         }
         Ok(())
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RatingForm {
+    value: String,
+}
+
+/// 評価を付ける（1〜5）。空の値なら評価なしに戻す。
+pub(super) async fn rating(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<RatingForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let rating = match form.value.as_str() {
+        "" => None,
+        value => Some(
+            value
+                .parse()
+                .ok()
+                .and_then(Rating::new)
+                .ok_or(AppError::BadRequest("value must be 1..=5 or empty"))?,
+        ),
+    };
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.rate(user, id, rating, Utc::now())?)
     })
     .await?;
     Ok(Redirect::to(&format!("/articles/{id}")))
@@ -88,28 +118,49 @@ mod tests {
     use crate::db::{ContentKind, ContentOrigin, Db, NewArticle};
     use crate::web::server::test_support::*;
 
+    /// 評価は 1〜5 で付け直せ、空の値で評価なしに戻る。付けたら詳細に戻る。
     #[tokio::test]
-    async fn feedback_records_event_and_returns_to_detail() {
+    async fn rating_is_recorded_and_returns_to_detail() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let res = server
-            .post(&format!("/articles/{id}/feedback"), "kind=down")
-            .await;
+        let path = format!("/articles/{id}/rating");
+        let res = server.post(&path, "value=2").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
             format!("/articles/{id}")
         );
+        server.post(&path, "value=5").await;
         assert_eq!(
-            server.count("SELECT count(*) FROM events WHERE kind = 'down'"),
-            1
+            server.strings("SELECT CAST(value AS TEXT) FROM ratings"),
+            ["5"]
         );
-        let res = server
-            .post(&format!("/articles/{id}/feedback"), "kind=open_detail")
-            .await;
-        assert_eq!(res.status().as_u16(), 400);
-        assert_eq!(server.count("SELECT count(*) FROM events"), 1);
+        for bad in ["value=0", "value=6", "value=x"] {
+            let res = server.post(&path, bad).await;
+            assert_eq!(res.status().as_u16(), 400, "{bad}");
+        }
+        assert_eq!(
+            server.strings("SELECT CAST(value AS TEXT) FROM ratings"),
+            ["5"]
+        );
+        assert_eq!(server.post(&path, "value=").await.status().as_u16(), 303);
+        assert_eq!(server.count("SELECT count(*) FROM ratings"), 0);
+        let res = server.post("/articles/999/rating", "value=3").await;
+        assert_eq!(res.status().as_u16(), 404);
+    }
+
+    /// 👍/👎 は評価に置き換えたので、振り分けの受付では受け付けない。
+    #[tokio::test]
+    async fn feedback_no_longer_takes_thumbs() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        for kind in ["kind=up", "kind=down", "kind=open_detail"] {
+            let res = server.post(&format!("/articles/{id}/feedback"), kind).await;
+            assert_eq!(res.status().as_u16(), 400, "{kind}");
+        }
+        assert_eq!(server.count("SELECT count(*) FROM events"), 0);
     }
 
     /// ブックマークは状態として残り、外せる。「見ない」は行動として記録する。
@@ -155,7 +206,7 @@ mod tests {
         assert_eq!(server.count("SELECT count(*) FROM events"), 0);
         assert_eq!(server.count("SELECT count(*) FROM bookmarks"), 0);
 
-        server.post(&feedback, "kind=up").await;
+        server.post(&feedback, "kind=dismiss").await;
         let res = server.post(&undo, "kind=up").await;
         assert_eq!(res.status().as_u16(), 400);
         assert_eq!(server.count("SELECT count(*) FROM events"), 1);

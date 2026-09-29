@@ -1,14 +1,12 @@
-//! 既読・不要・ブックマークなどの利用者の行動。明示的な反応は評価（`eval`）の正解ラベルになる。
+//! 開いた記録・ブックマーク・見送りなどの利用者の行動。評価のラベルにはしない（ラベルは `signals` の評価）。
 
 use super::*;
 
-/// 利用者の行動。👍・ブックマークは関心、👎・見ないは不要の明示的な反応。
+/// 利用者の行動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalKind {
     OpenDetail,
     OpenTranslation,
-    Up,
-    Down,
     /// 一覧で後で読むために残した（外すまでブックマークとして残る）
     Bookmark,
     /// 一覧で見出しだけ見て見送った
@@ -20,32 +18,10 @@ impl SignalKind {
         match self {
             Self::OpenDetail => "open_detail",
             Self::OpenTranslation => "open_translation",
-            Self::Up => "up",
-            Self::Down => "down",
             Self::Bookmark => "bookmark",
             Self::Dismiss => "dismiss",
         }
     }
-
-    /// DB の `events.kind` の値を読む。
-    pub(super) fn parse(s: &str) -> Result<Self, DbError> {
-        Ok(match s {
-            "open_detail" => Self::OpenDetail,
-            "open_translation" => Self::OpenTranslation,
-            "up" => Self::Up,
-            "down" => Self::Down,
-            "bookmark" => Self::Bookmark,
-            "dismiss" => Self::Dismiss,
-            other => return Err(DbError::UnexpectedValue(format!("events.kind = {other:?}"))),
-        })
-    }
-}
-
-/// 利用者の最新の 👍/👎。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Feedback {
-    Up,
-    Down,
 }
 
 impl Db {
@@ -73,7 +49,7 @@ impl Db {
         Ok(())
     }
 
-    /// ブックマークを外す。ブックマークした行動は採点の手がかりとして残す。
+    /// ブックマークを外す。ブックマークした行動は残す。
     pub fn unbookmark(&self, user_id: i64, article_id: i64) -> Result<(), DbError> {
         self.conn.execute(
             "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",

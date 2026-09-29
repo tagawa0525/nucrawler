@@ -4,7 +4,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::config::Lang;
-use crate::db::{SearchOrder, SearchQuery};
+use crate::db::{Rating, SearchOrder, SearchQuery};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
@@ -14,6 +14,8 @@ pub enum SearchError {
     InvalidLang(String),
     #[error("min_score must be 0..=100, got {0:?}")]
     InvalidScore(String),
+    #[error("min_rating must be 1..=5, got {0:?}")]
+    InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
 }
@@ -29,9 +31,10 @@ pub struct Params {
     pub sources: Vec<String>,
     pub lang: String,
     pub translated: bool,
-    pub liked: bool,
     pub unread: bool,
     pub bookmarked: bool,
+    /// この評価（1〜5）以上
+    pub min_rating: String,
     pub min_score: String,
     /// `newest`（既定）か `score`
     pub sort: String,
@@ -51,9 +54,9 @@ impl Params {
                 "source" if !value.trim().is_empty() => p.sources.push(value),
                 "lang" => p.lang = value,
                 "translated" => p.translated = value == "1",
-                "liked" => p.liked = value == "1",
                 "unread" => p.unread = value == "1",
                 "bookmarked" => p.bookmarked = value == "1",
+                "min_rating" => p.min_rating = value,
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
                 _ => {}
@@ -69,13 +72,14 @@ impl Params {
             &self.since,
             &self.until,
             &self.lang,
+            &self.min_rating,
             &self.min_score,
         ]
         .iter()
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.liked || self.unread || self.bookmarked)
+            && !(self.translated || self.unread || self.bookmarked)
     }
 
     /// 検索の条件にする。一覧で隠す記事も含める。
@@ -99,6 +103,14 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidScore(v.to_string()))
             })
             .transpose()?;
+        let min_rating = given(&self.min_rating)
+            .map(|v| {
+                v.parse::<u8>()
+                    .ok()
+                    .and_then(Rating::new)
+                    .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
+            })
+            .transpose()?;
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -114,9 +126,9 @@ impl Params {
             sources: self.sources.clone(),
             lang,
             translated: self.translated,
-            liked: self.liked,
             unread: self.unread,
             bookmarked: self.bookmarked,
+            min_rating,
             min_score,
             hide_below: None,
             order,
@@ -202,7 +214,7 @@ mod tests {
     fn reads_params_from_a_query_string() {
         let p = Params::from_query(
             "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&source=nra&source=wnn\
-             &since=2026-09&until=&lang=ja&translated=1&liked=0&unread=on&bookmarked=1&min_score=60&sort=score&x=1",
+             &since=2026-09&until=&lang=ja&translated=1&min_rating=4&unread=on&bookmarked=1&min_score=60&sort=score&x=1",
         );
         assert_eq!(
             p,
@@ -214,6 +226,7 @@ mod tests {
                 lang: "ja".into(),
                 translated: true,
                 bookmarked: true,
+                min_rating: "4".into(),
                 min_score: "60".into(),
                 sort: "score".into(),
                 ..Params::default()
@@ -222,6 +235,7 @@ mod tests {
         assert!(!p.is_empty());
         assert!(Params::from_query("").is_empty());
         assert!(!Params::from_query("bookmarked=1").is_empty());
+        assert!(!Params::from_query("min_rating=4").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -238,9 +252,9 @@ mod tests {
             sources: vec!["nra".into()],
             lang: "en".into(),
             translated: true,
-            liked: true,
             unread: true,
             bookmarked: true,
+            min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
         };
@@ -252,7 +266,8 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.liked && q.unread && q.bookmarked);
+        assert!(q.translated && q.unread && q.bookmarked);
+        assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert_eq!(q.hide_below, None, "search shows what the list hides");
@@ -282,6 +297,15 @@ mod tests {
             }),
             SearchError::InvalidDate { name: "until", .. }
         ));
+        for bad in ["0", "6", "x"] {
+            assert_eq!(
+                err(Params {
+                    min_rating: bad.into(),
+                    ..Params::default()
+                }),
+                SearchError::InvalidRating(bad.into())
+            );
+        }
         assert_eq!(
             err(Params {
                 lang: "fr".into(),
@@ -330,7 +354,7 @@ mod tests {
             matched: Vec::new(),
             excluded: Vec::new(),
             read: false,
-            feedback: None,
+            rating: None,
             has_translation: false,
             translation_requested: false,
             bookmarked: false,

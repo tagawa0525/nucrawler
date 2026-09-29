@@ -13,6 +13,7 @@ mod notes;
 mod read;
 mod redo;
 mod score;
+mod signals;
 mod sources;
 mod stages;
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use notes::*;
 pub use read::*;
 pub use redo::*;
 pub use score::*;
+pub use signals::*;
 pub use sources::*;
 pub use stages::*;
 pub use translate::*;
@@ -106,6 +108,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0022_explore_picks.sql"),
     include_str!("migrations/0023_title_artifacts.sql"),
     include_str!("migrations/0024_work_claims.sql"),
+    include_str!("migrations/0025_ratings.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -1057,14 +1060,14 @@ mod tests {
             "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
                VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z');
              INSERT INTO events (id, user_id, article_id, kind, created_at)
-               VALUES (7, 1, 1, 'up', '2026-09-27T00:00:00.000Z');",
+               VALUES (7, 1, 1, 'open_detail', '2026-09-27T00:00:00.000Z');",
         )
         .unwrap();
         let db = Db::init(conn).unwrap();
         assert_eq!(
             db.query_strings("SELECT id || kind || created_at FROM events")
                 .unwrap(),
-            ["7up2026-09-27T00:00:00.000Z"]
+            ["7open_detail2026-09-27T00:00:00.000Z"]
         );
         // 作り直した events の索引と、bookmarks の外部キーの子側の索引
         assert_eq!(
@@ -1094,5 +1097,72 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("CHECK"), "{err}");
+    }
+
+    /// 👍/👎 は、記事ごとに最後のものを評価 4/2 として移し、行動からは消す。ほかの行動は残す。
+    #[test]
+    fn migration_moves_thumbs_to_ratings() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE ratings"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (id, login, display_name) VALUES (2, 'other', 'other');
+             INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (2, 's', 'https://e.example/b', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (3, 's', 'https://e.example/c', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO events (id, user_id, article_id, kind, created_at) VALUES
+               (1, 1, 1, 'down', '2026-09-27T01:00:00.000Z'),
+               (2, 1, 1, 'up', '2026-09-27T02:00:00.000Z'),
+               (3, 1, 2, 'up', '2026-09-27T03:00:00.000Z'),
+               -- 同じ時刻なら後に記録した方
+               (4, 1, 2, 'down', '2026-09-27T03:00:00.000Z'),
+               (5, 2, 1, 'down', '2026-09-27T04:00:00.000Z'),
+               (6, 1, 3, 'dismiss', '2026-09-27T05:00:00.000Z'),
+               (7, 1, 3, 'open_detail', '2026-09-27T06:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings(
+                "SELECT user_id || ':' || article_id || ':' || value || ':' || rated_at
+                 FROM ratings ORDER BY user_id, article_id"
+            )
+            .unwrap(),
+            [
+                "1:1:4:2026-09-27T02:00:00.000Z",
+                "1:2:2:2026-09-27T03:00:00.000Z",
+                "2:1:2:2026-09-27T04:00:00.000Z",
+            ]
+        );
+        assert_eq!(
+            db.query_strings("SELECT kind FROM events ORDER BY id")
+                .unwrap(),
+            ["dismiss", "open_detail"]
+        );
+        for value in [0, 6] {
+            let err = db
+                .conn
+                .execute(
+                    "INSERT INTO ratings (user_id, article_id, value, rated_at)
+                     VALUES (1, 3, ?1, '2026-09-27T00:00:00.000Z')",
+                    [value],
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("CHECK"), "{err}");
+        }
+        // 記事を消すと評価も消える
+        db.conn
+            .execute("DELETE FROM articles WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(db.query_i64("SELECT count(*) FROM ratings").unwrap(), 1);
     }
 }

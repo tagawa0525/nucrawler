@@ -98,6 +98,9 @@ pub async fn translate_titles<L: Llm>(
         )
         .await?;
         summary.calls += 1;
+        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let response = match outcome {
             Outcome::Response(response) => response,
             Outcome::Cancelled => {
@@ -107,22 +110,19 @@ pub async fn translate_titles<L: Llm>(
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
                     summary.failed +=
-                        record_failures(db, ids.iter().map(|&id| key(id)), message, now)?;
+                        record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
             }
         };
-        // 保存する前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は、
-        // 延長できないので結果を保存しない（予約を持っている実行だけが保存する）
-        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let parsed = match prompt::title::parse(&response.output, &ids) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let message = errors::error_chain(&e);
                 tracing::warn!("title output rejected: {message}");
                 summary.failed +=
-                    record_failures(db, ids.iter().map(|&id| key(id)), &message, now)?;
+                    record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
                 continue;
             }
         };

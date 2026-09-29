@@ -118,15 +118,58 @@ pub fn list_page_with_explore(
         );
         body.extend(explore.iter().map(|i| card(i, true, page)));
     }
-    body.push_str(SWIPE_SCRIPT);
+    body.push_str(MARKS_SCRIPT);
     layout("一覧", page, &body)
 }
 
-/// 一覧のカードを左右にスワイプして印を付ける（右でブックマーク、左で既読）。
-/// 振り分けたカードは隠し、しばらく「元に戻す」を出す。縦のスクロールはブラウザに任せ
+/// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。カードは消さない。
+/// 左右のスワイプでも印を付けられる（右でブックマーク、左で既読）。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
-/// キーボードでは j/k・↓/↑ でカードを選び、l/→ と h/← で振り分け、u で取り消す。
-const SWIPE_SCRIPT: &str = concat!("<script>\n", include_str!("assets/swipe.js"), "</script>");
+/// キーボードでは j/k・↓/↑ でカードを選び、1〜5 で評価、0 で評価なし、l/→ でブックマーク、h/← で既読。
+/// スワイプ・キーはカードのボタンと同じ送信を通す。
+pub(super) const MARKS_SCRIPT: &str =
+    concat!("<script>\n", include_str!("assets/marks.js"), "</script>");
+
+/// 評価（1〜5 の星）とブックマーク・既読の印。一覧のカードと詳細で共有する。
+/// 星は今の評価まで塗り、今の評価の星を押すと評価なしに戻る。星は記号だけなので、段階の意味を
+/// 読み上げの名前（aria-label）にも付け、`data-label` にも持たせて画面の側で付け直せるようにする。
+/// ブックマーク・既読は押すと今の逆にするボタンで、状態を `aria-pressed` で示す。
+/// JavaScript が無ければフォームの送信で付け、詳細に戻る。
+pub(super) fn marks(i: &ListItem) -> String {
+    let id = i.article_id;
+    let stars: String = Rating::all()
+        .map(|r| {
+            let on = i.rating.is_some_and(|c| r <= c);
+            let label = format!("{} {}", r.get(), r.meaning());
+            let (value, title) = if i.rating == Some(r) {
+                (String::new(), format!("{label}（押すと評価なし）"))
+            } else {
+                (r.get().to_string(), label.clone())
+            };
+            format!(
+                "<button name=\"value\" value=\"{value}\" data-label=\"{label}\" aria-label=\"{title}\" \
+                 title=\"{title}\"{}>{}</button>",
+                if on { " class=\"on\"" } else { "" },
+                if on { '★' } else { '☆' }
+            )
+        })
+        .collect();
+    let toggle = |mark: &str, label: &str, glyph: &str, on: bool| {
+        format!(
+            "<form method=\"post\" action=\"/articles/{id}/{mark}\">\
+             <button name=\"on\" value=\"{}\" aria-pressed=\"{on}\" aria-label=\"{label}\" title=\"{label}\"{}>\
+             {glyph}</button></form>",
+            if on { "0" } else { "1" },
+            if on { " class=\"on\"" } else { "" },
+        )
+    };
+    format!(
+        "<div class=\"actions marks\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
+         {stars}</form>{}{}</div>",
+        toggle("bookmark", "ブックマーク", "🔖", i.bookmarked),
+        toggle("read", "既読", "✓", i.is_read()),
+    )
+}
 
 /// 点数が当たったプロファイルの語（関心分野と、除外に当たった話題）。
 pub(super) fn matches(i: &ListItem) -> String {
@@ -141,7 +184,8 @@ pub(super) fn matches(i: &ListItem) -> String {
     matched.chain(excluded).collect()
 }
 
-/// 記事のカード。`swipe` なら一覧の振り分けの対象にする（`SWIPE_SCRIPT`）。
+/// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
+/// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     let title = display_title(i.title_ja.as_deref(), i);
     let score = i
@@ -152,11 +196,13 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     } else {
         format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
     };
+    // 一覧のカードでは印のボタンが状態を示すので、見出しの下の行には出さない
     let rating = i
         .rating
+        .filter(|_| !swipe)
         .map(|r| format!(" ★{}", r.get()))
         .unwrap_or_default();
-    let bookmarked = if i.bookmarked { " 🔖" } else { "" };
+    let bookmarked = if i.bookmarked && !swipe { " 🔖" } else { "" };
     let translation = if i.has_translation {
         " ・和訳あり"
     } else if i.translation_requested {
@@ -170,21 +216,14 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
+         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}{marks}</div>",
         read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
-            format!(
-                " data-id=\"{}\"{} tabindex=\"0\"",
-                i.article_id,
-                if i.bookmarked {
-                    " data-bookmarked=\"1\""
-                } else {
-                    ""
-                }
-            )
+            format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
         } else {
             String::new()
         },
+        marks = if swipe { marks(i) } else { String::new() },
         id = i.article_id,
         title = escape(title),
         source = escape(page.source(&i.source_id)),
@@ -234,34 +273,46 @@ mod tests {
         assert!(earlier.is_empty());
     }
 
-    /// スワイプで付ける印が既に付いていれば、取り消しで外さない（付けたのはこのスワイプではない）。
-    /// そのため、カードは今の印（ブックマーク・既読）を持つ。
+    /// 一覧のカードでは、評価・ブックマーク・既読の印をその場で付け外しできる。
+    /// 印の状態はボタンが示すので、見出しの下の行には重ねて出さない。
     #[test]
-    fn swipe_cards_carry_their_marks() {
-        let mut bookmarked = item(1, "2026-09-27T05:00:00.000Z");
-        bookmarked.bookmarked = true;
-        let mut read = item(2, "2026-09-27T05:00:00.000Z");
-        read.read_at = Some("2026-09-27T06:00:00.000Z".into());
+    fn list_cards_offer_marks_in_place() {
+        let mut marked = item(1, "2026-09-27T05:00:00.000Z");
+        marked.rating = Rating::new(4);
+        marked.bookmarked = true;
+        marked.read_at = Some("2026-09-27T06:00:00.000Z".into());
         let html = list_page(
-            &[bookmarked, read],
+            &[marked, item(2, "2026-09-27T05:00:00.000Z")],
             &[],
             ListView::default(),
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<div class="card" data-id="1" data-bookmarked="1" tabindex="0">"#),
+            html.contains(r#"<div class="card read" data-id="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"action="/articles/1/rating""#), "{html}");
+        assert!(
+            html.contains(r#"<button name="value" value="" data-label="4 読んでよかった" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<div class="card read" data-id="2" tabindex="0">"#),
+            html.contains(r#"<form method="post" action="/articles/1/bookmark"><button name="on" value="0" aria-pressed="true" aria-label="ブックマーク" title="ブックマーク" class="on">🔖</button></form>"#),
             "{html}"
         );
-        // 取り消しは、スワイプの前に付いていなかった印だけを外す
-        assert!(html.contains("card.dataset.bookmarked"), "{html}");
         assert!(
-            html.contains(r#"card.classList.contains("read")"#),
+            html.contains(r#"<form method="post" action="/articles/1/read"><button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">✓</button></form>"#),
             "{html}"
         );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/2/bookmark"><button name="on" value="1" aria-pressed="false" aria-label="ブックマーク" title="ブックマーク">🔖</button></form>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/2/read"><button name="on" value="1" aria-pressed="false" aria-label="既読" title="既読">✓</button></form>"#),
+            "{html}"
+        );
+        assert!(!html.contains(" ★4"), "{html}");
     }
 
     #[test]
@@ -293,22 +344,22 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<script>"), "{html}");
-        // 左は既読の印（見送りではない）
-        assert!(html.contains(r#"h: "read""#), "{html}");
+        // スワイプ・キーは、カードのボタンと同じ送信を通す（印を付けてもカードは消さない）
+        assert!(html.contains("requestSubmit"), "{html}");
         assert!(
-            !html.contains("dismiss") && !html.contains("/feedback"),
+            !html.contains("card.hidden = true") && !html.contains("元に戻す"),
             "{html}"
         );
-        // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
+        // ←/→ で既読・ブックマーク、↓/↑ で選ぶ
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
         }
-        // 検索の結果は振り分けの対象にしない
+        // 検索の結果は印の対象にしない
         let p = Params::from_query("q=x");
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
-            !html.contains(r#"data-id=""#) && !html.contains(SWIPE_SCRIPT),
+            !html.contains(r#"data-id=""#) && !html.contains(MARKS_SCRIPT),
             "{html}"
         );
     }

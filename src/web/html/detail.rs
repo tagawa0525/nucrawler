@@ -79,7 +79,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    body.push_str(&feedback_forms(id, i.rating, i.bookmarked));
+    body.push_str(&super::list::marks(i));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -96,6 +96,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     let has_japanese = !d.digests.is_empty() || !d.translations.is_empty();
     body.push_str(&comment_section(id, notes.comments, view));
     body.push_str(&report_section(id, notes.reports, has_japanese, view));
+    // 評価・印は一覧と同じく、ページを移らずにその場で付け外しする
+    body.push_str(super::list::MARKS_SCRIPT);
     layout(&title, page, &body)
 }
 
@@ -229,41 +231,6 @@ fn report_summary(r: &Report) -> String {
     }
 }
 
-/// 評価（1〜5 の星）とブックマーク。今の評価までの星を塗り、今の評価の星を押すと評価なしに戻る。
-/// 星は記号だけなので、段階の意味を読み上げの名前（aria-label）にも付ける。
-/// ブックマーク済みなら、同じボタンで外す。
-fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String {
-    let stars: String = Rating::all()
-        .map(|r| {
-            let on = current.is_some_and(|c| r <= c);
-            let (value, title) = if current == Some(r) {
-                (
-                    String::new(),
-                    format!("{} {}（押すと評価なし）", r.get(), r.meaning()),
-                )
-            } else {
-                (r.get().to_string(), format!("{} {}", r.get(), r.meaning()))
-            };
-            format!(
-                "<button name=\"value\" value=\"{value}\" aria-label=\"{title}\" title=\"{title}\"{}>{}</button>",
-                if on { " class=\"on\"" } else { "" },
-                if on { '★' } else { '☆' }
-            )
-        })
-        .collect();
-    // 押すと、今の印の逆にする
-    let bookmark = format!(
-        "<form method=\"post\" action=\"/articles/{id}/bookmark\">\
-         <button name=\"on\" value=\"{}\"{}>🔖</button></form>",
-        if bookmarked { "0" } else { "1" },
-        if bookmarked { " class=\"on\"" } else { "" }
-    );
-    format!(
-        "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
-         {stars}</form>{bookmark}</div>"
-    )
-}
-
 fn translation_section(d: &ArticleDetail, view: DetailView) -> String {
     let id = d.item.article_id;
     if view.show_translation {
@@ -339,27 +306,29 @@ mod tests {
         );
         assert!(html.contains("sonnet"));
         assert!(html.contains(r#"action="/articles/7/bookmark""#), "{html}");
+        // 詳細でも既読の印を外せる（未読に戻す）。一覧のカードと同じ部品
+        assert!(html.contains(r#"action="/articles/7/read""#), "{html}");
         // 評価は 1〜5 の星で、今の評価（4）まで塗る。今の評価を押すと評価なしに戻る
         assert!(html.contains(r#"action="/articles/7/rating""#), "{html}");
         assert!(
             html.contains(
-                r#"<button name="value" value="3" aria-label="3 どちらでもない" title="3 どちらでもない" class="on">★</button>"#
+                r#"<button name="value" value="3" data-label="3 どちらでもない" aria-label="3 どちらでもない" title="3 どちらでもない" class="on">★</button>"#
             ),
             "{html}"
         );
         assert!(
-            html.contains(r#"<button name="value" value="" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
+            html.contains(r#"<button name="value" value="" data-label="4 読んでよかった" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<button name="value" value="5" aria-label="5 必読" title="5 必読">☆</button>"#
+                r#"<button name="value" value="5" data-label="5 必読" aria-label="5 必読" title="5 必読">☆</button>"#
             ),
             "{html}"
         );
         assert!(!html.contains("👍") && !html.contains("👎"), "{html}");
         assert!(
-            html.contains(r#"<button name="on" value="1">🔖</button>"#),
+            html.contains(r#"<button name="on" value="1" aria-pressed="false" aria-label="ブックマーク" title="ブックマーク">🔖</button>"#),
             "{html}"
         );
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
@@ -400,7 +369,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<button name="on" value="0" class="on">🔖</button>"#),
+            html.contains(r#"<button name="on" value="0" aria-pressed="true" aria-label="ブックマーク" title="ブックマーク" class="on">🔖</button>"#),
             "{html}"
         );
     }

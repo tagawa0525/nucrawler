@@ -61,14 +61,12 @@ pub(super) async fn add_report(
         Ok(db.add_report(user, id, &report, Utc::now())?)
     })
     .await?;
-    let view = if form.view.as_deref() == Some("translation") {
-        "view=translation&"
-    } else {
-        ""
-    };
-    Ok(Redirect::to(&format!(
-        "/articles/{id}?{view}reported=1#reports"
-    )))
+    Ok(back_to_detail(
+        id,
+        form.view.as_deref() == Some("translation"),
+        "reported=1&",
+        "#reports",
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -102,12 +100,7 @@ impl CommentForm {
 
 /// 記事のコメントの欄へ戻る。和訳を読んでいたなら和訳のまま。
 fn back_to_comments(article_id: i64, view: Option<&str>) -> Redirect {
-    let view = if view == Some("translation") {
-        "?view=translation"
-    } else {
-        ""
-    };
-    Redirect::to(&format!("/articles/{article_id}{view}#comments"))
+    back_to_detail(article_id, view == Some("translation"), "", "#comments")
 }
 
 pub(super) async fn add_comment(
@@ -300,7 +293,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation&reported=1#reports")
+            format!("/articles/{id}?view=translation&reported=1&back=1#reports")
         );
         assert_eq!(
             server.count(&format!(
@@ -313,7 +306,7 @@ mod tests {
         let res = server.post(&path, "kind=term&found=x").await;
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?reported=1#reports")
+            format!("/articles/{id}?reported=1&back=1#reports")
         );
         let (_, html) = server.get(&format!("/articles/{id}?reported=1")).await;
         assert!(html.contains("指摘を受け付けました"), "{html}");
@@ -554,7 +547,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation#comments")
+            format!("/articles/{id}?view=translation&back=1#comments")
         );
         assert_eq!(
             server.strings("SELECT body || '|' || visibility FROM comments"),
@@ -570,7 +563,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}#comments")
+            format!("/articles/{id}?back=1#comments")
         );
         assert_eq!(
             server.strings("SELECT body || '|' || visibility FROM comments"),
@@ -582,7 +575,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}?view=translation#comments")
+            format!("/articles/{id}?view=translation&back=1#comments")
         );
         assert_eq!(server.count("SELECT count(*) FROM comments"), 0);
     }

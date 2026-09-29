@@ -31,7 +31,7 @@ pub(super) async fn rating(
         Ok(db.rate(user, id, rating, Utc::now())?)
     })
     .await?;
-    Ok(Redirect::to(&format!("/articles/{id}")))
+    Ok(back_to_detail(id, false, "", ""))
 }
 
 #[derive(serde::Deserialize)]
@@ -65,7 +65,7 @@ pub(super) async fn bookmark(
         Ok(db.set_bookmark(user, id, on, Utc::now())?)
     })
     .await?;
-    Ok(Redirect::to(&format!("/articles/{id}")))
+    Ok(back_to_detail(id, false, "", ""))
 }
 
 /// 既読の印を付け外しする。
@@ -83,7 +83,7 @@ pub(super) async fn read(
         Ok(db.set_read(user, id, on, Utc::now())?)
     })
     .await?;
-    Ok(Redirect::to(&format!("/articles/{id}")))
+    Ok(back_to_detail(id, false, "", ""))
 }
 
 pub(super) async fn translation_request(
@@ -103,7 +103,7 @@ pub(super) async fn translation_request(
         Ok(db.request_translation(user, id, Utc::now())?)
     })
     .await?;
-    Ok(Redirect::to(&format!("/articles/{id}")))
+    Ok(back_to_detail(id, false, "", ""))
 }
 
 #[cfg(test)]
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
-            format!("/articles/{id}")
+            format!("/articles/{id}?back=1")
         );
         server.post(&path, "value=5").await;
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
             assert_eq!(res.status().as_u16(), 303, "{mark}");
             assert_eq!(
                 res.headers()["location"].to_str().unwrap(),
-                format!("/articles/{id}")
+                format!("/articles/{id}?back=1")
             );
             assert_eq!(server.count(&format!("SELECT count(*) FROM {table}")), 1);
             assert_eq!(server.post(&path, "on=x").await.status().as_u16(), 400);

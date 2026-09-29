@@ -278,4 +278,40 @@ mod tests {
         assert_eq!(summary.new_articles, 0);
         assert_eq!(count(&db, "SELECT count(*) FROM articles"), 0);
     }
+
+    /// ホストが違うソースは並行して取得する（同じホストへの間隔は `Fetcher` が守る）。
+    #[tokio::test]
+    async fn fetches_sources_on_different_hosts_concurrently() {
+        let serve = || {
+            Server::start(
+                [
+                    ("/rss", Route::ok(fixture("rss2.xml"))),
+                    ("/atom", Route::ok(fixture("atom.xml"))),
+                ]
+                .into(),
+            )
+        };
+        let (a, b) = (serve(), serve());
+        let sources = vec![
+            src("a1", a.url("/rss"), true, Filter::default()),
+            src("a2", a.url("/atom"), true, Filter::default()),
+            src("b1", b.url("/rss"), true, Filter::default()),
+            src("b2", b.url("/atom"), true, Filter::default()),
+        ];
+        let fetcher = Fetcher::new(
+            "t",
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            1 << 20,
+        )
+        .unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let summary = fetch_sources(&db, &fetcher, &sources, &Cancel::default(), at())
+            .await
+            .unwrap();
+        assert!(summary.failed_sources.is_empty(), "{summary:?}");
+        let first_b = b.requests().iter().map(|r| r.at).min().unwrap();
+        let last_a = a.requests().iter().map(|r| r.at).max().unwrap();
+        assert!(first_b < last_a, "b must not wait for a to finish");
+    }
 }

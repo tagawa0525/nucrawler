@@ -491,4 +491,54 @@ mod tests {
         assert!(summary.cancelled);
         assert!(bodies(&db).is_empty());
     }
+
+    /// ホストが違えば並行して取得する（同じホストへの間隔は `Fetcher` が守る）。1 件ずつ順に取ると、
+    /// 間隔待ちの間も空いているほかのホストにアクセスしない。
+    #[tokio::test]
+    async fn fetches_different_hosts_concurrently() {
+        let (a, b) = (server(), server());
+        let db = Db::open_in_memory().unwrap();
+        // 新しい順に a の 2 件、b の 2 件（順に取れば a が終わるまで b に行かない）
+        for (i, (server, path)) in [
+            (&a, "/news/1"),
+            (&a, "/news/2"),
+            (&b, "/news/1"),
+            (&b, "/news/2"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let published = format!("2026-09-26T{:02}:00:00.000Z", 23 - i);
+            db.insert_article(&NewArticle {
+                source_id: "u",
+                url: &server.url(path),
+                title: path,
+                lang: Lang::En,
+                published_at: Some(&published),
+            })
+            .unwrap()
+            .unwrap();
+        }
+        let fetcher = Fetcher::new(
+            "t",
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+            1 << 20,
+        )
+        .unwrap();
+        let summary = extract_pages(
+            &db,
+            &fetcher,
+            &[source("u", None)],
+            &cfg(10),
+            now(),
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.extracted, 4);
+        let first_b = b.requests().iter().map(|r| r.at).min().unwrap();
+        let last_a = a.requests().iter().map(|r| r.at).max().unwrap();
+        assert!(first_b < last_a, "b must not wait for a to finish");
+    }
 }

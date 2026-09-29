@@ -147,8 +147,23 @@ fn option(value: &str, target: ListView, selected: bool, label: &str) -> String 
     )
 }
 
+/// 「絞らない」の選択肢。開いた一覧では「-」、閉じた選択では `closed`（00・★）と書く（`BAR_SCRIPT`）。
+fn blank_option(value: &str, target: ListView, selected: bool, closed: &str) -> String {
+    format!(
+        "<option value=\"{value}\" data-href=\"{}\" data-closed=\"{closed}\"{}>-</option>",
+        target.href(),
+        if selected { " selected" } else { "" },
+    )
+}
+
+/// 上部のバーの選択の「絞らない」を、閉じているときは 00・★、開いた一覧では「-」と書き分ける。
+/// JavaScript が無ければ「-」のまま。
+pub(super) const BAR_SCRIPT: &str =
+    concat!("<script>\n", include_str!("assets/bar.js"), "</script>");
+
 /// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
-/// （JavaScript が無ければ「表示」のボタンで）。00（0）は点数で絞らない（すべて）で、それ以外のあいだは緑にする。
+/// （JavaScript が無ければ「表示」のボタンで）。0 は点数で絞らない（すべて。開いた一覧では「-」、閉じた選択では 00）で、
+/// それ以外のあいだは緑にする。
 fn min_select(view: ListView) -> String {
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend([view.default_min, view.min]);
@@ -157,14 +172,14 @@ fn min_select(view: ListView) -> String {
     let options: String = values
         .into_iter()
         .map(|v| {
-            // 桁をそろえる（0 は 00）
-            let label = format!("{v:02}");
-            option(
-                &v.to_string(),
-                ListView { min: v, ..view },
-                v == view.min,
-                &label,
-            )
+            let target = ListView { min: v, ..view };
+            if v == 0 {
+                // 絞らない
+                blank_option("0", target, v == view.min, "00")
+            } else {
+                // 桁をそろえる（1 桁は 0 を付ける）
+                option(&v.to_string(), target, v == view.min, &format!("{v:02}"))
+            }
         })
         .collect();
     format!(
@@ -176,27 +191,32 @@ fn min_select(view: ListView) -> String {
     )
 }
 
-/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。数字の無い「★」は絞らない、白抜きの「☆」は
-/// 評価の無い記事だけ。最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。
-/// 「★」以外のあいだは緑にする。
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」（閉じた選択では数字の無い ★）は絞らない、
+/// ★1〜★5 は最低点と同じく小さい順で「以上」の印は付けない（★4 は ★4 以上）、最後の白抜きの「☆」は
+/// 評価の無い記事だけ。絞っているあいだは緑にする。
 /// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、絞り込みの中ならほかの条件も引き継ぐ）。
 fn rating_select(view: ListView) -> String {
     let choices = [
-        (None, "★"),
-        (Some(0), "☆"),
         (Some(1), "★1"),
         (Some(2), "★2"),
         (Some(3), "★3"),
         (Some(4), "★4"),
         (Some(5), "★5"),
+        (Some(0), "☆"),
     ];
-    let options: String = choices
-        .iter()
-        .map(|(rating, label)| {
+    // 絞らない（閉じた選択では数字の無い ★）
+    let blank = blank_option(
+        "",
+        view.with_filters(None, view.bookmarked),
+        view.rating.is_none(),
+        "★",
+    );
+    let options: String = std::iter::once(blank)
+        .chain(choices.iter().map(|(rating, label)| {
             let value = rating.map(|r| r.to_string()).unwrap_or_default();
             let target = view.with_filters(*rating, view.bookmarked);
             option(&value, target, *rating == view.rating, label)
-        })
+        }))
         .collect();
     // 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
     let inputs = if view.filtered() {
@@ -227,7 +247,7 @@ fn bar(view: ListView) -> String {
     };
     let read = button(&read_toggle.href(), "既読も表示", "👁", Some(view.read));
     format!(
-        "<nav class=\"bar\">{}{min}{}{read}{bookmark}{}</nav>",
+        "<nav class=\"bar\">{}{min}{}{read}{bookmark}{}</nav>{BAR_SCRIPT}",
         button("/search", "検索", "🔍", None),
         rating_select(view),
         button("/settings", "設定", "⚙️", None),

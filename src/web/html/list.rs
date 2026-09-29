@@ -512,7 +512,7 @@ mod tests {
         unscored.score = None;
         let html = card(&unscored, true, &Page::default());
         assert!(
-            html.contains(r#"<div class="actions marks"><span class="score" title="未採点">&nbsp;</span><form"#),
+            html.contains(r#"<div class="actions marks"><span class="score" role="img" aria-label="未採点" title="未採点">&nbsp;</span><form"#),
             "{html}"
         );
     }

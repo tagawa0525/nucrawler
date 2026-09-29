@@ -353,14 +353,10 @@ mod tests {
     #[test]
     fn list_page_links_to_search() {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
-        assert!(html.contains(r#"href="/search""#), "{html}");
-        assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
-        // 検索とブックマークの間に、評価 4 以上の記事へのボタンを置く
-        let search = html.find(r#"href="/search""#).unwrap();
-        let liked = html
-            .find(r#"<a class="btn" href="/search?min_rating=4" aria-label="評価 4 以上" title="評価 4 以上">👍</a>"#)
-            .expect(&html);
-        let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
+        // 検索とブックマークの間に、評価で絞る選択を置く
+        let search = html.find(r#"href="/search""#).expect(&html);
+        let liked = html.find(r#"name="rating""#).expect(&html);
+        let bookmarked = html.find(r#"href="/?bookmarked=1""#).expect(&html);
         assert!(search < liked && liked < bookmarked, "{html}");
     }
 
@@ -519,7 +515,7 @@ mod tests {
         let odd = ListView {
             min: 55,
             default_min: 55,
-            read: false,
+            ..ListView::default()
         };
         let html = list_page(&[], &[], odd, &Page::default());
         let at = |v: &str| html.find(&format!(r#"<option value="{v}""#)).unwrap();
@@ -529,6 +525,91 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains(r#"name="read""#), "{html}");
+    }
+
+    /// 👍 は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
+    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示し、評価の星と同じ色の枠にする。
+    #[test]
+    fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(!html.contains("/search?"), "{html}");
+        assert!(
+            html.contains(
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>👍</option><option value="5">★5</option><option value="4">★4↑</option><option value="3">★3↑</option><option value="2">★2↑</option><option value="1">★1↑</option></select>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+            ),
+            "{html}"
+        );
+    }
+
+    /// 絞り込んだ画面は、上部のバーと該当する記事だけを出す。検索のフォームも、効かない最低点と 👁 も出さない。
+    /// 絞り込みはもう一方の状態を引き継ぎ、👍 を選び直すか 🔖 を外すと一覧に戻る。
+    #[test]
+    fn filtered_page_shows_the_bar_and_the_matches() {
+        let view = ListView {
+            rating: Some(4),
+            ..ListView::default()
+        };
+        let mut rated = item(1, "2026-09-27T05:00:00.000Z");
+        rated.rating = Rating::new(4);
+        let html = filtered_page(&[rated], view, &Page::default());
+        assert!(!html.contains(r#"action="/search""#), "{html}");
+        assert!(
+            !html.contains(r#"name="min""#) && !html.contains("既読も表示"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form class="stars on" method="get" action="/">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="4" selected>★4↑</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn off" href="/?rating=4&amp;bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("<h2>1 件</h2>"), "{html}");
+        // 一覧と同じく、カードの印をその場で付け外しできる
+        assert!(
+            html.contains(r#"data-id="1""#) && html.contains(MARKS_SCRIPT),
+            "{html}"
+        );
+
+        let view = ListView {
+            rating: Some(4),
+            bookmarked: true,
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], view, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="bookmarked" value="1">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<a class="btn on" href="/?rating=4" aria-label="ブックマークだけ表示：ON""#
+            ),
+            "{html}"
+        );
+        assert!(html.contains("該当する記事はありません"), "{html}");
+        let view = ListView {
+            bookmarked: true,
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], view, &Page::default());
+        assert!(
+            html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
+            "{html}"
+        );
     }
 
     #[test]

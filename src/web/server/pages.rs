@@ -681,8 +681,56 @@ mod tests {
             .await;
         let (_, html) = server.get("/?min=0").await;
         assert!(html.contains("見出しA"), "{html}");
-        let (_, html) = server.get("/search?bookmarked=1").await;
+        let (_, html) = server.get("/?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");
+    }
+
+    /// 👍（`rating=N`）と 🔖（`bookmarked=1`）の絞り込みは、一覧の期間・最低点・既読によらず全期間から探す。
+    /// 検索と同じく閲覧ではないので、訪問は始めない。
+    #[tokio::test]
+    async fn list_filters_by_rating_and_bookmark() {
+        let db = Db::open_in_memory().unwrap();
+        // どちらも未採点なので、既定の一覧には出ない
+        let (four, _) = seed(&db, "https://e.com/four", "星四つ");
+        let (two, _) = seed(&db, "https://e.com/two", "星二つ");
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{four}/rating"), "value=4")
+            .await;
+        server
+            .post(&format!("/articles/{two}/rating"), "value=2")
+            .await;
+        server
+            .post(&format!("/articles/{two}/bookmark"), "on=1")
+            .await;
+        let (status, html) = server.get("/?rating=4").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("星四つ") && !html.contains("星二つ"),
+            "{html}"
+        );
+        assert!(!html.contains(r#"action="/search""#), "{html}");
+        let (_, html) = server.get("/?rating=2").await;
+        assert!(html.contains("星四つ") && html.contains("星二つ"), "{html}");
+        let (_, html) = server.get("/?bookmarked=1").await;
+        assert!(
+            !html.contains("星四つ") && html.contains("星二つ"),
+            "{html}"
+        );
+        let (_, html) = server.get("/?rating=4&bookmarked=1").await;
+        assert!(html.contains("該当する記事はありません"), "{html}");
+        assert_eq!(
+            server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
+            0
+        );
+        // 👍 を選び直す（空）と一覧に戻る
+        let (status, html) = server.get("/?rating=").await;
+        assert_eq!(status, 200);
+        assert!(html.contains("<h2>前回から</h2>"), "{html}");
+        for bad in ["0", "6", "x"] {
+            let (status, _) = server.get(&format!("/?rating={bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
     }
 
     #[tokio::test]

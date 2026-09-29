@@ -816,6 +816,29 @@ mod tests {
         assert!(!none.contains("確認枠"), "{none}");
     }
 
+    /// 推薦点が LLM の点数と違えば、点数の title に LLM の点数と補正を出す。
+    #[test]
+    fn card_shows_the_llm_score_behind_the_recommended_score() {
+        let mut adjusted = item(1, "2026-09-27T05:00:00.000Z");
+        adjusted.score = Some(81);
+        adjusted.llm_score = Some(72);
+        let html = card(&adjusted, false, &Page::default());
+        assert!(
+            html.contains(r#"<span class="score" title="LLM 72・補正 +9">81</span>"#),
+            "{html}"
+        );
+        let mut lowered = adjusted.clone();
+        lowered.score = Some(60);
+        let html = card(&lowered, false, &Page::default());
+        assert!(html.contains(r#"title="LLM 72・補正 -12""#), "{html}");
+        let html = card(
+            &item(2, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(html.contains(r#"<span class="score">80</span>"#), "{html}");
+    }
+
     #[test]
     fn card_marks_rated_and_bookmarked_articles() {
         let mut marked = item(1, "2026-09-27T05:00:00.000Z");

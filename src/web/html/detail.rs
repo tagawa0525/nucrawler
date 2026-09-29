@@ -357,6 +357,44 @@ mod tests {
         );
     }
 
+    /// 推薦点が LLM の点数と違えば、補正の内訳（効いた特徴と、動かした点数）を出す。
+    #[test]
+    fn detail_page_explains_the_recommended_score() {
+        use crate::recommend::{Feature, FeatureKind};
+        let mut d = detail();
+        d.item.score = Some(81);
+        d.item.llm_score = Some(72);
+        d.adjustments = vec![
+            (
+                Feature {
+                    kind: FeatureKind::Interest,
+                    key: "燃料".into(),
+                },
+                6,
+            ),
+            (
+                Feature {
+                    kind: FeatureKind::Source,
+                    key: "wnn".into(),
+                },
+                3,
+            ),
+        ];
+        let labels = SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
+        let page = Page {
+            labels: &labels,
+            ..Page::default()
+        };
+        let html = detail_page(&d, &Notes::default(), DetailView::default(), &page);
+        assert!(
+            html.contains("推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3"),
+            "{html}"
+        );
+        // 補正が無ければ出さない
+        let html = detail_page(&detail(), &Notes::default(), DetailView::default(), &page);
+        assert!(!html.contains("推薦点"), "{html}");
+    }
+
     /// ブックマーク済みなら、同じボタンで外す。
     #[test]
     fn detail_page_offers_to_remove_the_bookmark() {

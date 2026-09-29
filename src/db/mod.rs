@@ -10,6 +10,7 @@ mod claims;
 mod eval;
 mod notes;
 mod read;
+mod recommend;
 mod redo;
 mod score;
 mod signals;

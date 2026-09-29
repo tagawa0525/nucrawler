@@ -195,6 +195,7 @@ mod tests {
             summary_ja: None,
             lwr_relevant: Some(true),
             score: Some(80),
+            llm_score: Some(80),
             reason: Some("理由".into()),
             matched: vec!["燃料".into()],
             excluded: vec!["核融合".into()],
@@ -209,6 +210,11 @@ mod tests {
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));
         assert_eq!(json["excluded"], serde_json::json!(["核融合"]));
         assert_eq!(json["rating"], 4);
+        // 点数は推薦点で、LLM の点数も並べる
+        assert_eq!(
+            (json["score"].clone(), json["llm_score"].clone()),
+            (80.into(), 80.into())
+        );
         assert!(json.get("feedback").is_none(), "{json}");
     }
 }

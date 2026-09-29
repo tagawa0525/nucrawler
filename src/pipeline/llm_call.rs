@@ -25,6 +25,15 @@ pub struct LlmStage<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
+    /// 作業を予約するときに今の時刻を読む（ステージの `now` は開始時の時刻のまま進まないが、予約の
+    /// 期限は実際の時刻で決める。テストでは固定する）
+    pub clock: &'a dyn Fn() -> DateTime<Utc>,
+}
+
+/// 作業の予約の期限。呼び出しはタイムアウトより長く続かないので、その 2 倍を過ぎた予約は
+/// 落ちたプロセスが残したものとみなせる。
+pub fn claim_ttl(cfg: &crate::config::LlmConfig) -> chrono::Duration {
+    chrono::Duration::seconds(i64::try_from(cfg.timeout_secs.saturating_mul(2)).unwrap_or(i64::MAX))
 }
 
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。

@@ -4,11 +4,12 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded, record_failures};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, record_failures};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
-    ArtifactKind, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateInput, TranslateQuery,
+    ArtifactKind, ClaimKey, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateInput,
+    TranslateQuery,
 };
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
@@ -38,6 +39,7 @@ pub async fn translate_articles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
@@ -91,25 +93,56 @@ pub async fn translate_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        // 全文は長いので 1 件ずつ訳す
-        let Some(input) = (match (&mut outdated, target) {
-            (Some(queue), _) => queue.pop_front().into_iter().collect(),
-            (None, Target::Pending { .. }) => db.pending_translate(query, cutoff, now, 1)?,
-            (None, Target::Redo(spec)) => db.redo_translate(
-                RedoKey {
-                    user_id: spec.user_id,
-                    profile_hash: spec.profile_hash.as_deref(),
-                    backend,
-                    model,
-                    prompt_version: prompt::translate::PROMPT_VERSION,
-                },
-                &spec.filter,
-                now,
-                1,
+        let claim_key = ClaimKey {
+            stage: STAGE,
+            backend,
+            model,
+        };
+        // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (inputs, _claim) = match (&mut outdated, target) {
+            (Some(queue), _) => {
+                let items: Vec<TranslateInput> = queue.pop_front().into_iter().collect();
+                let ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
+                let claim = db.claim(claim_key, &ids, clock(), claim_ttl(llm_cfg))?;
+                let items = items
+                    .into_iter()
+                    .filter(|i| claim.ids().contains(&i.article_id))
+                    .collect();
+                (items, claim)
+            }
+            (None, Target::Pending { .. }) => db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| db.pending_translate(query, cutoff, now, 1),
+                |i| i.article_id,
             )?,
-        })
-        .into_iter()
-        .next() else {
+            (None, Target::Redo(spec)) => db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| {
+                    db.redo_translate(
+                        RedoKey {
+                            user_id: spec.user_id,
+                            profile_hash: spec.profile_hash.as_deref(),
+                            backend,
+                            model,
+                            prompt_version: prompt::translate::PROMPT_VERSION,
+                        },
+                        &spec.filter,
+                        now,
+                        1,
+                    )
+                },
+                |i| i.article_id,
+            )?,
+        };
+        let Some(input) = inputs.into_iter().next() else {
+            // 先に決めた作り直しの対象がほかの実行に予約されていたら、残りに進む
+            if outdated.as_ref().is_some_and(|queue| !queue.is_empty()) {
+                continue;
+            }
             break;
         };
         let key = StageKey {
@@ -568,7 +601,7 @@ mod tests {
                 llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
-                clock: &now,
+                clock: &|| now,
             },
             &LlmConfig::default(),
             &PipelineConfig::default(),

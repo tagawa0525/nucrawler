@@ -34,6 +34,7 @@ pub async fn tidy_topics<L: Llm>(
         llm,
         quota,
         cancel,
+        ..
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     force: bool,

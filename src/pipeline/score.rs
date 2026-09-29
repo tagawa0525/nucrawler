@@ -6,9 +6,11 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
+use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
 use crate::profile::Profile;
@@ -51,6 +53,7 @@ pub async fn score_articles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
@@ -105,7 +108,18 @@ pub async fn score_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_score(key, scope, now, llm_cfg.score_batch_size)?;
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (batch, _claim) = db.claim_selected(
+            ClaimKey {
+                stage: &failure_stage,
+                backend,
+                model,
+            },
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| db.pending_score(key, scope, now, llm_cfg.score_batch_size),
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
             break;
         }

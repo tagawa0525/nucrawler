@@ -54,6 +54,7 @@ impl<L> RunEnv<'_, L> {
             llm: self.llm,
             quota: self.quota,
             cancel: self.cancel,
+            clock: self.clock,
         }
     }
 }

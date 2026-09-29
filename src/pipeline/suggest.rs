@@ -38,6 +38,7 @@ pub async fn suggest_profile<L: Llm>(
         llm,
         quota,
         cancel,
+        ..
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,

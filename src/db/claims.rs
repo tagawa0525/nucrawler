@@ -84,6 +84,33 @@ impl Db {
             ids: claimed,
         })
     }
+
+    /// `select` で対象を選び、その記事を予約して、予約できたものだけを返す。選ぶのと予約するのを
+    /// 1 つの書き込みトランザクション（IMMEDIATE）で行う。別々に行うと、選んでから予約するまでの間に
+    /// ほかの実行がその記事を処理し終えて予約を外したとき、同じ記事をもう一度処理してしまう
+    /// （処理する側は成果物を保存してから予約を外すので、トランザクションの中で選べば処理済みか予約中に見える）。
+    pub fn claim_selected<T>(
+        &self,
+        key: ClaimKey,
+        now: chrono::DateTime<chrono::Utc>,
+        ttl: chrono::Duration,
+        select: impl FnOnce(&Db) -> Result<Vec<T>, DbError>,
+        article_id: impl Fn(&T) -> i64,
+    ) -> Result<(Vec<T>, Claim<'_>), DbError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let items = select(self)?;
+        let ids: Vec<i64> = items.iter().map(&article_id).collect();
+        let claim = self.claim(key, &ids, now, ttl)?;
+        tx.commit()?;
+        let items = items
+            .into_iter()
+            .filter(|item| claim.ids().contains(&article_id(item)))
+            .collect();
+        Ok((items, claim))
+    }
 }
 
 #[cfg(test)]

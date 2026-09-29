@@ -4,9 +4,11 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+};
 use crate::config::LlmConfig;
-use crate::db::{ArtifactKind, DbError, NewArtifact, StageKey};
+use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::{errors, glossary, prompt};
 
@@ -33,6 +35,7 @@ pub async fn translate_titles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
@@ -57,7 +60,18 @@ pub async fn translate_titles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_titles(now, backend, model, llm_cfg.title_batch_size)?;
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (batch, _claim) = db.claim_selected(
+            ClaimKey {
+                stage: STAGE,
+                backend,
+                model,
+            },
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| db.pending_titles(now, backend, model, llm_cfg.title_batch_size),
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
             break;
         }

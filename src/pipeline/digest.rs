@@ -5,10 +5,12 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, record_failures,
+};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
+use crate::db::{ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
 use crate::{errors, glossary};
@@ -37,6 +39,7 @@ pub async fn digest_articles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
@@ -75,28 +78,57 @@ pub async fn digest_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = match (&mut outdated, target) {
+        let claim_key = ClaimKey {
+            stage: STAGE,
+            backend,
+            model,
+        };
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (batch, _claim) = match (&mut outdated, target) {
             (Some(queue), _) => {
                 let n = llm_cfg.digest_batch_size.min(queue.len());
-                queue.drain(..n).collect()
+                let items: Vec<DigestInput> = queue.drain(..n).collect();
+                let ids: Vec<i64> = items.iter().map(|b| b.article_id).collect();
+                let claim = db.claim(claim_key, &ids, clock(), claim_ttl(llm_cfg))?;
+                let items = items
+                    .into_iter()
+                    .filter(|b| claim.ids().contains(&b.article_id))
+                    .collect();
+                (items, claim)
             }
-            (None, Target::Pending { .. }) => {
-                db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?
-            }
-            (None, Target::Redo(spec)) => db.redo_digest(
-                RedoKey {
-                    user_id: spec.user_id,
-                    profile_hash: spec.profile_hash.as_deref(),
-                    backend,
-                    model,
-                    prompt_version: prompt::digest::PROMPT_VERSION,
+            (None, Target::Pending { .. }) => db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size),
+                |b| b.article_id,
+            )?,
+            (None, Target::Redo(spec)) => db.claim_selected(
+                claim_key,
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| {
+                    db.redo_digest(
+                        RedoKey {
+                            user_id: spec.user_id,
+                            profile_hash: spec.profile_hash.as_deref(),
+                            backend,
+                            model,
+                            prompt_version: prompt::digest::PROMPT_VERSION,
+                        },
+                        &spec.filter,
+                        now,
+                        llm_cfg.digest_batch_size,
+                    )
                 },
-                &spec.filter,
-                now,
-                llm_cfg.digest_batch_size,
+                |b| b.article_id,
             )?,
         };
         if batch.is_empty() {
+            // 先に決めた作り直しの対象がほかの実行に予約されていたら、残りに進む
+            if outdated.as_ref().is_some_and(|queue| !queue.is_empty()) {
+                continue;
+            }
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
@@ -663,7 +695,7 @@ mod tests {
                 llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
-                clock: &now,
+                clock: &|| now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),

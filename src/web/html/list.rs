@@ -667,10 +667,9 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<option value="0" data-href="/?min=0" selected>-</option>"#),
+            html.contains(r#"<option value="0" data-href="/?min=0" selected>00</option>"#),
             "{html}"
         );
-        assert!(!html.contains(">00<"), "{html}");
         assert!(
             html.contains(r#"<option value="50" data-href="/">50</option>"#),
             "{html}"
@@ -757,7 +756,7 @@ mod tests {
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" selected>-</option><option value="0" data-href="/?rating=0">☆</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option></select>"#
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" selected>★</option><option value="0" data-href="/?rating=0">☆</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option></select>"#
             ),
             "{html}"
         );
@@ -786,7 +785,7 @@ mod tests {
         assert!(!html.contains(r#"action="/search""#), "{html}");
         // 最低点も絞れる（既定は「-」で絞らない）。👁 は既読も絞れる（OFF にすると `read=0`）
         assert!(
-            html.contains(r#"<option value="0" data-href="/?rating=4" selected>-</option>"#),
+            html.contains(r#"<option value="0" data-href="/?rating=4" selected>00</option>"#),
             "{html}"
         );
         assert!(
@@ -960,7 +959,7 @@ mod tests {
         );
         // 一覧へ戻ると、最低点は設定の最低点に戻る
         assert!(
-            html.contains(r#"<option value="" data-href="/">-</option>"#),
+            html.contains(r#"<option value="" data-href="/">★</option>"#),
             "{html}"
         );
         // 一覧から絞り込みへ移ると、最低点は「-」になる

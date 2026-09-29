@@ -215,28 +215,30 @@ mod tests {
     use super::*;
     use crate::db::test_support::*;
 
+    /// ラベルは評価だけから決める。ブックマーク・見送り・開いた記録はラベルにしない。
     #[test]
-    fn labels_come_from_the_last_explicit_reaction() {
+    fn labels_come_from_ratings() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
         let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
         let c = page_article(&db, "https://e.com/c", "2026-09-26T00:00:00.000Z");
         let d = page_article(&db, "https://e.com/d", "2026-09-26T00:00:00.000Z");
-        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
-        // 見送った後でブックマークした → 正例
-        event(a, SignalKind::Dismiss, "2026-09-27T00:00:00Z");
-        event(a, SignalKind::Bookmark, "2026-09-27T01:00:00Z");
-        // 開いただけ → ラベルなし
-        event(b, SignalKind::OpenDetail, "2026-09-27T00:00:00Z");
-        // 👍 を取り消して 👎 → 負例
-        event(c, SignalKind::Up, "2026-09-27T00:00:00Z");
-        db.undo_event(owner, c, SignalKind::Up).unwrap();
-        event(c, SignalKind::Down, "2026-09-27T02:00:00Z");
-        // ブックマークを外しても、ブックマークした反応は残る → 正例
-        event(d, SignalKind::Bookmark, "2026-09-27T00:00:00Z");
-        db.unbookmark(owner, d).unwrap();
-        // 別の利用者の反応は使わない
+        let rate = |article, value, at| db.rate(owner, article, Rating::new(value), t(at)).unwrap();
+        // 付け直した評価 → 最後の評価
+        rate(a, 2, "2026-09-27T00:00:00Z");
+        rate(a, 5, "2026-09-27T01:00:00Z");
+        // 開いただけ・ブックマーク・見送り → ラベルなし
+        db.record_event(owner, b, SignalKind::OpenDetail, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, b, SignalKind::Bookmark, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.record_event(owner, c, SignalKind::Dismiss, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 評価なしに戻した → ラベルなし
+        rate(d, 4, "2026-09-27T00:00:00Z");
+        db.rate(owner, d, None, t("2026-09-27T01:00:00Z")).unwrap();
+        // 別の利用者の評価は使わない
         let other = db
             .conn()
             .query_row(
@@ -245,21 +247,17 @@ mod tests {
                 |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        db.record_event(other, b, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+        db.rate(other, b, Rating::new(5), t("2026-09-27T00:00:00Z"))
             .unwrap();
 
         let labels = db.eval_labels(owner).unwrap();
-        let summary: Vec<_> = labels
-            .iter()
-            .map(|l| (l.article_id, l.positive(), l.at.as_str()))
-            .collect();
         assert_eq!(
-            summary,
-            [
-                (a, true, "2026-09-27T01:00:00.000Z"),
-                (c, false, "2026-09-27T02:00:00.000Z"),
-                (d, true, "2026-09-27T00:00:00.000Z"),
-            ]
+            labels,
+            [Label {
+                article_id: a,
+                rating: Rating::new(5).unwrap(),
+                at: "2026-09-27T01:00:00.000Z".into(),
+            }]
         );
     }
 
@@ -278,20 +276,13 @@ mod tests {
             "2026-09-26T02:00:00Z",
         );
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
-        add_digest(
-            &db,
-            b,
-            "sonnet",
-            "見送った記事",
-            true,
-            "2026-09-26T01:00:00Z",
-        );
+        add_digest(&db, b, "sonnet", "不要な記事", true, "2026-09-26T01:00:00Z");
         // digest の無い記事は根拠にできない
         let bare = page_article(&db, "https://e.com/bare", "2026-09-26T00:00:00.000Z");
-        let event = |article, kind, at| db.record_event(owner, article, kind, t(at)).unwrap();
-        event(a, SignalKind::Up, "2026-09-27T00:00:00Z");
-        event(b, SignalKind::Dismiss, "2026-09-27T01:00:00Z");
-        event(bare, SignalKind::Up, "2026-09-27T02:00:00Z");
+        let rate = |article, value, at| db.rate(owner, article, Rating::new(value), t(at)).unwrap();
+        rate(a, 4, "2026-09-27T00:00:00Z");
+        rate(b, 2, "2026-09-27T01:00:00Z");
+        rate(bare, 5, "2026-09-27T02:00:00Z");
 
         let evidence = db.label_evidence(owner).unwrap();
         assert_eq!(
@@ -299,14 +290,14 @@ mod tests {
             [
                 Evidence {
                     article_id: b,
-                    positive: false,
-                    title_ja: "見送った記事".into(),
+                    rating: Rating::new(2).unwrap(),
+                    title_ja: "不要な記事".into(),
                     topics: vec!["規制・審査".into()],
                     at: "2026-09-27T01:00:00.000Z".into(),
                 },
                 Evidence {
                     article_id: a,
-                    positive: true,
+                    rating: Rating::new(4).unwrap(),
                     title_ja: "新しい見出し".into(),
                     topics: vec!["規制・審査".into()],
                     at: "2026-09-27T00:00:00.000Z".into(),
@@ -362,7 +353,7 @@ mod tests {
         let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
         gated_digest(b, "会員限定だけ", "2026-09-26T01:00:00Z");
         for article in [a, b] {
-            db.record_event(owner, article, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+            db.rate(owner, article, Rating::new(4), t("2026-09-27T00:00:00Z"))
                 .unwrap();
         }
         let titles: Vec<String> = db
@@ -395,19 +386,26 @@ mod tests {
                 )
                 .unwrap();
         }
-        let event = |article, kind| {
-            db.record_event(owner, article, kind, t("2026-09-27T01:00:00Z"))
-                .unwrap()
+        let rate = |article, value| {
+            db.rate(
+                owner,
+                article,
+                Rating::new(value),
+                t("2026-09-27T01:00:00Z"),
+            )
+            .unwrap()
         };
-        event(ids[0], SignalKind::Bookmark);
-        event(ids[1], SignalKind::Dismiss);
-        // 確認枠に選んでいない記事の反応は数えない
-        event(ids[3], SignalKind::Up);
+        rate(ids[0], 5);
+        rate(ids[1], 3);
+        rate(ids[2], 1);
+        // 確認枠に選んでいない記事の評価は数えない
+        rate(ids[3], 4);
         assert_eq!(
             db.explore_stats(owner).unwrap(),
             ExploreStats {
                 picked: 3,
                 positive: 1,
+                neutral: 1,
                 negative: 1,
             }
         );
@@ -455,7 +453,7 @@ mod tests {
             .unwrap();
         db.insert_score(key, translation, 5, None, t("2026-09-26T07:00:00Z"))
             .unwrap();
-        db.record_event(owner, a, SignalKind::Up, t("2026-09-27T00:00:00Z"))
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
             .unwrap();
 
         let scores = db.eval_scores(owner).unwrap();

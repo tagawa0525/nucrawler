@@ -121,7 +121,7 @@ mod tests {
     fn evidence() -> Vec<Evidence> {
         vec![Evidence {
             article_id: 1,
-            positive: true,
+            rating: crate::db::Rating::new(4).unwrap(),
             title_ja: "SMR の建設許可".into(),
             topics: vec!["新設・建設".into()],
             at: "2026-09-27T00:00:00.000Z".into(),

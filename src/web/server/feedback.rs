@@ -88,28 +88,49 @@ mod tests {
     use crate::db::{ContentKind, ContentOrigin, Db, NewArticle};
     use crate::web::server::test_support::*;
 
+    /// 評価は 1〜5 で付け直せ、空の値で評価なしに戻る。付けたら詳細に戻る。
     #[tokio::test]
-    async fn feedback_records_event_and_returns_to_detail() {
+    async fn rating_is_recorded_and_returns_to_detail() {
         let db = Db::open_in_memory().unwrap();
         let (id, _) = seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let res = server
-            .post(&format!("/articles/{id}/feedback"), "kind=down")
-            .await;
+        let path = format!("/articles/{id}/rating");
+        let res = server.post(&path, "value=2").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(
             res.headers()["location"].to_str().unwrap(),
             format!("/articles/{id}")
         );
+        server.post(&path, "value=5").await;
         assert_eq!(
-            server.count("SELECT count(*) FROM events WHERE kind = 'down'"),
-            1
+            server.strings("SELECT CAST(value AS TEXT) FROM ratings"),
+            ["5"]
         );
-        let res = server
-            .post(&format!("/articles/{id}/feedback"), "kind=open_detail")
-            .await;
-        assert_eq!(res.status().as_u16(), 400);
-        assert_eq!(server.count("SELECT count(*) FROM events"), 1);
+        for bad in ["value=0", "value=6", "value=x"] {
+            let res = server.post(&path, bad).await;
+            assert_eq!(res.status().as_u16(), 400, "{bad}");
+        }
+        assert_eq!(
+            server.strings("SELECT CAST(value AS TEXT) FROM ratings"),
+            ["5"]
+        );
+        assert_eq!(server.post(&path, "value=").await.status().as_u16(), 303);
+        assert_eq!(server.count("SELECT count(*) FROM ratings"), 0);
+        let res = server.post("/articles/999/rating", "value=3").await;
+        assert_eq!(res.status().as_u16(), 404);
+    }
+
+    /// 👍/👎 は評価に置き換えたので、振り分けの受付では受け付けない。
+    #[tokio::test]
+    async fn feedback_no_longer_takes_thumbs() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        for kind in ["kind=up", "kind=down", "kind=open_detail"] {
+            let res = server.post(&format!("/articles/{id}/feedback"), kind).await;
+            assert_eq!(res.status().as_u16(), 400, "{kind}");
+        }
+        assert_eq!(server.count("SELECT count(*) FROM events"), 0);
     }
 
     /// ブックマークは状態として残り、外せる。「見ない」は行動として記録する。
@@ -155,7 +176,7 @@ mod tests {
         assert_eq!(server.count("SELECT count(*) FROM events"), 0);
         assert_eq!(server.count("SELECT count(*) FROM bookmarks"), 0);
 
-        server.post(&feedback, "kind=up").await;
+        server.post(&feedback, "kind=dismiss").await;
         let res = server.post(&undo, "kind=up").await;
         assert_eq!(res.status().as_u16(), 400);
         assert_eq!(server.count("SELECT count(*) FROM events"), 1);

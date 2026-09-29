@@ -326,6 +326,23 @@ mod tests {
         );
         assert!(html.contains("sonnet"));
         assert!(html.contains(r#"action="/articles/7/feedback""#));
+        // 評価は 1〜5 の星で、今の評価（4）まで塗る。今の評価を押すと評価なしに戻る
+        assert!(html.contains(r#"action="/articles/7/rating""#), "{html}");
+        assert!(
+            html.contains(
+                r#"<button name="value" value="3" title="3 どちらでもない" class="on">★</button>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<button name="value" value="" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<button name="value" value="5" title="5 必読">☆</button>"#),
+            "{html}"
+        );
+        assert!(!html.contains("👍") && !html.contains("👎"), "{html}");
         assert!(
             html.contains(r#"<button name="kind" value="bookmark">🔖</button>"#),
             "{html}"

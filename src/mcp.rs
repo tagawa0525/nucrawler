@@ -341,7 +341,7 @@ mod tests {
     use super::*;
     use crate::config::Lang;
     use crate::db::{ArtifactKind, ContentKind, ContentOrigin, NewArticle, NewArtifact, ScoreKey};
-    use crate::db::{ListQuery, SignalKind};
+    use crate::db::{ListQuery, Rating};
     use chrono::Duration;
 
     fn now() -> DateTime<Utc> {
@@ -494,7 +494,7 @@ mod tests {
                 ..Seed::default()
             },
         );
-        db.record_event(db.owner_id().unwrap(), down, SignalKind::Down, now())
+        db.rate(db.owner_id().unwrap(), down, Rating::new(2), now())
             .unwrap();
 
         let result = run_search(&db, SearchParams::default()).unwrap();
@@ -511,7 +511,7 @@ mod tests {
         // 点数の高い順、同点なら新しい順（ここでは ID の大きい順）
         assert_eq!(ids(&all), [down, other, shown, low, unscored]);
         let a = &all.articles[0];
-        assert_eq!(a.feedback.as_deref(), Some("down"));
+        assert_eq!(a.rating, Some(2));
         assert_eq!(a.url, "https://e.com/down");
         assert_eq!(a.title_ja.as_deref(), Some("題"));
         assert_eq!(a.reason.as_deref(), Some("理由"));

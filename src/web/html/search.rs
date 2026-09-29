@@ -179,6 +179,7 @@ mod tests {
             lang: "ja".into(),
             unread: true,
             bookmarked: true,
+            min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
             ..Params::default()
@@ -233,6 +234,11 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"name="min_score" value="60""#), "{html}");
+        assert!(
+            html.contains(r#"<option value="4" selected>★4 以上</option>"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"name="liked""#), "{html}");
         assert!(
             html.contains(r#"<option value="score" selected>"#),
             "{html}"

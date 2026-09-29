@@ -227,13 +227,13 @@ mod tests {
             (server.base.as_str(), 303),
         ] {
             let res = server
-                .form(&format!("/articles/{id}/feedback"), "kind=up")
+                .form(&format!("/articles/{id}/rating"), "value=4")
                 .header("origin", origin)
                 .send()
                 .await
                 .unwrap();
             assert_eq!(res.status().as_u16(), expected, "{origin}");
         }
-        assert_eq!(server.count("SELECT count(*) FROM events"), 1);
+        assert_eq!(server.count("SELECT count(*) FROM ratings"), 1);
     }
 }

@@ -108,7 +108,7 @@ mod tests {
             matched: Vec::new(),
             excluded: Vec::new(),
             read: false,
-            feedback: None,
+            rating: None,
             has_translation: false,
             translation_requested: false,
             bookmarked: false,

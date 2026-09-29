@@ -179,7 +179,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Feedback;
+    use crate::db::Rating;
     use crate::web::html::test_support::*;
 
     #[test]
@@ -216,10 +216,10 @@ mod tests {
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(html.contains(r#"href="/search""#), "{html}");
         assert!(html.contains(r#"href="/search?bookmarked=1""#), "{html}");
-        // 検索とブックマークの間に、いいねした記事へのボタンを置く
+        // 検索とブックマークの間に、評価 4 以上の記事へのボタンを置く
         let search = html.find(r#"href="/search""#).unwrap();
         let liked = html
-            .find(r#"<a class="btn" href="/search?liked=1" aria-label="いいね" title="いいね">👍</a>"#)
+            .find(r#"<a class="btn" href="/search?min_rating=4" aria-label="評価 4 以上" title="評価 4 以上">👍</a>"#)
             .expect(&html);
         let bookmarked = html.find(r#"href="/search?bookmarked=1""#).unwrap();
         assert!(search < liked && liked < bookmarked, "{html}");
@@ -404,17 +404,21 @@ mod tests {
     }
 
     #[test]
-    fn card_marks_liked_and_bookmarked_articles() {
+    fn card_marks_rated_and_bookmarked_articles() {
         let mut marked = item(1, "2026-09-27T05:00:00.000Z");
-        marked.feedback = Some(Feedback::Up);
+        marked.rating = Rating::new(4);
         marked.bookmarked = true;
         let html = card(&marked, false, &Page::default());
-        assert!(html.contains(" 👍 🔖</div>"), "{html}");
-        let mut disliked = item(2, "2026-09-27T05:00:00.000Z");
-        disliked.feedback = Some(Feedback::Down);
-        for i in [item(3, "2026-09-27T05:00:00.000Z"), disliked] {
-            let html = card(&i, false, &Page::default());
-            assert!(!html.contains('👍') && !html.contains('🔖'), "{html}");
-        }
+        assert!(html.contains(" ★4 🔖</div>"), "{html}");
+        let mut low = item(2, "2026-09-27T05:00:00.000Z");
+        low.rating = Rating::new(1);
+        let html = card(&low, false, &Page::default());
+        assert!(html.contains(" ★1</div>"), "{html}");
+        let html = card(
+            &item(3, "2026-09-27T05:00:00.000Z"),
+            false,
+            &Page::default(),
+        );
+        assert!(!html.contains('★') && !html.contains('🔖'), "{html}");
     }
 }

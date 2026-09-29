@@ -191,16 +191,25 @@ fn render_key(
 mod tests {
     use super::*;
 
+    fn pair(score: u8, rating: u8) -> (u8, Rating) {
+        (score, Rating::new(rating).unwrap())
+    }
+
+    /// 評価の違う組のうち、評価の高い方の点数が高い割合（同点は半分）。2 値なら AUC と同じ。
     #[test]
-    fn auc_is_the_share_of_correctly_ordered_pairs() {
-        assert_eq!(auc(&[90, 80], &[10, 20]), Some(1.0));
-        assert_eq!(auc(&[10], &[90]), Some(0.0));
-        assert_eq!(auc(&[50], &[50]), Some(0.5));
-        // 組は (90,50) 正、(90,70) 正、(40,50) 誤、(40,70) 誤
-        assert_eq!(auc(&[90, 40], &[50, 70]), Some(0.5));
-        assert_eq!(auc(&[80, 60], &[60]), Some(0.75));
-        assert_eq!(auc(&[], &[10]), None);
-        assert_eq!(auc(&[10], &[]), None);
+    fn concordance_is_the_share_of_correctly_ordered_pairs() {
+        assert_eq!(concordance(&[pair(90, 5), pair(10, 1)]), Some(1.0));
+        assert_eq!(concordance(&[pair(10, 5), pair(90, 1)]), Some(0.0));
+        assert_eq!(concordance(&[pair(50, 4), pair(50, 2)]), Some(0.5));
+        // 組は (5,3) 正、(5,1) 正、(3,1) 誤。同じ評価どうし（4 と 4）は数えない
+        let three = [pair(90, 5), pair(10, 3), pair(50, 1)];
+        assert_eq!(concordance(&three), Some(2.0 / 3.0));
+        assert_eq!(
+            concordance(&[pair(90, 5), pair(10, 3), pair(50, 1), pair(20, 3)]),
+            Some(0.6)
+        );
+        assert_eq!(concordance(&[pair(90, 4), pair(10, 4)]), None);
+        assert_eq!(concordance(&[]), None);
     }
 
     #[test]
@@ -212,10 +221,10 @@ mod tests {
         assert_eq!(band(100), 90);
     }
 
-    fn label(article_id: i64, kind: SignalKind) -> Label {
+    fn label(article_id: i64, rating: u8) -> Label {
         Label {
             article_id,
-            kind,
+            rating: Rating::new(rating).unwrap(),
             at: "2026-09-27T00:00:00.000Z".into(),
         }
     }
@@ -240,11 +249,7 @@ mod tests {
 
     #[test]
     fn renders_labels_and_the_current_key() {
-        let labels = [
-            label(1, SignalKind::Up),
-            label(2, SignalKind::Bookmark),
-            label(3, SignalKind::Dismiss),
-        ];
+        let labels = [label(1, 5), label(2, 4), label(3, 2)];
         let current = key("0123456789abcdef", 1);
         let old = key("fedcba9876543210", 1);
         let before = "2026-09-26T00:00:00.000Z";
@@ -257,9 +262,7 @@ mod tests {
         ];
         let out = render(&labels, &scores, Some("0123456789abcdef"), None, 1, false);
         assert!(
-            out.starts_with(
-                "labels: 2 positive (up 1, bookmark 1), 1 negative (down 0, dismiss 1)\n"
-            ),
+            out.starts_with("labels: 3 rated (★5 1, ★4 1, ★3 0, ★2 1, ★1 0)\n"),
             "{out}"
         );
         assert!(out.contains("fewer than 5"), "{out}");
@@ -267,11 +270,12 @@ mod tests {
             out.contains("profile 01234567  claude-cli/sonnet  prompt v1  (current)"),
             "{out}"
         );
-        assert!(out.contains("scored 3/3  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 3/3  concordance 1.00"), "{out}");
         assert!(out.contains("1 scored after the reaction"), "{out}");
-        assert!(out.contains("90-100      1     0"), "{out}");
-        assert!(out.contains("70-79       1     0"), "{out}");
-        assert!(out.contains("40-49       0     1"), "{out}");
+        assert!(out.contains("  score     ★1  ★2  ★3  ★4  ★5\n"), "{out}");
+        assert!(out.contains("  90-100     0   0   0   0   1\n"), "{out}");
+        assert!(out.contains("  70-79      0   0   0   1   0\n"), "{out}");
+        assert!(out.contains("  40-49      0   1   0   0   0\n"), "{out}");
         // 既定では現行のキーだけ
         assert!(!out.contains("fedcba98"), "{out}");
         let all = render(&labels, &scores, Some("0123456789abcdef"), None, 1, true);
@@ -279,24 +283,24 @@ mod tests {
             all.contains("profile fedcba98  claude-cli/sonnet  prompt v1\n"),
             "{all}"
         );
-        assert!(all.contains("scored 1/3  AUC -"), "{all}");
+        assert!(all.contains("scored 1/3  concordance -"), "{all}");
     }
 
     /// 反応の見出しをプロンプトに入れていたのは版 1 だけなので、それ以降の版には注記しない。
     #[test]
     fn notes_late_scores_only_for_prompt_v1() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let v2 = key("h", 2);
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
         let out = render(&labels, &scores, Some("h"), None, 2, false);
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
     #[test]
     fn shows_the_candidate_next_to_the_current_key() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let current = key("aaaaaaaaaaaa", 2);
         let candidate = key("bbbbbbbbbbbb", 2);
         let other = key("cccccccccccc", 2);
@@ -320,15 +324,15 @@ mod tests {
         let candidate_at = out.find("profile bbbbbbbb").unwrap();
         assert!(current_at < candidate_at, "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 0.00"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 0.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("cccccccc"), "{out}");
     }
 
     /// 候補だけ採点済みでも、現行のキーの採点が無いことを示す（比べる相手が黙って消えないように）。
     #[test]
     fn says_when_only_the_candidate_has_scores() {
-        let labels = [label(1, SignalKind::Up)];
+        let labels = [label(1, 4)];
         let candidate = key("bbbbbbbbbbbb", 2);
         let scores = [scored(&candidate, 1, 90, "2026-09-26T00:00:00.000Z")];
         let out = render(
@@ -346,14 +350,14 @@ mod tests {
     /// プロファイルをまだ取り込んでいなくても、候補の結果は出す。
     #[test]
     fn shows_the_candidate_without_a_saved_profile() {
-        let labels = [label(1, SignalKind::Up), label(2, SignalKind::Dismiss)];
+        let labels = [label(1, 4), label(2, 2)];
         let candidate = key("bbbbbbbbbbbb", 2);
         let at = "2026-09-26T00:00:00.000Z";
         let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
         let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false);
         assert!(out.contains("no profile"), "{out}");
         assert!(out.contains("prompt v2  (candidate)"), "{out}");
-        assert!(out.contains("scored 2/2  AUC 1.00"), "{out}");
+        assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
     }
 
     #[test]
@@ -361,32 +365,32 @@ mod tests {
         let out = render_explore(ExploreStats {
             picked: 12,
             positive: 1,
-            negative: 4,
+            neutral: 1,
+            negative: 3,
         });
         assert_eq!(
             out,
-            "\nexplore: 12 picked below the threshold, 5 with reactions (1 positive, 4 negative)\n\
-             \x20 about 20% of the reacted picks were of interest (misses below the threshold)\n"
+            "\nexplore: 12 picked below the threshold, 5 rated (1 of interest, 1 neutral, 3 not)\n\
+             \x20 about 20% of the rated picks were of interest (misses below the threshold)\n"
         );
         let none = render_explore(ExploreStats {
             picked: 3,
-            positive: 0,
-            negative: 0,
+            ..ExploreStats::default()
         });
         assert_eq!(
             none,
-            "\nexplore: 3 picked below the threshold, 0 with reactions (0 positive, 0 negative)\n"
+            "\nexplore: 3 picked below the threshold, 0 rated (0 of interest, 0 neutral, 0 not)\n"
         );
         assert_eq!(render_explore(ExploreStats::default()), "");
     }
 
     #[test]
     fn says_when_the_current_key_has_no_scores() {
-        let labels = [label(1, SignalKind::Up)];
+        let labels = [label(1, 4)];
         let out = render(&labels, &[], Some("h"), None, 1, false);
         assert!(out.contains("no scores for the current profile"), "{out}");
         let out = render(&[], &[], None, None, 1, false);
-        assert!(out.starts_with("labels: 0 positive"), "{out}");
+        assert!(out.starts_with("labels: 0 rated"), "{out}");
         assert!(out.contains("no profile"), "{out}");
     }
 }

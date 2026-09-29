@@ -171,7 +171,7 @@ mod tests {
             matched: vec!["燃料".into()],
             excluded: vec!["核融合".into()],
             read: false,
-            feedback: None,
+            rating: crate::db::Rating::new(4),
             bookmarked: false,
             has_translation: false,
             translation_requested: false,
@@ -180,5 +180,7 @@ mod tests {
         let json = serde_json::to_value(Article::new(&item, &SourceLabels::default())).unwrap();
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));
         assert_eq!(json["excluded"], serde_json::json!(["核融合"]));
+        assert_eq!(json["rating"], 4);
+        assert!(json.get("feedback").is_none(), "{json}");
     }
 }

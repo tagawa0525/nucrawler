@@ -202,7 +202,7 @@ mod tests {
     fn reads_params_from_a_query_string() {
         let p = Params::from_query(
             "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&source=nra&source=wnn\
-             &since=2026-09&until=&lang=ja&translated=1&liked=0&unread=on&bookmarked=1&min_score=60&sort=score&x=1",
+             &since=2026-09&until=&lang=ja&translated=1&min_rating=4&unread=on&bookmarked=1&min_score=60&sort=score&x=1",
         );
         assert_eq!(
             p,
@@ -214,6 +214,7 @@ mod tests {
                 lang: "ja".into(),
                 translated: true,
                 bookmarked: true,
+                min_rating: "4".into(),
                 min_score: "60".into(),
                 sort: "score".into(),
                 ..Params::default()
@@ -222,6 +223,7 @@ mod tests {
         assert!(!p.is_empty());
         assert!(Params::from_query("").is_empty());
         assert!(!Params::from_query("bookmarked=1").is_empty());
+        assert!(!Params::from_query("min_rating=4").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -238,9 +240,9 @@ mod tests {
             sources: vec!["nra".into()],
             lang: "en".into(),
             translated: true,
-            liked: true,
             unread: true,
             bookmarked: true,
+            min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
         };
@@ -252,7 +254,8 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.liked && q.unread && q.bookmarked);
+        assert!(q.translated && q.unread && q.bookmarked);
+        assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert_eq!(q.hide_below, None, "search shows what the list hides");
@@ -282,6 +285,15 @@ mod tests {
             }),
             SearchError::InvalidDate { name: "until", .. }
         ));
+        for bad in ["0", "6", "x"] {
+            assert_eq!(
+                err(Params {
+                    min_rating: bad.into(),
+                    ..Params::default()
+                }),
+                SearchError::InvalidRating(bad.into())
+            );
+        }
         assert_eq!(
             err(Params {
                 lang: "fr".into(),
@@ -330,7 +342,7 @@ mod tests {
             matched: Vec::new(),
             excluded: Vec::new(),
             read: false,
-            feedback: None,
+            rating: None,
             has_translation: false,
             translation_requested: false,
             bookmarked: false,

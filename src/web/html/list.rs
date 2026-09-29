@@ -89,11 +89,6 @@ impl ListView {
         next
     }
 
-    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
-    fn href(self) -> String {
-        escape(&self.url())
-    }
-
     /// この表示の一覧の正規の URL。既定と同じ値は付けない（最低点・既読の表示は、この表示での既定と
     /// 違うときだけ）。
     pub fn url(self) -> String {
@@ -126,32 +121,107 @@ pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &
 /// （一覧と絞り込みを行き来するときに、既読の表示と最低点を行き先の既定に戻すため）。
 const JUMP: &str = "location.href=this.selectedOptions[0].dataset.href";
 
+/// 上部のバー（点数・評価・既読・ブックマーク）が指す表示。一覧・絞り込み（`ListView`）と
+/// 検索（`SearchView`）で、今の状態と、バーの部品を変えたときの行き先を与える。
+pub(super) trait BarView: Clone {
+    /// JavaScript が無いときに選択を送る先
+    fn action(&self) -> &'static str;
+    /// この表示の正規の URL
+    fn bar_url(&self) -> String;
+    /// 表示する最低点（0 は絞らない）
+    fn min(&self) -> u8;
+    /// 最低点の選択肢に加える値（設定の最低点）
+    fn extra_min(&self) -> Option<u8>;
+    /// 評価の絞り込み（0 は評価の無い記事だけ）
+    fn rating(&self) -> Option<u8>;
+    /// 既読の記事も出すか
+    fn read(&self) -> bool;
+    /// ブックマークした記事だけか
+    fn bookmarked(&self) -> bool;
+    fn with_min(&self, min: u8) -> Self;
+    fn with_rating(&self, rating: Option<u8>) -> Self;
+    fn with_read(&self, read: bool) -> Self;
+    fn with_bookmarked(&self, bookmarked: bool) -> Self;
+    /// JavaScript が無いとき、評価の選択と一緒に今の条件を送るか
+    fn keeps_state_on_rating(&self) -> bool {
+        true
+    }
+    /// この表示の URL（HTML の属性値としてエスケープ済み）
+    fn bar_href(&self) -> String {
+        escape(&self.bar_url())
+    }
+}
+
+impl BarView for ListView {
+    fn action(&self) -> &'static str {
+        "/"
+    }
+    fn bar_url(&self) -> String {
+        ListView::url(*self)
+    }
+    fn min(&self) -> u8 {
+        self.min
+    }
+    fn extra_min(&self) -> Option<u8> {
+        Some(self.default_min)
+    }
+    fn rating(&self) -> Option<u8> {
+        self.rating
+    }
+    fn read(&self) -> bool {
+        self.read
+    }
+    fn bookmarked(&self) -> bool {
+        self.bookmarked
+    }
+    fn with_min(&self, min: u8) -> Self {
+        ListView { min, ..*self }
+    }
+    fn with_rating(&self, rating: Option<u8>) -> Self {
+        self.with_filters(rating, self.bookmarked)
+    }
+    fn with_read(&self, read: bool) -> Self {
+        ListView { read, ..*self }
+    }
+    fn with_bookmarked(&self, bookmarked: bool) -> Self {
+        self.with_filters(self.rating, bookmarked)
+    }
+    /// 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
+    fn keeps_state_on_rating(&self) -> bool {
+        self.filtered()
+    }
+}
+
 /// JavaScript が無いときに選択と一緒に送る、今の表示のほかの条件（正規の URL の `except` 以外）。
-fn state_inputs(view: ListView, except: &str) -> String {
-    let url = view.url();
-    url.split_once('?')
-        .map_or("", |(_, query)| query)
-        .split('&')
-        .filter_map(|kv| kv.split_once('='))
-        .filter(|(key, _)| *key != except)
-        .map(|(key, value)| format!("<input type=\"hidden\" name=\"{key}\" value=\"{value}\">"))
+fn state_inputs(view: &impl BarView, except: &str) -> String {
+    let url = view.bar_url();
+    let query = url.split_once('?').map_or("", |(_, query)| query);
+    url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, _)| key != except)
+        .map(|(key, value)| {
+            format!(
+                "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+                escape(&key),
+                escape(&value)
+            )
+        })
         .collect()
 }
 
 /// 選択肢。今の選択なら `selected`。
-fn option(value: &str, target: ListView, selected: bool, label: &str) -> String {
+fn option(value: &str, target: &impl BarView, selected: bool, label: &str) -> String {
     format!(
         "<option value=\"{value}\" data-href=\"{}\"{}>{label}</option>",
-        target.href(),
+        target.bar_href(),
         if selected { " selected" } else { "" },
     )
 }
 
 /// 「絞らない」の選択肢。開いた一覧では「-」、閉じた選択では `closed`（00・★）と書く（`BAR_SCRIPT`）。
-fn blank_option(value: &str, target: ListView, selected: bool, closed: &str) -> String {
+fn blank_option(value: &str, target: &impl BarView, selected: bool, closed: &str) -> String {
     format!(
         "<option value=\"{value}\" data-href=\"{}\" data-closed=\"{closed}\"{}>-</option>",
-        target.href(),
+        target.bar_href(),
         if selected { " selected" } else { "" },
     )
 }
@@ -161,32 +231,34 @@ fn blank_option(value: &str, target: ListView, selected: bool, closed: &str) -> 
 pub(super) const BAR_SCRIPT: &str =
     concat!("<script>\n", include_str!("assets/bar.js"), "</script>");
 
-/// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
+/// 表示する最低点の選択。0〜90 の 10 刻みと設定・今の最低点から選び、選ぶとすぐ表示を切り替える
 /// （JavaScript が無ければ「表示」のボタンで）。0 は点数で絞らない（すべて。開いた一覧では「-」、閉じた選択では 00）で、
 /// それ以外のあいだは緑にする。
-fn min_select(view: ListView) -> String {
+fn min_select(view: &impl BarView) -> String {
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
-    values.extend([view.default_min, view.min]);
+    values.extend(view.extra_min());
+    values.push(view.min());
     values.sort_unstable();
     values.dedup();
     let options: String = values
         .into_iter()
         .map(|v| {
-            let target = ListView { min: v, ..view };
+            let target = view.with_min(v);
             if v == 0 {
                 // 絞らない
-                blank_option("0", target, v == view.min, "00")
+                blank_option("0", &target, v == view.min(), "00")
             } else {
                 // 桁をそろえる（1 桁は 0 を付ける）
-                option(&v.to_string(), target, v == view.min, &format!("{v:02}"))
+                option(&v.to_string(), &target, v == view.min(), &format!("{v:02}"))
             }
         })
         .collect();
     format!(
-        "<form class=\"min{}\" method=\"get\" action=\"/\"><select name=\"min\" aria-label=\"表示する最低点\" \
+        "<form class=\"min{}\" method=\"get\" action=\"{}\"><select name=\"min\" aria-label=\"表示する最低点\" \
          title=\"表示する最低点\" onchange=\"{JUMP}\">{options}</select>{}\
          <noscript><button>表示</button></noscript></form>",
-        if view.min == 0 { "" } else { " on" },
+        if view.min() == 0 { "" } else { " on" },
+        view.action(),
         state_inputs(view, "min"),
     )
 }
@@ -194,8 +266,8 @@ fn min_select(view: ListView) -> String {
 /// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」（閉じた選択では数字の無い ★）は絞らない、
 /// ★1〜★5 は最低点と同じく小さい順で「以上」の印は付けない（★4 は ★4 以上）、最後の白抜きの「☆」は
 /// 評価の無い記事だけ。絞っているあいだは緑にする。
-/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、絞り込みの中ならほかの条件も引き継ぐ）。
-fn rating_select(view: ListView) -> String {
+/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、`keeps_state_on_rating` ならほかの条件も送る）。
+fn rating_select(view: &impl BarView) -> String {
     let choices = [
         (Some(1), "★1"),
         (Some(2), "★2"),
@@ -205,55 +277,55 @@ fn rating_select(view: ListView) -> String {
         (Some(0), "☆"),
     ];
     // 絞らない（閉じた選択では数字の無い ★）
-    let blank = blank_option(
-        "",
-        view.with_filters(None, view.bookmarked),
-        view.rating.is_none(),
-        "★",
-    );
+    let blank = blank_option("", &view.with_rating(None), view.rating().is_none(), "★");
     let options: String = std::iter::once(blank)
         .chain(choices.iter().map(|(rating, label)| {
             let value = rating.map(|r| r.to_string()).unwrap_or_default();
-            let target = view.with_filters(*rating, view.bookmarked);
-            option(&value, target, *rating == view.rating, label)
+            option(
+                &value,
+                &view.with_rating(*rating),
+                *rating == view.rating(),
+                label,
+            )
         }))
         .collect();
-    // 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
-    let inputs = if view.filtered() {
+    let inputs = if view.keeps_state_on_rating() {
         state_inputs(view, "rating")
     } else {
         String::new()
     };
     format!(
-        "<form class=\"stars{}\" method=\"get\" action=\"/\"><select name=\"rating\" aria-label=\"評価で絞る\" \
+        "<form class=\"stars{}\" method=\"get\" action=\"{}\"><select name=\"rating\" aria-label=\"評価で絞る\" \
          title=\"評価で絞る\" onchange=\"{JUMP}\">{options}</select>{inputs}\
          <noscript><button>表示</button></noscript></form>",
-        if view.rating.is_some() { " on" } else { "" },
+        if view.rating().is_some() { " on" } else { "" },
+        view.action(),
     )
 }
 
-/// 一覧の上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
+/// 上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
 /// 一覧・絞り込みの画面では先頭を 🔍（検索）に、ほかの画面では 🏠（一覧へ戻る）にする。
-fn bar(view: ListView, home: bool) -> String {
+pub(super) fn bar(view: &impl BarView, home: bool) -> String {
     let bookmark = button(
-        &view.with_filters(view.rating, !view.bookmarked).href(),
+        &view.with_bookmarked(!view.bookmarked()).bar_href(),
         "ブックマークだけ表示",
         "🔖",
-        Some(view.bookmarked),
+        Some(view.bookmarked()),
     );
-    let min = min_select(view);
-    let read_toggle = ListView {
-        read: !view.read,
-        ..view
-    };
-    let read = button(&read_toggle.href(), "既読も表示", "👁", Some(view.read));
+    let read = button(
+        &view.with_read(!view.read()).bar_href(),
+        "既読も表示",
+        "👁",
+        Some(view.read()),
+    );
     format!(
-        "<nav class=\"bar\">{}{min}{}{read}{bookmark}{}</nav>{BAR_SCRIPT}",
+        "<nav class=\"bar\">{}{}{}{read}{bookmark}{}</nav>{BAR_SCRIPT}",
         if home {
             button("/", "ホーム", "🏠", None)
         } else {
             button("/search", "検索", "🔍", None)
         },
+        min_select(view),
         rating_select(view),
         button("/settings", "設定", "⚙️", None),
     )
@@ -266,12 +338,12 @@ pub(super) fn home_bar(page: &Page) -> String {
         default_min: page.default_min,
         ..ListView::default()
     };
-    bar(view, true)
+    bar(&view, true)
 }
 
 /// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
 pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
-    let mut body = bar(view, false);
+    let mut body = bar(&view, false);
     if items.is_empty() {
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
@@ -310,7 +382,7 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let mut body = bar(view, false);
+    let mut body = bar(&view, false);
     // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
     body.push_str(if view.read {
         "<div class=\"sections\">"

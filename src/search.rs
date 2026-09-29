@@ -68,6 +68,52 @@ impl Params {
         p
     }
 
+    /// クエリ文字列（`?` を除く）に戻す。空の条件は付けない（`from_query` で読み直すと同じ条件になる）。
+    pub fn query_string(&self) -> String {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        let texts = [
+            ("q", &self.q),
+            ("since", &self.since),
+            ("until", &self.until),
+        ];
+        for (key, value) in texts {
+            if !value.is_empty() {
+                q.append_pair(key, value);
+            }
+        }
+        for topic in &self.topics {
+            q.append_pair("topic", topic);
+        }
+        for source in &self.sources {
+            q.append_pair("source", source);
+        }
+        if !self.lang.is_empty() {
+            q.append_pair("lang", &self.lang);
+        }
+        let flags = [
+            ("translated", self.translated),
+            ("unread", self.unread),
+            ("bookmarked", self.bookmarked),
+            ("unrated", self.unrated),
+        ];
+        for (key, on) in flags {
+            if on {
+                q.append_pair(key, "1");
+            }
+        }
+        let rest = [
+            ("min_rating", &self.min_rating),
+            ("min_score", &self.min_score),
+            ("sort", &self.sort),
+        ];
+        for (key, value) in rest {
+            if !value.is_empty() {
+                q.append_pair(key, value);
+            }
+        }
+        q.finish()
+    }
+
     /// 条件が 1 つも無い（検索画面では結果を出さず、フォームだけを出す）。並びは条件に数えない。
     pub fn is_empty(&self) -> bool {
         [

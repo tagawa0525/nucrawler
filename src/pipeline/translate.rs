@@ -102,7 +102,7 @@ pub async fn translate_articles<L: Llm>(
                 break;
             }
         };
-        if let Err(stop) = permit(db, quota, now, 0)? {
+        if let Err(stop) = permit(db, quota, clock(), 0)? {
             tracing::info!("translate stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

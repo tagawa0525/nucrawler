@@ -38,7 +38,7 @@ pub async fn suggest_profile<L: Llm>(
         llm,
         quota,
         cancel,
-        ..
+        clock,
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,
@@ -58,7 +58,7 @@ pub async fn suggest_profile<L: Llm>(
             return Ok(summary);
         }
     };
-    if let Err(stop) = permit(db, quota, now, 0)? {
+    if let Err(stop) = permit(db, quota, clock(), 0)? {
         tracing::info!("suggest stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

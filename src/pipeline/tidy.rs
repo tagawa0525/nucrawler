@@ -34,7 +34,7 @@ pub async fn tidy_topics<L: Llm>(
         llm,
         quota,
         cancel,
-        ..
+        clock,
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     force: bool,
@@ -63,7 +63,7 @@ pub async fn tidy_topics<L: Llm>(
             return Ok(summary);
         }
     };
-    if let Err(stop) = permit(db, quota, now, 0)? {
+    if let Err(stop) = permit(db, quota, clock(), 0)? {
         tracing::info!("tidy stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

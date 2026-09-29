@@ -88,7 +88,7 @@ pub async fn digest_articles<L: Llm>(
                 break;
             }
         };
-        if let Err(stop) = permit(db, quota, now, llm_cfg.score_reserved_calls)? {
+        if let Err(stop) = permit(db, quota, clock(), llm_cfg.score_reserved_calls)? {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

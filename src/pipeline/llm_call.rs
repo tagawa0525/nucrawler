@@ -73,6 +73,8 @@ pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 
 /// 次の呼び出しをしてよいか。LLM を呼ぶ実行は並行して動くので、判定の前に DB の最新の使用率を
 /// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
+/// `now` は判定する時点の時刻（`LlmStage::clock`）。ステージを始めた時刻を使うと、枠を待つ間や
+/// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
 pub fn permit(
     db: &Db,
     quota: &mut Quota,

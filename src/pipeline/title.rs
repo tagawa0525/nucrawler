@@ -68,7 +68,7 @@ pub async fn translate_titles<L: Llm>(
                 break;
             }
         };
-        if let Err(stop) = permit(db, quota, now, 0)? {
+        if let Err(stop) = permit(db, quota, clock(), 0)? {
             tracing::info!("title stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

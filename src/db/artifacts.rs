@@ -515,6 +515,43 @@ mod tests {
         );
     }
 
+    /// ほかの実行が予約している記事は選ばない（期限を過ぎれば選ぶ）。
+    #[test]
+    fn pending_digest_and_titles_skip_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let with_body = page_article(&db, "https://e.com/body", "2026-09-26T00:00:00.000Z");
+        db.insert_content(with_body, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let no_body = page_article(&db, "https://e.com/none", "2026-09-26T00:00:00.000Z");
+        let key = |stage| ClaimKey {
+            stage,
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        let _digest = db
+            .claim(
+                key("digest"),
+                &[with_body],
+                t(now),
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        let _title = db
+            .claim(
+                key("title"),
+                &[no_body],
+                t(now),
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        assert!(digest_ids(&db, now).is_empty());
+        assert!(title_ids(&db, now).is_empty());
+        let later = "2026-09-27T00:10:00Z";
+        assert_eq!(digest_ids(&db, later), [with_body]);
+        assert_eq!(title_ids(&db, later), [no_body]);
+    }
+
     #[test]
     fn pending_titles_skips_articles_backing_off_for_this_model() {
         let db = Db::open_in_memory().unwrap();

@@ -303,6 +303,31 @@ mod tests {
     }
 
     /// 先回りの判定は、利用者が閲覧できる最新の digest の採点だけで行う（古い版の高得点は使わない）。
+    /// ほかの実行が予約している記事は選ばない。
+    #[test]
+    fn pending_translate_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let key = ClaimKey {
+            stage: "translate",
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        let held = db
+            .claim(key, &[a], t(now), chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(translate_ids(&db, false, now).is_empty());
+        drop(held);
+        assert_eq!(translate_ids(&db, false, now), [a]);
+    }
+
     #[test]
     fn pending_translate_uses_score_of_latest_digest() {
         let db = Db::open_in_memory().unwrap();

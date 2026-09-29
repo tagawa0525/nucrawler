@@ -279,6 +279,28 @@ mod tests {
         assert_eq!(score_ids(&db, changed, now), [a]);
     }
 
+    /// ほかの実行が予約している記事は選ばない。
+    #[test]
+    fn pending_score_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let stage = score_stage(key);
+        let claim_key = ClaimKey {
+            stage: &stage,
+            backend: key.backend,
+            model: key.model,
+        };
+        let held = db
+            .claim(claim_key, &[a], t(now), chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        drop(held);
+        assert_eq!(score_ids(&db, key, now), [a]);
+    }
+
     #[test]
     fn pending_score_rescores_when_prompt_version_changes() {
         let db = Db::open_in_memory().unwrap();

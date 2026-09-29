@@ -406,6 +406,42 @@ mod tests {
         assert!(redo_digest_ids(&db, "opus", &RedoFilter::default()).is_empty());
     }
 
+    /// ほかの実行が予約している記事は、作り直しの対象にも選ばない。
+    #[test]
+    fn redo_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = t("2026-09-27T00:00:00Z");
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let key = |stage| ClaimKey {
+            stage,
+            backend: "claude-cli",
+            model: "opus",
+        };
+        let translate_ids = |db: &Db| -> Vec<i64> {
+            db.redo_translate(redo_key(db, "opus"), &RedoFilter::default(), now, 10)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &RedoFilter::default()), [a]);
+        assert_eq!(translate_ids(&db), [a]);
+        let _digest = db
+            .claim(key("digest"), &[a], now, chrono::Duration::minutes(10))
+            .unwrap();
+        let _translate = db
+            .claim(key("translate"), &[a], now, chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(redo_digest_ids(&db, "opus", &RedoFilter::default()).is_empty());
+        assert!(translate_ids(&db).is_empty());
+    }
+
     #[test]
     fn redo_translate_selects_english_articles_missing_this_model() {
         let db = Db::open_in_memory().unwrap();

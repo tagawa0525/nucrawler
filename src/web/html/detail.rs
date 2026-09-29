@@ -50,10 +50,10 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
         }
     ));
+    // 点数そのものは一覧のカードと同じく印の行の先頭に出し、ここには当たった語と理由だけを出す
     if i.score.is_some() {
         body.push_str(&format!(
-            "<p>{}{}{}</p>",
-            super::list::score_badge(i),
+            "<p>{}{}</p>",
             super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
@@ -82,8 +82,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    // 詳細の点数は理由と一緒に上に出しているので、印の行には置かない
-    body.push_str(&super::list::marks(i, ""));
+    // 一覧のカードと同じく 点数・評価・既読・ブックマーク の順
+    body.push_str(&super::list::marks(i, &super::list::score_badge(i)));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {

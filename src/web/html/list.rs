@@ -146,6 +146,10 @@ pub(super) trait BarView: Clone {
     fn keeps_state_on_rating(&self) -> bool {
         true
     }
+    /// JavaScript が無いときに最低点の選択を送る欄の名前（選んだ値で置き換わるので、今の条件からは外す）
+    fn min_name(&self) -> &'static str;
+    /// 評価の選択（`rating`）で置き換わる、今の条件の欄の名前
+    fn rating_replaces(&self) -> &'static [&'static str];
     /// この表示の URL（HTML の属性値としてエスケープ済み）
     fn bar_href(&self) -> String {
         escape(&self.bar_url())
@@ -190,14 +194,20 @@ impl BarView for ListView {
     fn keeps_state_on_rating(&self) -> bool {
         self.filtered()
     }
+    fn min_name(&self) -> &'static str {
+        "min"
+    }
+    fn rating_replaces(&self) -> &'static [&'static str] {
+        &["rating"]
+    }
 }
 
-/// JavaScript が無いときに選択と一緒に送る、今の表示のほかの条件（正規の URL の `except` 以外）。
-fn state_inputs(view: &impl BarView, except: &str) -> String {
+/// JavaScript が無いときに選択と一緒に送る、今の表示のほかの条件（正規の URL の、`except` 以外の欄）。
+fn state_inputs(view: &impl BarView, except: &[&str]) -> String {
     let url = view.bar_url();
     let query = url.split_once('?').map_or("", |(_, query)| query);
     url::form_urlencoded::parse(query.as_bytes())
-        .filter(|(key, _)| key != except)
+        .filter(|(key, _)| !except.contains(&key.as_ref()))
         .map(|(key, value)| {
             format!(
                 "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
@@ -235,6 +245,7 @@ pub(super) const BAR_SCRIPT: &str =
 /// （JavaScript が無ければ「表示」のボタンで）。0 は点数で絞らない（すべて。開いた一覧では「-」、閉じた選択では 00）で、
 /// それ以外のあいだは緑にする。
 fn min_select(view: &impl BarView) -> String {
+    let name = view.min_name();
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend(view.extra_min());
     values.push(view.min());
@@ -254,12 +265,12 @@ fn min_select(view: &impl BarView) -> String {
         })
         .collect();
     format!(
-        "<form class=\"min{}\" method=\"get\" action=\"{}\"><select name=\"min\" aria-label=\"表示する最低点\" \
+        "<form class=\"min{}\" method=\"get\" action=\"{}\"><select name=\"{name}\" aria-label=\"表示する最低点\" \
          title=\"表示する最低点\" onchange=\"{JUMP}\">{options}</select>{}\
          <noscript><button>表示</button></noscript></form>",
         if view.min() == 0 { "" } else { " on" },
         view.action(),
-        state_inputs(view, "min"),
+        state_inputs(view, &[name]),
     )
 }
 
@@ -290,7 +301,7 @@ fn rating_select(view: &impl BarView) -> String {
         }))
         .collect();
     let inputs = if view.keeps_state_on_rating() {
-        state_inputs(view, "rating")
+        state_inputs(view, view.rating_replaces())
     } else {
         String::new()
     };

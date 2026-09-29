@@ -69,6 +69,13 @@ impl BarView for SearchView {
     fn with_bookmarked(&self, bookmarked: bool) -> Self {
         self.with(|p| p.bookmarked = bookmarked)
     }
+    fn min_name(&self) -> &'static str {
+        "min_score"
+    }
+    /// 評価の選択（`rating`、検索の条件の読み取りで min_rating・unrated にする）で置き換わる
+    fn rating_replaces(&self) -> &'static [&'static str] {
+        &["min_rating", "unrated"]
+    }
 }
 
 /// 検索画面。`results` が None なら（条件が無いときは）フォームだけを出す。

@@ -18,6 +18,8 @@ pub enum SearchError {
     InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
+    #[error("unrated and min_rating cannot be combined")]
+    ConflictingRating,
 }
 
 /// 検索画面・JSON API・CLI の条件。名前はクエリ文字列のキーと同じ（`topic` と `source` は繰り返せる）。
@@ -60,6 +62,12 @@ impl Params {
                 "bookmarked" => p.bookmarked = value == "1",
                 "unrated" => p.unrated = value == "1",
                 "min_rating" => p.min_rating = value,
+                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、空は絞らない
+                "rating" => match value.as_str() {
+                    "" => {}
+                    "0" => p.unrated = true,
+                    _ => p.min_rating = value,
+                },
                 "min_score" => p.min_score = value,
                 "sort" => p.sort = value,
                 _ => {}
@@ -160,6 +168,10 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
             })
             .transpose()?;
+        // 評価の無い記事と ★N 以上の記事は重ならないので、両方は指定できない
+        if self.unrated && min_rating.is_some() {
+            return Err(SearchError::ConflictingRating);
+        }
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -326,7 +338,7 @@ mod tests {
             translated: true,
             unread: true,
             bookmarked: true,
-            unrated: true,
+            unrated: false,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -339,7 +351,12 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.unread && q.bookmarked && q.unrated);
+        assert!(q.translated && q.unread && q.bookmarked && !q.unrated);
+        let unrated = Params {
+            unrated: true,
+            ..Params::default()
+        };
+        assert!(unrated.to_query(7, None, 30).unwrap().unrated);
         assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);

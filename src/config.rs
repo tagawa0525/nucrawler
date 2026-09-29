@@ -117,14 +117,17 @@ pub struct LlmConfig {
     pub title_model: String,
     /// 1 回の呼び出しで和訳する見出しの数
     pub title_batch_size: usize,
-    /// 同時に動かす claude の数の上限（プロセスをまたいで数える）
+    /// 同時に動かすバックエンド（claude・copilot）の数の上限（プロセスをまたいで数える）
     pub concurrency: usize,
 }
 
 impl LlmConfig {
     /// バックエンドの実行ファイル。
     pub fn command(&self) -> &str {
-        todo!()
+        self.command.as_deref().unwrap_or(match self.backend {
+            LlmBackend::ClaudeCli => "claude",
+            LlmBackend::CopilotCli => "copilot",
+        })
     }
 
     /// 0 だと処理が黙って何もしなくなる値を拒否する。
@@ -406,6 +409,16 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
                 .copilot_quota
                 .as_ref()
                 .map_or(Ok(()), crate::quota::CreditsConfig::validate)
+        })
+        .and_then(|()| {
+            // 使用率を返さない Copilot は、月の予算が無いと止める基準が無い
+            if config.llm.backend == LlmBackend::CopilotCli && config.copilot_quota.is_none() {
+                Err("llm.backend = \"copilot-cli\" needs [copilot_quota] \
+                     (monthly_credits of the Copilot plan)"
+                    .into())
+            } else {
+                Ok(())
+            }
         })
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),

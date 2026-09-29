@@ -256,8 +256,20 @@ impl Quota {
 
     /// 設定のバックエンド（`llm.backend`）に合わせて判定する。claude-cli は使用率（`[quota]`）、
     /// copilot-cli は月の消費クレジット（`[copilot_quota]`）。
-    pub fn from_config(_config: &crate::config::Config, _max_calls: Option<u32>) -> Self {
-        todo!()
+    pub fn from_config(config: &crate::config::Config, max_calls: Option<u32>) -> Self {
+        match config.llm.backend {
+            crate::config::LlmBackend::ClaudeCli => {
+                Self::new(config.quota.clone(), None, max_calls)
+            }
+            crate::config::LlmBackend::CopilotCli => Self::with_credits(
+                config.quota.clone(),
+                config.copilot_quota.clone().expect(
+                    "[copilot_quota] is required for copilot-cli when the config is loaded",
+                ),
+                crate::llm::copilot_cli::BACKEND,
+                max_calls,
+            ),
+        }
     }
 
     /// `backend` の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`

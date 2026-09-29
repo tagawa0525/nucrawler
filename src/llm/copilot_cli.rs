@@ -39,6 +39,26 @@ pub struct CopilotCli {
     pub concurrency: usize,
 }
 
+impl CopilotCli {
+    /// 設定のコマンド・タイムアウト・同時に動かす数で、`cwd` を作業ディレクトリにし、呼び出しごとの
+    /// `COPILOT_HOME` を `homes` の下に作って呼ぶ。
+    pub fn from_config(
+        c: &crate::config::LlmConfig,
+        cwd: PathBuf,
+        homes: PathBuf,
+        slots: PathBuf,
+    ) -> Self {
+        Self {
+            command: c.command().into(),
+            cwd,
+            homes,
+            timeout: Duration::from_secs(c.timeout_secs),
+            slots,
+            concurrency: c.concurrency,
+        }
+    }
+}
+
 impl Llm for CopilotCli {
     type Slot = crate::pipeline::lock::Slot;
 

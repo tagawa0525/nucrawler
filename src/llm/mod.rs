@@ -1,5 +1,6 @@
-//! LLM の呼び出し口。今の実装は Claude Code の headless モード（`claude -p`）だけで、
-//! サブスクリプションの枠内で動かす。将来 API などを足せるよう `Llm` トレイトで抽象化する。
+//! LLM の呼び出し口。Claude Code の headless モード（`claude -p`、サブスクリプションの枠）と
+//! GitHub Copilot CLI（`copilot`、AI Credits の月の予算）を `Llm` トレイトで抽象化し、設定
+//! （`llm.backend`）で選ぶ（`Backend`）。
 
 pub mod claude_cli;
 pub mod copilot_cli;
@@ -116,8 +117,18 @@ pub enum Backend {
 
 impl Backend {
     /// 設定のバックエンドを、データディレクトリ `data` の下を作業場所にして作る。
-    pub fn from_config(_c: &crate::config::LlmConfig, _data: &std::path::Path) -> Self {
-        todo!()
+    /// 作業ディレクトリは `llm-cwd`、呼び出しの枠は `data` に置き、バックエンドによらず同じ場所で数える。
+    pub fn from_config(c: &crate::config::LlmConfig, data: &std::path::Path) -> Self {
+        let cwd = data.join("llm-cwd");
+        let slots = data.to_path_buf();
+        match c.backend {
+            crate::config::LlmBackend::ClaudeCli => {
+                Self::Claude(claude_cli::ClaudeCli::from_config(c, cwd, slots))
+            }
+            crate::config::LlmBackend::CopilotCli => Self::Copilot(
+                copilot_cli::CopilotCli::from_config(c, cwd, data.join("copilot-home"), slots),
+            ),
+        }
     }
 }
 
@@ -125,15 +136,24 @@ impl Llm for Backend {
     type Slot = crate::pipeline::lock::Slot;
 
     fn backend(&self) -> &'static str {
-        todo!()
+        match self {
+            Self::Claude(c) => c.backend(),
+            Self::Copilot(c) => c.backend(),
+        }
     }
 
     async fn reserve(&self) -> Result<Self::Slot, LlmError> {
-        todo!()
+        match self {
+            Self::Claude(c) => c.reserve().await,
+            Self::Copilot(c) => c.reserve().await,
+        }
     }
 
-    async fn call(&self, _req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
-        todo!()
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
+        match self {
+            Self::Claude(c) => c.call(req).await,
+            Self::Copilot(c) => c.call(req).await,
+        }
     }
 }
 

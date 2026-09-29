@@ -10,6 +10,7 @@ pub mod run;
 pub mod score;
 pub mod suggest;
 pub mod tidy;
+pub mod title;
 pub mod translate;
 
 use std::sync::Arc;
@@ -223,7 +224,13 @@ mod tests {
                 (LockKind::Fetch, vec![Stage::Fetch, Stage::Extract]),
                 (
                     LockKind::Llm,
-                    vec![Stage::Digest, Stage::Score, Stage::Translate, Stage::Tidy]
+                    vec![
+                        Stage::Digest,
+                        Stage::Score,
+                        Stage::Translate,
+                        Stage::Title,
+                        Stage::Tidy
+                    ]
                 ),
             ]
         );

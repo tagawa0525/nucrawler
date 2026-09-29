@@ -84,7 +84,9 @@ Copilot のために変えない。
 - `LlmResponse.rate_limit: Option<RateLimit>` を `usage: Option<Usage>` に変える。
   `enum Usage { Subscription(RateLimit), Credits { nano_aiu: i64 } }`
 - `llm_calls` に `credits_nano INTEGER` 列を足す（マイグレーション）。`rate_limit` 列は Claude 用にそのまま残す
-- `LlmError::RateLimited` の `rate_limit` は Claude 専用のままでよい
+- 失敗した呼び出しも使用量を運ぶ（`Llm::call` の失敗は `LlmFailure { error, usage }`）。JSON が崩れた呼び出しもクレジットを
+  消費するので、残さないと月の消費を少なく数える。`LlmError::RateLimited` が持っていた使用率もこの `usage` に移す
+- `CopilotCli` は、`totalNanoAiu` を読めた後の失敗（`Protocol` など）にも使用量を付けて返す
 
 ### Copilot のクォータ
 

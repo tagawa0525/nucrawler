@@ -377,12 +377,12 @@ mod tests {
                 .unwrap(),
             0
         );
-        let record = |nano_aiu: Option<i64>, at: &str| {
+        let record_by = |backend: &str, nano_aiu: Option<i64>, at: &str| {
             let usage = nano_aiu.map(|nano_aiu| crate::llm::Usage::Credits { nano_aiu });
             db.record_llm_call(
                 &LlmCall {
                     stage: "title",
-                    backend: "copilot-cli",
+                    backend,
                     model: "gpt-6-luna",
                     n_items: 1,
                     ok: nano_aiu.is_some(),
@@ -394,7 +394,10 @@ mod tests {
             )
             .unwrap();
         };
+        let record = |nano_aiu: Option<i64>, at: &str| record_by("copilot-cli", nano_aiu, at);
         record(Some(900), "2026-08-31T23:59:59Z");
+        // ほかのバックエンドの消費は、その予算に数える（Copilot の予算には数えない）
+        record_by("other-cli", Some(1000), "2026-09-15T00:00:00Z");
         record(Some(5), "2026-09-01T00:00:00Z");
         record(None, "2026-09-10T00:00:00Z");
         record(Some(7), "2026-09-20T00:00:00Z");

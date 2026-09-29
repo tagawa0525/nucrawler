@@ -263,6 +263,39 @@ mod tests {
         assert!(!all.contains("確認枠"), "{all}");
     }
 
+    /// 確認枠の記事も一覧と同じく、今回の訪問で既読にしたものは残し、前の訪問までに既読になったものは出さない。
+    #[tokio::test]
+    async fn explore_hides_picks_read_before_this_visit() {
+        let db = Db::open_in_memory().unwrap();
+        let (low, digest) = seed(&db, "https://e.com/low", "低い点");
+        score(&db, digest, 10);
+        let server = Server::start(db).await;
+        let in_explore = |html: &str| {
+            html.split("<h2>確認枠</h2>")
+                .nth(1)
+                .is_some_and(|s| s.contains("低い点"))
+        };
+        let (_, html) = server.get("/").await;
+        assert!(in_explore(&html), "{html}");
+        server.post(&format!("/articles/{low}/read"), "on=1").await;
+        let (_, html) = server.get("/").await;
+        assert!(in_explore(&html), "{html}");
+        // 次の訪問：既読と前回の閲覧を過去にずらす
+        server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .conn()
+            .execute_batch(
+                "UPDATE reads SET read_at = '2000-01-01T00:00:00.000Z';
+                 UPDATE users SET last_seen_at = '2000-01-02T00:00:00.000Z';",
+            )
+            .unwrap();
+        let (_, html) = server.get("/").await;
+        assert!(!html.contains("低い点"), "{html}");
+    }
+
     /// フィードは既定の一覧と同じ記事を Atom で出し、閲覧としては記録しない。
     #[tokio::test]
     async fn feed_lists_recommended_articles_as_atom() {

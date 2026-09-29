@@ -93,6 +93,33 @@ impl QuotaConfig {
     }
 }
 
+/// Copilot の AI Credits の月の予算（`[copilot_quota]`）。月の消費を、月の経過割合 × `pace` までに抑える。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreditsConfig {
+    /// プランの月のクレジット（Pro は 1500）。プランで大きく違うので既定値を置かない
+    pub monthly_credits: f64,
+    /// 月の経過割合のうち使ってよい割合。対話で使う Copilot の消費は見えないので、その分の余裕を残す
+    #[serde(default = "default_credits_pace")]
+    pub pace: f64,
+}
+
+fn default_credits_pace() -> f64 {
+    0.8
+}
+
+impl CreditsConfig {
+    /// 月のクレジットは正、`pace` は 0 より大きく 1 以下。
+    pub fn validate(&self) -> Result<(), String> {
+        todo!()
+    }
+}
+
+/// 月の始まり（UTC の暦月の 1 日 0 時。Copilot の AI Credits はここで戻る）。
+pub fn month_start(_now: DateTime<Utc>) -> DateTime<Utc> {
+    todo!()
+}
+
 /// 呼び出しを止める理由。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stop {
@@ -115,6 +142,11 @@ pub enum Stop {
     /// 後段のステージのために残した回数に達した
     Reserved {
         reserved: u32,
+    },
+    /// 月の消費クレジットが、月の経過に応じた許容量に達した
+    MonthlyCredits {
+        used: f64,
+        limit: f64,
     },
 }
 
@@ -144,6 +176,10 @@ impl std::fmt::Display for Stop {
                 limit * 100.0
             ),
             Stop::MaxCalls { limit } => write!(f, "reached {limit} llm calls in this run"),
+            Stop::MonthlyCredits { used, limit } => write!(
+                f,
+                "monthly AI Credits {used:.1} reached the pace allowance {limit:.1}"
+            ),
             Stop::Reserved { reserved } => {
                 write!(
                     f,
@@ -174,6 +210,26 @@ impl Quota {
             calls: 0,
             max_calls,
         }
+    }
+
+    /// Copilot の AI Credits の月の予算で判定する。呼び出し回数の上限は `cfg` の `max_calls_per_run`
+    /// （`max_calls` を指定すればそちら）を使う。使用率（5 時間枠・週次枠）は見ない。
+    pub fn with_credits(
+        _cfg: QuotaConfig,
+        _credits: CreditsConfig,
+        _max_calls: Option<u32>,
+    ) -> Self {
+        todo!()
+    }
+
+    /// 月の消費クレジットで判定するか（`with_credits`）。
+    pub fn counts_credits(&self) -> bool {
+        todo!()
+    }
+
+    /// ほかの実行を含めた今月の消費（10^-9 クレジット単位、DB の llm_calls の合計）を取り込む。
+    pub fn observe_credits(&mut self, _used_nano: i64) {
+        todo!()
     }
 
     /// 次の呼び出しをしてよいか。
@@ -355,6 +411,80 @@ mod tests {
             quota(usage(0.5, 0.1, now, 5.0)).permit(now),
             Err(Stop::FiveHour { limit, .. }) if limit == 0.20
         ));
+    }
+
+    const NANO: i64 = 1_000_000_000;
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().to_utc()
+    }
+
+    fn credits(monthly_credits: f64) -> CreditsConfig {
+        CreditsConfig {
+            monthly_credits,
+            pace: 0.8,
+        }
+    }
+
+    /// 月の半ばなら、月のクレジット × 0.5 × pace まで使える。月の長さによらない。
+    #[test]
+    fn credits_follow_the_month_pace() {
+        for now in [
+            "2026-09-16T00:00:00Z", // 30 日の月の 15 日経過
+            "2027-02-15T00:00:00Z", // 28 日の月の 14 日経過
+            "2026-12-16T12:00:00Z", // 31 日の月の 15.5 日経過
+        ] {
+            let now = utc(now);
+            let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), None);
+            assert!(q.counts_credits());
+            q.observe_credits(399 * NANO);
+            assert!(q.permit(now).is_ok(), "{now}");
+            q.observe_credits(400 * NANO);
+            let err = q.permit(now).unwrap_err();
+            assert!(
+                matches!(err, Stop::MonthlyCredits { used, limit }
+                    if used == 400.0 && (limit - 400.0).abs() < 1e-9),
+                "{now}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn month_starts_on_the_first_day_in_utc() {
+        assert_eq!(
+            month_start(utc("2026-09-30T20:00:00Z")),
+            utc("2026-09-01T00:00:00Z")
+        );
+        assert_eq!(
+            month_start(utc("2026-10-01T00:00:00Z")),
+            utc("2026-10-01T00:00:00Z")
+        );
+        // JST の 10 月 1 日 8 時は、UTC ではまだ 9 月
+        assert_eq!(
+            month_start(jst("2026-10-01T08:00:00")),
+            utc("2026-09-01T00:00:00Z")
+        );
+    }
+
+    /// クレジットで判定するときは、Claude の使用率を見ない。
+    #[test]
+    fn credits_ignore_subscription_usage() {
+        let now = utc("2026-09-16T00:00:00Z");
+        let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), None);
+        q.observe(Some(usage(1.0, 1.0, now, 6.9)));
+        q.observe_credits(0);
+        assert!(q.permit(now).is_ok());
+        assert!(!Quota::new(QuotaConfig::default(), None, None).counts_credits());
+    }
+
+    #[test]
+    fn credits_still_limit_calls_per_run() {
+        let now = utc("2026-09-16T00:00:00Z");
+        let mut q = Quota::with_credits(QuotaConfig::default(), credits(1000.0), Some(1));
+        q.observe_credits(0);
+        assert!(q.permit(now).is_ok());
+        q.record_call(None);
+        assert_eq!(q.permit(now), Err(Stop::MaxCalls { limit: 1 }));
     }
 
     #[test]

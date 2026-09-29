@@ -187,6 +187,11 @@ impl Db {
         Ok(latest)
     }
 
+    /// `since` 以降の呼び出しで消費した AI Credits の合計（10^-9 クレジット単位）。
+    pub fn credits_since(&self, _since: chrono::DateTime<chrono::Utc>) -> Result<i64, DbError> {
+        todo!()
+    }
+
     /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。
     pub fn llm_succeeded_since(
         &self,
@@ -354,6 +359,34 @@ mod tests {
                 "2026-09-27T01:05:00.000Z|digest|5|0|timeout|-",
             ]
         );
+    }
+
+    #[test]
+    fn sums_credits_consumed_since_a_time() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.credits_since(t("2026-09-01T00:00:00Z")).unwrap(), 0);
+        let record = |nano_aiu: Option<i64>, at: &str| {
+            let usage = nano_aiu.map(|nano_aiu| crate::llm::Usage::Credits { nano_aiu });
+            db.record_llm_call(
+                &LlmCall {
+                    stage: "title",
+                    backend: "copilot-cli",
+                    model: "gpt-6-luna",
+                    n_items: 1,
+                    ok: nano_aiu.is_some(),
+                    duration_ms: 1,
+                    error: None,
+                    usage: usage.as_ref(),
+                },
+                t(at),
+            )
+            .unwrap();
+        };
+        record(Some(900), "2026-08-31T23:59:59Z");
+        record(Some(5), "2026-09-01T00:00:00Z");
+        record(None, "2026-09-10T00:00:00Z");
+        record(Some(7), "2026-09-20T00:00:00Z");
+        assert_eq!(db.credits_since(t("2026-09-01T00:00:00Z")).unwrap(), 12);
     }
 
     #[test]

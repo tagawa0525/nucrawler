@@ -273,6 +273,47 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
     }
 
+    /// クレジットで判定するときは、DB にある今月の消費（ほかの実行の分も含む）で判定する。
+    #[test]
+    fn permit_counts_this_months_credits() {
+        const NANO: i64 = 1_000_000_000;
+        let db = Db::open_in_memory().unwrap();
+        let record = |nano_aiu: i64, at: &str| {
+            db.record_llm_call(
+                &LlmCall {
+                    stage: "title",
+                    backend: "copilot-cli",
+                    model: "gpt-6-luna",
+                    n_items: 1,
+                    ok: true,
+                    duration_ms: 1,
+                    error: None,
+                    usage: Some(&crate::llm::Usage::Credits { nano_aiu }),
+                },
+                DateTime::parse_from_rfc3339(at).unwrap().to_utc(),
+            )
+            .unwrap();
+        };
+        // 先月の分は数えない
+        record(10_000 * NANO, "2026-08-31T00:00:00Z");
+        record(399 * NANO, "2026-09-10T00:00:00Z");
+        let now = DateTime::parse_from_rfc3339("2026-09-16T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let credits = crate::quota::CreditsConfig {
+            monthly_credits: 1000.0,
+            pace: 0.8,
+        };
+        let mut quota = Quota::with_credits(QuotaConfig::default(), credits, None);
+        let shared = Shared::new(&mut quota);
+        assert_eq!(permit(&db, &shared, now, 0).unwrap(), Ok(()));
+        record(NANO, "2026-09-15T00:00:00Z");
+        assert!(matches!(
+            permit(&db, &shared, now, 0).unwrap(),
+            Err(crate::quota::Stop::MonthlyCredits { .. })
+        ));
+    }
+
     /// 応答の形が崩れて失敗しても、消費した分は記録する（月の消費を少なく数えないように）。
     #[tokio::test]
     async fn failed_calls_keep_the_consumed_credits() {

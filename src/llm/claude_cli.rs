@@ -414,6 +414,41 @@ mod tests {
         assert!(resp.usage.is_some());
     }
 
+    /// 使用率を受け取った後に失敗しても、その使用率を失わない（次回の判定に使う）。
+    #[tokio::test]
+    async fn reported_error_keeps_the_rate_limit() {
+        let rate = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "resetsAt": 1790457000,
+            "unifiedWindows": {"five_hour": {"utilization": 0.4, "resetsAt": 1790457000}}}});
+        let result = result_line(true, "error_during_execution", "boom");
+        let (script, dir) = fake_claude(
+            "cli-reported-with-rate",
+            &format!("cat >/dev/null\nprintf '%s\\n' '{rate}' '{result}'"),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
+        };
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Reported { .. }),
+            "{}",
+            failure.error
+        );
+        assert_eq!(
+            failure
+                .usage
+                .and_then(|u| u.rate_limit())
+                .and_then(|r| r.five_hour)
+                .map(|w| w.utilization),
+            Some(0.4)
+        );
+    }
+
     #[tokio::test]
     async fn nonzero_exit_reports_stderr() {
         let (script, dir) = fake_claude("cli-exit", "echo boom >&2\nexit 3");

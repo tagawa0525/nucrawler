@@ -276,6 +276,44 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
     }
 
+    /// 応答の形が崩れて失敗しても、消費した分は記録する（月の消費を少なく数えないように）。
+    #[tokio::test]
+    async fn failed_calls_keep_the_consumed_credits() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::failing([LlmFailure {
+            error: LlmError::Protocol("not json".into()),
+            usage: Some(crate::llm::Usage::Credits {
+                nano_aiu: 37_405_000,
+            }),
+        }]);
+        let schema = serde_json::json!({});
+        let outcome = call_recorded(
+            &db,
+            &llm,
+            &Shared::new(&mut Quota::new(QuotaConfig::default(), None, None)),
+            Call {
+                stage: "title",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            },
+            &Utc::now,
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Halted(Halt::LlmFailed(_))));
+        assert_eq!(
+            db.query_strings("SELECT ok || '|' || coalesce(credits_nano, '-') FROM llm_calls")
+                .unwrap(),
+            ["0|37405000"]
+        );
+    }
+
     /// 止める指示と重なっても、シグナルで終わったのでない失敗（利用上限など）は記録する。
     /// 利用上限の使用率を失うと、次回すぐに呼んでしまう。
     #[tokio::test]

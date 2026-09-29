@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
@@ -74,7 +75,22 @@ impl Llm for ClaudeCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        let output = super::process::run(child, req.prompt.as_bytes(), self.timeout).await?;
+        let output = match super::process::run(child, req.prompt.as_bytes(), self.timeout)
+            .await
+            .map_err(LlmError::Io)?
+        {
+            Ran::Exited(output) => output,
+            // 使用率を知らせた後に止まっても、その使用率を次回の判定に使う
+            Ran::TimedOut { stdout } => {
+                let (_, rate_limit) = parse_stream(&String::from_utf8_lossy(&stdout));
+                return Err(LlmFailure {
+                    error: LlmError::Timeout {
+                        secs: self.timeout.as_secs(),
+                    },
+                    usage: rate_limit.map(Usage::Subscription),
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (parsed, rate_limit) = parse_stream(&stdout);

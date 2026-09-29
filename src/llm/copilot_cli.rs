@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
 
 /// `--available-tools` に渡す、存在しないツールの名前。これだけを許可してツールを 0 個にする。
@@ -74,7 +75,22 @@ impl Llm for CopilotCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        let output = super::process::run(child, compose(&req).as_bytes(), self.timeout).await?;
+        let output = match super::process::run(child, compose(&req).as_bytes(), self.timeout)
+            .await
+            .map_err(LlmError::Io)?
+        {
+            Ran::Exited(output) => output,
+            // 消費を知らせた後に止まっても、消費した分はクォータに数える
+            Ran::TimedOut { stdout } => {
+                let (_, credits) = parse_events(&String::from_utf8_lossy(&stdout));
+                return Err(LlmFailure {
+                    error: LlmError::Timeout {
+                        secs: self.timeout.as_secs(),
+                    },
+                    usage: credits.map(|nano_aiu| Usage::Credits { nano_aiu }),
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (parsed, credits) = parse_events(&stdout);

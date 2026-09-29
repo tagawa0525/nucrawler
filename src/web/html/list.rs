@@ -663,7 +663,10 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<option value="0" data-href="/?min=0" selected>00</option>"#),
+            // 「絞らない」は開いた一覧では「-」、閉じた選択では 00 と書く（`BAR_SCRIPT` が書き換える）
+            html.contains(
+                r#"<option value="0" data-href="/?min=0" data-closed="00" selected>-</option>"#
+            ),
             "{html}"
         );
         assert!(
@@ -752,7 +755,7 @@ mod tests {
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" selected>★</option><option value="0" data-href="/?rating=0">☆</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option></select>"#
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" data-closed="★" selected>-</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option><option value="0" data-href="/?rating=0">☆</option></select>"#
             ),
             "{html}"
         );
@@ -781,7 +784,9 @@ mod tests {
         assert!(!html.contains(r#"action="/search""#), "{html}");
         // 最低点も絞れる（既定は 00 で絞らない）。👁 は既読も絞れる（OFF にすると `read=0`）
         assert!(
-            html.contains(r#"<option value="0" data-href="/?rating=4" selected>00</option>"#),
+            html.contains(
+                r#"<option value="0" data-href="/?rating=4" data-closed="00" selected>-</option>"#
+            ),
             "{html}"
         );
         assert!(
@@ -918,6 +923,28 @@ mod tests {
         assert!(!stars.contains(r#"name="read""#), "{stars}");
     }
 
+    /// 「絞らない」の選択肢は、閉じた選択では 00・★ と書き、開いた一覧では「-」に戻す。
+    #[test]
+    fn bar_script_relabels_the_blank_choice() {
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(html.contains(BAR_SCRIPT), "{html}");
+        assert!(
+            BAR_SCRIPT.contains("dataset.closed") && BAR_SCRIPT.contains("pointerdown"),
+            "{BAR_SCRIPT}"
+        );
+        let html = filtered_page(
+            &[],
+            ListView {
+                min: 0,
+                rating: Some(4),
+                read: true,
+                ..ListView::default()
+            },
+            &Page::default(),
+        );
+        assert!(html.contains(BAR_SCRIPT), "{html}");
+    }
+
     /// 「☆」は評価の無い記事だけに絞る（数字の無い「★」は評価で絞らない）。絞り込みの中では最低点を引き継ぎ、
     /// 一覧と行き来するときは最低点も行き先の既定に戻す（一覧は設定の最低点、絞り込みは 00）。
     #[test]
@@ -955,7 +982,7 @@ mod tests {
         );
         // 一覧へ戻ると、最低点は設定の最低点に戻る
         assert!(
-            html.contains(r#"<option value="" data-href="/">★</option>"#),
+            html.contains(r#"<option value="" data-href="/" data-closed="★">-</option>"#),
             "{html}"
         );
         // 一覧から絞り込みへ移ると、最低点は 00 になる

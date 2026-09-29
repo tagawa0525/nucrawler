@@ -4,9 +4,11 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+};
 use crate::config::LlmConfig;
-use crate::db::{ArtifactKind, DbError, NewArtifact, StageKey};
+use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
 use crate::llm::{Llm, LlmRequest};
 use crate::{errors, glossary, prompt};
 
@@ -33,6 +35,7 @@ pub async fn translate_titles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
@@ -57,7 +60,18 @@ pub async fn translate_titles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_titles(now, backend, model, llm_cfg.title_batch_size)?;
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (batch, claim) = db.claim_selected(
+            ClaimKey {
+                stage: STAGE,
+                backend,
+                model,
+            },
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| db.pending_titles(now, backend, model, llm_cfg.title_batch_size),
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
             break;
         }
@@ -84,6 +98,9 @@ pub async fn translate_titles<L: Llm>(
         )
         .await?;
         summary.calls += 1;
+        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let response = match outcome {
             Outcome::Response(response) => response,
             Outcome::Cancelled => {
@@ -93,7 +110,7 @@ pub async fn translate_titles<L: Llm>(
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
                     summary.failed +=
-                        record_failures(db, ids.iter().map(|&id| key(id)), message, now)?;
+                        record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -105,11 +122,18 @@ pub async fn translate_titles<L: Llm>(
                 let message = errors::error_chain(&e);
                 tracing::warn!("title output rejected: {message}");
                 summary.failed +=
-                    record_failures(db, ids.iter().map(|&id| key(id)), &message, now)?;
+                    record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
                 continue;
             }
         };
         for (id, title_ja) in &parsed.items {
+            if !held.contains(id) {
+                tracing::warn!(
+                    article_id = *id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
             let glossary_at = batch.iter().find(|b| b.article_id == *id).and_then(|b| {
                 let own = prompt::title::build_prompt(std::slice::from_ref(b));
@@ -131,8 +155,12 @@ pub async fn translate_titles<L: Llm>(
             db.clear_stage_failure(key(*id))?;
             summary.translated += 1;
         }
-        summary.failed +=
-            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
+        summary.failed += record_failures(
+            db,
+            held_missing(&parsed.missing, &held).map(key),
+            MISSING,
+            now,
+        )?;
     }
     Ok(summary)
 }
@@ -194,6 +222,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig {
                 title_batch_size: batch,
@@ -291,5 +320,26 @@ mod tests {
         let summary = run(&db, &llm, &mut quota(10), 2).await;
         assert_eq!((summary.calls, summary.failed), (1, 2));
         assert!(matches!(&summary.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in")));
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 2);
+        let key = crate::db::ClaimKey {
+            stage: "title",
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&ids[1..])]);
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.translated, 1);
+        assert!(!llm.requests()[0].prompt.contains("Title 0"));
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

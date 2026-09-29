@@ -5,10 +5,14 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
+use crate::db::{
+    ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoFilter, RedoKey, StageKey,
+};
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
 use crate::{errors, glossary};
@@ -37,6 +41,7 @@ pub async fn digest_articles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
@@ -47,22 +52,22 @@ pub async fn digest_articles<L: Llm>(
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let mut summary = DigestSummary::default();
-    // 訳語集の変更による作り直しは、先に対象を決めてバッチに分けて要約する
-    let mut outdated = match target {
-        Target::Redo(spec) if spec.glossary => Some(outdated_digests(
+    // 訳語集の変更による作り直しは、対象の記事を最初に 1 回だけ洗い出し、毎回その先頭の分だけを
+    // 予約と同じトランザクションの中で判定し直す（毎回すべてを洗い直すと件数の 2 乗の読み込みになり、
+    // 先に決めた一覧をそのまま使うと、ほかの実行が作り直し終えた記事をもう一度作り直してしまう）
+    let glossary_redo = matches!(target, Target::Redo(spec) if spec.glossary);
+    let mut outdated: VecDeque<i64> = match target {
+        Target::Redo(spec) if spec.glossary => outdated_digests(
             db,
-            RedoKey {
-                user_id: spec.user_id,
-                profile_hash: spec.profile_hash.as_deref(),
-                backend,
-                model,
-                prompt_version: prompt::digest::PROMPT_VERSION,
-            },
+            redo_key(spec, backend, model),
             &spec.filter,
             llm_cfg,
             now,
-        )?),
-        _ => None,
+        )?
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect(),
+        _ => VecDeque::new(),
     };
     loop {
         if cancel.is_requested() {
@@ -75,28 +80,44 @@ pub async fn digest_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = match (&mut outdated, target) {
-            (Some(queue), _) => {
-                let n = llm_cfg.digest_batch_size.min(queue.len());
-                queue.drain(..n).collect()
-            }
-            (None, Target::Pending { .. }) => {
-                db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)?
-            }
-            (None, Target::Redo(spec)) => db.redo_digest(
-                RedoKey {
-                    user_id: spec.user_id,
-                    profile_hash: spec.profile_hash.as_deref(),
-                    backend,
-                    model,
-                    prompt_version: prompt::digest::PROMPT_VERSION,
-                },
-                &spec.filter,
-                now,
-                llm_cfg.digest_batch_size,
-            )?,
+        let claim_key = ClaimKey {
+            stage: STAGE,
+            backend,
+            model,
         };
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ。対象は毎回、予約と同じ
+        // トランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を作ると、ほかの実行が
+        // 作り直し終えた記事をもう一度作り直してしまう）
+        let (batch, claim) = db.claim_selected(
+            claim_key,
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| match target {
+                Target::Redo(spec) if spec.glossary => {
+                    let n = llm_cfg.digest_batch_size.min(outdated.len());
+                    let next = RedoFilter {
+                        ids: outdated.drain(..n).collect(),
+                        ..spec.filter.clone()
+                    };
+                    outdated_digests(db, redo_key(spec, backend, model), &next, llm_cfg, now)
+                }
+                Target::Pending { .. } => {
+                    db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)
+                }
+                Target::Redo(spec) => db.redo_digest(
+                    redo_key(spec, backend, model),
+                    &spec.filter,
+                    now,
+                    llm_cfg.digest_batch_size,
+                ),
+            },
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
+            // 先頭の分がほかの実行に作り直されていたら、残りに進む
+            if glossary_redo && !outdated.is_empty() {
+                continue;
+            }
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
@@ -126,6 +147,9 @@ pub async fn digest_articles<L: Llm>(
         )
         .await?;
         summary.calls += 1;
+        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let key = |article_id| StageKey {
             article_id,
             stage: STAGE,
@@ -141,7 +165,7 @@ pub async fn digest_articles<L: Llm>(
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
                     summary.failed +=
-                        record_failures(db, ids.iter().map(|&id| key(id)), message, now)?;
+                        record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -153,11 +177,18 @@ pub async fn digest_articles<L: Llm>(
                 let message = errors::error_chain(&e);
                 tracing::warn!("digest output rejected: {message}");
                 summary.failed +=
-                    record_failures(db, ids.iter().map(|&id| key(id)), &message, now)?;
+                    record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
                 continue;
             }
         };
         for (id, payload) in &parsed.items {
+            if !held.contains(id) {
+                tracing::warn!(
+                    article_id = *id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             let input = batch.iter().find(|b| b.article_id == *id);
             let inputs: Vec<i64> = input
                 .map(|b| b.contents.iter().map(|c| c.id).collect())
@@ -184,8 +215,12 @@ pub async fn digest_articles<L: Llm>(
             db.clear_stage_failure(key(*id))?;
             summary.digested += 1;
         }
-        summary.failed +=
-            record_failures(db, parsed.missing.iter().map(|&id| key(id)), MISSING, now)?;
+        summary.failed += record_failures(
+            db,
+            held_missing(&parsed.missing, &held).map(key),
+            MISSING,
+            now,
+        )?;
     }
     Ok(summary)
 }
@@ -198,7 +233,7 @@ fn outdated_digests(
     filter: &crate::db::RedoFilter,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
-) -> Result<VecDeque<DigestInput>, DbError> {
+) -> Result<Vec<DigestInput>, DbError> {
     let entries = db.glossary_entries()?;
     Ok(db
         .redo_digest_existing(key, filter, now)?
@@ -210,6 +245,17 @@ fn outdated_digests(
         })
         .map(|(input, _)| input)
         .collect())
+}
+
+/// `redo` の対象を選ぶキー（このモデル・プロンプト版の成果物がまだ無い記事）。
+fn redo_key<'a>(spec: &'a super::RedoSpec, backend: &'a str, model: &'a str) -> RedoKey<'a> {
+    RedoKey {
+        user_id: spec.user_id,
+        profile_hash: spec.profile_hash.as_deref(),
+        backend,
+        model,
+        prompt_version: prompt::digest::PROMPT_VERSION,
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +339,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &llm_cfg(batch),
             &PipelineConfig::default(),
@@ -513,6 +560,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut q,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg,
             &PipelineConfig::default(),
@@ -661,6 +709,7 @@ mod tests {
                 llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &|| now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -698,6 +747,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &opus,
             &PipelineConfig::default(),
@@ -722,6 +772,7 @@ mod tests {
                 llm: &FakeLlm::new([]),
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &opus,
             &PipelineConfig::default(),
@@ -792,6 +843,7 @@ mod tests {
                     llm: &Hanging,
                     quota: &mut quota(10),
                     cancel: &cancel,
+                    clock: &now,
                 },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
@@ -820,6 +872,7 @@ mod tests {
                 llm: &KilledWithCancel(cancel.clone()),
                 quota: &mut quota(10),
                 cancel: &cancel,
+                clock: &now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -862,6 +915,7 @@ mod tests {
                     llm: &AnswerWithCancel(cancel.clone()),
                     quota: &mut quota(10),
                     cancel: &cancel,
+                    clock: &now,
                 },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
@@ -889,6 +943,7 @@ mod tests {
                 llm: &FakeLlm::new([]),
                 quota: &mut quota(10),
                 cancel: &cancel,
+                clock: &now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -901,5 +956,204 @@ mod tests {
         .unwrap();
         assert!(summary.cancelled);
         assert_eq!(summary.calls, 0);
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 3);
+        let key = crate::db::ClaimKey {
+            stage: "digest",
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&ids[1..], 0.1)]);
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.digested, 2);
+        let prompt = &llm.requests()[0].prompt;
+        assert!(
+            !prompt.contains(&format!("<article id=\"{}\"", ids[0])),
+            "{prompt}"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
+    }
+
+    /// 作り直しの途中で、ほかの実行が残りの記事を作り直し終えたら、その記事はもう作り直さない
+    /// （対象は毎回その時点で選び直す）。
+    #[tokio::test]
+    async fn redo_glossary_skips_digests_rebuilt_meanwhile_by_another_run() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-redo-glossary-race",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 2);
+        mention_edg(&db, ids[0]);
+        mention_edg(&db, ids[1]);
+        run(&db, &FakeLlm::new([ok(&ids, 0.1)]), &mut quota(10), 5).await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["EDG".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: Some("EDG".into()),
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        // 1 件目を作り直している間に、ほかの実行が 2 件目を今の訳語集で作り直す
+        let other = ids[1];
+        let llm = FakeLlm::with_hook([ok(&ids[..1], 0.1)], move |n| {
+            if n != 0 {
+                return;
+            }
+            let db = Db::open(&path).unwrap();
+            let body: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT id FROM contents WHERE article_id = ?1 LIMIT 1",
+                    [other],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: other,
+                    kind: ArtifactKind::Digest,
+                    backend: "fake",
+                    model: "sonnet",
+                    prompt_version: prompt::digest::PROMPT_VERSION,
+                    payload: &item(other),
+                    inputs: &[body],
+                    glossary_at: Some(&crate::db::timestamp(later)),
+                },
+                later,
+            )
+            .unwrap();
+        });
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: db.owner_id().unwrap(),
+            profile_hash: None,
+            glossary: true,
+        });
+        let summary = digest_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &|| later,
+            },
+            &llm_cfg(1),
+            &PipelineConfig::default(),
+            &target,
+            later,
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.digested, summary.calls), (1, 1));
+    }
+
+    /// 呼び出しの最中に予約の期限が切れ、ほかの実行に取り直されたら、その記事の結果は保存しない。
+    #[tokio::test]
+    async fn drops_results_for_claims_taken_over_meanwhile() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-lost-claim",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 2);
+        let lost = ids[0];
+        let llm = FakeLlm::with_hook([ok(&ids, 0.1)], move |_| {
+            Db::open(&path)
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE work_claims SET token = 'other', expires_at = '9999-01-01T00:00:00.000Z'
+                     WHERE article_id = ?1",
+                    [lost],
+                )
+                .unwrap();
+        });
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.digested, 1);
+        assert_eq!(
+            db.query_i64(&format!(
+                "SELECT count(*) FROM artifacts WHERE kind = 'digest' AND article_id = {lost}"
+            ))
+            .unwrap(),
+            0
+        );
+        // 取り直した実行の予約は残す
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM work_claims WHERE token = 'other'")
+                .unwrap(),
+            1
+        );
+    }
+
+    /// 呼び出しの最中に予約を取り直された記事には、失敗も記録しない（取り直した実行の再試行の
+    /// 回数を進めない）。LLM の失敗でも、応答の形式の誤りでも同じ。
+    #[tokio::test]
+    async fn records_no_failures_for_claims_taken_over_meanwhile() {
+        for (name, response) in [
+            (
+                "llm-failure",
+                Err(LlmError::Reported {
+                    subtype: "error".into(),
+                    message: "Not logged in".into(),
+                }),
+            ),
+            (
+                "malformed",
+                Ok(LlmResponse {
+                    output: serde_json::json!({"unexpected": true}),
+                    rate_limit: None,
+                }),
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "nucrawler-{}-digest-lost-claim-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("n.db");
+            let db = Db::open(&path).unwrap();
+            let ids = articles(&db, 2);
+            let lost = ids[0];
+            let llm = FakeLlm::with_hook([response], move |_| {
+                Db::open(&path)
+                    .unwrap()
+                    .conn()
+                    .execute(
+                        "UPDATE work_claims SET token = 'other',
+                                expires_at = '9999-01-01T00:00:00.000Z'
+                         WHERE article_id = ?1",
+                        [lost],
+                    )
+                    .unwrap();
+            });
+            let summary = run(&db, &llm, &mut quota(10), 5).await;
+            assert_eq!(summary.failed, 1, "{name}");
+            assert_eq!(
+                db.query_i64(&format!(
+                    "SELECT count(*) FROM stage_errors WHERE article_id = {lost}"
+                ))
+                .unwrap(),
+                0,
+                "{name}"
+            );
+        }
     }
 }

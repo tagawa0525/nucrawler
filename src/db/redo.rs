@@ -43,7 +43,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -88,7 +88,7 @@ impl Db {
              WHERE EXISTS (
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -144,7 +144,7 @@ impl Db {
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                    AND c.access_membership_id IS NULL)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -189,7 +189,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_NOT_BACKING_OFF}
+               AND {REDO_AVAILABLE}
                AND {REDO_FILTER}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -213,11 +213,16 @@ impl Db {
     }
 }
 
-/// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事を除く条件。
-const REDO_NOT_BACKING_OFF: &str = "NOT EXISTS (
+/// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事と、ほかの実行が予約している
+/// 記事を除く条件。
+const REDO_AVAILABLE: &str = "NOT EXISTS (
     SELECT 1 FROM stage_errors AS e
     WHERE e.article_id = a.id AND e.stage = :stage AND e.backend = :backend
-      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))";
+      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))
+    AND NOT EXISTS (
+    SELECT 1 FROM work_claims AS w
+    WHERE w.article_id = a.id AND w.stage = :stage AND w.backend = :backend
+      AND w.model = :model)";
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
 /// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。
@@ -404,6 +409,42 @@ mod tests {
         )
         .unwrap();
         assert!(redo_digest_ids(&db, "opus", &RedoFilter::default()).is_empty());
+    }
+
+    /// ほかの実行が予約している記事は、作り直しの対象にも選ばない。
+    #[test]
+    fn redo_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = t("2026-09-27T00:00:00Z");
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let key = |stage| ClaimKey {
+            stage,
+            backend: "claude-cli",
+            model: "opus",
+        };
+        let translate_ids = |db: &Db| -> Vec<i64> {
+            db.redo_translate(redo_key(db, "opus"), &RedoFilter::default(), now, 10)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect()
+        };
+        assert_eq!(redo_digest_ids(&db, "opus", &RedoFilter::default()), [a]);
+        assert_eq!(translate_ids(&db), [a]);
+        let _digest = db
+            .claim(key("digest"), &[a], now, chrono::Duration::minutes(10))
+            .unwrap();
+        let _translate = db
+            .claim(key("translate"), &[a], now, chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(redo_digest_ids(&db, "opus", &RedoFilter::default()).is_empty());
+        assert!(translate_ids(&db).is_empty());
     }
 
     #[test]

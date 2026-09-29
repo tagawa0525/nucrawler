@@ -6,9 +6,11 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, MISSING, Outcome, call_recorded, record_failures};
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
+use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
 use crate::errors;
 use crate::llm::{Llm, LlmRequest};
 use crate::profile::Profile;
@@ -51,6 +53,7 @@ pub async fn score_articles<L: Llm>(
         llm,
         quota,
         cancel,
+        clock,
     }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
@@ -105,7 +108,18 @@ pub async fn score_articles<L: Llm>(
             summary.halted = Some(Halt::Quota(stop));
             break;
         }
-        let batch = db.pending_score(key, scope, now, llm_cfg.score_batch_size)?;
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ
+        let (batch, claim) = db.claim_selected(
+            ClaimKey {
+                stage: &failure_stage,
+                backend,
+                model,
+            },
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| db.pending_score(key, scope, now, llm_cfg.score_batch_size),
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
             break;
         }
@@ -130,6 +144,9 @@ pub async fn score_articles<L: Llm>(
         )
         .await?;
         summary.calls += 1;
+        // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
+        // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
+        let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
         let response = match outcome {
             Outcome::Response(response) => response,
             Outcome::Cancelled => {
@@ -139,7 +156,7 @@ pub async fn score_articles<L: Llm>(
             Outcome::Halted(halt) => {
                 if let Halt::LlmFailed(message) = &halt {
                     summary.failed +=
-                        record_failures(db, ids.iter().map(|&id| failure_key(id)), message, now)?;
+                        record_failures(db, held.iter().map(|&id| failure_key(id)), message, now)?;
                 }
                 summary.halted = Some(halt);
                 break;
@@ -151,7 +168,7 @@ pub async fn score_articles<L: Llm>(
                 let message = errors::error_chain(&e);
                 tracing::warn!("score output rejected: {message}");
                 summary.failed +=
-                    record_failures(db, ids.iter().map(|&id| failure_key(id)), &message, now)?;
+                    record_failures(db, held.iter().map(|&id| failure_key(id)), &message, now)?;
                 continue;
             }
         };
@@ -159,6 +176,13 @@ pub async fn score_articles<L: Llm>(
             let Some(input) = batch.iter().find(|b| b.article_id == item.id) else {
                 continue;
             };
+            if !held.contains(&item.id) {
+                tracing::warn!(
+                    article_id = item.id,
+                    "{STAGE} result dropped: the claim was taken over"
+                );
+                continue;
+            }
             db.insert_score_with_matches(
                 key,
                 input.artifact_id,
@@ -175,7 +199,7 @@ pub async fn score_articles<L: Llm>(
         }
         summary.failed += record_failures(
             db,
-            parsed.missing.iter().map(|&id| failure_key(id)),
+            held_missing(&parsed.missing, &held).map(failure_key),
             MISSING,
             now,
         )?;
@@ -282,6 +306,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg(batch),
             &PipelineConfig::default(),
@@ -358,6 +383,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg(5),
             &PipelineConfig::default(),
@@ -442,5 +468,32 @@ mod tests {
         let summary = run(&db, owner, &llm, &mut quota(10), 1).await;
         assert!(matches!(summary.halted, Some(Halt::LlmFailed(_))));
         assert_eq!(summary.failed, 1);
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let (db, owner, ids) = setup(2);
+        let (_, hash) = db.load_profile(owner).unwrap().unwrap();
+        let stage = crate::db::score_stage(ScoreKey {
+            user_id: owner,
+            profile_hash: &hash,
+            backend: "fake",
+            model: "sonnet",
+            prompt_version: crate::prompt::score::PROMPT_VERSION,
+        });
+        let key = crate::db::ClaimKey {
+            stage: &stage,
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&[(ids[1], 50)])]);
+        let summary = run(&db, owner, &llm, &mut quota(10), 5).await;
+        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

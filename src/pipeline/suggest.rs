@@ -38,6 +38,7 @@ pub async fn suggest_profile<L: Llm>(
         llm,
         quota,
         cancel,
+        ..
     }: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,
@@ -138,6 +139,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig::default(),
             &profile(),

@@ -92,10 +92,15 @@ pub mod fake {
         pub model: String,
     }
 
+    /// 呼ばれたとき（応答を返す前）に、何回目の呼び出しか（0 から）を渡して実行する処理。
+    /// 呼び出しの最中にほかの実行が DB を書き換える状況を作るのに使う。
+    type Hook = Box<dyn FnMut(usize) + Send>;
+
     #[derive(Default)]
     pub struct FakeLlm {
         responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
         requests: Mutex<Vec<Recorded>>,
+        hook: Mutex<Option<Hook>>,
     }
 
     impl FakeLlm {
@@ -103,6 +108,17 @@ pub mod fake {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 requests: Mutex::default(),
+                hook: Mutex::default(),
+            }
+        }
+
+        pub fn with_hook(
+            responses: impl IntoIterator<Item = Result<LlmResponse, LlmError>>,
+            hook: impl FnMut(usize) + Send + 'static,
+        ) -> Self {
+            Self {
+                hook: Mutex::new(Some(Box::new(hook))),
+                ..Self::new(responses)
             }
         }
 
@@ -117,12 +133,19 @@ pub mod fake {
         }
 
         async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
-            self.requests.lock().unwrap().push(Recorded {
-                system: req.system.into(),
-                prompt: req.prompt.into(),
-                schema: req.schema.clone(),
-                model: req.model.into(),
-            });
+            let n = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(Recorded {
+                    system: req.system.into(),
+                    prompt: req.prompt.into(),
+                    schema: req.schema.clone(),
+                    model: req.model.into(),
+                });
+                requests.len() - 1
+            };
+            if let Some(hook) = self.hook.lock().unwrap().as_mut() {
+                hook(n);
+            }
             self.responses
                 .lock()
                 .unwrap()

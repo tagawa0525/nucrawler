@@ -25,6 +25,25 @@ pub struct LlmStage<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
+    /// 作業を予約するときに今の時刻を読む（ステージの `now` は開始時の時刻のまま進まないが、予約の
+    /// 期限は実際の時刻で決める。テストでは固定する）
+    pub clock: &'a dyn Fn() -> DateTime<Utc>,
+}
+
+/// 作業の予約の期限。呼び出しのタイムアウトの 2 倍（下限は `MIN_CLAIM_TTL`）で、それを過ぎた予約は
+/// 落ちたプロセスが残したものとみなす。処理がそれより長引いても、保存の前に延長できなければ
+/// 結果を捨てるので、2 つの実行が同じ記事を保存することはない。
+pub fn claim_ttl(cfg: &crate::config::LlmConfig) -> chrono::Duration {
+    let call = i64::try_from(cfg.timeout_secs.saturating_mul(2)).unwrap_or(i64::MAX);
+    chrono::Duration::seconds(call).max(MIN_CLAIM_TTL)
+}
+
+/// 予約の期限の下限。タイムアウトを短くしても、プロンプトの組み立てや保存の分の余裕を残す。
+const MIN_CLAIM_TTL: chrono::Duration = chrono::Duration::minutes(10);
+
+/// 応答に無かった記事のうち、まだ予約を持っているもの（取り直された記事の失敗は記録しない）。
+pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<Item = i64> + 'a {
+    missing.iter().copied().filter(|id| held.contains(id))
 }
 
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。

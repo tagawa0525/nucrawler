@@ -110,6 +110,10 @@ impl Db {
                    WHERE e.article_id = a.id AND e.stage = 'translate'
                      AND e.backend = ?3 AND e.model = ?4
                      AND (e.attempts >= ?5 OR e.next_retry_at > ?6))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM work_claims AS w
+                   WHERE w.article_id = a.id AND w.stage = 'translate'
+                     AND w.backend = ?3 AND w.model = ?4)
              ),
              candidates AS (
                SELECT b.*,
@@ -303,6 +307,31 @@ mod tests {
     }
 
     /// 先回りの判定は、利用者が閲覧できる最新の digest の採点だけで行う（古い版の高得点は使わない）。
+    /// ほかの実行が予約している記事は選ばない。
+    #[test]
+    fn pending_translate_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let a = scored_article(
+            &db,
+            "https://e.com/a",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            90,
+        );
+        let key = ClaimKey {
+            stage: "translate",
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        let held = db
+            .claim(key, &[a], t(now), chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(translate_ids(&db, false, now).is_empty());
+        drop(held);
+        assert_eq!(translate_ids(&db, false, now), [a]);
+    }
+
     #[test]
     fn pending_translate_uses_score_of_latest_digest() {
         let db = Db::open_in_memory().unwrap();

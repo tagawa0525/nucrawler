@@ -6,6 +6,7 @@ use crate::config::Lang;
 
 mod articles;
 mod artifacts;
+mod claims;
 mod eval;
 mod feedback;
 mod notes;
@@ -22,6 +23,7 @@ mod warnings;
 
 pub use articles::*;
 pub use artifacts::*;
+pub use claims::*;
 pub use eval::*;
 pub use feedback::*;
 pub use notes::*;
@@ -103,6 +105,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0021_score_matches.sql"),
     include_str!("migrations/0022_explore_picks.sql"),
     include_str!("migrations/0023_title_artifacts.sql"),
+    include_str!("migrations/0024_work_claims.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

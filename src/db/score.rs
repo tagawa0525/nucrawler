@@ -102,6 +102,10 @@ impl Db {
                  WHERE e.article_id = l.article_id AND e.stage = ?9
                    AND e.backend = ?4 AND e.model = ?5
                    AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = l.article_id AND w.stage = ?9
+                   AND w.backend = ?4 AND w.model = ?5)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
             linked = linked_topics("l"),
@@ -277,6 +281,28 @@ mod tests {
             ..key
         };
         assert_eq!(score_ids(&db, changed, now), [a]);
+    }
+
+    /// ほかの実行が予約している記事は選ばない。
+    #[test]
+    fn pending_score_skips_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let key = score_key(&db);
+        let now = "2026-09-27T00:00:00Z";
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        add_digest(&db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+        let stage = score_stage(key);
+        let claim_key = ClaimKey {
+            stage: &stage,
+            backend: key.backend,
+            model: key.model,
+        };
+        let held = db
+            .claim(claim_key, &[a], t(now), chrono::Duration::minutes(10))
+            .unwrap();
+        assert!(score_ids(&db, key, now).is_empty());
+        drop(held);
+        assert_eq!(score_ids(&db, key, now), [a]);
     }
 
     #[test]

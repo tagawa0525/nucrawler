@@ -113,6 +113,10 @@ impl Db {
                  WHERE e.article_id = a.id AND e.stage = 'digest'
                    AND e.backend = ?3 AND e.model = ?4
                    AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = a.id AND w.stage = 'digest'
+                   AND w.backend = ?3 AND w.model = ?4)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?6",
         )?;
@@ -170,6 +174,10 @@ impl Db {
                  WHERE e.article_id = a.id AND e.stage = 'title'
                    AND e.backend = ?2 AND e.model = ?3
                    AND (e.attempts >= ?1 OR e.next_retry_at > ?4))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = a.id AND w.stage = 'title'
+                   AND w.backend = ?2 AND w.model = ?3)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?5",
         )?;
@@ -513,6 +521,40 @@ mod tests {
                 title: "t".into()
             }]
         );
+    }
+
+    /// ほかの実行が予約している記事は選ばない（期限切れの予約は、予約するときに今の時刻で消す）。
+    #[test]
+    fn pending_digest_and_titles_skip_claimed_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        let with_body = page_article(&db, "https://e.com/body", "2026-09-26T00:00:00.000Z");
+        db.insert_content(with_body, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        let no_body = page_article(&db, "https://e.com/none", "2026-09-26T00:00:00.000Z");
+        let key = |stage| ClaimKey {
+            stage,
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        let _digest = db
+            .claim(
+                key("digest"),
+                &[with_body],
+                t(now),
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        let _title = db
+            .claim(
+                key("title"),
+                &[no_body],
+                t(now),
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        assert!(digest_ids(&db, now).is_empty());
+        assert!(title_ids(&db, now).is_empty());
     }
 
     #[test]

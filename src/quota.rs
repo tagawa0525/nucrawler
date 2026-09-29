@@ -565,6 +565,24 @@ mod tests {
         assert_eq!(q.max_calls, 2);
     }
 
+    /// 工程ごとに Claude と Copilot を使い分けるときは、両方の判定を持ち、呼び出すバックエンドで判定する。
+    #[test]
+    fn mixed_backends_are_judged_by_the_backend_called() {
+        let now = utc("2026-09-16T00:00:00Z");
+        let mut config = crate::config::Config::default();
+        config.llm.digest_backend = Some(crate::config::LlmBackend::CopilotCli);
+        config.copilot_quota = Some(credits(1000.0));
+        let mut q = Quota::from_config(&config, None);
+        assert_eq!(q.credits_backend(), Some("copilot-cli"));
+        q.observe(Some(usage(1.0, 0.1, now, 3.0)));
+        q.observe_credits(0);
+        assert!(matches!(
+            q.permit("claude-cli", now),
+            Err(Stop::FiveHour { .. })
+        ));
+        assert!(q.permit("copilot-cli", now).is_ok());
+    }
+
     /// クレジットで判定するときは、Claude の使用率を見ない。
     #[test]
     fn credits_ignore_subscription_usage() {

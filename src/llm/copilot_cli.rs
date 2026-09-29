@@ -49,7 +49,7 @@ impl CopilotCli {
         slots: PathBuf,
     ) -> Self {
         Self {
-            command: c.command().into(),
+            command: c.command_for(crate::config::LlmBackend::CopilotCli).into(),
             cwd,
             homes,
             timeout: Duration::from_secs(c.timeout_secs),

@@ -570,6 +570,57 @@ mod tests {
         assert!(!report.cancelled);
     }
 
+    /// 要約だけ別のバックエンドにする。
+    struct DigestApart {
+        digest: FakeLlm,
+        others: FakeLlm,
+    }
+
+    impl LlmSet for DigestApart {
+        type Llm = FakeLlm;
+
+        fn for_task(&self, task: LlmTask) -> &FakeLlm {
+            if task == LlmTask::Digest {
+                &self.digest
+            } else {
+                &self.others
+            }
+        }
+    }
+
+    /// 工程ごとにバックエンドを変えるとき、あるバックエンドが失敗しても、ほかのバックエンドの工程は続ける。
+    #[tokio::test]
+    async fn a_failing_backend_does_not_stop_the_others() {
+        let db = Db::open_in_memory().unwrap();
+        let digested = digested_and_pending(&db).await;
+        let llms = DigestApart {
+            digest: FakeLlm::new([not_logged_in()]).named("claude-cli"),
+            others: FakeLlm::new([score_ok(digested)]).named("copilot-cli"),
+        };
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(10));
+        let mut report = RunReport::default();
+        crawl(
+            RunEnv {
+                db: &db,
+                llm: &llms,
+                quota: &mut quota,
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            &[Stage::Digest, Stage::Score],
+            CrawlOptions::default(),
+            &Config::default(),
+            &[],
+            &Fetcher::from_config(&HttpConfig::default()).unwrap(),
+            &mut report,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.llm_blocked, ["claude-cli"]);
+        assert!(report.llm_failure.is_some());
+        assert_eq!(llms.others.requests().len(), 1, "score still runs");
+    }
+
     /// ロックの単位に分けて呼んでも、前の単位で LLM が失敗していれば後の単位の LLM ステージは呼ばない。
     #[tokio::test]
     async fn llm_failure_carries_over_to_later_lock_groups() {

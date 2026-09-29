@@ -96,10 +96,19 @@ pub enum LlmTask {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
-    /// LLM を呼ぶバックエンド。ステージごとのモデル名も、そのバックエンドの名前にする
+    /// LLM を呼ぶバックエンドの既定。工程ごとに `*_backend` で変えられる。各工程のモデル名は、
+    /// その工程のバックエンドの名前にする
     pub backend: LlmBackend,
-    /// バックエンドの実行ファイル（PATH から探す）。省けば `claude` か `copilot`
+    /// 要約・採点・和訳・見出しの和訳・語彙の整理のバックエンド（省けば `backend`）
+    pub digest_backend: Option<LlmBackend>,
+    pub score_backend: Option<LlmBackend>,
+    pub translate_backend: Option<LlmBackend>,
+    pub title_backend: Option<LlmBackend>,
+    pub tidy_backend: Option<LlmBackend>,
+    /// `claude` の実行ファイル（PATH から探す）。省けば `claude`
     pub command: Option<String>,
+    /// `copilot` の実行ファイル（PATH から探す）。省けば `copilot`
+    pub copilot_command: Option<String>,
     /// 1 回の呼び出しのタイムアウト
     pub timeout_secs: u64,
     /// 要約に使うモデル
@@ -134,11 +143,13 @@ pub struct LlmConfig {
 
 impl LlmConfig {
     /// バックエンドの実行ファイル。
-    pub fn command(&self) -> &str {
-        self.command.as_deref().unwrap_or(match self.backend {
-            LlmBackend::ClaudeCli => "claude",
-            LlmBackend::CopilotCli => "copilot",
-        })
+    pub fn command_for(&self, _backend: LlmBackend) -> &str {
+        todo!()
+    }
+
+    /// 工程のバックエンド（工程ごとの指定が無ければ `backend`）。
+    pub fn backend_for(&self, _task: LlmTask) -> LlmBackend {
+        todo!()
     }
 
     /// 0 だと処理が黙って何もしなくなる値を拒否する。
@@ -174,7 +185,13 @@ impl Default for LlmConfig {
     fn default() -> Self {
         Self {
             backend: LlmBackend::ClaudeCli,
+            digest_backend: None,
+            score_backend: None,
+            translate_backend: None,
+            title_backend: None,
+            tidy_backend: None,
             command: None,
+            copilot_command: None,
             timeout_secs: 300,
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
@@ -614,14 +631,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.llm.backend, LlmBackend::CopilotCli);
-        assert_eq!(c.llm.command(), "copilot");
+        assert_eq!(c.llm.command_for(LlmBackend::CopilotCli), "copilot");
+        // command は claude の、copilot_command は copilot の実行ファイル（両方を同時に使うため）
         let c = parse_config(
-            "[llm]\nbackend = \"copilot-cli\"\ncommand = \"/opt/copilot\"\n\
+            "[llm]\nbackend = \"copilot-cli\"\ncommand = \"/opt/claude\"\n\
              [copilot_quota]\nmonthly_credits = 1500\n",
             p(),
         )
         .unwrap();
-        assert_eq!(c.llm.command(), "/opt/copilot");
+        assert_eq!(c.llm.command_for(LlmBackend::CopilotCli), "copilot");
+        assert_eq!(c.llm.command_for(LlmBackend::ClaudeCli), "/opt/claude");
+        let c = parse_config("[llm]\ncopilot_command = \"/opt/copilot\"\n", p()).unwrap();
+        assert_eq!(c.llm.command_for(LlmBackend::CopilotCli), "/opt/copilot");
+        assert_eq!(c.llm.command_for(LlmBackend::ClaudeCli), "claude");
         // 月の予算が無いまま Copilot で動かさない
         let err = parse_config("[llm]\nbackend = \"copilot-cli\"\n", p()).unwrap_err();
         assert!(
@@ -629,6 +651,39 @@ mod tests {
             "{err}"
         );
         assert!(parse_config("[llm]\nbackend = \"gemini-cli\"\n", p()).is_err());
+    }
+
+    #[test]
+    fn selects_backends_per_task() {
+        let c = parse_config(
+            "[llm]\nbackend = \"copilot-cli\"\nscore_backend = \"claude-cli\"\n\
+             [copilot_quota]\nmonthly_credits = 1500\n",
+            p(),
+        )
+        .unwrap();
+        assert_eq!(c.llm.backend_for(LlmTask::Score), LlmBackend::ClaudeCli);
+        for task in [
+            LlmTask::Digest,
+            LlmTask::Translate,
+            LlmTask::Title,
+            LlmTask::Tidy,
+        ] {
+            assert_eq!(c.llm.backend_for(task), LlmBackend::CopilotCli, "{task:?}");
+        }
+        // どれかの工程が Copilot を使うなら、月の予算が要る
+        let err = parse_config("[llm]\ntranslate_backend = \"copilot-cli\"\n", p()).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains("copilot_quota")),
+            "{err}"
+        );
+        // どの工程も Claude なら要らない
+        let c = parse_config(
+            "[llm]\nbackend = \"copilot-cli\"\ndigest_backend = \"claude-cli\"\n\
+             score_backend = \"claude-cli\"\ntranslate_backend = \"claude-cli\"\n\
+             title_backend = \"claude-cli\"\ntidy_backend = \"claude-cli\"\n",
+            p(),
+        );
+        assert!(c.is_ok(), "{c:?}");
     }
 
     #[test]
@@ -696,7 +751,9 @@ mod tests {
     fn llm_defaults() {
         let d = LlmConfig::default();
         assert_eq!(d.backend, LlmBackend::ClaudeCli);
-        assert_eq!(d.command(), "claude");
+        assert_eq!(d.command_for(LlmBackend::ClaudeCli), "claude");
+        assert_eq!(d.command_for(LlmBackend::CopilotCli), "copilot");
+        assert_eq!(d.backend_for(LlmTask::Score), LlmBackend::ClaudeCli);
         assert_eq!(d.timeout_secs, 300);
         assert_eq!(d.digest_model, "sonnet");
         assert_eq!(d.digest_batch_size, 5);

@@ -88,6 +88,9 @@ pub async fn digest_articles<L: Llm>(
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = DigestSummary::default();
         loop {
+            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+            tokio::task::yield_now().await;
             if shared.stopped() {
                 break;
             }

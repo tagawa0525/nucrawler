@@ -103,6 +103,8 @@ pub mod fake {
         responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
         requests: Mutex<Vec<Recorded>>,
         hook: Mutex<Option<Hook>>,
+        reserve_hook: Mutex<Option<Hook>>,
+        reserved: Mutex<usize>,
     }
 
     impl FakeLlm {
@@ -111,6 +113,8 @@ pub mod fake {
                 responses: Mutex::new(responses.into_iter().collect()),
                 requests: Mutex::default(),
                 hook: Mutex::default(),
+                reserve_hook: Mutex::default(),
+                reserved: Mutex::default(),
             }
         }
 
@@ -120,6 +124,18 @@ pub mod fake {
         ) -> Self {
             Self {
                 hook: Mutex::new(Some(Box::new(hook))),
+                ..Self::new(responses)
+            }
+        }
+
+        /// 呼び出しの枠を取るたびに、何回目か（0 から）を渡して `hook` を実行する。枠を待つ間に
+        /// ほかの実行が DB を書き換える状況を作るのに使う。
+        pub fn with_reserve_hook(
+            responses: impl IntoIterator<Item = Result<LlmResponse, LlmError>>,
+            hook: impl FnMut(usize) + Send + 'static,
+        ) -> Self {
+            Self {
+                reserve_hook: Mutex::new(Some(Box::new(hook))),
                 ..Self::new(responses)
             }
         }

@@ -1209,4 +1209,51 @@ mod tests {
             "{summary:?}"
         );
     }
+
+    /// 呼び出しの枠は判定と予約の前に取る。枠を待つ間にほかの実行が使用率を上限まで上げたら、
+    /// 枠を取った後の判定で止まり、呼び出さない。
+    #[tokio::test]
+    async fn rechecks_the_quota_after_taking_a_call_slot() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-slot-quota",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        articles(&db, 2);
+        let resets_at = now().timestamp() + 3600;
+        let llm = FakeLlm::with_reserve_hook([], move |_| {
+            Db::open(&path)
+                .unwrap()
+                .record_llm_call(
+                    &crate::db::LlmCall {
+                        stage: "translate",
+                        backend: "claude-cli",
+                        model: "sonnet",
+                        n_items: 1,
+                        ok: true,
+                        duration_ms: 1,
+                        error: None,
+                        rate_limit: Some(&RateLimit {
+                            five_hour: Some(Window {
+                                utilization: 0.99,
+                                resets_at,
+                            }),
+                            seven_day: None,
+                        }),
+                    },
+                    now(),
+                )
+                .unwrap();
+        });
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.calls, 0);
+        assert!(
+            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            "{summary:?}"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 0);
+    }
 }

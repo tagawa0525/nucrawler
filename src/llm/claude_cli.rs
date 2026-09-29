@@ -503,9 +503,9 @@ mod tests {
         assert!(matches!(err, LlmError::Spawn { .. }), "{err}");
     }
 
-    /// 呼び出しの枠が空くまで claude を起動しない（枠はプロセスをまたいで数える）。
+    /// 呼び出しの枠は、空くまで待って取る（枠はプロセスをまたいで数える）。
     #[tokio::test]
-    async fn waits_for_a_free_call_slot() {
+    async fn reserve_waits_for_a_free_call_slot() {
         let (script, dir) = fake_claude(
             "cli-slot",
             &format!(
@@ -525,17 +525,17 @@ mod tests {
         let held = crate::pipeline::lock::acquire_slot(&slots, 1)
             .await
             .unwrap();
-        let schema = serde_json::json!({});
-        let call = cli.call(request(&schema));
-        tokio::pin!(call);
+        let reserve = cli.reserve();
+        tokio::pin!(reserve);
         let short = Duration::from_millis(300);
         assert!(
-            tokio::time::timeout(short, &mut call).await.is_err(),
+            tokio::time::timeout(short, &mut reserve).await.is_err(),
             "must wait"
         );
         drop(held);
-        let _ = tokio::time::timeout(Duration::from_secs(10), call)
+        let slot = tokio::time::timeout(Duration::from_secs(10), reserve)
             .await
-            .expect("runs once the slot is free");
+            .expect("takes the slot once it is free");
+        assert!(slot.is_ok(), "{slot:?}");
     }
 }

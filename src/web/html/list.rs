@@ -234,34 +234,46 @@ mod tests {
         assert!(earlier.is_empty());
     }
 
-    /// スワイプで付ける印が既に付いていれば、取り消しで外さない（付けたのはこのスワイプではない）。
-    /// そのため、カードは今の印（ブックマーク・既読）を持つ。
+    /// 一覧のカードでは、評価・ブックマーク・既読の印をその場で付け外しできる。
+    /// 印の状態はボタンが示すので、見出しの下の行には重ねて出さない。
     #[test]
-    fn swipe_cards_carry_their_marks() {
-        let mut bookmarked = item(1, "2026-09-27T05:00:00.000Z");
-        bookmarked.bookmarked = true;
-        let mut read = item(2, "2026-09-27T05:00:00.000Z");
-        read.read_at = Some("2026-09-27T06:00:00.000Z".into());
+    fn list_cards_offer_marks_in_place() {
+        let mut marked = item(1, "2026-09-27T05:00:00.000Z");
+        marked.rating = Rating::new(4);
+        marked.bookmarked = true;
+        marked.read_at = Some("2026-09-27T06:00:00.000Z".into());
         let html = list_page(
-            &[bookmarked, read],
+            &[marked, item(2, "2026-09-27T05:00:00.000Z")],
             &[],
             ListView::default(),
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<div class="card" data-id="1" data-bookmarked="1" tabindex="0">"#),
+            html.contains(r#"<div class="card read" data-id="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"action="/articles/1/rating""#), "{html}");
+        assert!(
+            html.contains(r#"<button name="value" value="" data-label="4 読んでよかった" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<div class="card read" data-id="2" tabindex="0">"#),
+            html.contains(r#"<form method="post" action="/articles/1/bookmark"><button name="on" value="0" aria-pressed="true" aria-label="ブックマーク" title="ブックマーク" class="on">🔖</button></form>"#),
             "{html}"
         );
-        // 取り消しは、スワイプの前に付いていなかった印だけを外す
-        assert!(html.contains("card.dataset.bookmarked"), "{html}");
         assert!(
-            html.contains(r#"card.classList.contains("read")"#),
+            html.contains(r#"<form method="post" action="/articles/1/read"><button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">✓</button></form>"#),
             "{html}"
         );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/2/bookmark"><button name="on" value="1" aria-pressed="false" aria-label="ブックマーク" title="ブックマーク">🔖</button></form>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/2/read"><button name="on" value="1" aria-pressed="false" aria-label="既読" title="既読">✓</button></form>"#),
+            "{html}"
+        );
+        assert!(!html.contains(" ★4"), "{html}");
     }
 
     #[test]
@@ -293,22 +305,22 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<script>"), "{html}");
-        // 左は既読の印（見送りではない）
-        assert!(html.contains(r#"h: "read""#), "{html}");
+        // スワイプ・キーは、カードのボタンと同じ送信を通す（印を付けてもカードは消さない）
+        assert!(html.contains("requestSubmit"), "{html}");
         assert!(
-            !html.contains("dismiss") && !html.contains("/feedback"),
+            !html.contains("card.hidden = true") && !html.contains("元に戻す"),
             "{html}"
         );
-        // h/l・←/→ で振り分け、j/k・↓/↑ で選び、u で取り消す
+        // ←/→ で既読・ブックマーク、↓/↑ で選ぶ
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
         }
-        // 検索の結果は振り分けの対象にしない
+        // 検索の結果は印の対象にしない
         let p = Params::from_query("q=x");
         let results = [item(1, "2026-09-27T05:00:00.000Z")];
         let html = search_page(&p, Some(&results), &[], None, &Page::default());
         assert!(
-            !html.contains(r#"data-id=""#) && !html.contains(SWIPE_SCRIPT),
+            !html.contains(r#"data-id=""#) && !html.contains(MARKS_SCRIPT),
             "{html}"
         );
     }

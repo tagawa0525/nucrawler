@@ -339,27 +339,29 @@ mod tests {
         );
         assert!(html.contains("sonnet"));
         assert!(html.contains(r#"action="/articles/7/bookmark""#), "{html}");
+        // 詳細でも既読の印を外せる（未読に戻す）。一覧のカードと同じ部品
+        assert!(html.contains(r#"action="/articles/7/read""#), "{html}");
         // 評価は 1〜5 の星で、今の評価（4）まで塗る。今の評価を押すと評価なしに戻る
         assert!(html.contains(r#"action="/articles/7/rating""#), "{html}");
         assert!(
             html.contains(
-                r#"<button name="value" value="3" aria-label="3 どちらでもない" title="3 どちらでもない" class="on">★</button>"#
+                r#"<button name="value" value="3" data-label="3 どちらでもない" aria-label="3 どちらでもない" title="3 どちらでもない" class="on">★</button>"#
             ),
             "{html}"
         );
         assert!(
-            html.contains(r#"<button name="value" value="" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
+            html.contains(r#"<button name="value" value="" data-label="4 読んでよかった" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<button name="value" value="5" aria-label="5 必読" title="5 必読">☆</button>"#
+                r#"<button name="value" value="5" data-label="5 必読" aria-label="5 必読" title="5 必読">☆</button>"#
             ),
             "{html}"
         );
         assert!(!html.contains("👍") && !html.contains("👎"), "{html}");
         assert!(
-            html.contains(r#"<button name="on" value="1">🔖</button>"#),
+            html.contains(r#"<button name="on" value="1" aria-pressed="false" aria-label="ブックマーク" title="ブックマーク">🔖</button>"#),
             "{html}"
         );
         // 英語で本文があり和訳が無いので、依頼ボタンを出す
@@ -400,7 +402,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<button name="on" value="0" class="on">🔖</button>"#),
+            html.contains(r#"<button name="on" value="0" aria-pressed="true" aria-label="ブックマーク" title="ブックマーク" class="on">🔖</button>"#),
             "{html}"
         );
     }

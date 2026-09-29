@@ -3,6 +3,7 @@
 
 pub mod claude_cli;
 pub mod copilot_cli;
+mod process;
 
 use serde::Serialize;
 

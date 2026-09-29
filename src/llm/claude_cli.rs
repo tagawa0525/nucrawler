@@ -9,8 +9,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
@@ -53,7 +51,7 @@ impl Llm for ClaudeCli {
     async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
-        let mut child = tokio::process::Command::new(&self.command)
+        let child = tokio::process::Command::new(&self.command)
             .args(["-p", "--output-format", "stream-json", "--verbose"])
             .args(["--json-schema", &schema])
             .args(["--tools", ""])
@@ -76,29 +74,7 @@ impl Llm for ClaudeCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let prompt = req.prompt.as_bytes();
-        let run = async {
-            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
-            let write = async {
-                match stdin.write_all(prompt).await {
-                    // 子が入力を読まずに終了した（認証エラーなど）。原因は終了コードと stderr で報告する
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-                    r => r?,
-                }
-                drop(stdin);
-                Ok::<_, std::io::Error>(())
-            };
-            let (written, output) = tokio::join!(write, child.wait_with_output());
-            written?;
-            output
-        };
-        let output = tokio::time::timeout(self.timeout, run)
-            .await
-            .map_err(|_| LlmError::Timeout {
-                secs: self.timeout.as_secs(),
-            })?
-            .map_err(LlmError::Io)?;
+        let output = super::process::run(child, req.prompt.as_bytes(), self.timeout).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (parsed, rate_limit) = parse_stream(&stdout);

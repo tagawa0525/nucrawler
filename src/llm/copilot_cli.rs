@@ -15,8 +15,6 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
-
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
 
 /// `--available-tools` に渡す、存在しないツールの名前。これだけを許可してツールを 0 個にする。
@@ -54,7 +52,7 @@ impl Llm for CopilotCli {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         // 子プロセスより後に消す（宣言の逆順に drop される）
         let home = Home::create(&self.homes).map_err(LlmError::Io)?;
-        let mut child = tokio::process::Command::new(&self.command)
+        let child = tokio::process::Command::new(&self.command)
             .args(["--output-format", "json"])
             .args(["--model", req.model])
             .args(["--available-tools", NO_TOOLS])
@@ -76,29 +74,7 @@ impl Llm for CopilotCli {
                 command: self.command.display().to_string(),
                 source,
             })?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let prompt = compose(&req);
-        let run = async {
-            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
-            let write = async {
-                match stdin.write_all(prompt.as_bytes()).await {
-                    // 子が入力を読まずに終了した（起動時のエラーなど）。原因は終了コードと stderr で報告する
-                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-                    r => r?,
-                }
-                drop(stdin);
-                Ok::<_, std::io::Error>(())
-            };
-            let (written, output) = tokio::join!(write, child.wait_with_output());
-            written?;
-            output
-        };
-        let output = tokio::time::timeout(self.timeout, run)
-            .await
-            .map_err(|_| LlmError::Timeout {
-                secs: self.timeout.as_secs(),
-            })?
-            .map_err(LlmError::Io)?;
+        let output = super::process::run(child, compose(&req).as_bytes(), self.timeout).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (parsed, credits) = parse_events(&stdout);

@@ -583,7 +583,14 @@ impl Db {
                  {items_filter}
              ),
              rows AS (
-               SELECT i.*, d.title_ja, d.summary_ja,
+               -- 要約が無ければ見出しの和訳を使う（本文が取れず要約できない記事。見出しは公開なので
+               -- 本文の閲覧の制限は掛からない）
+               SELECT i.*,
+                      coalesce(nullif(trim(d.title_ja), ''),
+                               (SELECT tt.title_ja FROM artifacts AS tt
+                                WHERE tt.article_id = i.id AND tt.kind = 'title'
+                                ORDER BY tt.created_at DESC, tt.id DESC LIMIT 1)) AS title_ja,
+                      d.summary_ja,
                       json_extract(d.payload, '$.lwr_relevant') AS relevant,
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile

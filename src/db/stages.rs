@@ -30,7 +30,7 @@ pub struct LlmCall<'a> {
     pub ok: bool,
     pub duration_ms: u64,
     pub error: Option<&'a str>,
-    pub rate_limit: Option<&'a crate::llm::RateLimit>,
+    pub usage: Option<&'a crate::llm::Usage>,
 }
 
 impl Db {
@@ -138,11 +138,19 @@ impl Db {
         call: &LlmCall,
         at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        let rate_limit = call.rate_limit.map(serde_json::to_string).transpose()?;
+        let rate_limit = call
+            .usage
+            .and_then(crate::llm::Usage::rate_limit)
+            .map(|r| serde_json::to_string(&r))
+            .transpose()?;
+        let credits_nano = match call.usage {
+            Some(crate::llm::Usage::Credits { nano_aiu }) => Some(*nano_aiu),
+            _ => None,
+        };
         self.conn.execute(
             "INSERT INTO llm_calls
-               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit, credits_nano)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 timestamp(at),
                 call.stage,
@@ -153,6 +161,7 @@ impl Db {
                 i64::try_from(call.duration_ms).unwrap_or(i64::MAX),
                 call.error,
                 rate_limit,
+                credits_nano,
             ],
         )?;
         Ok(())
@@ -312,7 +321,7 @@ mod tests {
                 ok: true,
                 duration_ms: 1234,
                 error: None,
-                rate_limit: Some(&rate),
+                usage: Some(&crate::llm::Usage::Subscription(rate)),
             },
             t("2026-09-27T01:00:00Z"),
         )
@@ -326,7 +335,7 @@ mod tests {
                 ok: false,
                 duration_ms: 10,
                 error: Some("timeout"),
-                rate_limit: None,
+                usage: None,
             },
             t("2026-09-27T01:05:00Z"),
         )
@@ -348,22 +357,64 @@ mod tests {
     }
 
     #[test]
+    fn records_consumed_credits_without_a_rate_limit() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "title",
+                backend: "copilot-cli",
+                model: "gpt-6-luna",
+                n_items: 1,
+                ok: true,
+                duration_ms: 2835,
+                error: None,
+                usage: Some(&crate::llm::Usage::Credits {
+                    nano_aiu: 159_762_400,
+                }),
+            },
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.record_llm_call(
+            &LlmCall {
+                stage: "title",
+                backend: "copilot-cli",
+                model: "gpt-6-luna",
+                n_items: 1,
+                ok: false,
+                duration_ms: 10,
+                error: Some("timeout"),
+                usage: None,
+            },
+            t("2026-09-27T01:05:00Z"),
+        )
+        .unwrap();
+        let rows = db
+            .query_strings(
+                "SELECT coalesce(credits_nano, '-') || '|' || coalesce(rate_limit, '-')
+                 FROM llm_calls ORDER BY id",
+            )
+            .unwrap();
+        assert_eq!(rows, ["159762400|-", "-|-"]);
+    }
+
+    #[test]
     fn latest_rate_limit_skips_calls_without_usage() {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(
             db.latest_rate_limit(t("2026-09-27T04:00:00Z")).unwrap(),
             None
         );
-        fn call(rate: Option<&crate::llm::RateLimit>) -> LlmCall<'_> {
+        fn call(usage: Option<&crate::llm::Usage>) -> LlmCall<'_> {
             LlmCall {
                 stage: "digest",
                 backend: "claude-cli",
                 model: "sonnet",
                 n_items: 1,
-                ok: rate.is_some(),
+                ok: usage.is_some(),
                 duration_ms: 1,
                 error: None,
-                rate_limit: rate,
+                usage,
             }
         }
         let older = crate::llm::RateLimit {
@@ -380,10 +431,16 @@ mod tests {
             }),
             seven_day: None,
         };
-        db.record_llm_call(&call(Some(&older)), t("2026-09-27T01:00:00Z"))
-            .unwrap();
-        db.record_llm_call(&call(Some(&newer)), t("2026-09-27T02:00:00Z"))
-            .unwrap();
+        db.record_llm_call(
+            &call(Some(&crate::llm::Usage::Subscription(older))),
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        db.record_llm_call(
+            &call(Some(&crate::llm::Usage::Subscription(newer))),
+            t("2026-09-27T02:00:00Z"),
+        )
+        .unwrap();
         db.record_llm_call(&call(None), t("2026-09-27T03:00:00Z"))
             .unwrap();
         assert_eq!(
@@ -413,7 +470,7 @@ mod tests {
                     ok: true,
                     duration_ms: 1,
                     error: None,
-                    rate_limit: Some(&rate),
+                    usage: Some(&crate::llm::Usage::Subscription(rate)),
                 },
                 t(at),
             )
@@ -470,7 +527,7 @@ mod tests {
             ok,
             duration_ms: 1,
             error: None,
-            rate_limit: None,
+            usage: None,
         };
         db.record_llm_call(&call("tidy", true), t("2026-09-20T00:00:00Z"))
             .unwrap();

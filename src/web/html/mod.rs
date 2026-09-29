@@ -282,7 +282,6 @@ mod tests {
     fn usage_limit_is_shown_as_paused_not_failed() {
         let error = crate::llm::LlmError::RateLimited {
             resets_at: Some(1_790_000_000),
-            rate_limit: None,
         }
         .to_string();
         let html = layout(

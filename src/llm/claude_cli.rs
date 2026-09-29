@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 
-use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Window};
+use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
     pub command: PathBuf,
@@ -50,7 +50,7 @@ impl Llm for ClaudeCli {
             .map_err(LlmError::Slot)
     }
 
-    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
         let mut child = tokio::process::Command::new(&self.command)
@@ -101,18 +101,22 @@ impl Llm for ClaudeCli {
             .map_err(LlmError::Io)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        match parse_stream(&stdout) {
+        let (parsed, rate_limit) = parse_stream(&stdout);
+        let usage = rate_limit.map(Usage::Subscription);
+        match parsed {
+            Ok(output) => Ok(LlmResponse { output, usage }),
             // 結果行が無い（途中で落ちた）ときだけ、終了コードと stderr で報告する。
             // 結果行があれば、終了コードに関わらずそちらが結果と原因を正確に表す。
-            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmError::Exit {
-                status: output.status.to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                interrupted: interrupted(output.status),
+            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmFailure {
+                error: LlmError::Exit {
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    interrupted: interrupted(output.status),
+                },
+                usage,
             }),
-            parsed => {
-                let (output, rate_limit) = parsed?;
-                Ok(LlmResponse { output, rate_limit })
-            }
+            // 上限での拒否やエラーの報告でも、それまでに分かった使用率を残して次回の判定に使う
+            Err(error) => Err(LlmFailure { error, usage }),
         }
     }
 }
@@ -129,9 +133,18 @@ fn interrupted(status: std::process::ExitStatus) -> bool {
     matches!(signal, Some(SIGINT | SIGTERM))
 }
 
-/// stream-json の出力から、構造化出力と最後の使用率を取り出す。
-pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit>), LlmError> {
+/// stream-json の出力から、構造化出力と最後の使用率を取り出す。使用率は、構造化出力が得られなくても
+/// それまでに見えた分を返す。
+pub fn parse_stream(stdout: &str) -> (Result<serde_json::Value, LlmError>, Option<RateLimit>) {
     let mut rate_limit = None;
+    let result = parse_events(stdout, &mut rate_limit);
+    (result, rate_limit)
+}
+
+fn parse_events(
+    stdout: &str,
+    rate_limit: &mut Option<RateLimit>,
+) -> Result<serde_json::Value, LlmError> {
     let mut rejected = None;
     let mut result = None;
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
@@ -140,7 +153,7 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
         match event["type"].as_str() {
             Some("rate_limit_event") => {
                 let info = &event["rate_limit_info"];
-                rate_limit = Some(parse_rate_limit(info));
+                *rate_limit = Some(parse_rate_limit(info));
                 // 最後のイベントの状態で判断する（途中で拒否されても、後で許可されれば上限ではない）。
                 rejected = (info["status"] == "rejected").then(|| info["resetsAt"].as_i64());
             }
@@ -151,10 +164,7 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
     let result = result.ok_or_else(|| LlmError::Protocol("no result event".into()))?;
     if result["is_error"].as_bool().unwrap_or(false) {
         if let Some(resets_at) = rejected {
-            return Err(LlmError::RateLimited {
-                resets_at,
-                rate_limit,
-            });
+            return Err(LlmError::RateLimited { resets_at });
         }
         return Err(LlmError::Reported {
             subtype: result["subtype"].as_str().unwrap_or_default().to_string(),
@@ -162,7 +172,7 @@ pub fn parse_stream(stdout: &str) -> Result<(serde_json::Value, Option<RateLimit
         });
     }
     match result.get("structured_output") {
-        Some(output) if !output.is_null() => Ok((output.clone(), rate_limit)),
+        Some(output) if !output.is_null() => Ok(output.clone()),
         _ => Err(LlmError::NoStructuredOutput),
     }
 }
@@ -193,7 +203,8 @@ mod tests {
 
     #[test]
     fn parses_structured_output_and_rate_limit() {
-        let (output, rate) = parse_stream(&fixture()).unwrap();
+        let (output, rate) = parse_stream(&fixture());
+        let output = output.unwrap();
         assert_eq!(
             output,
             serde_json::json!({"items": [{"id": 1, "ok": true}]})
@@ -225,6 +236,7 @@ mod tests {
             "error_during_execution",
             "Not logged in",
         ))
+        .0
         .unwrap_err();
         assert!(
             matches!(&err, LlmError::Reported { message, .. } if message == "Not logged in"),
@@ -241,12 +253,9 @@ mod tests {
             "{rate}\n{}\n",
             result_line(true, "error", "You've hit your session limit")
         );
-        let err = parse_stream(&out).unwrap_err();
-        let LlmError::RateLimited {
-            resets_at,
-            rate_limit,
-        } = err
-        else {
+        let (result, rate_limit) = parse_stream(&out);
+        let err = result.unwrap_err();
+        let LlmError::RateLimited { resets_at } = err else {
             panic!("{err}");
         };
         assert_eq!(resets_at, Some(1790457000));
@@ -271,17 +280,19 @@ mod tests {
             event("allowed"),
             result_line(true, "error_during_execution", "boom")
         );
-        let err = parse_stream(&out).unwrap_err();
+        let err = parse_stream(&out).0.unwrap_err();
         assert!(matches!(err, LlmError::Reported { .. }), "{err}");
     }
 
     #[test]
     fn missing_result_or_output_is_error() {
-        let err = parse_stream("{\"type\":\"system\"}\n").unwrap_err();
+        let err = parse_stream("{\"type\":\"system\"}\n").0.unwrap_err();
         assert!(matches!(err, LlmError::Protocol(_)), "{err}");
-        let err = parse_stream(&result_line(false, "success", "plain text")).unwrap_err();
+        let err = parse_stream(&result_line(false, "success", "plain text"))
+            .0
+            .unwrap_err();
         assert!(matches!(err, LlmError::NoStructuredOutput), "{err}");
-        let err = parse_stream("not json\n").unwrap_err();
+        let err = parse_stream("not json\n").0.unwrap_err();
         assert!(matches!(err, LlmError::Protocol(_)), "{err}");
     }
 
@@ -346,7 +357,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
         let resp = cli.call(request(&schema)).await.unwrap();
         assert_eq!(resp.output["items"][0]["id"], 1);
-        assert!(resp.rate_limit.is_some());
+        assert!(resp.usage.is_some());
 
         let args: Vec<String> = std::fs::read_to_string(cwd.join("args.txt"))
             .unwrap()
@@ -401,7 +412,42 @@ mod tests {
         let schema = serde_json::json!({});
         let resp = cli.call(request(&schema)).await.unwrap();
         assert_eq!(resp.output["items"][0]["id"], 1);
-        assert!(resp.rate_limit.is_some());
+        assert!(resp.usage.is_some());
+    }
+
+    /// 使用率を受け取った後に失敗しても、その使用率を失わない（次回の判定に使う）。
+    #[tokio::test]
+    async fn reported_error_keeps_the_rate_limit() {
+        let rate = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "resetsAt": 1790457000,
+            "unifiedWindows": {"five_hour": {"utilization": 0.4, "resetsAt": 1790457000}}}});
+        let result = result_line(true, "error_during_execution", "boom");
+        let (script, dir) = fake_claude(
+            "cli-reported-with-rate",
+            &format!("cat >/dev/null\nprintf '%s\\n' '{rate}' '{result}'"),
+        );
+        let cli = ClaudeCli {
+            command: script,
+            cwd: dir.join("cwd"),
+            timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
+        };
+        let schema = serde_json::json!({});
+        let failure = cli.call(request(&schema)).await.unwrap_err();
+        assert!(
+            matches!(failure.error, LlmError::Reported { .. }),
+            "{}",
+            failure.error
+        );
+        assert_eq!(
+            failure
+                .usage
+                .and_then(|u| u.rate_limit())
+                .and_then(|r| r.five_hour)
+                .map(|w| w.utilization),
+            Some(0.4)
+        );
     }
 
     #[tokio::test]
@@ -415,7 +461,7 @@ mod tests {
             concurrency: 1,
         };
         let schema = serde_json::json!({});
-        let err = cli.call(request(&schema)).await.unwrap_err();
+        let err = cli.call(request(&schema)).await.unwrap_err().error;
         assert!(
             matches!(&err, LlmError::Exit { stderr, .. } if stderr.contains("boom")),
             "{err}"
@@ -443,7 +489,8 @@ mod tests {
                 ..request(&schema)
             })
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .error;
         assert!(
             matches!(&err, LlmError::Exit { status, stderr, .. }
                 if status.ends_with(": 1") && stderr.contains("Not logged in")),
@@ -463,7 +510,7 @@ mod tests {
         };
         let schema = serde_json::json!({});
         let started = std::time::Instant::now();
-        let err = cli.call(request(&schema)).await.unwrap_err();
+        let err = cli.call(request(&schema)).await.unwrap_err().error;
         assert!(matches!(err, LlmError::Timeout { .. }), "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -485,7 +532,7 @@ mod tests {
                 concurrency: 1,
             };
             let schema = serde_json::json!({});
-            let err = cli.call(request(&schema)).await.unwrap_err();
+            let err = cli.call(request(&schema)).await.unwrap_err().error;
             assert!(
                 matches!(&err, LlmError::Exit { interrupted, .. } if *interrupted == expected),
                 "{name}: {err:?}"
@@ -503,7 +550,7 @@ mod tests {
             concurrency: 1,
         };
         let schema = serde_json::json!({});
-        let err = cli.call(request(&schema)).await.unwrap_err();
+        let err = cli.call(request(&schema)).await.unwrap_err().error;
         assert!(matches!(err, LlmError::Spawn { .. }), "{err}");
     }
 

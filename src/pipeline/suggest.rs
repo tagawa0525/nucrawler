@@ -135,7 +135,7 @@ mod tests {
                 "exclude": [],
                 "reasons": [{"change": "重みを変えた", "evidence": "関心 1 件"}],
             }),
-            rate_limit: None,
+            usage: None,
         })
     }
 

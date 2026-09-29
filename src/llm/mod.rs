@@ -17,7 +17,26 @@ pub struct LlmRequest<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmResponse {
     pub output: serde_json::Value,
-    pub rate_limit: Option<RateLimit>,
+    pub usage: Option<Usage>,
+}
+
+/// 呼び出しで分かった使用量。バックエンドによって分かるものが違う。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Usage {
+    /// サブスクリプションの枠の使用率（claude-cli）
+    Subscription(RateLimit),
+    /// 消費した AI Credits（copilot-cli）。10^-9 クレジット単位
+    Credits { nano_aiu: i64 },
+}
+
+impl Usage {
+    /// サブスクリプションの枠の使用率（それ以外の使用量なら `None`）
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        match self {
+            Usage::Subscription(r) => Some(*r),
+            Usage::Credits { .. } => None,
+        }
+    }
 }
 
 /// サブスクリプションの使用率（0〜1、超えることもある）とリセット時刻（UNIX 秒）。
@@ -80,15 +99,24 @@ pub enum LlmError {
     #[error("unexpected llm output: {0}")]
     Protocol(String),
     #[error("usage limit reached (resets at {resets_at:?})")]
-    RateLimited {
-        resets_at: Option<i64>,
-        /// 拒否されたときの使用率（次回の判定に使う）
-        rate_limit: Option<RateLimit>,
-    },
+    RateLimited { resets_at: Option<i64> },
     #[error("llm reported an error ({subtype}): {message}")]
     Reported { subtype: String, message: String },
     #[error("llm returned no structured output")]
     NoStructuredOutput,
+}
+
+/// 失敗した呼び出し。失敗しても、それまでに分かった使用量を運ぶ（消費した分をクォータに数えるため）。
+#[derive(Debug)]
+pub struct LlmFailure {
+    pub error: LlmError,
+    pub usage: Option<Usage>,
+}
+
+impl From<LlmError> for LlmFailure {
+    fn from(error: LlmError) -> Self {
+        Self { error, usage: None }
+    }
 }
 
 /// LLM のバックエンド。
@@ -106,7 +134,7 @@ pub trait Llm {
     fn call(
         &self,
         req: LlmRequest<'_>,
-    ) -> impl std::future::Future<Output = Result<LlmResponse, LlmError>>;
+    ) -> impl std::future::Future<Output = Result<LlmResponse, LlmFailure>>;
 }
 
 /// テスト用の偽のバックエンド。用意した応答を順に返し、受け取った依頼を記録する。
@@ -115,7 +143,7 @@ pub mod fake {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use super::{Llm, LlmError, LlmRequest, LlmResponse};
+    use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse};
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Recorded {
@@ -134,7 +162,7 @@ pub mod fake {
 
     #[derive(Default)]
     pub struct FakeLlm {
-        responses: Mutex<VecDeque<Result<LlmResponse, LlmError>>>,
+        responses: Mutex<VecDeque<Result<LlmResponse, LlmFailure>>>,
         requests: Mutex<Vec<Recorded>>,
         hook: Mutex<Option<Hook>>,
         reserve_hook: Mutex<Option<Hook>>,
@@ -148,7 +176,12 @@ pub mod fake {
     impl FakeLlm {
         pub fn new(responses: impl IntoIterator<Item = Result<LlmResponse, LlmError>>) -> Self {
             Self {
-                responses: Mutex::new(responses.into_iter().collect()),
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|r| r.map_err(LlmFailure::from))
+                        .collect(),
+                ),
                 requests: Mutex::default(),
                 hook: Mutex::default(),
                 reserve_hook: Mutex::default(),
@@ -156,6 +189,14 @@ pub mod fake {
                 responder: None,
                 delay: std::time::Duration::ZERO,
                 in_flight: Mutex::default(),
+            }
+        }
+
+        /// 使用量の分かった失敗を順に返す（失敗しても消費した分を記録するかを確かめるのに使う）。
+        pub fn failing(failures: impl IntoIterator<Item = LlmFailure>) -> Self {
+            Self {
+                responses: Mutex::new(failures.into_iter().map(Err).collect()),
+                ..Self::new([])
             }
         }
 
@@ -223,7 +264,7 @@ pub mod fake {
             Ok(())
         }
 
-        async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
             let n = {
                 let mut requests = self.requests.lock().unwrap();
                 requests.push(Recorded {
@@ -254,7 +295,7 @@ pub mod fake {
                 tokio::time::sleep(self.delay).await;
             }
             if let Some(respond) = &self.responder {
-                return respond(&req);
+                return respond(&req).map_err(Into::into);
             }
             self.responses
                 .lock()

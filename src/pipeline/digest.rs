@@ -316,7 +316,7 @@ mod tests {
     use crate::config::Lang;
     use crate::db::{ContentKind, ContentOrigin, Db, NewArticle};
     use crate::llm::fake::FakeLlm;
-    use crate::llm::{LlmError, LlmResponse, RateLimit, Window};
+    use crate::llm::{LlmError, LlmFailure, LlmResponse, RateLimit, Usage, Window};
     use crate::pipeline::Cancel;
     use crate::quota::{Quota, QuotaConfig, Stop};
 
@@ -374,13 +374,13 @@ mod tests {
     fn ok(ids: &[i64], five_hour: f64) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
             output: serde_json::json!({"items": ids.iter().map(|&id| item(id)).collect::<Vec<_>>()}),
-            rate_limit: Some(RateLimit {
+            usage: Some(Usage::Subscription(RateLimit {
                 five_hour: Some(Window {
                     utilization: five_hour,
                     resets_at: now().timestamp() + 3600,
                 }),
                 seven_day: None,
-            }),
+            })),
         })
     }
 
@@ -512,7 +512,7 @@ mod tests {
             serde_json::json!([{"name": "データセンター需要", "facet": "分野"}]);
         let first = Ok(LlmResponse {
             output: serde_json::json!({"items": [proposal]}),
-            rate_limit: None,
+            usage: None,
         });
         let llm = FakeLlm::new([first, ok(&ids[1..], 0.1)]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
@@ -666,16 +666,18 @@ mod tests {
     async fn usage_limit_halts_without_blaming_articles() {
         let db = Db::open_in_memory().unwrap();
         articles(&db, 2);
-        let llm = FakeLlm::new([Err(LlmError::RateLimited {
-            resets_at: Some(1790457000),
-            rate_limit: Some(RateLimit {
+        let llm = FakeLlm::failing([LlmFailure {
+            error: LlmError::RateLimited {
+                resets_at: Some(1790457000),
+            },
+            usage: Some(Usage::Subscription(RateLimit {
                 five_hour: Some(Window {
                     utilization: 1.0,
                     resets_at: 1790457000,
                 }),
                 seven_day: None,
-            }),
-        })]);
+            })),
+        }]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
         assert_eq!(
             summary.halted,
@@ -730,7 +732,7 @@ mod tests {
         let llm = FakeLlm::new([
             Ok(LlmResponse {
                 output: serde_json::json!({"nope": 1}),
-                rate_limit: None,
+                usage: None,
             }),
             ok(&ids[1..], 0.1),
         ]);
@@ -881,7 +883,7 @@ mod tests {
             "fake"
         }
 
-        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
             std::future::pending().await
         }
     }
@@ -900,13 +902,14 @@ mod tests {
             "fake"
         }
 
-        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
             self.0.request();
             Err(LlmError::Exit {
                 status: "exit status: 143".into(),
                 stderr: String::new(),
                 interrupted: true,
-            })
+            }
+            .into())
         }
     }
 
@@ -997,9 +1000,9 @@ mod tests {
             "fake"
         }
 
-        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        async fn call(&self, _: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
             self.0.request();
-            ok(&[1, 2], 0.1)
+            ok(&[1, 2], 0.1).map_err(Into::into)
         }
     }
 
@@ -1219,7 +1222,7 @@ mod tests {
                 "malformed",
                 Ok(LlmResponse {
                     output: serde_json::json!({"unexpected": true}),
-                    rate_limit: None,
+                    usage: None,
                 }),
             ),
         ] {
@@ -1275,7 +1278,7 @@ mod tests {
         let llm = FakeLlm::with_hook(
             [Ok(LlmResponse {
                 output: serde_json::json!({"items": ids[..2].iter().map(|&id| item(id)).collect::<Vec<_>>()}),
-                rate_limit: None,
+                usage: None,
             })],
             move |_| {
                 let other = Db::open(&path).unwrap();
@@ -1289,13 +1292,13 @@ mod tests {
                             ok: true,
                             duration_ms: 1,
                             error: None,
-                            rate_limit: Some(&RateLimit {
+                            usage: Some(&Usage::Subscription(RateLimit {
                                 five_hour: Some(Window {
                                     utilization: 0.99,
                                     resets_at,
                                 }),
                                 seven_day: None,
-                            }),
+                            })),
                         },
                         now(),
                     )
@@ -1336,13 +1339,13 @@ mod tests {
                         ok: true,
                         duration_ms: 1,
                         error: None,
-                        rate_limit: Some(&RateLimit {
+                        usage: Some(&Usage::Subscription(RateLimit {
                             five_hour: Some(Window {
                                 utilization: 0.99,
                                 resets_at,
                             }),
                             seven_day: None,
-                        }),
+                        })),
                     },
                     now(),
                 )

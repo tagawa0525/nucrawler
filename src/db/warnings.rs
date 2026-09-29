@@ -302,7 +302,7 @@ mod tests {
                 ok: false,
                 duration_ms: 1,
                 error: Some("Not logged in"),
-                rate_limit: None,
+                usage: None,
             },
             t("2026-09-27T01:00:00Z"),
         )
@@ -328,7 +328,7 @@ mod tests {
                 ok: true,
                 duration_ms: 1,
                 error: None,
-                rate_limit: None,
+                usage: None,
             },
             t("2026-09-27T02:00:00Z"),
         )
@@ -688,7 +688,7 @@ mod tests {
             ok,
             duration_ms: 1,
             error: (!ok).then_some("Not logged in"),
-            rate_limit: None,
+            usage: None,
         };
         db.record_llm_call(&call(false), t("2026-09-27T02:00:00Z"))
             .unwrap();

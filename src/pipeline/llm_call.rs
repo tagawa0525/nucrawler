@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use super::{Cancel, Halt};
 use crate::db::{Db, DbError, LlmCall, StageKey};
 use crate::errors;
-use crate::llm::{Llm, LlmError, LlmRequest, LlmResponse};
+use crate::llm::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse};
 use crate::quota::Quota;
 
 pub enum Outcome {
@@ -180,8 +180,11 @@ pub async fn call_recorded<L: Llm>(
     // ほかの失敗は、止める指示と重なってもそのまま記録する
     if matches!(
         result,
-        Err(LlmError::Exit {
-            interrupted: true,
+        Err(LlmFailure {
+            error: LlmError::Exit {
+                interrupted: true,
+                ..
+            },
             ..
         })
     ) && tokio::time::timeout(STOP_GRACE, cancel.requested())
@@ -190,14 +193,17 @@ pub async fn call_recorded<L: Llm>(
     {
         return Ok(Outcome::Cancelled);
     }
-    // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。
-    let rate_limit = match &result {
-        Ok(response) => response.rate_limit,
-        Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
-        Err(_) => None,
+    // 失敗しても、それまでに分かった使用量（上限で拒否されたときの使用率、消費したクレジット）を
+    // 残して、次回の判定に使う。
+    let usage = match &result {
+        Ok(response) => response.usage,
+        Err(failure) => failure.usage,
     };
-    shared.quota.borrow_mut().observe(rate_limit);
-    let error = result.as_ref().err().map(|e| errors::error_chain(e));
+    shared
+        .quota
+        .borrow_mut()
+        .observe(usage.and_then(|u| u.rate_limit()));
+    let error = result.as_ref().err().map(|f| errors::error_chain(&f.error));
     db.record_llm_call(
         &LlmCall {
             stage,
@@ -207,15 +213,16 @@ pub async fn call_recorded<L: Llm>(
             ok: result.is_ok(),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             error: error.as_deref(),
-            rate_limit: rate_limit.as_ref(),
+            usage: usage.as_ref(),
         },
         at,
     )?;
     Ok(match result {
         Ok(response) => Outcome::Response(response),
-        Err(LlmError::RateLimited { resets_at, .. }) => {
-            Outcome::Halted(Halt::UsageLimit { resets_at })
-        }
+        Err(LlmFailure {
+            error: LlmError::RateLimited { resets_at },
+            ..
+        }) => Outcome::Halted(Halt::UsageLimit { resets_at }),
         Err(_) => Outcome::Halted(Halt::LlmFailed(error.unwrap_or_default())),
     })
 }
@@ -266,6 +273,44 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
     }
 
+    /// 応答の形が崩れて失敗しても、消費した分は記録する（月の消費を少なく数えないように）。
+    #[tokio::test]
+    async fn failed_calls_keep_the_consumed_credits() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::failing([LlmFailure {
+            error: LlmError::Protocol("not json".into()),
+            usage: Some(crate::llm::Usage::Credits {
+                nano_aiu: 37_405_000,
+            }),
+        }]);
+        let schema = serde_json::json!({});
+        let outcome = call_recorded(
+            &db,
+            &llm,
+            &Shared::new(&mut Quota::new(QuotaConfig::default(), None, None)),
+            Call {
+                stage: "title",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            },
+            &Utc::now,
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Halted(Halt::LlmFailed(_))));
+        assert_eq!(
+            db.query_strings("SELECT ok || '|' || coalesce(credits_nano, '-') FROM llm_calls")
+                .unwrap(),
+            ["0|37405000"]
+        );
+    }
+
     /// 止める指示と重なっても、シグナルで終わったのでない失敗（利用上限など）は記録する。
     /// 利用上限の使用率を失うと、次回すぐに呼んでしまう。
     #[tokio::test]
@@ -273,7 +318,6 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let llm = FakeLlm::new([Err(crate::llm::LlmError::RateLimited {
             resets_at: Some(1),
-            rate_limit: None,
         })]);
         let cancel = Cancel::default();
         let requester = cancel.clone();

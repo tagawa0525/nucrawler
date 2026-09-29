@@ -1,3 +1,264 @@
+//! 推薦点：LLM の点数に、利用者の評価から学んだ補正を足した点数（計画 004）。
+//!
+//! 記事ごとに `z = a·x + b + Σ w_f`（x は LLM 点の logit、f は記事の特徴）を求め、`100·σ(z)` を推薦点にする。
+//! 評価 1〜5 を 0〜1 に写した値を目標に、交差エントロピーと L2 の正則化で a・b・w を学ぶ。正則化は
+//! 今の振る舞い（a = 1、b = 0、w = 0：推薦点 = LLM 点）を中心に置くので、評価が少ないうちは補正が小さい。
+//! I/O を持たない。
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::db::Rating;
+
+/// 特徴の種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FeatureKind {
+    /// 要約に付いたトピック（統合を反映した語）
+    Topic,
+    /// 記事のソース
+    Source,
+    /// 点数が当たった関心分野
+    Interest,
+    /// 点数が当たった推薦しない話題
+    Exclude,
+}
+
+/// 記事の特徴（あれば 1、無ければ 0）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Feature {
+    pub kind: FeatureKind,
+    pub key: String,
+}
+
+/// 学習の 1 件：評価した記事の LLM 点と特徴、評価。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Example {
+    pub llm_score: u8,
+    pub features: Vec<Feature>,
+    pub rating: Rating,
+}
+
+/// 補正のモデル。`weights` に無い特徴は 0（効かない）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Model {
+    /// LLM 点の logit の係数
+    pub a: f64,
+    /// 切片
+    pub b: f64,
+    pub weights: BTreeMap<Feature, f64>,
+}
+
+/// LLM 点を確率とみなすときの端（0 点・100 点で logit が無限にならないように）
+const EDGE: f64 = 0.005;
+/// Newton 法の打ち切り
+const MAX_ITERATIONS: usize = 100;
+const TOLERANCE: f64 = 1e-10;
+
+fn sigmoid(z: f64) -> f64 {
+    1.0 / (1.0 + (-z).exp())
+}
+
+/// LLM 点（0〜100）の logit。
+fn llm_logit(llm_score: u8) -> f64 {
+    let p = (f64::from(llm_score) / 100.0).clamp(EDGE, 1.0 - EDGE);
+    (p / (1.0 - p)).ln()
+}
+
+/// 確率を 0〜100 の点数にする。
+fn points(p: f64) -> u8 {
+    // p は (0, 1) に収まるので、四捨五入した値は 0〜100
+    (p * 100.0).round() as u8
+}
+
+/// 評価を 0〜1 の目標にする（1→0、3→0.5、5→1）。
+fn target(rating: Rating) -> f64 {
+    f64::from(rating.get() - Rating::MIN) / f64::from(Rating::MAX - Rating::MIN)
+}
+
+/// 重複を除いた特徴。
+fn distinct(features: &[Feature]) -> BTreeSet<&Feature> {
+    features.iter().collect()
+}
+
+impl Model {
+    /// 今の振る舞い（推薦点 = LLM 点）。
+    pub fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            weights: BTreeMap::new(),
+        }
+    }
+
+    /// 評価から学ぶ。`prior_strength` は正則化の強さ（大きいほど今の振る舞いに近いまま）で、正であること。
+    /// 重みを持つのは、評価した記事に現れた特徴だけ。
+    pub fn fit(examples: &[Example], prior_strength: f64) -> Self {
+        assert!(prior_strength > 0.0, "prior_strength must be positive");
+        let features: Vec<&Feature> = examples
+            .iter()
+            .flat_map(|e| e.features.iter())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let index: BTreeMap<&Feature, usize> = features
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (*f, i + 2))
+            .collect();
+        // 1 件ごとの、値が 1 の列（0 は a の列で x、1 は b の列で 1）
+        let rows: Vec<(f64, Vec<usize>, f64)> = examples
+            .iter()
+            .map(|e| {
+                let cols = distinct(&e.features)
+                    .into_iter()
+                    .map(|f| index[f])
+                    .collect();
+                (llm_logit(e.llm_score), cols, target(e.rating))
+            })
+            .collect();
+        let n = features.len() + 2;
+        let mut prior = vec![0.0; n];
+        prior[0] = 1.0;
+        let mut theta = prior.clone();
+        let z = |theta: &[f64], (x, cols, _): &(f64, Vec<usize>, f64)| {
+            theta[0] * x + theta[1] + cols.iter().map(|&c| theta[c]).sum::<f64>()
+        };
+        let loss = |theta: &[f64]| {
+            let data: f64 = rows
+                .iter()
+                .map(|row| {
+                    let z = z(theta, row);
+                    // 交差エントロピー：y·log(1+e^-z) + (1-y)·log(1+e^z)
+                    row.2 * softplus(-z) + (1.0 - row.2) * softplus(z)
+                })
+                .sum();
+            let penalty: f64 = theta.iter().zip(&prior).map(|(t, m)| (t - m).powi(2)).sum();
+            data + prior_strength / 2.0 * penalty
+        };
+        for _ in 0..MAX_ITERATIONS {
+            let mut grad: Vec<f64> = theta
+                .iter()
+                .zip(&prior)
+                .map(|(t, m)| prior_strength * (t - m))
+                .collect();
+            let mut hess = vec![vec![0.0; n]; n];
+            for (i, row) in hess.iter_mut().enumerate() {
+                row[i] = prior_strength;
+            }
+            for row in &rows {
+                let p = sigmoid(z(&theta, row));
+                let (x, cols, y) = row;
+                let mut entries: Vec<(usize, f64)> = vec![(0, *x), (1, 1.0)];
+                entries.extend(cols.iter().map(|&c| (c, 1.0)));
+                for &(i, vi) in &entries {
+                    grad[i] += (p - y) * vi;
+                    for &(j, vj) in &entries {
+                        hess[i][j] += p * (1.0 - p) * vi * vj;
+                    }
+                }
+            }
+            let step = solve_spd(hess, &grad);
+            // 損失が減るまで歩幅を半分にする（凸なので必ず減る向き）
+            let before = loss(&theta);
+            let mut scale = 1.0;
+            let next = loop {
+                let next: Vec<f64> = theta
+                    .iter()
+                    .zip(&step)
+                    .map(|(t, s)| t - scale * s)
+                    .collect();
+                if loss(&next) <= before || scale < 1e-8 {
+                    break next;
+                }
+                scale /= 2.0;
+            };
+            let moved = next
+                .iter()
+                .zip(&theta)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f64::max);
+            theta = next;
+            if moved < TOLERANCE {
+                break;
+            }
+        }
+        Self {
+            a: theta[0],
+            b: theta[1],
+            weights: features
+                .into_iter()
+                .cloned()
+                .zip(theta[2..].iter().copied())
+                .collect(),
+        }
+    }
+
+    /// 特徴の重みの和（知らない特徴は 0）。
+    pub fn weight_sum(&self, features: &[Feature]) -> f64 {
+        distinct(features)
+            .into_iter()
+            .filter_map(|f| self.weights.get(f))
+            .sum()
+    }
+
+    /// 推薦点（0〜100）。
+    pub fn score(&self, llm_score: u8, features: &[Feature]) -> u8 {
+        points(sigmoid(
+            self.a * llm_logit(llm_score) + self.b + self.weight_sum(features),
+        ))
+    }
+
+    /// 補正の内訳：特徴ごとに、その特徴が無かったときの推薦点からどれだけ動かしたか（点）。
+    /// 動かしていない特徴は除き、大きく効いたものから並べる。
+    pub fn contributions(&self, llm_score: u8, features: &[Feature]) -> Vec<(Feature, i32)> {
+        let all = i32::from(self.score(llm_score, features));
+        let mut parts: Vec<(Feature, i32)> = distinct(features)
+            .into_iter()
+            .filter(|f| self.weights.contains_key(*f))
+            .map(|f| {
+                let others: Vec<Feature> = features.iter().filter(|g| *g != f).cloned().collect();
+                (f.clone(), all - i32::from(self.score(llm_score, &others)))
+            })
+            .filter(|(_, p)| *p != 0)
+            .collect();
+        parts.sort_by(|a, b| b.1.abs().cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
+        parts
+    }
+}
+
+/// log(1 + e^z) を、z が大きくても溢れないように求める。
+fn softplus(z: f64) -> f64 {
+    if z > 0.0 {
+        z + (-z).exp().ln_1p()
+    } else {
+        z.exp().ln_1p()
+    }
+}
+
+/// 正定値対称行列 `a` について `a·x = b` を、コレスキー分解で解く。
+fn solve_spd(mut a: Vec<Vec<f64>>, b: &[f64]) -> Vec<f64> {
+    let n = b.len();
+    // a を下三角 L（a = L·Lᵀ）で置き換える
+    for j in 0..n {
+        let d = a[j][j] - (0..j).map(|k| a[j][k] * a[j][k]).sum::<f64>();
+        // 正則化で対角は正なので、丸め誤差以外で負にはならない
+        let d = d.max(f64::MIN_POSITIVE).sqrt();
+        a[j][j] = d;
+        for i in j + 1..n {
+            let s = a[i][j] - (0..j).map(|k| a[i][k] * a[j][k]).sum::<f64>();
+            a[i][j] = s / d;
+        }
+    }
+    let mut y = vec![0.0; n];
+    for i in 0..n {
+        y[i] = (b[i] - (0..i).map(|k| a[i][k] * y[k]).sum::<f64>()) / a[i][i];
+    }
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        x[i] = (y[i] - (i + 1..n).map(|k| a[k][i] * x[k]).sum::<f64>()) / a[i][i];
+    }
+    x
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

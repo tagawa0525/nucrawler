@@ -159,7 +159,9 @@ impl Params {
                     .filter(|score| *score <= 100)
                     .ok_or_else(|| SearchError::InvalidScore(v.to_string()))
             })
-            .transpose()?;
+            .transpose()?
+            // 0 は一覧の 00 と同じく点数で絞らない（未採点も出す）
+            .filter(|score| *score > 0);
         let min_rating = given(&self.min_rating)
             .map(|v| {
                 v.parse::<u8>()

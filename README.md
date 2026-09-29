@@ -92,7 +92,7 @@ nucrawler serve [--addr IP:PORT]
 nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N]
 nucrawler topics import FILE | nucrawler topics export
-nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--unread] [--bookmarked] [--min-score N] [--sort newest|score] [--limit N] [語]...
+nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--unread] [--bookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
 ```
 

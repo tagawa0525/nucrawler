@@ -187,6 +187,19 @@ impl Db {
         Ok(latest)
     }
 
+    /// `since` 以降の `backend` の呼び出しで消費した AI Credits の合計（10^-9 クレジット単位）。
+    pub fn credits_since(
+        &self,
+        backend: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<i64, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT coalesce(sum(credits_nano), 0) FROM llm_calls WHERE backend = ?1 AND at >= ?2",
+            [backend, &timestamp(since)],
+            |r| r.get(0),
+        )?)
+    }
+
     /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。
     pub fn llm_succeeded_since(
         &self,
@@ -353,6 +366,45 @@ mod tests {
                 "2026-09-27T01:00:00.000Z|digest|5|1|-|0.5",
                 "2026-09-27T01:05:00.000Z|digest|5|0|timeout|-",
             ]
+        );
+    }
+
+    #[test]
+    fn sums_credits_consumed_since_a_time() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(
+            db.credits_since("copilot-cli", t("2026-09-01T00:00:00Z"))
+                .unwrap(),
+            0
+        );
+        let record_by = |backend: &str, nano_aiu: Option<i64>, at: &str| {
+            let usage = nano_aiu.map(|nano_aiu| crate::llm::Usage::Credits { nano_aiu });
+            db.record_llm_call(
+                &LlmCall {
+                    stage: "title",
+                    backend,
+                    model: "gpt-6-luna",
+                    n_items: 1,
+                    ok: nano_aiu.is_some(),
+                    duration_ms: 1,
+                    error: None,
+                    usage: usage.as_ref(),
+                },
+                t(at),
+            )
+            .unwrap();
+        };
+        let record = |nano_aiu: Option<i64>, at: &str| record_by("copilot-cli", nano_aiu, at);
+        record(Some(900), "2026-08-31T23:59:59Z");
+        // ほかのバックエンドの消費は、その予算に数える（Copilot の予算には数えない）
+        record_by("other-cli", Some(1000), "2026-09-15T00:00:00Z");
+        record(Some(5), "2026-09-01T00:00:00Z");
+        record(None, "2026-09-10T00:00:00Z");
+        record(Some(7), "2026-09-20T00:00:00Z");
+        assert_eq!(
+            db.credits_since("copilot-cli", t("2026-09-01T00:00:00Z"))
+                .unwrap(),
+            12
         );
     }
 

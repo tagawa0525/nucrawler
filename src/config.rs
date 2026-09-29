@@ -33,6 +33,8 @@ pub struct Config {
     pub pipeline: PipelineConfig,
     pub llm: LlmConfig,
     pub quota: crate::quota::QuotaConfig,
+    /// Copilot の AI Credits の月の予算（copilot-cli で呼ぶときに使う）
+    pub copilot_quota: Option<crate::quota::CreditsConfig>,
     pub web: WebConfig,
     pub recommend: RecommendConfig,
 }
@@ -380,6 +382,12 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         .and_then(|()| config.llm.validate())
         .and_then(|()| config.web.validate())
         .and_then(|()| config.recommend.validate())
+        .and_then(|()| {
+            config
+                .copilot_quota
+                .as_ref()
+                .map_or(Ok(()), crate::quota::CreditsConfig::validate)
+        })
         .map_err(|reason| ConfigError::Invalid {
             path: path.to_path_buf(),
             reason,
@@ -545,6 +553,42 @@ mod tests {
             (
                 "[quota]\nslots = [{ start = 1, end = 2, max_five_hour = 1.5 }]\n",
                 "slot",
+            ),
+        ] {
+            let err = parse_config(toml, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains(needle)),
+                "{toml}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_copilot_quota() {
+        assert_eq!(parse_config("", p()).unwrap().copilot_quota, None);
+        let c = parse_config("[copilot_quota]\nmonthly_credits = 1500\n", p()).unwrap();
+        assert_eq!(
+            c.copilot_quota,
+            Some(crate::quota::CreditsConfig {
+                monthly_credits: 1500.0,
+                pace: 0.8,
+            })
+        );
+        // プランで大きく違うので、月のクレジットは省けない
+        assert!(parse_config("[copilot_quota]\npace = 0.5\n", p()).is_err());
+        for (toml, needle) in [
+            ("[copilot_quota]\nmonthly_credits = 0\n", "monthly_credits"),
+            (
+                "[copilot_quota]\nmonthly_credits = nan\n",
+                "monthly_credits",
+            ),
+            (
+                "[copilot_quota]\nmonthly_credits = 1500\npace = 0\n",
+                "pace",
+            ),
+            (
+                "[copilot_quota]\nmonthly_credits = 1500\npace = 1.5\n",
+                "pace",
             ),
         ] {
             let err = parse_config(toml, p()).unwrap_err();

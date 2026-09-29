@@ -170,7 +170,8 @@ pub(super) fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
         min_score: 60,
         since: t("2026-09-20T00:00:00Z"),
         show_all,
-        unread: false,
+        read: None,
+        bookmarked: None,
         limit: 50,
     }
 }

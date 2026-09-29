@@ -19,7 +19,7 @@ pub enum ParseError {
     TopicsUsage,
     #[error(
         "usage: nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... \
-         [--lang en|ja] [--translated] [--min-rating 1-5] [--unread] [--bookmarked] [--unrated] [--min-score N] [--sort newest|score] \
+         [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] \
          [--limit N] [WORD]...  (D: YYYY, YYYY-MM or YYYY-MM-DD)"
     )]
     SearchUsage,
@@ -377,6 +377,15 @@ pub struct SearchArgs {
 }
 
 /// オプション以外の引数は検索語として空白でつなぐ。
+/// 印で絞る条件を付ける。逆の指定が既にあれば誤り（`--read` と `--unread` など）。
+fn set_mark(mark: &mut Option<bool>, on: bool) -> Result<(), ParseError> {
+    if *mark == Some(!on) {
+        return Err(ParseError::SearchUsage);
+    }
+    *mark = Some(on);
+    Ok(())
+}
+
 pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
     fn value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Result<String, ParseError> {
         option_value(it).cloned().ok_or(ParseError::SearchUsage)
@@ -396,8 +405,11 @@ pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
             "--min-score" => params.min_score = value(&mut it)?,
             "--sort" => params.sort = value(&mut it)?,
             "--translated" => params.translated = true,
-            "--unread" => params.unread = true,
-            "--bookmarked" => params.bookmarked = true,
+            // あり・なしは片方だけ（両方の指定は誤り）
+            "--unread" => set_mark(&mut params.read, false)?,
+            "--read" => set_mark(&mut params.read, true)?,
+            "--bookmarked" => set_mark(&mut params.bookmarked, true)?,
+            "--unbookmarked" => set_mark(&mut params.bookmarked, false)?,
             "--unrated" => params.unrated = true,
             "--limit" => {
                 let n = value(&mut it)?
@@ -867,8 +879,8 @@ mod tests {
                     sources: vec!["nra".into()],
                     lang: "ja".into(),
                     translated: true,
-                    unread: true,
-                    bookmarked: true,
+                    read: Some(false),
+                    bookmarked: Some(true),
                     unrated: true,
                     min_rating: "4".into(),
                     min_score: "60".into(),
@@ -877,6 +889,16 @@ mod tests {
                 limit: Some(5),
             }
         );
+        // 既読だけ・ブックマークしていない記事だけ
+        let p = parse_search_args(&["--read".to_string(), "--unbookmarked".to_string()])
+            .unwrap()
+            .params;
+        assert_eq!((p.read, p.bookmarked), (Some(true), Some(false)));
+        // あり・なしを両方指定するのは誤り
+        for pair in [["--read", "--unread"], ["--bookmarked", "--unbookmarked"]] {
+            let args: Vec<String> = pair.iter().map(|a| a.to_string()).collect();
+            assert!(parse_search_args(&args).is_err(), "{pair:?}");
+        }
         assert_eq!(
             parse_search_args(&[]).unwrap(),
             SearchArgs {

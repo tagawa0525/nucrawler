@@ -4,7 +4,8 @@ use super::list::BarView;
 use super::*;
 
 /// 検索の画面の上部のバーが指す検索。点数・評価・既読・ブックマークはバーの条件で、変えるとほかの条件は
-/// そのままに検索し直す。既読は既定で出し（👁 が ON）、OFF で未読だけ（`unread=1`）。評価の ☆ は評価の無い記事だけ。
+/// そのままに検索し直す。👁・🔖 は既定で絞らず、押すたびに 印のある記事だけ（`read=1`・`bookmarked=1`）→
+/// 印の無い記事だけ（`read=0`・`bookmarked=0`）→ 絞らない と切り替える。評価の ☆ は評価の無い記事だけ。
 #[derive(Clone)]
 struct SearchView(Params);
 
@@ -40,10 +41,10 @@ impl BarView for SearchView {
             self.0.min_rating.trim().parse().ok()
         }
     }
-    fn read(&self) -> bool {
-        !self.0.unread
+    fn read(&self) -> Option<bool> {
+        self.0.read
     }
-    fn bookmarked(&self) -> bool {
+    fn bookmarked(&self) -> Option<bool> {
         self.0.bookmarked
     }
     fn with_min(&self, min: u8) -> Self {
@@ -64,10 +65,10 @@ impl BarView for SearchView {
                 .unwrap_or_default();
         })
     }
-    fn with_read(&self, read: bool) -> Self {
-        self.with(|p| p.unread = !read)
+    fn with_read(&self, read: Option<bool>) -> Self {
+        self.with(|p| p.read = read)
     }
-    fn with_bookmarked(&self, bookmarked: bool) -> Self {
+    fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self {
         self.with(|p| p.bookmarked = bookmarked)
     }
     fn min_name(&self) -> &'static str {
@@ -107,18 +108,14 @@ pub fn search_page(
     layout("検索", page, &body)
 }
 
-/// 上部のバーの条件（点数・評価・評価なし・未読・ブックマーク）を、フォームで送るための hidden の入力にする。
+/// 上部のバーの条件（点数・評価・評価なし・既読・ブックマーク）を、フォームで送るための hidden の入力にする。
 fn hidden_bar_conditions(p: &Params) -> String {
-    let flags = [
-        ("unread", p.unread),
-        ("bookmarked", p.bookmarked),
-        ("unrated", p.unrated),
-    ];
+    let marks = [("read", p.read), ("bookmarked", p.bookmarked)];
     let texts = [("min_rating", &p.min_rating), ("min_score", &p.min_score)];
-    flags
+    marks
         .into_iter()
-        .filter(|(_, on)| *on)
-        .map(|(name, _)| (name, "1".to_string()))
+        .filter_map(|(name, v)| v.map(|on| (name, if on { "1" } else { "0" }.to_string())))
+        .chain(p.unrated.then(|| ("unrated", "1".to_string())))
         .chain(
             texts
                 .into_iter()
@@ -275,7 +272,7 @@ mod tests {
         assert!(!html.contains(r#"aria-label="検索""#), "{html}");
         assert!(!html.contains("一覧へ"), "{html}");
         assert!(
-            html.contains(r#"name="rating""#) && html.contains("既読も表示"),
+            html.contains(r#"name="rating""#) && html.contains("既読："),
             "{html}"
         );
     }
@@ -297,7 +294,7 @@ mod tests {
     fn search_bar_holds_the_mark_conditions() {
         let params = Params {
             q: "炉心".into(),
-            unread: true,
+            read: Some(false),
             min_rating: "4".into(),
             min_score: "60".into(),
             ..Params::default()
@@ -309,27 +306,27 @@ mod tests {
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<option value="60" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=4&amp;min_score=60" selected>60</option>"#),
+            bar.contains(r#"<option value="60" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;min_rating=4&amp;min_score=60" selected>60</option>"#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=4" data-closed="00">-</option>"#),
+            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;min_rating=4" data-closed="00">-</option>"#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<option value="3" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;min_rating=3&amp;min_score=60">★3</option>"#),
+            bar.contains(r#"<option value="3" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;min_rating=3&amp;min_score=60">★3</option>"#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;unrated=1&amp;min_score=60">☆</option>"#),
+            bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;unrated=1&amp;min_score=60">☆</option>"#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読も表示：OFF""#),
+            bar.contains(r#"<a class="btn not" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読：未読だけ（押すと絞らない）""#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;unread=1&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマークだけ表示：OFF""#),
+            bar.contains(r#"<a class="btn" href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）""#),
             "{bar}"
         );
         // JavaScript が無いときは、選択を検索の欄で送り、ほかの条件を hidden で送る（選択で置き換わる条件は送らない）
@@ -372,7 +369,7 @@ mod tests {
             .nth(1)
             .unwrap();
         let form = form.split("</form>").next().unwrap();
-        for name in ["unread", "bookmarked", "unrated", "min_rating", "min_score"] {
+        for name in ["read", "bookmarked", "unrated", "min_rating", "min_score"] {
             assert!(
                 !form.contains(&format!(r#"name="{name}" value="1" checked"#))
                     && !form.contains(&format!(r#"<select name="{name}""#))
@@ -380,7 +377,7 @@ mod tests {
                 "{name}: {form}"
             );
         }
-        for (name, value) in [("unread", "1"), ("min_rating", "4"), ("min_score", "60")] {
+        for (name, value) in [("read", "0"), ("min_rating", "4"), ("min_score", "60")] {
             assert!(
                 form.contains(&format!(
                     r#"<input type="hidden" name="{name}" value="{value}">"#
@@ -406,8 +403,8 @@ mod tests {
             topics: vec!["PWR".into()],
             sources: vec!["nra".into()],
             lang: "ja".into(),
-            unread: true,
-            bookmarked: true,
+            read: Some(false),
+            bookmarked: Some(true),
             unrated: true,
             min_rating: "4".into(),
             min_score: "60".into(),
@@ -457,7 +454,7 @@ mod tests {
         assert!(html.contains(r#"name="translated" value="1">"#), "{html}");
         // 未読・ブックマーク・評価・評価なし・最低点はバーの条件で、フォームは hidden で引き継ぐ
         for (name, value) in [
-            ("unread", "1"),
+            ("read", "0"),
             ("bookmarked", "1"),
             ("unrated", "1"),
             ("min_rating", "4"),

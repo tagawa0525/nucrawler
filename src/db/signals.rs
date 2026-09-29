@@ -453,11 +453,22 @@ mod tests {
             found(
                 &db,
                 SearchQuery {
-                    bookmarked: true,
+                    bookmarked: Some(true),
                     ..search_query(&db)
                 }
             ),
             [a]
+        );
+        // ブックマークしていない記事だけ
+        assert!(
+            found(
+                &db,
+                SearchQuery {
+                    bookmarked: Some(false),
+                    ..search_query(&db)
+                }
+            )
+            .is_empty()
         );
         assert!(db.eval_labels(owner).unwrap().is_empty());
         db.set_bookmark(owner, a, false, t("2026-09-27T02:00:00Z"))
@@ -494,7 +505,7 @@ mod tests {
             found(
                 &db,
                 SearchQuery {
-                    unread: true,
+                    read: Some(false),
                     ..search_query(&db)
                 }
             ),

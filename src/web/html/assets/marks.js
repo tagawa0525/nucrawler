@@ -48,13 +48,14 @@
   const shownCards = () => [...document.querySelectorAll(".card[data-id]")].filter((c) => !c.hidden);
   const pressed = (card, selector) =>
     card.querySelector(selector)?.getAttribute("aria-pressed") === "true";
-  // カードの今の印が、欄（.sections）の条件に合うか。既読を隠す一覧（data-hide-read）では未読、
-  // 評価で絞った画面（data-min-rating）ではその評価以上（data-unrated なら評価なし）、ブックマークで絞った画面（data-bookmarked）では
-  // ブックマーク中
+  // 印で絞る条件（data-read・data-bookmarked。1 は印のある記事だけ、0 は無い記事だけ、無ければ絞らない）に合うか
+  const want = (value, on) => value === undefined || (value === "1") === on;
+  // カードの今の印が、欄（.sections）の条件に合うか。既読・ブックマークは data-read・data-bookmarked、
+  // 評価で絞った画面（data-min-rating）ではその評価以上（data-unrated なら評価なし）
   const matches = (card) => {
     const f = card.closest(".sections")?.dataset ?? {};
-    if (f.hideRead && pressed(card, READ)) return false;
-    if (f.bookmarked && !pressed(card, BOOKMARK)) return false;
+    if (!want(f.read, pressed(card, READ))) return false;
+    if (!want(f.bookmarked, pressed(card, BOOKMARK))) return false;
     const rating = card.querySelectorAll(".rating button.on").length;
     if (f.minRating && rating < Number(f.minRating)) return false;
     if (f.unrated && rating > 0) return false;

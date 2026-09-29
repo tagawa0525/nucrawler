@@ -703,7 +703,8 @@ mod tests {
                 min_score: 0,
                 since: now() - Duration::days(7),
                 show_all: true,
-                unread: false,
+                read: None,
+                bookmarked: None,
                 limit: 10,
             })
             .unwrap()[0]

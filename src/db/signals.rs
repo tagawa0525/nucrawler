@@ -441,6 +441,49 @@ mod tests {
         );
     }
 
+    /// 印の読み直し：指定した記事ごとに、評価・ブックマーク・既読を返す（無い記事は返さない）。
+    #[test]
+    fn marks_of_the_given_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let article = |url| scored_article(&db, url, Lang::En, "2026-09-26T00:00:00.000Z", 80);
+        let a = article("https://e.com/a");
+        let b = article("https://e.com/b");
+        let c = article("https://e.com/c");
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_bookmark(owner, b, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let marks = db.marks(owner, &[a, b, 999]).unwrap();
+        assert_eq!(
+            marks,
+            [
+                Marks {
+                    article_id: a,
+                    rating: Rating::new(4),
+                    bookmarked: false,
+                    read: true,
+                },
+                Marks {
+                    article_id: b,
+                    rating: None,
+                    bookmarked: true,
+                    read: false,
+                },
+            ]
+        );
+        assert!(
+            db.marks(owner, &[c]).unwrap()[0]
+                == Marks {
+                    article_id: c,
+                    rating: None,
+                    bookmarked: false,
+                    read: false,
+                }
+        );
+        assert!(db.marks(owner, &[]).unwrap().is_empty());
+    }
+
     /// 検索は、指定した評価以上の記事に絞れる（評価なしは除く）。
     #[test]
     fn search_filters_by_minimum_rating() {

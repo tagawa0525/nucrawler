@@ -70,6 +70,46 @@ mod tests {
     use crate::db::Db;
     use crate::web::server::test_support::*;
 
+    /// 印の読み直し（一覧に戻ったとき）は、指定した記事の評価・ブックマーク・既読だけを返す。
+    /// 閲覧ではないので、訪問も開いたことも記録しない。
+    #[tokio::test]
+    async fn api_marks_returns_only_the_marks() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, _) = seed(&db, "https://e.com/a", "題A");
+        let (b, _) = seed(&db, "https://e.com/b", "題B");
+        db.rate(
+            db.owner_id().unwrap(),
+            a,
+            crate::db::Rating::new(5),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let server = Server::start(db).await;
+        let (status, json) = server
+            .get_json(&format!("/api/marks?ids={a},{b},999"))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            json,
+            serde_json::json!({"marks": [
+                {"id": a, "rating": 5, "bookmarked": false, "read": true},
+                {"id": b, "rating": null, "bookmarked": false, "read": false},
+            ]})
+        );
+        server.assert_no_views();
+        for bad in ["ids=x", "ids=1,,2", "ids=-1"] {
+            let (status, _) = server.get_json(&format!("/api/marks?{bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
+        let many: Vec<String> = (1..=501).map(|i| i.to_string()).collect();
+        let (status, _) = server
+            .get_json(&format!("/api/marks?ids={}", many.join(",")))
+            .await;
+        assert_eq!(status, 400, "too many ids");
+        let (status, json) = server.get_json("/api/marks?ids=").await;
+        assert_eq!((status, json), (200, serde_json::json!({"marks": []})));
+    }
+
     /// API の検索は検索画面と同じ条件で、トピックやソースを繰り返し指定できる。
     #[tokio::test]
     async fn api_search_uses_the_same_conditions() {

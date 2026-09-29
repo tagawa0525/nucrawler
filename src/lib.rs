@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod profile;
 pub mod prompt;
 pub mod quota;
+pub mod recommend;
 pub mod robots;
 pub mod search;
 pub mod source;

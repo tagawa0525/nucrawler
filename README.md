@@ -95,7 +95,8 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
-- 取得（fetch・extract）は 1 つずつ動く。LLM を呼ぶ処理（要約・採点・和訳・見出しの和訳と `redo`・`profile suggest`・
+- 取得（fetch・extract）は 1 つずつ動く。1 つの取得の中では、同じホストへは `http.per_host_delay_secs` の間隔を空けて
+  順に、ホストどうしは並行してアクセスする。LLM を呼ぶ処理（要約・採点・和訳・見出しの和訳と `redo`・`profile suggest`・
   `eval --profile`）は、取得ともほかの LLM の処理とも並行して動く（例：長い `redo digest` の最中でも、和訳の依頼や
   定時の crawl は待たされない）。同じ記事・同じモデルを同時に処理しないよう、処理する記事は DB 上で予約してから扱う。
   クォータの判定は呼び出しのたびに DB の最新の使用率を読むので、ほかの実行の呼び出しも入る（並行している呼び出しの分だけ、

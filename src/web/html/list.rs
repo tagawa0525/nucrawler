@@ -492,18 +492,26 @@ mod tests {
         assert!(!html.contains(" ★4"), "{html}");
         // カードの下は 点数・評価・既読・ブックマーク の順（h で既読、l でブックマーク）。
         // 点数は見出しの左から、この行の先頭に移す
-        let card = html.split(r#"data-id="2""#).nth(1).unwrap();
+        let second = html.split(r#"data-id="2""#).nth(1).unwrap();
         assert!(
-            card.contains(r#"<div class="actions marks"><span class="score">80</span><form method="post" action="/articles/2/rating""#),
-            "{card}"
+            second.contains(r#"<div class="actions marks"><span class="score">80</span><form method="post" action="/articles/2/rating""#),
+            "{second}"
         );
         assert!(
-            card.find("/articles/2/read").unwrap() < card.find("/articles/2/bookmark").unwrap(),
-            "{card}"
+            second.find("/articles/2/read").unwrap() < second.find("/articles/2/bookmark").unwrap(),
+            "{second}"
         );
         assert!(
-            !card.contains(r#"tabindex="0"><span class="score">"#),
-            "{card}"
+            !second.contains(r#"tabindex="0"><span class="score">"#),
+            "{second}"
+        );
+        // 未採点の記事も、点数の場所に数字の無い青い印を置いて並びをそろえる
+        let mut unscored = item(3, "2026-09-27T05:00:00.000Z");
+        unscored.score = None;
+        let html = card(&unscored, true, &Page::default());
+        assert!(
+            html.contains(r#"<div class="actions marks"><span class="score" title="未採点">&nbsp;</span><form"#),
+            "{html}"
         );
     }
 

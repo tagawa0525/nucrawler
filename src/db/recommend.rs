@@ -27,7 +27,7 @@ mod tests {
     /// LLM が「市場」を高く付けても低く評価し、「燃料」を低く付けても高く評価してきた。
     fn rate_training(db: &Db) {
         let owner = db.owner_id().unwrap();
-        for i in 0..5 {
+        for i in 0..10 {
             let market = article_with(db, &format!("https://e.com/m{i}"), 85, &["市場"]);
             db.rate(owner, market, Rating::new(1), t("2026-09-27T00:00:00Z"))
                 .unwrap();

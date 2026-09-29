@@ -805,8 +805,10 @@ mod tests {
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
+        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は LLM の点数から少し下がる
+        assert!(h.score.is_some_and(|s| s < 90), "{h:?}");
         assert_eq!(
-            (h.score, h.title_ja.as_deref(), h.read_at.as_deref()),
+            (h.llm_score, h.title_ja.as_deref(), h.read_at.as_deref()),
             (Some(90), Some("題"), None)
         );
     }

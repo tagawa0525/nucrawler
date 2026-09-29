@@ -147,23 +147,18 @@ fn option(value: &str, target: ListView, selected: bool, label: &str) -> String 
     )
 }
 
-/// 表示する最低点の選択。「-」（0。点数で絞らない、すべて）と、10〜90 の 10 刻みと既定・今の最低点から選び、
-/// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。「-」以外のあいだは緑にする。
+/// 表示する最低点の選択。0〜90 の 10 刻みと既定・今の最低点から選び、選ぶとすぐ表示を切り替える
+/// （JavaScript が無ければ「表示」のボタンで）。00（0）は点数で絞らない（すべて）で、それ以外のあいだは緑にする。
 fn min_select(view: ListView) -> String {
-    let mut values: Vec<u8> = (MIN_STEP..100).step_by(MIN_STEP.into()).collect();
+    let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend([view.default_min, view.min]);
-    values.retain(|v| *v != 0);
     values.sort_unstable();
     values.dedup();
-    let options: String = std::iter::once(0)
-        .chain(values)
+    let options: String = values
+        .into_iter()
         .map(|v| {
-            // 桁をそろえる（1 桁は 0 を付ける）
-            let label = if v == 0 {
-                "-".to_string()
-            } else {
-                format!("{v:02}")
-            };
+            // 桁をそろえる（0 は 00）
+            let label = format!("{v:02}");
             option(
                 &v.to_string(),
                 ListView { min: v, ..view },
@@ -181,12 +176,13 @@ fn min_select(view: ListView) -> String {
     )
 }
 
-/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」は絞らない、白抜きの「☆」は評価の無い記事だけ。
-/// 最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。「-」以外のあいだは緑にする。
+/// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。数字の無い「★」は絞らない、白抜きの「☆」は
+/// 評価の無い記事だけ。最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。
+/// 「★」以外のあいだは緑にする。
 /// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、絞り込みの中ならほかの条件も引き継ぐ）。
 fn rating_select(view: ListView) -> String {
     let choices = [
-        (None, "-"),
+        (None, "★"),
         (Some(0), "☆"),
         (Some(1), "★1"),
         (Some(2), "★2"),
@@ -659,7 +655,7 @@ mod tests {
             html.contains(r#"<a class="btn" href="/search" aria-label="検索" title="検索">🔍</a>"#),
             "{html}"
         );
-        // 選ぶと、その選択の正規の URL へ移る。「-」は絞らない（すべて）で、絞っているあいだは緑
+        // 選ぶと、その選択の正規の URL へ移る。00 は絞らない（すべて）で、絞っているあいだは緑
         assert!(
             html.contains(
                 r#"<form class="min" method="get" action="/"><select name="min" aria-label="表示する最低点" title="表示する最低点" onchange="location.href=this.selectedOptions[0].dataset.href">"#
@@ -783,7 +779,7 @@ mod tests {
         rated.rating = Rating::new(4);
         let html = filtered_page(&[rated], view, &Page::default());
         assert!(!html.contains(r#"action="/search""#), "{html}");
-        // 最低点も絞れる（既定は「-」で絞らない）。👁 は既読も絞れる（OFF にすると `read=0`）
+        // 最低点も絞れる（既定は 00 で絞らない）。👁 は既読も絞れる（OFF にすると `read=0`）
         assert!(
             html.contains(r#"<option value="0" data-href="/?rating=4" selected>00</option>"#),
             "{html}"
@@ -922,8 +918,8 @@ mod tests {
         assert!(!stars.contains(r#"name="read""#), "{stars}");
     }
 
-    /// 「☆」は評価の無い記事だけに絞る（「-」は評価で絞らない）。絞り込みの中では最低点を引き継ぎ、
-    /// 一覧と行き来するときは最低点も行き先の既定に戻す（一覧は設定の最低点、絞り込みは「-」）。
+    /// 「☆」は評価の無い記事だけに絞る（数字の無い「★」は評価で絞らない）。絞り込みの中では最低点を引き継ぎ、
+    /// 一覧と行き来するときは最低点も行き先の既定に戻す（一覧は設定の最低点、絞り込みは 00）。
     #[test]
     fn rating_select_offers_unrated_and_resets_the_score_across_modes() {
         let unrated = ListView {

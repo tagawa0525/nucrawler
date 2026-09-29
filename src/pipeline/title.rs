@@ -259,7 +259,7 @@ mod tests {
                 .iter()
                 .map(|&id| serde_json::json!({"id": id, "title_ja": format!("見出し{id}")}))
                 .collect::<Vec<_>>()}),
-            rate_limit: None,
+            usage: None,
         })
     }
 
@@ -408,13 +408,13 @@ mod tests {
                 ok: true,
                 duration_ms: 1,
                 error: None,
-                rate_limit: Some(&crate::llm::RateLimit {
+                usage: Some(&crate::llm::Usage::Subscription(crate::llm::RateLimit {
                     five_hour: Some(crate::llm::Window {
                         utilization: 0.5,
                         resets_at: late.timestamp() + 3600,
                     }),
                     seven_day: None,
-                }),
+                })),
             },
             now(),
         )

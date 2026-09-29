@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 
-use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Window};
+use super::{Llm, LlmError, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
     pub command: PathBuf,
@@ -111,7 +111,10 @@ impl Llm for ClaudeCli {
             }),
             parsed => {
                 let (output, rate_limit) = parsed?;
-                Ok(LlmResponse { output, rate_limit })
+                Ok(LlmResponse {
+                    output,
+                    usage: rate_limit.map(Usage::Subscription),
+                })
             }
         }
     }
@@ -346,7 +349,7 @@ mod tests {
         let schema = serde_json::json!({"type": "object"});
         let resp = cli.call(request(&schema)).await.unwrap();
         assert_eq!(resp.output["items"][0]["id"], 1);
-        assert!(resp.rate_limit.is_some());
+        assert!(resp.usage.is_some());
 
         let args: Vec<String> = std::fs::read_to_string(cwd.join("args.txt"))
             .unwrap()
@@ -401,7 +404,7 @@ mod tests {
         let schema = serde_json::json!({});
         let resp = cli.call(request(&schema)).await.unwrap();
         assert_eq!(resp.output["items"][0]["id"], 1);
-        assert!(resp.rate_limit.is_some());
+        assert!(resp.usage.is_some());
     }
 
     #[tokio::test]

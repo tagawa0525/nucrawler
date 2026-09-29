@@ -423,7 +423,7 @@ mod tests {
                 "implications_ja": "", "lwr_relevant": true,
                 "topics": ["規制・審査"], "new_topics": [],
             }]}),
-            rate_limit: None,
+            usage: None,
         })
     }
 
@@ -432,7 +432,7 @@ mod tests {
             output: serde_json::json!({"items": [{
                 "id": id, "score": 80, "reason": "理由", "matched": ["燃料"], "excluded": [],
             }]}),
-            rate_limit: None,
+            usage: None,
         })
     }
 

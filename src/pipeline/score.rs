@@ -343,7 +343,7 @@ mod tests {
                     "id": id, "score": s, "reason": "理由", "matched": ["燃料"], "excluded": [],
                 })
             }).collect::<Vec<_>>()}),
-            rate_limit: None,
+            usage: None,
         })
     }
 

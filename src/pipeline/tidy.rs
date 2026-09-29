@@ -176,7 +176,7 @@ mod tests {
                 .iter()
                 .map(|(from, into)| serde_json::json!({"from": from, "into": into, "reason": "同じ意味"}))
                 .collect::<Vec<_>>()}),
-            rate_limit: None,
+            usage: None,
         })
     }
 
@@ -286,7 +286,7 @@ mod tests {
         propose(&db, "新設炉");
         let llm = FakeLlm::new([Ok(LlmResponse {
             output: serde_json::json!({"unexpected": true}),
-            rate_limit: None,
+            usage: None,
         })]);
         let summary = run(&db, &llm, &mut quota(10), true).await;
         assert_eq!(summary.merged, 0);

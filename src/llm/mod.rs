@@ -17,7 +17,23 @@ pub struct LlmRequest<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmResponse {
     pub output: serde_json::Value,
-    pub rate_limit: Option<RateLimit>,
+    pub usage: Option<Usage>,
+}
+
+/// 呼び出しで分かった使用量。バックエンドによって分かるものが違う。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Usage {
+    /// サブスクリプションの枠の使用率（claude-cli）
+    Subscription(RateLimit),
+}
+
+impl Usage {
+    /// サブスクリプションの枠の使用率（それ以外の使用量なら `None`）
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        match self {
+            Usage::Subscription(r) => Some(*r),
+        }
+    }
 }
 
 /// サブスクリプションの使用率（0〜1、超えることもある）とリセット時刻（UNIX 秒）。

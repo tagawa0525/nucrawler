@@ -399,7 +399,7 @@ mod tests {
     fn ok(body_ja: &str) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
             output: serde_json::json!({"body_ja": body_ja}),
-            rate_limit: None,
+            usage: None,
         })
     }
 

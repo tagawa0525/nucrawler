@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use super::{Cancel, Halt};
 use crate::db::{Db, DbError, LlmCall, StageKey};
 use crate::errors;
-use crate::llm::{Llm, LlmError, LlmRequest, LlmResponse};
+use crate::llm::{Llm, LlmError, LlmRequest, LlmResponse, Usage};
 use crate::quota::Quota;
 
 pub enum Outcome {
@@ -191,12 +191,15 @@ pub async fn call_recorded<L: Llm>(
         return Ok(Outcome::Cancelled);
     }
     // 上限で拒否されたときも、そのときの使用率を残して次回の判定に使う。
-    let rate_limit = match &result {
-        Ok(response) => response.rate_limit,
-        Err(LlmError::RateLimited { rate_limit, .. }) => *rate_limit,
+    let usage = match &result {
+        Ok(response) => response.usage,
+        Err(LlmError::RateLimited { rate_limit, .. }) => rate_limit.map(Usage::Subscription),
         Err(_) => None,
     };
-    shared.quota.borrow_mut().observe(rate_limit);
+    shared
+        .quota
+        .borrow_mut()
+        .observe(usage.and_then(|u| u.rate_limit()));
     let error = result.as_ref().err().map(|e| errors::error_chain(e));
     db.record_llm_call(
         &LlmCall {
@@ -207,7 +210,7 @@ pub async fn call_recorded<L: Llm>(
             ok: result.is_ok(),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             error: error.as_deref(),
-            rate_limit: rate_limit.as_ref(),
+            usage: usage.as_ref(),
         },
         at,
     )?;

@@ -1287,6 +1287,58 @@ mod tests {
     }
 
     /// 検索は一覧の既定で隠す記事（非軽水炉・未採点・閾値未満）も含め、点数ではなく新しい順に並べる。
+    fn add_title(db: &Db, article_id: i64, title_ja: &str) {
+        db.insert_artifact(
+            &NewArtifact {
+                article_id,
+                kind: ArtifactKind::Title,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({ "title_ja": title_ja }),
+                inputs: &[],
+                glossary_at: None,
+            },
+            t("2026-09-26T03:00:00Z"),
+        )
+        .unwrap();
+    }
+
+    /// 要約の無い記事は見出しの和訳を見出しに使い、要約ができれば要約の見出しを使う。
+    /// 見出しの和訳も検索に当たる。
+    #[test]
+    fn titles_fall_back_to_the_title_translation() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let only_title = dated_article(&db, "https://e.com/t", "IAEA News", "2026-09-20T00:00:00Z");
+        add_title(&db, only_title, "見出しの和訳");
+        let digested = dated_article(&db, "https://e.com/d", "WNN", "2026-09-19T00:00:00Z");
+        add_title(&db, digested, "先に訳した見出し");
+        add_digest(
+            &db,
+            digested,
+            "sonnet",
+            "要約の見出し",
+            false,
+            "2026-09-27T00:00:00Z",
+        );
+        let items = db.search_articles(&search_query(&db)).unwrap();
+        let title_of = |id| {
+            items
+                .iter()
+                .find(|i| i.article_id == id)
+                .and_then(|i| i.title_ja.clone())
+        };
+        assert_eq!(title_of(only_title).as_deref(), Some("見出しの和訳"));
+        assert_eq!(title_of(digested).as_deref(), Some("要約の見出し"));
+        let detail = db
+            .article_detail(owner, Some("h1"), only_title)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.item.title_ja.as_deref(), Some("見出しの和訳"));
+        assert_eq!(search_ids(&db, &["見出しの和訳"]), [only_title]);
+    }
+
     #[test]
     fn search_includes_hidden_articles_newest_first() {
         let db = Db::open_in_memory().unwrap();

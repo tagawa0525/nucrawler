@@ -657,6 +657,36 @@ mod tests {
         );
     }
 
+    /// 要約の無い記事は、受付箱でも見出しの和訳を見出しに使う。
+    #[test]
+    fn reports_use_the_title_translation_without_a_digest() {
+        let db = Db::open_in_memory().unwrap();
+        let a = db
+            .insert_article(&article("https://e.com/a"))
+            .unwrap()
+            .unwrap();
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Title,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({ "title_ja": "見出しの和訳" }),
+                inputs: &[],
+                glossary_at: None,
+            },
+            t("2026-09-26T00:00:00Z"),
+        )
+        .unwrap();
+        report(&db, a, "給油停止", "2026-09-27T00:00:00Z");
+        let owner = db.owner_id().unwrap();
+        assert_eq!(
+            db.reports(owner, &ReportFilter::default()).unwrap()[0].article_title,
+            "見出しの和訳"
+        );
+    }
+
     /// 対応日時は状況を変えたときだけ進み、ひとことや訳語だけを直しても変わらない。
     #[test]
     fn term_report_resolution_time_moves_only_with_the_status() {

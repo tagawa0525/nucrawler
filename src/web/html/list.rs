@@ -454,6 +454,9 @@ mod tests {
             &Page::default(),
         );
         assert!(html.contains("<h2>確認枠</h2>"), "{html}");
+        // 確認枠は評価を集めるためのもの。見送り（今は既読の印）では集まらない
+        assert!(html.contains("開いて ★ で評価してください"), "{html}");
+        assert!(!html.contains("見送"), "{html}");
         assert!(html.contains("無作為"), "{html}");
         // 他のカードと同じく振り分けられる
         assert!(html.contains("data-id=\"9\""), "{html}");

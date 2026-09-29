@@ -28,11 +28,7 @@ pub(crate) async fn redo(
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.clone());
-    let mut quota = Quota::new(
-        config.quota.clone(),
-        db.latest_rate_limit()?,
-        args.max_llm_calls,
-    );
+    let mut quota = Quota::new(config.quota.clone(), None, args.max_llm_calls);
     let report = run::redo(
         RunEnv {
             db: &db,

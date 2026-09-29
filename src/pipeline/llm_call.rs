@@ -79,7 +79,7 @@ pub fn permit(
     now: DateTime<Utc>,
     reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
-    quota.observe(db.latest_rate_limit()?);
+    quota.observe(db.latest_rate_limit(now)?);
     Ok(quota.permit_reserving(now, reserve))
 }
 

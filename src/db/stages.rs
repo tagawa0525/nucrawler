@@ -159,18 +159,23 @@ impl Db {
     }
 
     /// 最後に記録された使用率（無ければ `None`）。
-    pub fn latest_rate_limit(&self) -> Result<Option<crate::llm::RateLimit>, DbError> {
-        use rusqlite::OptionalExtension;
-        let json: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT rate_limit FROM llm_calls WHERE rate_limit IS NOT NULL
-                 ORDER BY id DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+    /// ほかの実行を含めた最新の使用率。呼び出しは並行して終わる順が前後するので、最後の行ではなく、
+    /// 枠ごとにリセット時刻が最も新しい枠の最も高い使用率を使う（`RateLimit::merge`）。週次枠より
+    /// 古い観測は期限を過ぎているので、`now` から 8 日分だけを見る。
+    pub fn latest_rate_limit(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<crate::llm::RateLimit>, DbError> {
+        let since = timestamp(now - chrono::Duration::days(8));
+        let mut stmt = self.conn.prepare(
+            "SELECT rate_limit FROM llm_calls WHERE rate_limit IS NOT NULL AND at >= ?1",
+        )?;
+        let mut latest: Option<crate::llm::RateLimit> = None;
+        for json in stmt.query_map([since], |r| r.get::<_, String>(0))? {
+            let observed: crate::llm::RateLimit = serde_json::from_str(&json?)?;
+            latest = Some(latest.map_or(observed, |l| l.merge(observed)));
+        }
+        Ok(latest)
     }
 
     /// `since` 以降に、そのステージの LLM の呼び出しが成功したか。

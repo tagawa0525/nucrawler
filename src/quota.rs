@@ -228,14 +228,10 @@ impl Quota {
 
     /// ほかの実行を含めて分かった最新の使用率（DB の最新の llm_calls）を取り込む。LLM を呼ぶ実行は
     /// 並行して動くので、判定の前に読んで、ほかの実行の呼び出しも判定に入れる。
+    /// 並行した呼び出しの結果は順が前後するので、同じ枠の中では使用率を下げない（`RateLimit::merge`）。
     pub fn observe(&mut self, usage: Option<RateLimit>) {
-        // 含まれない枠は、それまでの値を残す。
         if let Some(new) = usage {
-            let old = self.usage.unwrap_or_default();
-            self.usage = Some(RateLimit {
-                five_hour: new.five_hour.or(old.five_hour),
-                seven_day: new.seven_day.or(old.seven_day),
-            });
+            self.usage = Some(self.usage.unwrap_or_default().merge(new));
         }
     }
 

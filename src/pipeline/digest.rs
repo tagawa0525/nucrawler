@@ -620,7 +620,7 @@ mod tests {
         );
         // 拒否されたときの使用率も記録し、次回の判定に使えるようにする
         assert_eq!(
-            db.latest_rate_limit()
+            db.latest_rate_limit(now())
                 .unwrap()
                 .and_then(|r| r.five_hour)
                 .map(|w| w.utilization),

@@ -75,7 +75,7 @@ async fn score_candidate(
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.to_path_buf());
-    let mut quota = Quota::new(config.quota.clone(), db.latest_rate_limit()?, max_llm_calls);
+    let mut quota = Quota::new(config.quota.clone(), None, max_llm_calls);
     let articles: Vec<i64> = db
         .eval_labels(db.owner_id()?)?
         .iter()

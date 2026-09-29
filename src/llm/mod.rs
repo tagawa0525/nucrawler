@@ -33,6 +33,30 @@ pub struct RateLimit {
     pub seven_day: Option<Window>,
 }
 
+impl RateLimit {
+    /// 2 つの観測を合わせる。並行した呼び出しの結果は順が前後するので、枠ごとに、リセット時刻が
+    /// 新しい方を使い、同じ枠なら使用率の高い方を使う（同じ枠の中で使用率は下がらない）。
+    /// どちらかに無い枠は、ある方を使う。順によらず同じ結果になる。
+    pub fn merge(self, other: RateLimit) -> RateLimit {
+        RateLimit {
+            five_hour: Window::merge(self.five_hour, other.five_hour),
+            seven_day: Window::merge(self.seven_day, other.seven_day),
+        }
+    }
+}
+
+impl Window {
+    fn merge(a: Option<Window>, b: Option<Window>) -> Option<Window> {
+        match (a, b) {
+            (Some(a), Some(b)) if a.resets_at != b.resets_at => {
+                Some(if a.resets_at > b.resets_at { a } else { b })
+            }
+            (Some(a), Some(b)) => Some(if a.utilization >= b.utilization { a } else { b }),
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     #[error("failed to run {command}")]

@@ -922,6 +922,18 @@ mod tests {
         assert_eq!(item.locked_by, ["日本原子力学会"]);
     }
 
+    /// 原文へ移るときは、記事の URL だけを読む（無い記事は None）。
+    #[test]
+    fn article_url_reads_only_the_url() {
+        let db = Db::open_in_memory().unwrap();
+        let id = page_article(&db, "https://e.com/a?x=1", "2026-09-26T00:00:00.000Z");
+        assert_eq!(
+            db.article_url(id).unwrap().as_deref(),
+            Some("https://e.com/a?x=1")
+        );
+        assert_eq!(db.article_url(id + 1).unwrap(), None);
+    }
+
     #[test]
     fn article_detail_lists_viewable_versions_newest_first() {
         let db = Db::open_in_memory().unwrap();

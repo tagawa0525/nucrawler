@@ -41,7 +41,8 @@ pub struct Config {
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecommendConfig {
-    /// 補正の正則化の強さ。大きいほど LLM の点数に近いまま（評価が多くないと補正が効かない）
+    /// 補正の正則化の強さ。特徴ごとの「中立の仮の評価の件数」にあたり、ある特徴に同じ傾向の評価がこの件数ほど
+    /// 付くと、補正がおよそ半分の強さまで効く。大きいほど LLM の点数に近いまま
     pub prior_strength: f64,
 }
 
@@ -61,7 +62,7 @@ impl RecommendConfig {
 impl Default for RecommendConfig {
     fn default() -> Self {
         Self {
-            prior_strength: 1.0,
+            prior_strength: 5.0,
         }
     }
 }

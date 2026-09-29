@@ -1,8 +1,10 @@
 //! 推薦点：LLM の点数に、利用者の評価から学んだ補正を足した点数（計画 004）。
 //!
-//! 記事ごとに `z = a·x + b + Σ w_f`（x は LLM 点の logit、f は記事の特徴）を求め、`100·σ(z)` を推薦点にする。
-//! 評価 1〜5 を 0〜1 に写した値を目標に、交差エントロピーと L2 の正則化で a・b・w を学ぶ。正則化は
-//! 今の振る舞い（a = 1、b = 0、w = 0：推薦点 = LLM 点）を中心に置くので、評価が少ないうちは補正が小さい。
+//! 記事ごとに `z = x + Σ w_f`（x は LLM 点の logit、f は記事の特徴）を求め、`100·σ(z)` を推薦点にする。
+//! 評価 1〜5 を 0〜1 に写した値を目標に、交差エントロピーと L2 の正則化で特徴ごとの重み w を学ぶ。正則化は
+//! 今の振る舞い（w = 0：推薦点 = LLM 点）を中心に置くので、評価が少ないうちは補正が小さい。
+//! 全記事に効く係数（LLM 点の傾きや全体のずれ）は学ばない。学ぶと評価 1 件で全記事の点数が動いてしまい、
+//! 評価した記事と特徴を共有しない記事まで補正されるため。
 //! I/O を持たない。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,10 +42,6 @@ pub struct Example {
 /// 補正のモデル。`weights` に無い特徴は 0（効かない）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
-    /// LLM 点の logit の係数
-    pub a: f64,
-    /// 切片
-    pub b: f64,
     pub weights: BTreeMap<Feature, f64>,
 }
 
@@ -83,8 +81,6 @@ impl Model {
     /// 今の振る舞い（推薦点 = LLM 点）。
     pub fn identity() -> Self {
         Self {
-            a: 1.0,
-            b: 0.0,
             weights: BTreeMap::new(),
         }
     }
@@ -102,12 +98,9 @@ impl Model {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let index: BTreeMap<&Feature, usize> = features
-            .iter()
-            .enumerate()
-            .map(|(i, f)| (*f, i + 2))
-            .collect();
-        // 1 件ごとの、値が 1 の列（0 は a の列で x、1 は b の列で 1）
+        let index: BTreeMap<&Feature, usize> =
+            features.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+        // 1 件ごとの (LLM 点の logit, 値が 1 の特徴の列, 目標)
         let rows: Vec<(f64, Vec<usize>, f64)> = examples
             .iter()
             .map(|e| {
@@ -118,12 +111,11 @@ impl Model {
                 (llm_logit(e.llm_score), cols, target(e.rating))
             })
             .collect();
-        let n = features.len() + 2;
-        let mut prior = vec![0.0; n];
-        prior[0] = 1.0;
-        let mut theta = prior.clone();
+        let n = features.len();
+        // 事前の中心は w = 0（推薦点 = LLM 点）
+        let mut theta = vec![0.0; n];
         let z = |theta: &[f64], (x, cols, _): &(f64, Vec<usize>, f64)| {
-            theta[0] * x + theta[1] + cols.iter().map(|&c| theta[c]).sum::<f64>()
+            x + cols.iter().map(|&c| theta[c]).sum::<f64>()
         };
         let loss = |theta: &[f64]| {
             let data: f64 = rows
@@ -134,28 +126,22 @@ impl Model {
                     row.2 * softplus(-z) + (1.0 - row.2) * softplus(z)
                 })
                 .sum();
-            let penalty: f64 = theta.iter().zip(&prior).map(|(t, m)| (t - m).powi(2)).sum();
+            let penalty: f64 = theta.iter().map(|t| t.powi(2)).sum();
             data + prior_strength / 2.0 * penalty
         };
         for _ in 0..MAX_ITERATIONS {
-            let mut grad: Vec<f64> = theta
-                .iter()
-                .zip(&prior)
-                .map(|(t, m)| prior_strength * (t - m))
-                .collect();
+            let mut grad: Vec<f64> = theta.iter().map(|t| prior_strength * t).collect();
             let mut hess = vec![vec![0.0; n]; n];
             for (i, row) in hess.iter_mut().enumerate() {
                 row[i] = prior_strength;
             }
             for row in &rows {
                 let p = sigmoid(z(&theta, row));
-                let (x, cols, y) = row;
-                let mut entries: Vec<(usize, f64)> = vec![(0, *x), (1, 1.0)];
-                entries.extend(cols.iter().map(|&c| (c, 1.0)));
-                for &(i, vi) in &entries {
-                    grad[i] += (p - y) * vi;
-                    for &(j, vj) in &entries {
-                        hess[i][j] += p * (1.0 - p) * vi * vj;
+                let (_, cols, y) = row;
+                for &i in cols {
+                    grad[i] += p - y;
+                    for &j in cols {
+                        hess[i][j] += p * (1.0 - p);
                     }
                 }
             }
@@ -185,13 +171,7 @@ impl Model {
             }
         }
         Self {
-            a: theta[0],
-            b: theta[1],
-            weights: features
-                .into_iter()
-                .cloned()
-                .zip(theta[2..].iter().copied())
-                .collect(),
+            weights: features.into_iter().cloned().zip(theta).collect(),
         }
     }
 
@@ -205,9 +185,7 @@ impl Model {
 
     /// 推薦点（0〜100）。
     pub fn score(&self, llm_score: u8, features: &[Feature]) -> u8 {
-        points(sigmoid(
-            self.a * llm_logit(llm_score) + self.b + self.weight_sum(features),
-        ))
+        points(sigmoid(llm_logit(llm_score) + self.weight_sum(features)))
     }
 
     /// 補正の内訳：特徴ごとに、その特徴が無かったときの推薦点からどれだけ動かしたか（点）。

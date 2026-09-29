@@ -347,16 +347,18 @@ mod tests {
         assert!(html.contains(r#"action="/articles/7/rating""#), "{html}");
         assert!(
             html.contains(
-                r#"<button name="value" value="3" title="3 どちらでもない" class="on">★</button>"#
+                r#"<button name="value" value="3" aria-label="3 どちらでもない" title="3 どちらでもない" class="on">★</button>"#
             ),
             "{html}"
         );
         assert!(
-            html.contains(r#"<button name="value" value="" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
+            html.contains(r#"<button name="value" value="" aria-label="4 読んでよかった（押すと評価なし）" title="4 読んでよかった（押すと評価なし）" class="on">★</button>"#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<button name="value" value="5" title="5 必読">☆</button>"#),
+            html.contains(
+                r#"<button name="value" value="5" aria-label="5 必読" title="5 必読">☆</button>"#
+            ),
             "{html}"
         );
         assert!(!html.contains("👍") && !html.contains("👎"), "{html}");

@@ -134,13 +134,15 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
                 crate::jst::format_local(at),
             )
         }
-        Warning::LlmFailed { error, at, .. } => {
-            // 認証切れは利用者にしか直せないので、対処を案内する
+        Warning::LlmFailed { error, backend, at } => {
+            // 認証切れは利用者にしか直せないので、失敗したバックエンドに合わせて対処を案内する
             let lower = error.to_lowercase();
-            let hint = if lower.contains("logged in") || lower.contains("authenticat") {
-                "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
-            } else {
+            let hint = if !(lower.contains("logged in") || lower.contains("authenticat")) {
                 ""
+            } else if backend == crate::llm::copilot_cli::BACKEND {
+                "（copilot の認証が切れているようです。端末で copilot login を実行してログインしてください）"
+            } else {
+                "（claude の認証が切れているようです。端末で claude を起動してログインしてください）"
             };
             format!(
                 "<div class=\"warn\">⚠ 要約・採点・和訳が失敗しています（{}）：{}{hint}</div>",

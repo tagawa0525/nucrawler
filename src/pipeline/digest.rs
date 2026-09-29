@@ -108,6 +108,10 @@ pub async fn digest_articles<L: Llm>(
                     break;
                 }
             };
+            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+            if shared.stopped() {
+                break;
+            }
             if let Err(stop) = permit(db, &shared, clock(), llm_cfg.score_reserved_calls)? {
                 tracing::info!("digest stops: {stop}");
                 summary.halted = Some(Halt::Quota(stop));

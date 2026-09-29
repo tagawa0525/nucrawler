@@ -86,6 +86,10 @@ pub async fn translate_titles<L: Llm>(
                     break;
                 }
             };
+            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+            if shared.stopped() {
+                break;
+            }
             if let Err(stop) = permit(db, &shared, clock(), 0)? {
                 tracing::info!("title stops: {stop}");
                 summary.halted = Some(Halt::Quota(stop));

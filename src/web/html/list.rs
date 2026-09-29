@@ -628,19 +628,26 @@ mod tests {
             html.contains(r#"<a class="btn" href="/search" aria-label="検索" title="検索">🔍</a>"#),
             "{html}"
         );
+        // 選ぶと、その選択の正規の URL へ移る。「-」は絞らない（すべて）で、絞っているあいだは緑
         assert!(
             html.contains(
-                r#"<form class="min" method="get" action="/"><select name="min" aria-label="表示する最低点" title="表示する最低点" onchange="this.form.submit()">"#
+                r#"<form class="min" method="get" action="/"><select name="min" aria-label="表示する最低点" title="表示する最低点" onchange="location.href=this.selectedOptions[0].dataset.href">"#
             ),
             "{html}"
         );
         assert!(
-            // 数字の桁をそろえるため、0 は 00 と書く
-            html.contains(r#"<option value="0" selected>00</option>"#),
+            html.contains(r#"<option value="0" data-href="/?min=0" selected>-</option>"#),
             "{html}"
         );
-        assert!(html.contains(r#"<option value="50">50</option>"#), "{html}");
-        assert!(html.contains(r#"<option value="90">90</option>"#), "{html}");
+        assert!(!html.contains(">00<"), "{html}");
+        assert!(
+            html.contains(r#"<option value="50" data-href="/">50</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="90" data-href="/?min=90">90</option>"#),
+            "{html}"
+        );
         assert!(!html.contains(r#"<option value="100">"#), "{html}");
         assert!(
             html.contains(
@@ -694,7 +701,11 @@ mod tests {
         let at = |v: &str| html.find(&format!(r#"<option value="{v}""#)).unwrap();
         assert!(at("50") < at("55") && at("55") < at("60"), "{html}");
         assert!(
-            html.contains(r#"<option value="55" selected>55</option>"#),
+            html.contains(r#"<option value="55" data-href="/" selected>55</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form class="min on" method="get" action="/">"#),
             "{html}"
         );
         assert!(!html.contains(r#"name="read""#), "{html}");
@@ -706,14 +717,16 @@ mod tests {
     #[test]
     fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
         assert!(
-            STYLE.contains(".btn.on, .marks button[aria-pressed=true], .bar .stars.on select {"),
+            STYLE.contains(
+                ".btn.on, .marks button[aria-pressed=true], .bar .stars.on select, .bar .min.on select {"
+            ),
             "{STYLE}"
         );
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>☆</option><option value="1">★1</option><option value="2">★2</option><option value="3">★3</option><option value="4">★4</option><option value="5">★5</option></select>"#
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" selected>-</option><option value="0" data-href="/?rating=0">☆</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option></select>"#
             ),
             "{html}"
         );
@@ -731,6 +744,7 @@ mod tests {
     fn filtered_page_shows_the_bar_and_the_matches() {
         // 絞り込んだ画面の既定は、既読も出す
         let view = ListView {
+            min: 0,
             rating: Some(4),
             read: true,
             ..ListView::default()
@@ -739,8 +753,15 @@ mod tests {
         rated.rating = Rating::new(4);
         let html = filtered_page(&[rated], view, &Page::default());
         assert!(!html.contains(r#"action="/search""#), "{html}");
-        // 最低点は効かないので出さない。👁 は既読も絞れる（OFF にすると `read=0`）
-        assert!(!html.contains(r#"name="min""#), "{html}");
+        // 最低点も絞れる（既定は「-」で絞らない）。👁 は既読も絞れる（OFF にすると `read=0`）
+        assert!(
+            html.contains(r#"<option value="0" data-href="/?rating=4" selected>-</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<option value="60" data-href="/?min=60&amp;rating=4">60</option>"#),
+            "{html}"
+        );
         assert!(
             html.contains(
                 r#"<a class="btn on" href="/?rating=4&amp;read=0" aria-label="既読も表示：ON" title="既読も表示：ON">"#
@@ -752,7 +773,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<option value="4" selected>★4</option>"#),
+            html.contains(r#"<option value="4" data-href="/?rating=4" selected>★4</option>"#),
             "{html}"
         );
         assert!(
@@ -779,6 +800,7 @@ mod tests {
         );
 
         let view = ListView {
+            min: 0,
             rating: Some(4),
             bookmarked: true,
             read: true,
@@ -806,6 +828,7 @@ mod tests {
         );
         assert!(html.contains("該当する記事はありません"), "{html}");
         let view = ListView {
+            min: 0,
             bookmarked: true,
             read: true,
             ..ListView::default()
@@ -818,6 +841,7 @@ mod tests {
 
         // 👁 を OFF にした絞り込みは、既読を隠し（その場でも隠す）、絞り込みを変えても OFF を引き継ぐ
         let view = ListView {
+            min: 0,
             rating: Some(4),
             ..ListView::default()
         };
@@ -844,6 +868,7 @@ mod tests {
         );
         // 一覧と絞り込みを行き来するときは、👁 を行き先の既定に戻す（一覧は OFF、絞り込みは ON）
         let bookmark_off = ListView {
+            min: 0,
             bookmarked: true,
             ..ListView::default()
         };
@@ -865,6 +890,58 @@ mod tests {
         let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
         let stars = stars.split("</form>").next().unwrap();
         assert!(!stars.contains(r#"name="read""#), "{stars}");
+    }
+
+    /// 「☆」は評価の無い記事だけに絞る（「-」は評価で絞らない）。絞り込みの中では最低点を引き継ぎ、
+    /// 一覧と行き来するときは最低点も行き先の既定に戻す（一覧は設定の最低点、絞り込みは「-」）。
+    #[test]
+    fn rating_select_offers_unrated_and_resets_the_score_across_modes() {
+        let unrated = ListView {
+            min: 0,
+            read: true,
+            rating: Some(0),
+            ..ListView::default()
+        };
+        let html = filtered_page(
+            &[item(4, "2026-09-27T05:00:00.000Z")],
+            unrated,
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<option value="0" data-href="/?rating=0" selected>☆</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-unrated="1">"#),
+            "{html}"
+        );
+        assert!(html.contains("f.unrated"), "{html}");
+        let scored = ListView { min: 60, ..unrated };
+        let html = filtered_page(&[], scored, &Page::default());
+        // 絞り込みの中では最低点を引き継ぐ
+        assert!(
+            html.contains(r#"<option value="3" data-href="/?min=60&amp;rating=3">★3</option>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form class="min on" method="get" action="/">"#),
+            "{html}"
+        );
+        // 一覧へ戻ると、最低点は設定の最低点に戻る
+        assert!(
+            html.contains(r#"<option value="" data-href="/">-</option>"#),
+            "{html}"
+        );
+        // 一覧から絞り込みへ移ると、最低点は「-」になる
+        let list = ListView {
+            min: 30,
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], list, &Page::default());
+        assert!(
+            html.contains(r#"<option value="4" data-href="/?rating=4">★4</option>"#),
+            "{html}"
+        );
     }
 
     #[test]

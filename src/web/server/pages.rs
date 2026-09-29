@@ -423,7 +423,7 @@ mod tests {
         );
         assert_eq!(html.matches("四十点").count(), 1, "{html}");
         assert!(
-            html.contains(r#"<option value="30" selected>30</option>"#),
+            html.contains(r#"<option value="30" data-href="/?min=30" selected>30</option>"#),
             "{html}"
         );
         let (_, html) = server.get("/?min=0").await;
@@ -652,12 +652,21 @@ mod tests {
             ("/?min=50", "/"),
             ("/?read=1&min=30", "/?min=30&read=1"),
             ("/?rating=4&read=1", "/?rating=4"),
+            // 絞り込みの最低点の既定は 0（「-」）
+            ("/?rating=4&min=0", "/?rating=4"),
+            ("/?rating=4&min=60", "/?min=60&rating=4"),
         ] {
             let res = server.get_raw(from).await;
             assert_eq!(res.status().as_u16(), 303, "{from}");
             assert_eq!(res.headers()["location"], to, "{from}");
         }
-        for canonical in ["/", "/?min=30&read=1", "/?rating=4&read=0&bookmarked=1"] {
+        for canonical in [
+            "/",
+            "/?min=0",
+            "/?min=30&read=1",
+            "/?rating=4&read=0&bookmarked=1",
+            "/?rating=0",
+        ] {
             assert_eq!(
                 server.get_raw(canonical).await.status().as_u16(),
                 200,
@@ -832,6 +841,35 @@ mod tests {
         assert!(html.contains("見出しA"), "{html}");
         let (_, html) = server.get("/?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");
+    }
+
+    /// 絞り込みの「☆」（`rating=0`）は評価の無い記事だけ、最低点（`min`）は絞り込みの中でも効く（既定は絞らない）。
+    #[tokio::test]
+    async fn filtered_list_takes_unrated_and_the_minimum_score() {
+        let db = Db::open_in_memory().unwrap();
+        let (low, digest) = seed(&db, "https://e.com/low", "低い点");
+        score(&db, digest, 20);
+        let (high, digest) = seed(&db, "https://e.com/high", "高い点");
+        score(&db, digest, 80);
+        seed(&db, "https://e.com/none", "評価なし");
+        let server = Server::start(db).await;
+        for id in [low, high] {
+            server
+                .post(&format!("/articles/{id}/rating"), "value=4")
+                .await;
+        }
+        let (_, html) = server.get("/?rating=4").await;
+        assert!(html.contains("低い点") && html.contains("高い点"), "{html}");
+        let (_, html) = server.get("/?min=60&rating=4").await;
+        assert!(
+            !html.contains("低い点") && html.contains("高い点"),
+            "{html}"
+        );
+        let (_, html) = server.get("/?rating=0").await;
+        assert!(
+            html.contains("評価なし") && !html.contains("低い点") && !html.contains("高い点"),
+            "{html}"
+        );
     }
 
     /// 👍（`rating=N`）と 🔖（`bookmarked=1`）の絞り込みは、一覧の期間・最低点・既読によらず全期間から探す。

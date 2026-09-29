@@ -52,7 +52,8 @@ pub(super) struct MarksParams {
     ids: String,
 }
 
-/// 一度に読み直せる印の件数の上限（一覧の件数 `web.list_limit` の既定 200 より多めに取る）
+/// 一度に読み直せる印の件数の上限（一覧の件数 `web.list_limit` の既定 200 より多めに取る）。
+/// 画面の側（marks.js の MAX_MARK_IDS）は、これを超える件数を分けて問い合わせる
 const MAX_MARK_IDS: usize = 500;
 
 /// 記事の印（評価・ブックマーク・既読）。`ids` はカンマ区切りの記事の ID。一覧に戻ったときの読み直しに使い、
@@ -148,6 +149,16 @@ mod tests {
         assert_eq!(status, 400, "too many ids");
         let (status, json) = server.get_json("/api/marks?ids=").await;
         assert_eq!((status, json), (200, serde_json::json!({"marks": []})));
+    }
+
+    /// 画面の側は、受付の上限を超える件数を分けて問い合わせる（上限を揃えておく）。
+    #[test]
+    fn the_script_batches_marks_by_the_same_limit() {
+        let script = include_str!("../html/assets/marks.js");
+        assert!(
+            script.contains(&format!("const MAX_MARK_IDS = {};", super::MAX_MARK_IDS)),
+            "{script}"
+        );
     }
 
     /// API の検索は検索画面と同じ条件で、トピックやソースを繰り返し指定できる。

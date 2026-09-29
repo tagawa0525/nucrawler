@@ -273,4 +273,22 @@ mod tests {
             .unwrap();
         assert_eq!(items.iter().map(|i| i.article_id).collect::<Vec<_>>(), [a]);
     }
+
+    /// 延長できるのは自分の予約だけ。期限が切れてほかの実行に取り直された記事は、延長できない
+    /// （その結果は保存しない）。
+    #[test]
+    fn renew_keeps_only_claims_still_held() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        let held = db
+            .claim(KEY, &[a, b], t("2026-09-27T00:00:00Z"), ttl())
+            .unwrap();
+        let later = t("2026-09-27T00:10:00Z");
+        let _successor = db.claim(KEY, &[b], later, ttl()).unwrap();
+        assert_eq!(held.renew(later, ttl()).unwrap(), [a]);
+        // 延長した予約は、延長した時刻から期限まで取られない
+        let still = t("2026-09-27T00:19:59Z");
+        assert!(db.claim(KEY, &[a], still, ttl()).unwrap().ids().is_empty());
+    }
 }

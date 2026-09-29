@@ -1024,4 +1024,45 @@ mod tests {
         .unwrap();
         assert_eq!((summary.digested, summary.calls), (1, 1));
     }
+
+    /// 呼び出しの最中に予約の期限が切れ、ほかの実行に取り直されたら、その記事の結果は保存しない。
+    #[tokio::test]
+    async fn drops_results_for_claims_taken_over_meanwhile() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-digest-lost-claim",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 2);
+        let lost = ids[0];
+        let llm = FakeLlm::with_hook([ok(&ids, 0.1)], move |_| {
+            Db::open(&path)
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE work_claims SET token = 'other', expires_at = '9999-01-01T00:00:00.000Z'
+                     WHERE article_id = ?1",
+                    [lost],
+                )
+                .unwrap();
+        });
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.digested, 1);
+        assert_eq!(
+            db.query_i64(&format!(
+                "SELECT count(*) FROM artifacts WHERE kind = 'digest' AND article_id = {lost}"
+            ))
+            .unwrap(),
+            0
+        );
+        // 取り直した実行の予約は残す
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM work_claims WHERE token = 'other'")
+                .unwrap(),
+            1
+        );
+    }
 }

@@ -646,6 +646,8 @@ mod tests {
             )),
             1
         );
+        // 原文を開いても既読は変えない（既読は詳細の既読だけ）
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 0);
         assert_eq!(server.get("/articles/999/source").await.0, 404);
     }
 

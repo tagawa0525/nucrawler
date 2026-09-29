@@ -332,6 +332,10 @@ mod tests {
             90,
         );
         assert_eq!(item(&db, a).read_at, None);
+        // 原文を開いても既読にはしない（既読は詳細の既読だけ）
+        db.record_open(owner, a, OpenKind::Source, t("2026-09-26T12:00:00Z"))
+            .unwrap();
+        assert_eq!(item(&db, a).read_at, None);
         db.record_open(owner, a, OpenKind::Detail, t("2026-09-27T00:00:00Z"))
             .unwrap();
         db.record_open(owner, a, OpenKind::Translation, t("2026-09-27T01:00:00Z"))
@@ -345,7 +349,12 @@ mod tests {
         assert_eq!(
             db.query_strings("SELECT kind FROM events ORDER BY id")
                 .unwrap(),
-            ["open_detail", "open_translation", "open_source"]
+            [
+                "open_source",
+                "open_detail",
+                "open_translation",
+                "open_source"
+            ]
         );
     }
 

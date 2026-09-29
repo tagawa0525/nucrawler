@@ -127,20 +127,42 @@ impl<L: Llm> LlmSet for L {
 
 /// 設定の工程ごとのバックエンド（`llm.backend`・`llm.*_backend`）。claude と copilot の両方を持ち、
 /// 工程に応じて返す（使わない方は呼ばないので、作るだけなら費用は無い）。
-pub struct Backends;
+pub struct Backends {
+    claude: Backend,
+    copilot: Backend,
+    config: crate::config::LlmConfig,
+}
 
 impl Backends {
     /// 作業ディレクトリは `llm-cwd`、呼び出しの枠は `data` に置き、バックエンドによらず同じ場所で数える。
-    pub fn from_config(_c: &crate::config::LlmConfig, _data: &std::path::Path) -> Self {
-        todo!()
+    pub fn from_config(c: &crate::config::LlmConfig, data: &std::path::Path) -> Self {
+        let cwd = data.join("llm-cwd");
+        let slots = data.to_path_buf();
+        Self {
+            claude: Backend::Claude(claude_cli::ClaudeCli::from_config(
+                c,
+                cwd.clone(),
+                slots.clone(),
+            )),
+            copilot: Backend::Copilot(copilot_cli::CopilotCli::from_config(
+                c,
+                cwd,
+                data.join("copilot-home"),
+                slots,
+            )),
+            config: c.clone(),
+        }
     }
 }
 
 impl LlmSet for Backends {
     type Llm = Backend;
 
-    fn for_task(&self, _task: crate::config::LlmTask) -> &Backend {
-        todo!()
+    fn for_task(&self, task: crate::config::LlmTask) -> &Backend {
+        match self.config.backend_for(task) {
+            crate::config::LlmBackend::ClaudeCli => &self.claude,
+            crate::config::LlmBackend::CopilotCli => &self.copilot,
+        }
     }
 }
 
@@ -148,23 +170,6 @@ impl LlmSet for Backends {
 pub enum Backend {
     Claude(claude_cli::ClaudeCli),
     Copilot(copilot_cli::CopilotCli),
-}
-
-impl Backend {
-    /// 設定のバックエンドを、データディレクトリ `data` の下を作業場所にして作る。
-    /// 作業ディレクトリは `llm-cwd`、呼び出しの枠は `data` に置き、バックエンドによらず同じ場所で数える。
-    pub fn from_config(c: &crate::config::LlmConfig, data: &std::path::Path) -> Self {
-        let cwd = data.join("llm-cwd");
-        let slots = data.to_path_buf();
-        match c.backend {
-            crate::config::LlmBackend::ClaudeCli => {
-                Self::Claude(claude_cli::ClaudeCli::from_config(c, cwd, slots))
-            }
-            crate::config::LlmBackend::CopilotCli => Self::Copilot(
-                copilot_cli::CopilotCli::from_config(c, cwd, data.join("copilot-home"), slots),
-            ),
-        }
-    }
 }
 
 impl Llm for Backend {

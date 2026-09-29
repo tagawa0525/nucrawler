@@ -6,7 +6,7 @@ use nucrawler::cli;
 use nucrawler::config;
 use nucrawler::db::Db;
 use nucrawler::http::Fetcher;
-use nucrawler::llm::Backend;
+use nucrawler::llm::Backends;
 use nucrawler::pipeline::lock::{self, Lock, LockError, LockKind};
 use nucrawler::pipeline::run::{self, CrawlOptions, RunEnv, RunReport};
 use nucrawler::pipeline::{self, Cancel, Stage};
@@ -31,7 +31,7 @@ pub(crate) async fn crawl(
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let fetcher = Fetcher::from_config(&config.http)?;
-    let llm = Backend::from_config(&config.llm, &data);
+    let llm = Backends::from_config(&config.llm, &data);
     // クォータと報告（LLM が使えないことを含む）は実行全体で 1 つにし、ロックの単位をまたいで
     // 引き継ぐ（呼び出し回数の上限と、LLM の失敗の後に後続の LLM ステージを呼ばないことが効くように）。
     // 使用率は判定のたびに DB から読むので、ここでは読まない

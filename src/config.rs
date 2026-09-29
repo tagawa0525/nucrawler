@@ -93,6 +93,16 @@ pub enum LlmTask {
     Tidy,
 }
 
+impl LlmTask {
+    pub const ALL: [LlmTask; 5] = [
+        LlmTask::Digest,
+        LlmTask::Score,
+        LlmTask::Translate,
+        LlmTask::Title,
+        LlmTask::Tidy,
+    ];
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
@@ -143,13 +153,28 @@ pub struct LlmConfig {
 
 impl LlmConfig {
     /// バックエンドの実行ファイル。
-    pub fn command_for(&self, _backend: LlmBackend) -> &str {
-        todo!()
+    pub fn command_for(&self, backend: LlmBackend) -> &str {
+        match backend {
+            LlmBackend::ClaudeCli => self.command.as_deref().unwrap_or("claude"),
+            LlmBackend::CopilotCli => self.copilot_command.as_deref().unwrap_or("copilot"),
+        }
     }
 
     /// 工程のバックエンド（工程ごとの指定が無ければ `backend`）。
-    pub fn backend_for(&self, _task: LlmTask) -> LlmBackend {
-        todo!()
+    pub fn backend_for(&self, task: LlmTask) -> LlmBackend {
+        match task {
+            LlmTask::Digest => self.digest_backend,
+            LlmTask::Score => self.score_backend,
+            LlmTask::Translate => self.translate_backend,
+            LlmTask::Title => self.title_backend,
+            LlmTask::Tidy => self.tidy_backend,
+        }
+        .unwrap_or(self.backend)
+    }
+
+    /// どれかの工程が `backend` を使うか。
+    pub fn uses(&self, backend: LlmBackend) -> bool {
+        LlmTask::ALL.iter().any(|&t| self.backend_for(t) == backend)
     }
 
     /// 0 だと処理が黙って何もしなくなる値を拒否する。
@@ -440,10 +465,12 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         })
         .and_then(|()| {
             // 使用率を返さない Copilot は、月の予算が無いと止める基準が無い
-            if config.llm.backend == LlmBackend::CopilotCli && config.copilot_quota.is_none() {
-                Err("llm.backend = \"copilot-cli\" needs [copilot_quota] \
-                     (monthly_credits of the Copilot plan)"
-                    .into())
+            if config.llm.uses(LlmBackend::CopilotCli) && config.copilot_quota.is_none() {
+                Err(
+                    "a stage runs on copilot-cli (llm.backend or llm.*_backend) and needs \
+                     [copilot_quota] (monthly_credits of the Copilot plan)"
+                        .into(),
+                )
             } else {
                 Ok(())
             }

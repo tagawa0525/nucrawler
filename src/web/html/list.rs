@@ -699,15 +699,20 @@ mod tests {
         assert!(!html.contains(r#"name="read""#), "{html}");
     }
 
-    /// 👍 は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
-    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示し、評価の星と同じ色の枠にする。
+    /// 評価の選択は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
+    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示す。並びは最低点と同じく小さい順で、
+    /// 最低点と同じく「以上」の印（↑）は付けない。絞っているときは切り替えの ON と同じ緑にする。
     #[test]
     fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
+        assert!(
+            STYLE.contains(".btn.on, .marks button[aria-pressed=true], .bar .stars.on select {"),
+            "{STYLE}"
+        );
         let html = list_page(&[], &[], ListView::default(), &Page::default());
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>☆</option><option value="5">★5</option><option value="4">★4↑</option><option value="3">★3↑</option><option value="2">★2↑</option><option value="1">★1↑</option></select>"#
+                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="this.form.submit()"><option value="" selected>☆</option><option value="1">★1</option><option value="2">★2</option><option value="3">★3</option><option value="4">★4</option><option value="5">★5</option></select>"#
             ),
             "{html}"
         );
@@ -746,7 +751,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<option value="4" selected>★4↑</option>"#),
+            html.contains(r#"<option value="4" selected>★4</option>"#),
             "{html}"
         );
         assert!(

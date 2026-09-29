@@ -63,6 +63,8 @@
     busy.delete(form);
     if (!ok) {
       notify("記録できませんでした");
+      // 送れたか分からないので、印を今の状態に合わせ直す（押した印は読み直しで上書きされなくなっているため）
+      resync();
       return;
     }
     if (form.classList.contains("rating")) {

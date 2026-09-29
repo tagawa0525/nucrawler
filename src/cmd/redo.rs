@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use nucrawler::cli::RedoArgs;
 use nucrawler::config;
 use nucrawler::db::Db;
-use nucrawler::llm::Backend;
+use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
@@ -27,7 +27,7 @@ pub(crate) async fn redo(
     let db = Db::open(&data.join("nucrawler.db"))?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    let llm = Backend::from_config(&config.llm, &data);
+    let llm = Backends::from_config(&config.llm, &data);
     let mut quota = Quota::from_config(&config, args.max_llm_calls);
     let report = run::redo(
         RunEnv {

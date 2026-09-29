@@ -116,7 +116,13 @@ pub async fn digest_articles<L: Llm>(
             if shared.stopped() {
                 break;
             }
-            if let Err(stop) = permit(db, &shared, clock(), llm_cfg.score_reserved_calls)? {
+            if let Err(stop) = permit(
+                db,
+                &shared,
+                llm.backend(),
+                clock(),
+                llm_cfg.score_reserved_calls,
+            )? {
                 tracing::info!("digest stops: {stop}");
                 summary.halted = Some(Halt::Quota(stop));
                 break;
@@ -659,7 +665,10 @@ mod tests {
             summary.halted,
             Some(Halt::Quota(Stop::Reserved { reserved: 1 }))
         );
-        assert!(q.permit(now()).is_ok(), "one call is left for scoring");
+        assert!(
+            q.permit("fake", now()).is_ok(),
+            "one call is left for scoring"
+        );
     }
 
     #[tokio::test]

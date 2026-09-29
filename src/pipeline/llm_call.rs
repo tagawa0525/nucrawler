@@ -106,16 +106,17 @@ pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 pub fn permit(
     db: &Db,
     shared: &Shared<'_>,
+    backend: &str,
     now: DateTime<Utc>,
     reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
     let mut quota = shared.quota.borrow_mut();
-    if let Some(backend) = quota.credits_backend() {
+    if quota.credits_backend() == Some(backend) {
         quota.observe_credits(db.credits_since(backend, crate::quota::month_start(now))?);
     } else {
         quota.observe(db.latest_rate_limit(now)?);
     }
-    Ok(quota.permit_reserving(now, reserve))
+    Ok(quota.permit_reserving(backend, now, reserve))
 }
 
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。
@@ -310,10 +311,10 @@ mod tests {
         };
         let mut quota = Quota::with_credits(QuotaConfig::default(), credits, "copilot-cli", None);
         let shared = Shared::new(&mut quota);
-        assert_eq!(permit(&db, &shared, now, 0).unwrap(), Ok(()));
+        assert_eq!(permit(&db, &shared, "copilot-cli", now, 0).unwrap(), Ok(()));
         record(NANO, "2026-09-15T00:00:00Z");
         assert!(matches!(
-            permit(&db, &shared, now, 0).unwrap(),
+            permit(&db, &shared, "copilot-cli", now, 0).unwrap(),
             Err(crate::quota::Stop::MonthlyCredits { .. })
         ));
     }

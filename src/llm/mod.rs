@@ -109,27 +109,67 @@ pub enum LlmError {
     NoStructuredOutput,
 }
 
-/// 設定で選んだバックエンド（`llm.backend`）。
-pub enum Backend {
-    Claude(claude_cli::ClaudeCli),
-    Copilot(copilot_cli::CopilotCli),
+/// 工程ごとの LLM。工程によってバックエンドを変えられる。
+pub trait LlmSet {
+    type Llm: Llm;
+
+    fn for_task(&self, task: crate::config::LlmTask) -> &Self::Llm;
 }
 
-impl Backend {
-    /// 設定のバックエンドを、データディレクトリ `data` の下を作業場所にして作る。
+/// 1 つの LLM は、どの工程にも自分を使う。
+impl<L: Llm> LlmSet for L {
+    type Llm = L;
+
+    fn for_task(&self, _: crate::config::LlmTask) -> &L {
+        self
+    }
+}
+
+/// 設定の工程ごとのバックエンド（`llm.backend`・`llm.*_backend`）。claude と copilot の両方を持ち、
+/// 工程に応じて返す（使わない方は呼ばないので、作るだけなら費用は無い）。
+pub struct Backends {
+    claude: Backend,
+    copilot: Backend,
+    config: crate::config::LlmConfig,
+}
+
+impl Backends {
     /// 作業ディレクトリは `llm-cwd`、呼び出しの枠は `data` に置き、バックエンドによらず同じ場所で数える。
     pub fn from_config(c: &crate::config::LlmConfig, data: &std::path::Path) -> Self {
         let cwd = data.join("llm-cwd");
         let slots = data.to_path_buf();
-        match c.backend {
-            crate::config::LlmBackend::ClaudeCli => {
-                Self::Claude(claude_cli::ClaudeCli::from_config(c, cwd, slots))
-            }
-            crate::config::LlmBackend::CopilotCli => Self::Copilot(
-                copilot_cli::CopilotCli::from_config(c, cwd, data.join("copilot-home"), slots),
-            ),
+        Self {
+            claude: Backend::Claude(claude_cli::ClaudeCli::from_config(
+                c,
+                cwd.clone(),
+                slots.clone(),
+            )),
+            copilot: Backend::Copilot(copilot_cli::CopilotCli::from_config(
+                c,
+                cwd,
+                data.join("copilot-home"),
+                slots,
+            )),
+            config: c.clone(),
         }
     }
+}
+
+impl LlmSet for Backends {
+    type Llm = Backend;
+
+    fn for_task(&self, task: crate::config::LlmTask) -> &Backend {
+        match self.config.backend_for(task) {
+            crate::config::LlmBackend::ClaudeCli => &self.claude,
+            crate::config::LlmBackend::CopilotCli => &self.copilot,
+        }
+    }
+}
+
+/// claude か copilot のバックエンド。
+pub enum Backend {
+    Claude(claude_cli::ClaudeCli),
+    Copilot(copilot_cli::CopilotCli),
 }
 
 impl Llm for Backend {
@@ -222,6 +262,8 @@ pub mod fake {
         delay: std::time::Duration,
         /// いま応答を待っている呼び出しの数と、その最大
         in_flight: Mutex<(usize, usize)>,
+        /// `backend()` の名前（省けば "fake"）。工程ごとにバックエンドを変える場合を作るのに使う
+        name: Option<&'static str>,
     }
 
     impl FakeLlm {
@@ -240,6 +282,7 @@ pub mod fake {
                 responder: None,
                 delay: std::time::Duration::ZERO,
                 in_flight: Mutex::default(),
+                name: None,
             }
         }
 
@@ -286,6 +329,14 @@ pub mod fake {
             }
         }
 
+        /// `backend()` の名前を変える。
+        pub fn named(self, name: &'static str) -> Self {
+            Self {
+                name: Some(name),
+                ..self
+            }
+        }
+
         /// 同時に応答を待った呼び出しの数の最大
         pub fn max_in_flight(&self) -> usize {
             self.in_flight.lock().unwrap().1
@@ -300,7 +351,7 @@ pub mod fake {
         type Slot = ();
 
         fn backend(&self) -> &'static str {
-            "fake"
+            self.name.unwrap_or("fake")
         }
 
         async fn reserve(&self) -> Result<(), LlmError> {
@@ -360,29 +411,28 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LlmBackend, LlmConfig};
+    use crate::config::{LlmBackend, LlmConfig, LlmTask};
 
     #[test]
-    fn builds_the_configured_backend() {
+    fn builds_backends_per_task() {
         let data = std::path::Path::new("/data");
-        let claude = Backend::from_config(&LlmConfig::default(), data);
-        assert_eq!(claude.backend(), "claude-cli");
-        let Backend::Claude(c) = &claude else {
-            panic!("expected claude");
-        };
-        assert_eq!(c.command, std::path::PathBuf::from("claude"));
-        assert_eq!(c.cwd, data.join("llm-cwd"));
-
-        let copilot = Backend::from_config(
+        let backends = Backends::from_config(
             &LlmConfig {
                 backend: LlmBackend::CopilotCli,
+                score_backend: Some(LlmBackend::ClaudeCli),
+                command: Some("/opt/claude".into()),
                 ..LlmConfig::default()
             },
             data,
         );
-        assert_eq!(copilot.backend(), "copilot-cli");
-        let Backend::Copilot(c) = &copilot else {
-            panic!("expected copilot");
+        let Backend::Claude(c) = backends.for_task(LlmTask::Score) else {
+            panic!("score runs on claude");
+        };
+        assert_eq!(c.command, std::path::PathBuf::from("/opt/claude"));
+        assert_eq!(c.cwd, data.join("llm-cwd"));
+        assert_eq!(c.slots, data);
+        let Backend::Copilot(c) = backends.for_task(LlmTask::Digest) else {
+            panic!("digest runs on copilot");
         };
         assert_eq!(c.command, std::path::PathBuf::from("copilot"));
         assert_eq!(c.cwd, data.join("llm-cwd"));
@@ -390,5 +440,10 @@ mod tests {
         // 呼び出しの枠はバックエンドによらず同じ場所で数える
         assert_eq!(c.slots, data);
         assert_eq!(c.timeout, std::time::Duration::from_secs(300));
+        assert_eq!(
+            backends.for_task(LlmTask::Translate).backend(),
+            "copilot-cli"
+        );
+        assert_eq!(backends.for_task(LlmTask::Score).backend(), "claude-cli");
     }
 }

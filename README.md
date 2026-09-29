@@ -4,7 +4,8 @@
 スマホから Tailscale 経由で読むための Web UI を持つ。
 
 - 要約・採点・和訳は Claude Code の headless 実行（`claude -p`）で行い、サブスクリプションの枠内に収める
-  （`llm.backend = "copilot-cli"` にすると GitHub Copilot CLI（`copilot`）で行い、AI Credits の枠を使う）
+  （`llm.backend = "copilot-cli"` にすると GitHub Copilot CLI（`copilot`）で行い、AI Credits の枠を使う。
+  `llm.score_backend` などで工程ごとに選べ、採点だけ Claude のまま、ほかを Copilot にするといった使い分けもできる）
 - 5 時間枠と週次枠の使用率を見て、時間帯ごとの上限を超えないように止まる（`config.toml` の `[quota]`）。
   Copilot では、今月の消費クレジットを月の経過に合わせた上限までに抑える（`[copilot_quota]`）
 - 処理はステージ（取得 → 本文抽出 → 要約 → 採点 → 和訳 → 見出しの和訳）ごとに成果物の有無で進み、中断しても次回は続きから再開する
@@ -62,7 +63,7 @@ users.users.<name>.linger = true;
 
 1. `claude` にログインしておく（`claude` を一度起動する）。unit は利用者のプロファイルの `claude` を使う。
    別の場所にあるなら `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す。
-   `llm.backend = "copilot-cli"` なら、代わりに `copilot login` でログインしておく
+   Copilot を使う工程があれば、`copilot login` でもログインしておく
 2. 関心プロファイルを用意して取り込む。パッケージに入っている例をコピーして編集するとよい
 
    ```sh

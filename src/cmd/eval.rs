@@ -7,7 +7,7 @@ use nucrawler::cli::EvalArgs;
 use nucrawler::config;
 use nucrawler::db::Db;
 use nucrawler::eval;
-use nucrawler::llm::Backend;
+use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
@@ -75,7 +75,7 @@ async fn score_candidate(
 ) -> Result<(), Error> {
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    let llm = Backend::from_config(&config.llm, data);
+    let llm = Backends::from_config(&config.llm, data);
     let mut quota = Quota::from_config(config, max_llm_calls);
     let articles: Vec<i64> = db
         .eval_labels(db.owner_id()?)?

@@ -43,7 +43,8 @@ pub struct RunEnv<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
-    /// ステージを始めるたびに今の時刻を読む（テストでは固定する）
+    /// ステージを始めるたびに今の時刻を読む。ステージの中でも、クォータの判定・作業の予約と延長・
+    /// 呼び出しの記録のたびに読む（`LlmStage::clock`。テストでは固定する）
     pub clock: &'a dyn Fn() -> DateTime<Utc>,
 }
 

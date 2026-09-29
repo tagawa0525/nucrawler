@@ -27,8 +27,8 @@ pub struct LlmStage<'a, L> {
     pub llm: &'a L,
     pub quota: &'a mut Quota,
     pub cancel: &'a Cancel,
-    /// 作業を予約するときに今の時刻を読む（ステージの `now` は開始時の時刻のまま進まないが、予約の
-    /// 期限は実際の時刻で決める。テストでは固定する）
+    /// クォータの判定・作業の予約と延長・呼び出しの記録のたびに今の時刻を読む（ステージの `now` は
+    /// 開始時の時刻のまま進まないが、これらは実際の時刻で決める。テストでは固定する）
     pub clock: &'a dyn Fn() -> DateTime<Utc>,
 }
 

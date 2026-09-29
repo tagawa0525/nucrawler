@@ -6,6 +6,7 @@ pub mod digest;
 pub mod score;
 pub mod suggest;
 pub mod tidy;
+pub mod title;
 pub mod translate;
 
 /// 資料中の `<` をすべて `&lt;` にする。`<article>` や `<signal>` などの区切りを、大文字小文字や

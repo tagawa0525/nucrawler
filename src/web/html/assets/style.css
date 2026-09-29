@@ -34,7 +34,6 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .card[data-dir=read] { box-shadow: inset -5px 0 #b3261e; }
 .toast { position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%); background: #1d1d1b;
   color: #fff; padding: 0.6rem 0.9rem; border-radius: 0.5rem; font-size: 0.9rem; }
-.toast button { margin-left: 0.8rem; background: none; border: 0; color: #9cc3ff; font-size: 0.9rem; }
 .translation p { line-height: 1.7; }
 .comments { margin-top: 1.5rem; }
 .comment { border-left: 3px solid #ddd; padding-left: 0.6rem; margin: 0.5rem 0; }
@@ -62,5 +61,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .term form, .add form { display: inline-block; margin: 0.2rem 0.5rem 0.2rem 0; }
 .term form:first-of-type, .add form { display: block; }
 .term button, .add button { font-size: 1rem; padding: 0.3rem 0.9rem; }
+.card .marks { margin-top: 0.3rem; }
+.card .marks button { font-size: 1rem; padding: 0.2rem 0.55rem; margin: 0.1rem; }
 .actions .rating button { padding: 0.4rem 0.15rem; border: none; background: none; color: #999; }
 .actions .rating button.on { background: none; color: #d08a00; }

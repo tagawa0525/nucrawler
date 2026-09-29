@@ -1,5 +1,5 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。
-//! JavaScript は一覧のスワイプ（`SWIPE_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
+//! JavaScript は一覧の印の付け外し（`MARKS_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）に
 //! だけ使い、無くても読める。
 
 use crate::db::{

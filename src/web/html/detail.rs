@@ -79,7 +79,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    body.push_str(&feedback_forms(id, i.rating, i.bookmarked));
+    body.push_str(&super::list::marks(i));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -227,41 +227,6 @@ fn report_summary(r: &Report) -> String {
             escape(r.note.as_deref().unwrap_or_default())
         ),
     }
-}
-
-/// 評価（1〜5 の星）とブックマーク。今の評価までの星を塗り、今の評価の星を押すと評価なしに戻る。
-/// 星は記号だけなので、段階の意味を読み上げの名前（aria-label）にも付ける。
-/// ブックマーク済みなら、同じボタンで外す。
-fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String {
-    let stars: String = Rating::all()
-        .map(|r| {
-            let on = current.is_some_and(|c| r <= c);
-            let (value, title) = if current == Some(r) {
-                (
-                    String::new(),
-                    format!("{} {}（押すと評価なし）", r.get(), r.meaning()),
-                )
-            } else {
-                (r.get().to_string(), format!("{} {}", r.get(), r.meaning()))
-            };
-            format!(
-                "<button name=\"value\" value=\"{value}\" aria-label=\"{title}\" title=\"{title}\"{}>{}</button>",
-                if on { " class=\"on\"" } else { "" },
-                if on { '★' } else { '☆' }
-            )
-        })
-        .collect();
-    // 押すと、今の印の逆にする
-    let bookmark = format!(
-        "<form method=\"post\" action=\"/articles/{id}/bookmark\">\
-         <button name=\"on\" value=\"{}\"{}>🔖</button></form>",
-        if bookmarked { "0" } else { "1" },
-        if bookmarked { " class=\"on\"" } else { "" }
-    );
-    format!(
-        "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
-         {stars}</form>{bookmark}</div>"
-    )
 }
 
 fn translation_section(d: &ArticleDetail, view: DetailView) -> String {

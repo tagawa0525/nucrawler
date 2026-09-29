@@ -249,6 +249,25 @@ mod tests {
         );
     }
 
+    /// 条件をクエリ文字列に戻す（検索の画面のバーの行き先）。空の条件は付けず、読み直すと同じ条件になる。
+    #[test]
+    fn writes_params_back_to_a_query_string() {
+        let p = Params {
+            q: "炉心 NRC".into(),
+            topics: vec!["燃料".into(), "PWR".into()],
+            unread: true,
+            min_rating: "4".into(),
+            min_score: "60".into(),
+            ..Params::default()
+        };
+        assert_eq!(
+            p.query_string(),
+            "q=%E7%82%89%E5%BF%83+NRC&topic=%E7%87%83%E6%96%99&topic=PWR&unread=1&min_rating=4&min_score=60"
+        );
+        assert_eq!(Params::from_query(&p.query_string()), p);
+        assert_eq!(Params::default().query_string(), "");
+    }
+
     #[test]
     fn builds_a_search_query() {
         let p = Params {

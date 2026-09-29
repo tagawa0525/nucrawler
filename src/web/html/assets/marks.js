@@ -46,6 +46,14 @@
     if (busy.has(form)) return;
     busy.add(form);
     const { name, value } = e.submitter;
+    // 読み直し（resync）が、この送信より前の状態で上書きしないように、押した印ごとに時刻を残す。
+    // 評価すると既読にもなるので、既読の印にも残す
+    const now = String(performance.now());
+    form.dataset.changed = now;
+    if (form.classList.contains("rating") && value !== "") {
+      const read = marks.querySelector('form[action$="/read"]');
+      if (read) read.dataset.changed = now;
+    }
     const ok = await fetch(form.action, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -55,6 +63,9 @@
     busy.delete(form);
     if (!ok) {
       notify("記録できませんでした");
+      // 送れたか分からないので、印を今の状態に合わせ直す。この読み直しは押した後に始まるので、
+      // 押した印もサーバーの状態で上書きする（押した印を残すのは、押す前に始まった読み直しだけ）
+      resync();
       return;
     }
     if (form.classList.contains("rating")) {
@@ -144,4 +155,41 @@
       if (moved) { e.preventDefault(); moved = false; }
     }, true);
   }
+  // 戻るボタンで戻ると、ブラウザは詳細を開く前のページを出す（詳細で付いた既読や評価が映らない）。
+  // カードの記事の印（評価・ブックマーク・既読）だけを読み直して、見た目を今の状態に合わせる
+  // `/api/marks` が 1 回に受け付ける件数の上限（サーバーの MAX_MARK_IDS と同じ）
+  const MAX_MARK_IDS = 500;
+  const resync = async () => {
+    const started = performance.now();
+    const cards = new Map(
+      [...document.querySelectorAll(".card[data-id]")].map((c) => [c.dataset.id, c]),
+    );
+    // 受付の上限（1 回 500 件）ごとに分けて問い合わせる
+    const ids = [...cards.keys()];
+    for (let i = 0; i < ids.length; i += MAX_MARK_IDS) {
+      const batch = ids.slice(i, i + MAX_MARK_IDS).join(",");
+      const res = await fetch(`/api/marks?ids=${batch}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+      if (res) apply(cards, res.marks, started);
+    }
+  };
+  // 読み直した印を、読み直しを始めた後に押されていない印にだけ当てる（押した印は、その送信の結果のほうが新しい）
+  const apply = (cards, list, started) => {
+    const untouched = (form) => form && Number(form.dataset.changed ?? -1) < started;
+    for (const m of list) {
+      const card = cards.get(String(m.id));
+      const marks = card && card.querySelector(".marks");
+      if (!marks) continue;
+      const rating = marks.querySelector(".rating");
+      if (untouched(rating)) setStars(rating, m.rating ?? 0);
+      const bookmark = marks.querySelector('form[action$="/bookmark"]');
+      if (untouched(bookmark)) setToggle(bookmark.querySelector("button"), m.bookmarked);
+      if (untouched(marks.querySelector('form[action$="/read"]'))) setRead(marks, m.read);
+    }
+  };
+  addEventListener("pageshow", (e) => {
+    const nav = performance.getEntriesByType("navigation")[0];
+    if (e.persisted || (nav && nav.type === "back_forward")) resync();
+  });
 })();

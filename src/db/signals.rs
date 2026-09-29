@@ -68,6 +68,15 @@ impl rusqlite::ToSql for Rating {
     }
 }
 
+/// 記事 1 件の印（一覧に戻ったときの読み直し用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marks {
+    pub article_id: i64,
+    pub rating: Option<Rating>,
+    pub bookmarked: bool,
+    pub read: bool,
+}
+
 /// 開いたものの種類（`events.kind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenKind {
@@ -101,6 +110,32 @@ fn mark_read(
 }
 
 impl Db {
+    /// 指定した記事の印を、指定した順に返す。無い記事は返さない。
+    pub fn marks(&self, user_id: i64, article_ids: &[i64]) -> Result<Vec<Marks>, DbError> {
+        let ids = serde_json::to_string(article_ids)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id,
+                    (SELECT value FROM ratings WHERE user_id = :user AND article_id = a.id),
+                    EXISTS (SELECT 1 FROM bookmarks WHERE user_id = :user AND article_id = a.id),
+                    EXISTS (SELECT 1 FROM reads WHERE user_id = :user AND article_id = a.id)
+             FROM json_each(:ids) AS j
+             JOIN articles AS a ON a.id = j.value
+             ORDER BY j.key",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {":user": user_id, ":ids": ids},
+            |r| {
+                Ok(Marks {
+                    article_id: r.get(0)?,
+                    rating: r.get(1)?,
+                    bookmarked: r.get(2)?,
+                    read: r.get(3)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// 開いたことを記録し、既読にする。
     pub fn record_open(
         &self,
@@ -439,6 +474,49 @@ mod tests {
             ),
             [b]
         );
+    }
+
+    /// 印の読み直し：指定した記事ごとに、評価・ブックマーク・既読を返す（無い記事は返さない）。
+    #[test]
+    fn marks_of_the_given_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let article = |url| scored_article(&db, url, Lang::En, "2026-09-26T00:00:00.000Z", 80);
+        let a = article("https://e.com/a");
+        let b = article("https://e.com/b");
+        let c = article("https://e.com/c");
+        db.rate(owner, a, Rating::new(4), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_bookmark(owner, b, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let marks = db.marks(owner, &[a, b, 999]).unwrap();
+        assert_eq!(
+            marks,
+            [
+                Marks {
+                    article_id: a,
+                    rating: Rating::new(4),
+                    bookmarked: false,
+                    read: true,
+                },
+                Marks {
+                    article_id: b,
+                    rating: None,
+                    bookmarked: true,
+                    read: false,
+                },
+            ]
+        );
+        assert!(
+            db.marks(owner, &[c]).unwrap()[0]
+                == Marks {
+                    article_id: c,
+                    rating: None,
+                    bookmarked: false,
+                    read: false,
+                }
+        );
+        assert!(db.marks(owner, &[]).unwrap().is_empty());
     }
 
     /// 検索は、指定した評価以上の記事に絞れる（評価なしは除く）。

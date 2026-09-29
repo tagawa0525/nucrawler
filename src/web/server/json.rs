@@ -46,6 +46,47 @@ pub(super) async fn api_search(
     Ok(json(body))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct MarksParams {
+    #[serde(default)]
+    ids: String,
+}
+
+/// 一度に読み直せる印の件数の上限（一覧の件数 `web.list_limit` の既定 200 より多めに取る）。
+/// 画面の側（marks.js の MAX_MARK_IDS）は、これを超える件数を分けて問い合わせる
+const MAX_MARK_IDS: usize = 500;
+
+/// 記事の印（評価・ブックマーク・既読）。`ids` はカンマ区切りの記事の ID。一覧に戻ったときの読み直しに使い、
+/// 閲覧ではないので、訪問も開いたことも記録しない。
+pub(super) async fn api_marks(
+    State(state): State<AppState>,
+    Query(params): Query<MarksParams>,
+) -> Result<Response, AppError> {
+    let ids: Vec<i64> = if params.ids.is_empty() {
+        Vec::new()
+    } else {
+        params
+            .ids
+            .split(',')
+            .map(|id| id.parse().ok().filter(|id: &i64| *id > 0))
+            .collect::<Option<_>>()
+            .ok_or(AppError::BadRequest(
+                "ids must be positive integers separated by commas",
+            ))?
+    };
+    if ids.len() > MAX_MARK_IDS {
+        return Err(AppError::BadRequest("too many ids"));
+    }
+    let body = with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        Ok(serde_json::to_string(&api::MarkList::new(
+            db.marks(user, &ids)?,
+        ))?)
+    })
+    .await?;
+    Ok(json(body))
+}
+
 /// 記事 1 件の最新の要約と和訳。閲覧ではないので、開いたことを記録しない。
 pub(super) async fn api_detail(
     State(state): State<AppState>,
@@ -69,6 +110,56 @@ pub(super) async fn api_detail(
 mod tests {
     use crate::db::Db;
     use crate::web::server::test_support::*;
+
+    /// 印の読み直し（一覧に戻ったとき）は、指定した記事の評価・ブックマーク・既読だけを返す。
+    /// 閲覧ではないので、訪問も開いたことも記録しない。
+    #[tokio::test]
+    async fn api_marks_returns_only_the_marks() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, _) = seed(&db, "https://e.com/a", "題A");
+        let (b, _) = seed(&db, "https://e.com/b", "題B");
+        db.rate(
+            db.owner_id().unwrap(),
+            a,
+            crate::db::Rating::new(5),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let server = Server::start(db).await;
+        let (status, json) = server
+            .get_json(&format!("/api/marks?ids={a},{b},999"))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            json,
+            serde_json::json!({"marks": [
+                {"id": a, "rating": 5, "bookmarked": false, "read": true},
+                {"id": b, "rating": null, "bookmarked": false, "read": false},
+            ]})
+        );
+        server.assert_no_views();
+        for bad in ["ids=x", "ids=1,,2", "ids=-1"] {
+            let (status, _) = server.get_json(&format!("/api/marks?{bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
+        let many: Vec<String> = (1..=501).map(|i| i.to_string()).collect();
+        let (status, _) = server
+            .get_json(&format!("/api/marks?ids={}", many.join(",")))
+            .await;
+        assert_eq!(status, 400, "too many ids");
+        let (status, json) = server.get_json("/api/marks?ids=").await;
+        assert_eq!((status, json), (200, serde_json::json!({"marks": []})));
+    }
+
+    /// 画面の側は、受付の上限を超える件数を分けて問い合わせる（上限を揃えておく）。
+    #[test]
+    fn the_script_batches_marks_by_the_same_limit() {
+        let script = include_str!("../html/assets/marks.js");
+        assert!(
+            script.contains(&format!("const MAX_MARK_IDS = {};", super::MAX_MARK_IDS)),
+            "{script}"
+        );
+    }
 
     /// API の検索は検索画面と同じ条件で、トピックやソースを繰り返し指定できる。
     #[tokio::test]

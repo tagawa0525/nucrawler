@@ -1,42 +1,6 @@
-//! 記事への操作（評価・ブックマーク・見送り・取り消し・和訳の依頼）。
+//! 記事への操作（評価・ブックマーク・既読・和訳の依頼）。
 
 use super::*;
-
-#[derive(serde::Deserialize)]
-pub(super) struct FeedbackForm {
-    kind: String,
-}
-
-pub(super) async fn feedback(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(form): Form<FeedbackForm>,
-) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
-    // ブックマークを外すのは行動ではなく状態の変更（ブックマークした行動は残す）
-    let kind = match form.kind.as_str() {
-        "bookmark" => Some(SignalKind::Bookmark),
-        "dismiss" => Some(SignalKind::Dismiss),
-        "unbookmark" => None,
-        _ => {
-            return Err(AppError::BadRequest(
-                "kind must be bookmark, unbookmark or dismiss",
-            ));
-        }
-    };
-    with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
-        find_article(db, user, id)?;
-        match kind {
-            Some(kind) => db.record_event(user, id, kind, Utc::now())?,
-            None => db.unbookmark(user, id)?,
-        }
-        Ok(())
-    })
-    .await?;
-    Ok(Redirect::to(&format!("/articles/{id}")))
-}
 
 #[derive(serde::Deserialize)]
 pub(super) struct RatingForm {
@@ -70,26 +34,56 @@ pub(super) async fn rating(
     Ok(Redirect::to(&format!("/articles/{id}")))
 }
 
-/// 一覧のスワイプの取り消し。その振り分けを無かったことにする。
-pub(super) async fn undo_feedback(
+#[derive(serde::Deserialize)]
+pub(super) struct MarkForm {
+    on: String,
+}
+
+impl MarkForm {
+    /// `on=1` で付け、`on=0` で外す。
+    fn on(&self) -> Result<bool, AppError> {
+        match self.on.as_str() {
+            "1" => Ok(true),
+            "0" => Ok(false),
+            _ => Err(AppError::BadRequest("on must be 1 or 0")),
+        }
+    }
+}
+
+/// ブックマーク（後で読む）の印を付け外しする。
+pub(super) async fn bookmark(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Form(form): Form<FeedbackForm>,
-) -> Result<StatusCode, AppError> {
+    Form(form): Form<MarkForm>,
+) -> Result<Redirect, AppError> {
     check_same_origin(&headers)?;
-    let kind = match form.kind.as_str() {
-        "bookmark" => SignalKind::Bookmark,
-        "dismiss" => SignalKind::Dismiss,
-        _ => return Err(AppError::BadRequest("kind must be bookmark or dismiss")),
-    };
+    let on = form.on()?;
     with_db(&state, move |db| {
         let (user, _) = viewer(db)?;
         find_article(db, user, id)?;
-        Ok(db.undo_event(user, id, kind)?)
+        Ok(db.set_bookmark(user, id, on, Utc::now())?)
     })
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Redirect::to(&format!("/articles/{id}")))
+}
+
+/// 既読の印を付け外しする。
+pub(super) async fn read(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<MarkForm>,
+) -> Result<Redirect, AppError> {
+    check_same_origin(&headers)?;
+    let on = form.on()?;
+    with_db(&state, move |db| {
+        let (user, _) = viewer(db)?;
+        find_article(db, user, id)?;
+        Ok(db.set_read(user, id, on, Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to(&format!("/articles/{id}")))
 }
 
 pub(super) async fn translation_request(

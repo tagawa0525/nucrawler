@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。
-/// `include_read` なら後者に既読の記事も残す。
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の未読の記事」に分ける。後者からは、前回の訪問までに
+/// 既読になった記事を除く（今回の訪問で既読にした記事は残す）。`include_read` なら後者に既読の記事も残す。
 /// `boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
@@ -16,11 +16,13 @@ pub fn split_sections(
     let (new, earlier): (Vec<_>, Vec<_>) = items
         .into_iter()
         .partition(|i| i.fetched_at.as_str() > boundary);
+    // 前の訪問までに既読になった記事は隠す。今回の訪問で既読にした記事は、再読み込みしても残す
+    let read_before = |i: &ListItem| i.read_at.as_deref().is_some_and(|at| at <= boundary);
     (
         new,
         earlier
             .into_iter()
-            .filter(|i| include_read || !i.read)
+            .filter(|i| include_read || !read_before(i))
             .collect(),
     )
 }
@@ -28,7 +30,7 @@ pub fn split_sections(
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。
 #[derive(Clone, Copy, Default)]
 pub struct ListView {
-    /// 👎・見ない・低い点・未採点の記事も出す
+    /// 評価 1〜2・低い点・未採点の記事も出す
     pub all: bool,
     /// 過去の欄に既読の記事も出す
     pub read: bool,
@@ -161,7 +163,7 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
     format!(
         "<div class=\"card{read}\"{swipe}>{score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
          <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
-        read = if i.read { " read" } else { "" },
+        read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
         } else {

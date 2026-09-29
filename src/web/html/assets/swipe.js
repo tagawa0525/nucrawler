@@ -1,8 +1,9 @@
 (() => {
-  const post = (url, kind) => fetch(url, {
+  // 印（bookmark・read）を付け外しする
+  const mark = (id, kind, on) => fetch(`/articles/${id}/${kind}`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: "kind=" + kind,
+    body: "on=" + (on ? "1" : "0"),
     redirect: "manual",
   }).then((res) => res.ok || res.type === "opaqueredirect");
   const toast = document.createElement("div");
@@ -37,14 +38,14 @@
     card.dataset.busy = "1";
     const id = card.dataset.id;
     card.style.transform = `translateX(${kind === "bookmark" ? "" : "-"}110%)`;
-    if (!(await post(`/articles/${id}/feedback`, kind).catch(() => false))) {
+    if (!(await mark(id, kind, true).catch(() => false))) {
       reset(card);
       notify("記録できませんでした");
       return;
     }
     card.hidden = true;
-    notify(kind === "bookmark" ? "🔖 ブックマークしました" : "見ない記事にしました", async () => {
-      if (await post(`/articles/${id}/feedback/undo`, kind).catch(() => false)) {
+    notify(kind === "bookmark" ? "🔖 ブックマークしました" : "既読にしました", async () => {
+      if (await mark(id, kind, false).catch(() => false)) {
         reset(card);
         card.hidden = false;
       } else {
@@ -52,7 +53,7 @@
       }
     });
   };
-  const TRIAGE_KEYS = { l: "bookmark", ArrowRight: "bookmark", h: "dismiss", ArrowLeft: "dismiss" };
+  const TRIAGE_KEYS = { l: "bookmark", ArrowRight: "bookmark", h: "read", ArrowLeft: "read" };
   const MOVE_KEYS = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1 };
   document.addEventListener("keydown", (e) => {
     if (e.altKey || e.ctrlKey || e.metaKey || e.target.closest("input, textarea, select")) return;
@@ -97,7 +98,7 @@
         card.style.transition = "none";
       }
       card.style.transform = `translateX(${dx}px)`;
-      card.dataset.dir = dx > 0 ? "bookmark" : "dismiss";
+      card.dataset.dir = dx > 0 ? "bookmark" : "read";
     });
     const end = () => {
       const was = dragging;
@@ -105,7 +106,7 @@
       if (!was) return;
       card.style.transition = "";
       if (Math.abs(dx) > card.offsetWidth * COMMIT) {
-        triage(card, dx > 0 ? "bookmark" : "dismiss");
+        triage(card, dx > 0 ? "bookmark" : "read");
       } else {
         reset(card);
       }

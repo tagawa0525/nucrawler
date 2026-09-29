@@ -8,7 +8,6 @@ mod articles;
 mod artifacts;
 mod claims;
 mod eval;
-mod feedback;
 mod notes;
 mod read;
 mod redo;
@@ -26,7 +25,6 @@ pub use articles::*;
 pub use artifacts::*;
 pub use claims::*;
 pub use eval::*;
-pub use feedback::*;
 pub use notes::*;
 pub use read::*;
 pub use redo::*;
@@ -109,6 +107,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0023_title_artifacts.sql"),
     include_str!("migrations/0024_work_claims.sql"),
     include_str!("migrations/0025_ratings.sql"),
+    include_str!("migrations/0026_marks.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

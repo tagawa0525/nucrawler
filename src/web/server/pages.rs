@@ -190,16 +190,15 @@ pub(super) async fn detail(
                 ..ReportFilter::default()
             },
         )?;
-        // 開いたことだけを記録し、版の切り替えは数えない（同じ記事の反応が重なると
-        // 採点に渡す直近の反応が偏る）
+        // 開いたことだけを記録し、版の切り替えは数えない（開いた回数を、読んだ回数として数えられるように）
         let opened = if view.show_translation {
             (view.translation.is_none() && !detail.translations.is_empty())
-                .then_some(SignalKind::OpenTranslation)
+                .then_some(OpenKind::Translation)
         } else {
-            view.digest.is_none().then_some(SignalKind::OpenDetail)
+            view.digest.is_none().then_some(OpenKind::Detail)
         };
         if let Some(kind) = opened {
-            db.record_event(user, id, kind, Utc::now())?;
+            db.record_open(user, id, kind, Utc::now())?;
         }
         let warnings = warnings(db)?;
         let page = Page {

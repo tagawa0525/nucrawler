@@ -251,21 +251,16 @@ fn feedback_forms(id: i64, current: Option<Rating>, bookmarked: bool) -> String 
             )
         })
         .collect();
-    let bookmark = |value: &str, on: bool| {
-        format!(
-            "<form method=\"post\" action=\"/articles/{id}/feedback\">\
-             <button name=\"kind\" value=\"{value}\"{}>🔖</button></form>",
-            if on { " class=\"on\"" } else { "" }
-        )
-    };
+    // 押すと、今の印の逆にする
+    let bookmark = format!(
+        "<form method=\"post\" action=\"/articles/{id}/bookmark\">\
+         <button name=\"on\" value=\"{}\"{}>🔖</button></form>",
+        if bookmarked { "0" } else { "1" },
+        if bookmarked { " class=\"on\"" } else { "" }
+    );
     format!(
         "<div class=\"actions\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
-         {stars}</form>{}</div>",
-        if bookmarked {
-            bookmark("unbookmark", true)
-        } else {
-            bookmark("bookmark", false)
-        }
+         {stars}</form>{bookmark}</div>"
     )
 }
 

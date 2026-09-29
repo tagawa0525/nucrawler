@@ -70,7 +70,7 @@ impl<'a> Article<'a> {
             reason: i.reason.as_deref(),
             matched: &i.matched,
             excluded: &i.excluded,
-            read: i.read,
+            read: i.is_read(),
             rating: i.rating,
             has_translation: i.has_translation,
             translation_requested: i.translation_requested,

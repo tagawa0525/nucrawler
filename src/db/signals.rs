@@ -1,4 +1,5 @@
-//! 利用者の評価（1〜5）。評価のラベル（`eval`・確認枠・`profile suggest`）はこれだけから決める。
+//! 利用者の反応：評価（1〜5）と、既読・ブックマークの印、開いた記録。
+//! 評価のラベル（`eval`・確認枠・`profile suggest`）は評価だけから決め、印と開いた記録は使わない。
 
 use super::*;
 
@@ -67,8 +68,101 @@ impl rusqlite::ToSql for Rating {
     }
 }
 
+/// 開いたものの種類（`events.kind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenKind {
+    /// 詳細を開いた
+    Detail,
+    /// 全文和訳を開いた
+    Translation,
+}
+
+impl OpenKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Detail => "open_detail",
+            Self::Translation => "open_translation",
+        }
+    }
+}
+
+/// 既読にする（既に既読なら、最初に既読になった時刻のまま）。
+fn mark_read(
+    conn: &Connection,
+    user_id: i64,
+    article_id: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO reads (user_id, article_id, read_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![user_id, article_id, timestamp(now)],
+    )?;
+    Ok(())
+}
+
 impl Db {
-    /// 評価を付ける（付け直すと置き換わる）。`None` なら評価なしに戻す。
+    /// 開いたことを記録し、既読にする。
+    pub fn record_open(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        kind: OpenKind,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO events (user_id, article_id, kind, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, article_id, kind.as_str(), timestamp(now)],
+        )?;
+        mark_read(&tx, user_id, article_id, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 既読の印を付け外しする。
+    pub fn set_read(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        read: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        if read {
+            mark_read(&self.conn, user_id, article_id, now)
+        } else {
+            self.conn.execute(
+                "DELETE FROM reads WHERE user_id = ?1 AND article_id = ?2",
+                rusqlite::params![user_id, article_id],
+            )?;
+            Ok(())
+        }
+    }
+
+    /// ブックマーク（後で読む）の印を付け外しする。既に付いていれば、付けた時刻のまま。
+    pub fn set_bookmark(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        bookmarked: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        if bookmarked {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO bookmarks (user_id, article_id, bookmarked_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![user_id, article_id, timestamp(now)],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM bookmarks WHERE user_id = ?1 AND article_id = ?2",
+                rusqlite::params![user_id, article_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 評価を付ける（付け直すと置き換わる）。評価すると既読になる（処理済み）。
+    /// `None` なら評価なしに戻す（既読はそのまま）。
     pub fn rate(
         &self,
         user_id: i64,
@@ -76,18 +170,26 @@ impl Db {
         rating: Option<Rating>,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
+        let tx = self.conn.unchecked_transaction()?;
         match rating {
-            Some(rating) => self.conn.execute(
-                "INSERT INTO ratings (user_id, article_id, value, rated_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (user_id, article_id)
-                 DO UPDATE SET value = excluded.value, rated_at = excluded.rated_at",
-                rusqlite::params![user_id, article_id, rating, timestamp(now)],
-            )?,
-            None => self.conn.execute(
-                "DELETE FROM ratings WHERE user_id = ?1 AND article_id = ?2",
-                rusqlite::params![user_id, article_id],
-            )?,
-        };
+            Some(rating) => {
+                tx.execute(
+                    "INSERT INTO ratings (user_id, article_id, value, rated_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (user_id, article_id)
+                     DO UPDATE SET value = excluded.value, rated_at = excluded.rated_at",
+                    rusqlite::params![user_id, article_id, rating, timestamp(now)],
+                )?;
+                mark_read(&tx, user_id, article_id, now)?;
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM ratings WHERE user_id = ?1 AND article_id = ?2",
+                    rusqlite::params![user_id, article_id],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 }

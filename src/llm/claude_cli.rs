@@ -123,7 +123,7 @@ impl Llm for ClaudeCli {
 
 /// SIGINT・SIGTERM で終わったか。シグナルで殺された場合と、シグナルを受けて 128 + 番号で
 /// 終了した場合の両方を含む。
-fn interrupted(status: std::process::ExitStatus) -> bool {
+pub(super) fn interrupted(status: std::process::ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt;
     const SIGINT: i32 = 2;
     const SIGTERM: i32 = 15;

@@ -10,10 +10,20 @@
 //! - 出力は JSONL。`assistant.message` から応答を、`session.usage_checkpoint` から消費した
 //!   AI Credits を、`result` から終了コードを得る。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse};
+use tokio::io::AsyncWriteExt;
+
+use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
+
+/// `--available-tools` に渡す、存在しないツールの名前。これだけを許可してツールを 0 個にする。
+const NO_TOOLS: &str = "nucrawler-no-tools";
+
+/// 応答が JSON でなかったときに、エラーに載せる本文の最大文字数（和訳の全文を載せないため）
+const MAX_ANSWER_IN_ERROR: usize = 200;
 
 pub struct CopilotCli {
     pub command: PathBuf,
@@ -40,20 +50,178 @@ impl Llm for CopilotCli {
             .map_err(LlmError::Slot)
     }
 
-    async fn call(&self, _req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
-        todo!()
+    async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
+        std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
+        // 子プロセスより後に消す（宣言の逆順に drop される）
+        let home = Home::create(&self.homes).map_err(LlmError::Io)?;
+        let mut child = tokio::process::Command::new(&self.command)
+            .args(["--output-format", "json"])
+            .args(["--model", req.model])
+            .args(["--available-tools", NO_TOOLS])
+            .arg("--disable-builtin-mcps")
+            .arg("-C")
+            .arg(&self.cwd)
+            .env("COPILOT_HOME", &home.0)
+            // Nix で入れた版から勝手に変わらないようにする
+            .env("COPILOT_AUTO_UPDATE", "false")
+            .env_remove("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
+            .current_dir(&self.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // タイムアウトで future を捨てたときに子プロセスも止める。
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|source| LlmError::Spawn {
+                command: self.command.display().to_string(),
+                source,
+            })?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let prompt = compose(&req);
+        let run = async {
+            // 書き込みと読み取りを並行させ、パイプが詰まって互いに待ち続けないようにする。
+            let write = async {
+                match stdin.write_all(prompt.as_bytes()).await {
+                    // 子が入力を読まずに終了した（起動時のエラーなど）。原因は終了コードと stderr で報告する
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    r => r?,
+                }
+                drop(stdin);
+                Ok::<_, std::io::Error>(())
+            };
+            let (written, output) = tokio::join!(write, child.wait_with_output());
+            written?;
+            output
+        };
+        let output = tokio::time::timeout(self.timeout, run)
+            .await
+            .map_err(|_| LlmError::Timeout {
+                secs: self.timeout.as_secs(),
+            })?
+            .map_err(LlmError::Io)?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (parsed, credits) = parse_events(&stdout);
+        let usage = credits.map(|nano_aiu| Usage::Credits { nano_aiu });
+        match parsed {
+            Ok(output) => Ok(LlmResponse { output, usage }),
+            // 結果行が無い（起動時に失敗した、途中で落ちた）ときだけ、終了コードと stderr で報告する。
+            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmFailure {
+                error: LlmError::Exit {
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    interrupted: super::claude_cli::interrupted(output.status),
+                },
+                usage,
+            }),
+            // 応答の形が崩れても、消費した分はクォータに数える
+            Err(error) => Err(LlmFailure { error, usage }),
+        }
+    }
+}
+
+/// 呼び出しごとの `COPILOT_HOME`。drop で消す。
+struct Home(PathBuf);
+
+impl Home {
+    fn create(root: &Path) -> std::io::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = root.join(format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0) {
+            tracing::warn!(dir = %self.0.display(), "failed to remove the copilot home: {e}");
+        }
     }
 }
 
 /// copilot に渡すプロンプト。システムの指示、出力の形（JSON Schema）、依頼の本文の順にまとめる。
-pub fn compose(_req: &LlmRequest<'_>) -> String {
-    todo!()
+pub fn compose(req: &LlmRequest<'_>) -> String {
+    format!(
+        "{system}\n\n\
+         ## 出力の形\n\n\
+         次の JSON Schema に従う JSON を 1 つだけ返す。前後に説明や ``` などの囲みを付けない。\n\n\
+         {schema}\n\n\
+         ## 依頼\n\n\
+         {prompt}",
+        system = req.system,
+        schema = req.schema,
+        prompt = req.prompt,
+    )
 }
 
 /// JSONL の出力から、応答の JSON と消費した AI Credits（10^-9 単位）を取り出す。消費は、応答が
 /// 得られなくてもそれまでに見えた分を返す。
-pub fn parse_events(_stdout: &str) -> (Result<serde_json::Value, LlmError>, Option<i64>) {
-    todo!()
+pub fn parse_events(stdout: &str) -> (Result<serde_json::Value, LlmError>, Option<i64>) {
+    let mut credits = None;
+    let result = read_events(stdout, &mut credits);
+    (result, credits)
+}
+
+fn read_events(stdout: &str, credits: &mut Option<i64>) -> Result<serde_json::Value, LlmError> {
+    let mut answer = None;
+    let mut exit_code = None;
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        let event: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| LlmError::Protocol(format!("invalid json line ({e}): {line}")))?;
+        match event["type"].as_str() {
+            Some("assistant.message") => {
+                if let Some(content) = event["data"]["content"].as_str().filter(|c| !c.is_empty()) {
+                    answer = Some(content.to_string());
+                }
+            }
+            Some("session.usage_checkpoint") => {
+                // 累計なので、最後の値がその呼び出しの消費
+                if let Some(n) = event["data"]["totalNanoAiu"].as_i64() {
+                    *credits = Some(n);
+                }
+                warn_if_tools_offered(&event["data"]);
+            }
+            Some("result") => exit_code = Some(event["exitCode"].as_i64()),
+            _ => {}
+        }
+    }
+    let exit_code = exit_code.ok_or_else(|| LlmError::Protocol("no result event".into()))?;
+    if exit_code != Some(0) {
+        return Err(LlmError::Reported {
+            subtype: "exit".into(),
+            message: format!("copilot finished with exit code {exit_code:?}"),
+        });
+    }
+    let answer = answer.ok_or(LlmError::NoStructuredOutput)?;
+    serde_json::from_str(&answer).map_err(|e| {
+        let head: String = answer.chars().take(MAX_ANSWER_IN_ERROR).collect();
+        LlmError::Protocol(format!("answer is not json ({e}): {head}"))
+    })
+}
+
+/// モデルにツールが渡っていれば警告する。ツールを外す指定（存在しない名前だけを許可する）は
+/// CLI の振る舞いに頼っているので、更新で効かなくなったときに気づけるように。
+fn warn_if_tools_offered(checkpoint: &serde_json::Value) {
+    let offered = checkpoint["promptCacheBreakState"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["models"].as_object())
+        .flat_map(|models| models.values())
+        .filter_map(|m| m["tool_count"].as_u64())
+        .max()
+        .unwrap_or(0);
+    if offered > 0 {
+        tracing::warn!(
+            tools = offered,
+            "copilot offered tools to the model; --available-tools {NO_TOOLS} no longer disables them"
+        );
+    }
 }
 
 #[cfg(test)]

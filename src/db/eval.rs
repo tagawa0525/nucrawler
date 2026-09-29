@@ -28,6 +28,8 @@ pub struct LabeledScore {
     pub score: u8,
     /// 採点した時刻
     pub scored_at: String,
+    /// 推薦点の学習に使う特徴（記事のソース、採点した要約のトピック、その採点が当たった関心分野と推薦しない話題）
+    pub features: Vec<crate::recommend::Feature>,
 }
 
 /// プロファイルの見直しの根拠：評価した記事の見出しとトピック。
@@ -138,14 +140,14 @@ impl Db {
         Ok(stats)
     }
 
-    /// ラベルの付いた記事の点数。キーごとに、そのキーで採点された最新の digest の点数を使う
+    /// ラベルの付いた記事の点数と特徴。キーごとに、そのキーで採点された最新の digest の点数を使う
     /// （キー・article_id 順）。
     pub fn eval_scores(&self, user_id: i64) -> Result<Vec<LabeledScore>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "WITH labeled AS (SELECT article_id FROM ratings WHERE user_id = ?1),
              ranked AS (
                SELECT s.profile_hash, s.backend, s.model, s.prompt_version, r.article_id,
-                      s.score, s.created_at,
+                      s.score, s.created_at, s.id AS score_id, r.id,
                       row_number() OVER (
                         PARTITION BY s.profile_hash, s.backend, s.model, s.prompt_version,
                                      r.article_id
@@ -154,24 +156,51 @@ impl Db {
                JOIN artifacts AS r ON r.id = s.artifact_id AND r.kind = 'digest'
                JOIN labeled AS l ON l.article_id = r.article_id
                WHERE s.user_id = ?1)
-             SELECT profile_hash, backend, model, prompt_version, article_id, score, created_at
-             FROM ranked WHERE rn = 1
-             ORDER BY profile_hash, backend, model, prompt_version, article_id",
-        )?;
+             SELECT r.profile_hash, r.backend, r.model, r.prompt_version, r.article_id, r.score,
+                    r.created_at, a.source_id, {topics},
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = r.score_id AND kind = 'interest' ORDER BY topic)),
+                    (SELECT json_group_array(topic) FROM (
+                       SELECT topic FROM score_matches
+                       WHERE score_id = r.score_id AND kind = 'exclude' ORDER BY topic))
+             FROM ranked AS r
+             JOIN articles AS a ON a.id = r.article_id
+             WHERE r.rn = 1
+             ORDER BY r.profile_hash, r.backend, r.model, r.prompt_version, r.article_id",
+            topics = super::read::linked_topics("r"),
+        ))?;
         let rows = stmt.query_map([user_id], |r| {
-            Ok(LabeledScore {
-                key: EvalKey {
-                    profile_hash: r.get(0)?,
-                    backend: r.get(1)?,
-                    model: r.get(2)?,
-                    prompt_version: r.get(3)?,
+            Ok((
+                LabeledScore {
+                    key: EvalKey {
+                        profile_hash: r.get(0)?,
+                        backend: r.get(1)?,
+                        model: r.get(2)?,
+                        prompt_version: r.get(3)?,
+                    },
+                    article_id: r.get(4)?,
+                    score: r.get(5)?,
+                    scored_at: r.get(6)?,
+                    features: Vec::new(),
                 },
-                article_id: r.get(4)?,
-                score: r.get(5)?,
-                scored_at: r.get(6)?,
-            })
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, String>(10)?,
+            ))
         })?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        rows.map(|row| {
+            let (mut score, source, topics, matched, excluded) = row?;
+            let [topics, matched, excluded]: [Vec<String>; 3] = [
+                serde_json::from_str(&topics)?,
+                serde_json::from_str(&matched)?,
+                serde_json::from_str(&excluded)?,
+            ];
+            score.features = crate::recommend::features(&source, &topics, &matched, &excluded);
+            Ok(score)
+        })
+        .collect()
     }
 }
 

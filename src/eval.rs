@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 
 use crate::db::{EvalKey, ExploreStats, Label, LabeledScore, Rating};
+use crate::recommend::{Example, leave_one_out};
 
 /// 関心（評価 4〜5）・不要（評価 1〜2）のどちらかがこれより少なければ、指標は参考値と注記する
 const FEW_LABELS: usize = 5;
@@ -48,6 +49,7 @@ pub fn render(
     candidate: Option<&str>,
     version: i64,
     all: bool,
+    prior_strength: f64,
 ) -> String {
     let current = current.map(|hash| (hash, version));
     let mut out = String::new();
@@ -111,7 +113,7 @@ pub fn render(
         } else {
             ""
         };
-        render_key(&mut out, key, role, labels, scores);
+        render_key(&mut out, key, role, labels, scores, prior_strength);
     }
     out
 }
@@ -143,6 +145,7 @@ fn render_key(
     role: &str,
     labels: &[Label],
     scores: &[LabeledScore],
+    prior_strength: f64,
 ) {
     let hash: String = key.profile_hash.chars().take(8).collect();
     let _ = writeln!(
@@ -151,21 +154,40 @@ fn render_key(
         key.backend, key.model, key.prompt_version,
     );
     // ラベルと突き合わせた (点数, 評価, 評価より後に採点したか)
-    let matched: Vec<(u8, Rating, bool)> = scores
+    let labeled: Vec<(&LabeledScore, Rating, bool)> = scores
         .iter()
         .filter(|s| &s.key == key)
         .filter_map(|s| {
             let label = labels.iter().find(|l| l.article_id == s.article_id)?;
-            Some((s.score, label.rating, s.scored_at > label.at))
+            Some((s, label.rating, s.scored_at > label.at))
         })
         .collect();
+    let matched: Vec<(u8, Rating, bool)> = labeled
+        .iter()
+        .map(|(s, rating, late)| (s.score, *rating, *late))
+        .collect();
+    let format = |c: Option<f64>| c.map_or_else(|| "-".to_string(), |c| format!("{c:.2}"));
     let pairs: Vec<(u8, Rating)> = matched.iter().map(|m| (m.0, m.1)).collect();
-    let concordance = concordance(&pairs).map_or_else(|| "-".to_string(), |c| format!("{c:.2}"));
+    // 推薦点（評価から学んだ補正を足した点数）は、1 件ずつ外して学習した予測で測る
+    let examples: Vec<Example> = labeled
+        .iter()
+        .map(|(s, rating, _)| Example {
+            llm_score: s.score,
+            features: s.features.clone(),
+            rating: *rating,
+        })
+        .collect();
+    let adjusted: Vec<(u8, Rating)> = leave_one_out(&examples, prior_strength)
+        .into_iter()
+        .zip(examples.iter().map(|e| e.rating))
+        .collect();
     let _ = writeln!(
         out,
-        "  scored {}/{}  concordance {concordance}",
+        "  scored {}/{}  concordance {}  adjusted {} (leave-one-out)",
         matched.len(),
-        labels.len()
+        labels.len(),
+        format(concordance(&pairs)),
+        format(concordance(&adjusted)),
     );
     let late = matched.iter().filter(|m| m.2).count();
     if key.prompt_version == 1 && late > 0 {

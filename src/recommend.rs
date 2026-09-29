@@ -228,6 +228,48 @@ impl Model {
     }
 }
 
+/// 記事の特徴：ソース、要約のトピック、点数が当たった関心分野と推薦しない話題。
+pub fn features(
+    source_id: &str,
+    topics: &[String],
+    matched: &[String],
+    excluded: &[String],
+) -> Vec<Feature> {
+    let of = |kind, keys: &[String]| {
+        keys.iter()
+            .map(move |key| Feature {
+                kind,
+                key: key.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut all = vec![Feature {
+        kind: FeatureKind::Source,
+        key: source_id.to_string(),
+    }];
+    all.extend(of(FeatureKind::Topic, topics));
+    all.extend(of(FeatureKind::Interest, matched));
+    all.extend(of(FeatureKind::Exclude, excluded));
+    all
+}
+
+/// 1 件ずつ外して学習し、外した 1 件の推薦点を予測する（例の順）。学習と評価に同じ評価を使うと
+/// 当たり具合が良く出すぎるので、`eval` の比較にはこちらを使う。
+pub fn leave_one_out(examples: &[Example], prior_strength: f64) -> Vec<u8> {
+    (0..examples.len())
+        .map(|i| {
+            let others: Vec<Example> = examples
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, e)| e.clone())
+                .collect();
+            let e = &examples[i];
+            Model::fit(&others, prior_strength).score(e.llm_score, &e.features)
+        })
+        .collect()
+}
+
 /// log(1 + e^z) を、z が大きくても溢れないように求める。
 fn softplus(z: f64) -> f64 {
     if z > 0.0 {

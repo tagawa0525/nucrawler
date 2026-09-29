@@ -326,6 +326,118 @@ mod tests {
         assert_eq!(access_of(&db, id), vec![aesj]);
     }
 
+    fn add_title(db: &Db, article_id: i64, title_ja: &str) -> i64 {
+        db.insert_artifact(
+            &NewArtifact {
+                article_id,
+                kind: ArtifactKind::Title,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({ "title_ja": title_ja }),
+                inputs: &[],
+                glossary_at: None,
+            },
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap()
+    }
+
+    /// 見出しの和訳は本文を入力にしない（見出しは公開）ので、入力が無くても保存でき、誰でも見られる。
+    #[test]
+    fn insert_artifact_accepts_titles_without_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let id = add_title(&db, a, "見出し");
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT kind || '|' || input_scope || '|' || title_ja FROM artifacts WHERE id = {id}"
+            ))
+            .unwrap(),
+            ["title|public|見出し"]
+        );
+        assert_eq!(access_of(&db, id), Vec::<i64>::new());
+    }
+
+    fn title_ids(db: &Db, now: &str) -> Vec<i64> {
+        db.pending_titles(t(now), "claude-cli", "sonnet", 10)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+    }
+
+    /// 要約できない（公開の本文が無い）英語記事の見出しを訳す。期間では絞らない。
+    #[test]
+    fn pending_titles_selects_english_articles_without_body() {
+        let db = Db::open_in_memory().unwrap();
+        let now = "2026-09-27T00:00:00Z";
+        // 本文も概要も無い → 対象
+        let empty = page_article(&db, "https://e.com/empty", "2026-09-26T00:00:00.000Z");
+        // 概要だけで抽出の再試行待ち → 見出しは先に訳す
+        let lead_only = page_article(&db, "https://e.com/lead", "2026-09-25T00:00:00.000Z");
+        db.insert_content(lead_only, ContentKind::Lead, ContentOrigin::Feed, "lead")
+            .unwrap();
+        // 会員限定の本文しか無い → 要約できないので対象
+        let aesj: i64 = db
+            .conn()
+            .query_row("SELECT id FROM memberships WHERE code = 'aesj'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let member_only = page_article(&db, "https://e.com/member", "2026-09-24T00:00:00.000Z");
+        insert_content(&db, member_only, Some(aesj));
+        // 何年も前の記事 → 期間では絞らない
+        let old = page_article(&db, "https://e.com/old", "2020-01-01T00:00:00.000Z");
+        // 公開の本文がある → 要約で見出しが付く
+        let with_body = page_article(&db, "https://e.com/body", "2026-09-23T00:00:00.000Z");
+        db.insert_content(with_body, ContentKind::Body, ContentOrigin::Page, "body")
+            .unwrap();
+        // 要約済み
+        let digested = page_article(&db, "https://e.com/digested", "2026-09-22T00:00:00.000Z");
+        add_digest(&db, digested, "sonnet", "題", true, now);
+        // 訳済み（どのモデルでも）
+        let titled = page_article(&db, "https://e.com/titled", "2026-09-21T00:00:00.000Z");
+        add_title(&db, titled, "訳済み");
+        // 日本語の記事
+        let ja = db
+            .insert_article(&NewArticle {
+                lang: Lang::Ja,
+                ..article("https://e.com/ja")
+            })
+            .unwrap()
+            .unwrap();
+        let _ = ja;
+        assert_eq!(title_ids(&db, now), [empty, lead_only, member_only, old]);
+
+        let inputs = db
+            .pending_titles(t(now), "claude-cli", "sonnet", 1)
+            .unwrap();
+        assert_eq!(
+            inputs,
+            [TitleInput {
+                article_id: empty,
+                title: "t".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn pending_titles_skips_articles_backing_off_for_this_model() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let key = StageKey {
+            article_id: a,
+            stage: "title",
+            backend: "claude-cli",
+            model: "sonnet",
+        };
+        db.record_stage_failure(key, "bad output", t("2026-09-27T00:00:00Z"), false)
+            .unwrap();
+        assert!(title_ids(&db, "2026-09-27T00:30:00Z").is_empty());
+        assert_eq!(title_ids(&db, "2026-09-27T01:00:00Z"), [a]);
+    }
+
     #[test]
     fn insert_artifact_rejects_empty_inputs() {
         let db = Db::open_in_memory().unwrap();

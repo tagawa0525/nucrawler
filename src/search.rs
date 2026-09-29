@@ -236,6 +236,9 @@ mod tests {
         assert!(Params::from_query("").is_empty());
         assert!(!Params::from_query("bookmarked=1").is_empty());
         assert!(!Params::from_query("min_rating=4").is_empty());
+        // 評価の無い記事だけ
+        assert!(Params::from_query("unrated=1").unrated);
+        assert!(!Params::from_query("unrated=1").is_empty());
         assert!(
             Params::from_query("q=&since=&sort=score").is_empty(),
             "sort alone is not a condition"
@@ -254,6 +257,7 @@ mod tests {
             translated: true,
             unread: true,
             bookmarked: true,
+            unrated: true,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -266,7 +270,7 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && q.unread && q.bookmarked);
+        assert!(q.translated && q.unread && q.bookmarked && q.unrated);
         assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);

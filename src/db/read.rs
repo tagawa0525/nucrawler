@@ -1199,6 +1199,14 @@ mod tests {
             }),
             [liked]
         );
+        // 評価の無い記事だけ
+        assert_eq!(
+            with(SearchQuery {
+                unrated: true,
+                ..search_query(&db)
+            }),
+            [unscored, read, translated]
+        );
         assert_eq!(
             with(SearchQuery {
                 unread: true,

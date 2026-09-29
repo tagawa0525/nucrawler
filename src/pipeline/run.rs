@@ -66,6 +66,9 @@ pub struct RunReport {
     /// 認証切れなど、利用者が対処すべき LLM の失敗
     pub llm_failure: Option<String>,
     pub cancelled: bool,
+    /// 利用上限や LLM の失敗で、この実行の後続の LLM ステージを呼ばない（crawl をロックの単位に
+    /// 分けて呼んでも引き継ぐ）
+    pub llm_blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -83,11 +86,9 @@ pub async fn crawl<L: Llm>(
     config: &Config,
     sources: &[Source],
     fetcher: &Fetcher,
-) -> Result<RunReport, RunError> {
+    report: &mut RunReport,
+) -> Result<(), RunError> {
     let db = env.db;
-    let mut report = RunReport::default();
-    // 上限到達や LLM の失敗の後は、同じ実行の中で後続の LLM ステージを試さない
-    let mut llm_blocked = false;
     for &stage in stages {
         if env.cancel.is_requested() {
             break;
@@ -104,7 +105,7 @@ pub async fn crawl<L: Llm>(
                 report.failed_sources += summary.failed_sources.len();
             }
             Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy
-                if llm_blocked =>
+                if report.llm_blocked =>
             {
                 tracing::warn!(
                     stage = stage.name(),
@@ -138,7 +139,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "digest stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Score => {
                 let now = (env.clock)();
@@ -157,7 +158,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "score stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Translate => {
                 let now = (env.clock)();
@@ -178,7 +179,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "translate stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Title => {
                 let now = (env.clock)();
@@ -189,7 +190,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "title stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Tidy => {
                 let now = (env.clock)();
@@ -200,7 +201,7 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "tidy stage finished"
                 );
-                llm_blocked = report_halt(summary.halted, &mut report.llm_failure);
+                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
             }
             Stage::Extract => {
                 let summary = extract::extract_pages(
@@ -222,7 +223,7 @@ pub async fn crawl<L: Llm>(
         }
     }
     report.cancelled = env.cancel.is_requested();
-    Ok(report)
+    Ok(())
 }
 
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の

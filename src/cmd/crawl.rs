@@ -32,9 +32,13 @@ pub(crate) async fn crawl(
     spawn_signal_handler(cancel.clone());
     let fetcher = Fetcher::from_config(&config.http)?;
     let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.clone());
+    // クォータと報告（LLM が使えないことを含む）は実行全体で 1 つにし、ロックの単位をまたいで
+    // 引き継ぐ（呼び出し回数の上限と、LLM の失敗の後に後続の LLM ステージを呼ばないことが効くように）。
+    // 使用率は判定のたびに DB から読むので、ここでは読まない
+    let mut quota = Quota::new(config.quota.clone(), None, args.max_llm_calls);
     let mut report = RunReport::default();
-    // 取得と LLM のステージはロックが別なので、取得を終えてから LLM のロックを取る。
-    // 両方を同時には持たないので、他の実行と互いに待ち合って止まることはない
+    // 単位ごとに、その単位のロックを取ってから実行する。複数のロックを同時には持たないので、
+    // 他の実行と互いに待ち合って止まることはない
     for (kind, group) in pipeline::lock_groups(&stages) {
         let Some(_lock) = acquire(&data, kind, args.wait_lock, &cancel).await? else {
             report.cancelled = true;
@@ -42,14 +46,7 @@ pub(crate) async fn crawl(
         };
         // DB はロックを取ってから開く。更新前の版の実行が使っている間にマイグレーションを当てないため
         let db = Db::open(&data.join("nucrawler.db"))?;
-        // 使用率はロックを取ってから読む。待っている間に他の実行が呼んだ分も判定に入れるため。
-        // LLM のステージは 1 つの単位にまとまるので、呼び出し回数の上限はこの実行全体に効く
-        let mut quota = Quota::new(
-            config.quota.clone(),
-            db.latest_rate_limit()?,
-            args.max_llm_calls,
-        );
-        let part = run::crawl(
+        run::crawl(
             RunEnv {
                 db: &db,
                 llm: &llm,
@@ -65,11 +62,9 @@ pub(crate) async fn crawl(
             &config,
             &sources.sources,
             &fetcher,
+            &mut report,
         )
         .await?;
-        report.failed_sources += part.failed_sources;
-        report.llm_failure = report.llm_failure.or(part.llm_failure);
-        report.cancelled = part.cancelled;
         if report.cancelled {
             break;
         }

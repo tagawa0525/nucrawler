@@ -18,8 +18,8 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
   background: #fff; }
 .btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
   background: #fff; text-decoration: none; }
-.btn.on { border-color: #2e7d32; background: #e3f1e4; }
-.btn.off { border-color: #b3261e; background: #fbe7e6; }
+.btn.on, .marks button[aria-pressed=true] { border-color: #2e7d32; background: #e3f1e4; }
+.btn.off, .marks button[aria-pressed=false] { border-color: #b3261e; background: #fbe7e6; }
 .warn { background: #fff3cd; border-left: 4px solid #d39e00; padding: 0.5rem 0.75rem; margin: 0.4rem 0;
   font-size: 0.85rem; }
 .wide { width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
@@ -29,7 +29,6 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .actions form { display: inline; }
 .actions button { font-size: 1.1rem; padding: 0.4rem 0.9rem; margin: 0.2rem; border-radius: 0.5rem;
   border: 1px solid #bbb; background: #fff; }
-.actions button.on { background: #0b57a4; color: #fff; }
 .versions a { margin-right: 0.6rem; font-size: 0.85rem; }
 .card[data-id] { touch-action: pan-y; transition: transform 0.2s; }
 .card[data-id]:focus { outline: 2px solid #0b57a4; outline-offset: 2px; }

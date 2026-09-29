@@ -84,17 +84,24 @@ impl ListParams {
     }
 }
 
-/// 一覧の印で絞る値。`1` はあり、`0` はなし、`any` は絞らない（`Some(None)`）。無ければ `None`（既定）。
-fn mark(value: Option<&str>, name: &'static str) -> Result<Option<Option<bool>>, AppError> {
+/// 一覧の既読で絞る値。`1` は既読だけ、`0` は未読だけ、`any` は絞らない（`Some(None)`）。無ければ `None`（既定）。
+fn read_mark(value: Option<&str>) -> Result<Option<Option<bool>>, AppError> {
     match value {
         None => Ok(None),
         Some("1") => Ok(Some(Some(true))),
         Some("0") => Ok(Some(Some(false))),
         Some("any") => Ok(Some(None)),
-        Some(_) => Err(AppError::BadRequest(match name {
-            "read" => "read must be 1, 0 or any",
-            _ => "bookmarked must be 1, 0 or any",
-        })),
+        Some(_) => Err(AppError::BadRequest("read must be 1, 0 or any")),
+    }
+}
+
+/// 一覧のブックマークで絞る値。`1` はブックマーク中だけ、`0` はしていない記事だけ。無ければ絞らない。
+fn bookmark_mark(value: Option<&str>) -> Result<Option<bool>, AppError> {
+    match value {
+        None => Ok(None),
+        Some("1") => Ok(Some(true)),
+        Some("0") => Ok(Some(false)),
+        Some(_) => Err(AppError::BadRequest("bookmarked must be 1 or 0")),
     }
 }
 
@@ -104,7 +111,7 @@ pub(super) async fn list(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let rating = params.rating()?;
-    let bookmarked = mark(params.bookmarked.as_deref(), "bookmarked")?.flatten();
+    let bookmarked = bookmark_mark(params.bookmarked.as_deref())?;
     let filtering = rating.is_some() || bookmarked == Some(true);
     // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
     // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
@@ -119,7 +126,7 @@ pub(super) async fn list(
     let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
     // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
     let read =
-        mark(params.read.as_deref(), "read")?.unwrap_or(if filtering { None } else { Some(false) });
+        read_mark(params.read.as_deref())?.unwrap_or(if filtering { None } else { Some(false) });
     let view = html::ListView {
         min,
         default_min: state.web.min_score,

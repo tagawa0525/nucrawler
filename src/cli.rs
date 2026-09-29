@@ -377,6 +377,15 @@ pub struct SearchArgs {
 }
 
 /// オプション以外の引数は検索語として空白でつなぐ。
+/// 印で絞る条件を付ける。逆の指定が既にあれば誤り（`--read` と `--unread` など）。
+fn set_mark(mark: &mut Option<bool>, on: bool) -> Result<(), ParseError> {
+    if *mark == Some(!on) {
+        return Err(ParseError::SearchUsage);
+    }
+    *mark = Some(on);
+    Ok(())
+}
+
 pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
     fn value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Result<String, ParseError> {
         option_value(it).cloned().ok_or(ParseError::SearchUsage)
@@ -396,10 +405,11 @@ pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
             "--min-score" => params.min_score = value(&mut it)?,
             "--sort" => params.sort = value(&mut it)?,
             "--translated" => params.translated = true,
-            "--unread" => params.read = Some(false),
-            "--read" => params.read = Some(true),
-            "--bookmarked" => params.bookmarked = Some(true),
-            "--unbookmarked" => params.bookmarked = Some(false),
+            // あり・なしは片方だけ（両方の指定は誤り）
+            "--unread" => set_mark(&mut params.read, false)?,
+            "--read" => set_mark(&mut params.read, true)?,
+            "--bookmarked" => set_mark(&mut params.bookmarked, true)?,
+            "--unbookmarked" => set_mark(&mut params.bookmarked, false)?,
             "--unrated" => params.unrated = true,
             "--limit" => {
                 let n = value(&mut it)?

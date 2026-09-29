@@ -143,10 +143,14 @@ impl Db {
             .and_then(crate::llm::Usage::rate_limit)
             .map(|r| serde_json::to_string(&r))
             .transpose()?;
+        let credits_nano = match call.usage {
+            Some(crate::llm::Usage::Credits { nano_aiu }) => Some(*nano_aiu),
+            _ => None,
+        };
         self.conn.execute(
             "INSERT INTO llm_calls
-               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               (at, stage, backend, model, n_items, ok, duration_ms, error, rate_limit, credits_nano)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 timestamp(at),
                 call.stage,
@@ -157,6 +161,7 @@ impl Db {
                 i64::try_from(call.duration_ms).unwrap_or(i64::MAX),
                 call.error,
                 rate_limit,
+                credits_nano,
             ],
         )?;
         Ok(())

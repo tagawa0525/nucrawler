@@ -177,9 +177,6 @@ fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail,
     db.article_detail(user, None, id)?.ok_or(AppError::NotFound)
 }
 
-/// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で書き込まれないよう、
-/// ブラウザが付ける Origin がこのサーバー自身（http で待ち受けているので `http://` + Host）で
-/// なければ拒否する（Origin の無い curl などは通す）。
 /// 記事への書き込み（評価・印・和訳の依頼・指摘・コメント）の後に戻る詳細。`back=1` を付け、詳細はそれを
 /// 開いたとは数えない（数えると、外した既読が付き直り、開いた記録も戻るたびに増える）。
 /// `translation` なら和訳の表示に戻る。`extra` は足すクエリ（末尾に `&`）、`fragment` は `#` から。
@@ -188,6 +185,9 @@ fn back_to_detail(id: i64, translation: bool, extra: &str, fragment: &str) -> Re
     Redirect::to(&format!("/articles/{id}?{view}{extra}back=1{fragment}"))
 }
 
+/// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で書き込まれないよう、
+/// ブラウザが付ける Origin がこのサーバー自身（http で待ち受けているので `http://` + Host）で
+/// なければ拒否する（Origin の無い curl などは通す）。
 fn check_same_origin(headers: &HeaderMap) -> Result<(), AppError> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Ok(());

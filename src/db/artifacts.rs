@@ -7,6 +7,8 @@ pub enum ArtifactKind {
     Digest,
     Translation,
     Judgment,
+    /// 本文が無く要約できない記事の見出しの和訳
+    Title,
 }
 
 impl ArtifactKind {
@@ -15,11 +17,13 @@ impl ArtifactKind {
             Self::Digest => "digest",
             Self::Translation => "translation",
             Self::Judgment => "judgment",
+            Self::Title => "title",
         }
     }
 }
 
-/// 登録する成果物。`inputs` は元にした本文の部分（contents.id）で、空は許さない。
+/// 登録する成果物。`inputs` は元にした本文の部分（contents.id）で、空は許さない（閲覧できる範囲を
+/// 入力の本文から決めるため）。見出しの和訳だけは、公開の見出しから作るので入力を持たない。
 #[derive(Debug)]
 pub struct NewArtifact<'a> {
     pub article_id: i64,
@@ -31,6 +35,13 @@ pub struct NewArtifact<'a> {
     pub inputs: &'a [i64],
     /// 使った訳語集の時点（[`crate::glossary::Relevant::glossary_at`]）
     pub glossary_at: Option<&'a str>,
+}
+
+/// 見出しを和訳する記事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleInput {
+    pub article_id: i64,
+    pub title: String,
 }
 
 /// 要約の入力にする記事と、その公開の本文の部分。
@@ -131,6 +142,53 @@ impl Db {
             })
             .collect()
     }
+
+    /// 見出しを和訳する英語記事（新しい順）：要約も見出しの和訳も無く、公開の本文（body/fulltext）が
+    /// 無いもの。本文のある記事は要約で見出しが付く。抽出の再試行待ちの記事も、見出しは先に訳しておく。
+    /// 見出しだけの記事は数が限られるので、期間では絞らない（絞ると古い記事が英語のまま残る）。
+    /// `backend`/`model` の title の失敗で再試行待ち・断念済みの記事は含めない。
+    pub fn pending_titles(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        backend: &str,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<TitleInput>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.title FROM articles AS a
+             WHERE a.lang = 'en'
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts AS r
+                 WHERE r.article_id = a.id AND r.kind IN ('digest', 'title'))
+               AND NOT EXISTS (
+                 SELECT 1 FROM contents AS c
+                 WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                   AND c.access_membership_id IS NULL)
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = a.id AND e.stage = 'title'
+                   AND e.backend = ?2 AND e.model = ?3
+                   AND (e.attempts >= ?1 OR e.next_retry_at > ?4))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                MAX_ATTEMPTS,
+                backend,
+                model,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |r| {
+                Ok(TitleInput {
+                    article_id: r.get(0)?,
+                    title: r.get(1)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
 }
 
 /// 成果物と入力を、呼び出し側のトランザクションの中で書く。
@@ -139,7 +197,7 @@ pub(super) fn write_artifact(
     a: &NewArtifact,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<i64, DbError> {
-    if a.inputs.is_empty() {
+    if a.inputs.is_empty() && a.kind != ArtifactKind::Title {
         return Err(DbError::NoArtifactInputs {
             article_id: a.article_id,
         });

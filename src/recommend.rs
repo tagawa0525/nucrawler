@@ -89,10 +89,13 @@ impl Model {
         }
     }
 
-    /// 評価から学ぶ。`prior_strength` は正則化の強さ（大きいほど今の振る舞いに近いまま）で、正であること。
-    /// 重みを持つのは、評価した記事に現れた特徴だけ。
+    /// 評価から学ぶ。`prior_strength` は正則化の強さ（大きいほど今の振る舞いに近いまま）で、正の有限値であること
+    /// （設定から来る値は読み込むときに確かめる）。重みを持つのは、評価した記事に現れた特徴だけ。
     pub fn fit(examples: &[Example], prior_strength: f64) -> Self {
-        assert!(prior_strength > 0.0, "prior_strength must be positive");
+        assert!(
+            prior_strength.is_finite() && prior_strength > 0.0,
+            "prior_strength must be positive and finite"
+        );
         let features: Vec<&Feature> = examples
             .iter()
             .flat_map(|e| e.features.iter())

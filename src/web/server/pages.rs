@@ -611,7 +611,7 @@ mod tests {
         let server = Server::start(db).await;
         let (_, html) = server.get(&format!("/articles/{id}")).await;
         assert!(
-            html.contains(r#"<button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">✓</button>"#),
+            html.contains(r#"<button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">👁</button>"#),
             "{html}"
         );
         assert!(html.contains("requestSubmit"), "{html}");

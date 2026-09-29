@@ -209,7 +209,7 @@ pub(super) fn marks(i: &ListItem) -> String {
         "<div class=\"actions marks\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
          {stars}</form>{}{}</div>",
         toggle("bookmark", "ブックマーク", "🔖", i.bookmarked),
-        toggle("read", "既読", "✓", i.is_read()),
+        toggle("read", "既読", "👁", i.is_read()),
     )
 }
 
@@ -343,7 +343,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<form method="post" action="/articles/1/read"><button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">✓</button></form>"#),
+            html.contains(r#"<form method="post" action="/articles/1/read"><button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">👁</button></form>"#),
             "{html}"
         );
         assert!(
@@ -351,7 +351,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains(r#"<form method="post" action="/articles/2/read"><button name="on" value="1" aria-pressed="false" aria-label="既読" title="既読">✓</button></form>"#),
+            html.contains(r#"<form method="post" action="/articles/2/read"><button name="on" value="1" aria-pressed="false" aria-label="既読" title="既読">👁</button></form>"#),
             "{html}"
         );
         assert!(!html.contains(" ★4"), "{html}");

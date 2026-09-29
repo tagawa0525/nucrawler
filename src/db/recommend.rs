@@ -245,6 +245,29 @@ mod tests {
         );
     }
 
+    /// 学習の材料が変われば、評価や採点が増えなくても学習し直す。例えば評価した記事に新しい要約が付き、
+    /// まだ採点されていなければ、その記事は材料から外れる。
+    #[test]
+    fn the_model_follows_changes_to_its_inputs() {
+        let db = Db::open_in_memory().unwrap().with_prior_strength(1.0);
+        let market = article_with(&db, "https://e.com/a", 80, &["市場"]);
+        rate_training(&db);
+        assert!(item(&db, market).score.unwrap() < 80);
+        // 評価した記事すべてに、まだ採点していない新しい要約が付いた
+        let rated: Vec<i64> = db
+            .conn()
+            .prepare("SELECT article_id FROM ratings")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for id in rated {
+            add_digest(&db, id, "opus", "新しい版", true, "2026-09-28T00:00:00Z");
+        }
+        assert_eq!(item(&db, market).score, Some(80));
+    }
+
     /// 正則化を強くすると、補正はほとんど効かない。
     #[test]
     fn a_strong_prior_keeps_the_llm_scores() {

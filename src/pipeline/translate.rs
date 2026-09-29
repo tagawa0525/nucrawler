@@ -1,13 +1,15 @@
 //! 和訳ステージ：依頼された記事と、点数の高い英語記事の本文を 1 件ずつ全文和訳する。
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, record_failures};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
-    ArtifactKind, ClaimKey, Db, DbError, NewArtifact, RedoKey, StageKey, TranslateInput,
-    TranslateQuery,
+    ArtifactKind, ClaimKey, Db, DbError, NewArtifact, RedoFilter, RedoKey, StageKey,
+    TranslateInput, TranslateQuery,
 };
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
@@ -64,6 +66,23 @@ pub async fn translate_articles<L: Llm>(
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let schema = prompt::translate::schema();
     let mut summary = TranslateSummary::default();
+    // 訳語集の変更による作り直しは、対象の記事を最初に 1 回だけ洗い出し、毎回その先頭の分だけを
+    // 予約と同じトランザクションの中で判定し直す（毎回すべてを洗い直すと件数の 2 乗の読み込みになり、
+    // 先に決めた一覧をそのまま使うと、ほかの実行が作り直し終えた記事をもう一度作り直してしまう）
+    let glossary_redo = matches!(target, Target::Redo(spec) if spec.glossary);
+    let mut outdated: VecDeque<i64> = match target {
+        Target::Redo(spec) if spec.glossary => outdated_translations(
+            db,
+            redo_key(spec, backend, model),
+            &spec.filter,
+            llm_cfg,
+            now,
+        )?
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect(),
+        _ => VecDeque::new(),
+    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -88,15 +107,11 @@ pub async fn translate_articles<L: Llm>(
             claim_ttl(llm_cfg),
             |db| match target {
                 Target::Redo(spec) if spec.glossary => {
-                    let mut items = outdated_translations(
-                        db,
-                        redo_key(spec, backend, model),
-                        &spec.filter,
-                        llm_cfg,
-                        now,
-                    )?;
-                    items.truncate(1);
-                    Ok(items)
+                    let next = RedoFilter {
+                        ids: outdated.pop_front().into_iter().collect(),
+                        ..spec.filter.clone()
+                    };
+                    outdated_translations(db, redo_key(spec, backend, model), &next, llm_cfg, now)
                 }
                 Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1),
                 Target::Redo(spec) => {
@@ -106,6 +121,10 @@ pub async fn translate_articles<L: Llm>(
             |i| i.article_id,
         )?;
         let Some(input) = inputs.into_iter().next() else {
+            // 先頭の記事がほかの実行に作り直されていたら、残りに進む
+            if glossary_redo && !outdated.is_empty() {
+                continue;
+            }
             break;
         };
         let key = StageKey {

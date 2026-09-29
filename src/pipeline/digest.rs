@@ -1,6 +1,8 @@
 //! 要約ステージ：digest の無い記事を数件ずつ LLM に渡し、応答を検証して成果物として保存する。
 //! 呼び出しの前にクォータを確かめ、上限に達したら残りは次回に回す。
 
+use std::collections::VecDeque;
+
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
@@ -8,7 +10,9 @@ use super::llm_call::{
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::{ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoKey, StageKey};
+use crate::db::{
+    ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoFilter, RedoKey, StageKey,
+};
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt;
 use crate::{errors, glossary};
@@ -48,6 +52,23 @@ pub async fn digest_articles<L: Llm>(
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let mut summary = DigestSummary::default();
+    // 訳語集の変更による作り直しは、対象の記事を最初に 1 回だけ洗い出し、毎回その先頭の分だけを
+    // 予約と同じトランザクションの中で判定し直す（毎回すべてを洗い直すと件数の 2 乗の読み込みになり、
+    // 先に決めた一覧をそのまま使うと、ほかの実行が作り直し終えた記事をもう一度作り直してしまう）
+    let glossary_redo = matches!(target, Target::Redo(spec) if spec.glossary);
+    let mut outdated: VecDeque<i64> = match target {
+        Target::Redo(spec) if spec.glossary => outdated_digests(
+            db,
+            redo_key(spec, backend, model),
+            &spec.filter,
+            llm_cfg,
+            now,
+        )?
+        .into_iter()
+        .map(|i| i.article_id)
+        .collect(),
+        _ => VecDeque::new(),
+    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -73,15 +94,12 @@ pub async fn digest_articles<L: Llm>(
             claim_ttl(llm_cfg),
             |db| match target {
                 Target::Redo(spec) if spec.glossary => {
-                    let mut items = outdated_digests(
-                        db,
-                        redo_key(spec, backend, model),
-                        &spec.filter,
-                        llm_cfg,
-                        now,
-                    )?;
-                    items.truncate(llm_cfg.digest_batch_size);
-                    Ok(items)
+                    let n = llm_cfg.digest_batch_size.min(outdated.len());
+                    let next = RedoFilter {
+                        ids: outdated.drain(..n).collect(),
+                        ..spec.filter.clone()
+                    };
+                    outdated_digests(db, redo_key(spec, backend, model), &next, llm_cfg, now)
                 }
                 Target::Pending { .. } => {
                     db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)
@@ -96,6 +114,10 @@ pub async fn digest_articles<L: Llm>(
             |b| b.article_id,
         )?;
         if batch.is_empty() {
+            // 先頭の分がほかの実行に作り直されていたら、残りに進む
+            if glossary_redo && !outdated.is_empty() {
+                continue;
+            }
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();

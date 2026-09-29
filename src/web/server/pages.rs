@@ -649,6 +649,18 @@ mod tests {
         assert_eq!(server.get("/articles/999/source").await.0, 404);
     }
 
+    /// HEAD（リンクの確かめなど）は開いたわけではないので、詳細も原文も開いた記録・既読を残さない。
+    #[tokio::test]
+    async fn head_requests_are_not_opens() {
+        let db = Db::open_in_memory().unwrap();
+        let (id, _) = seed(&db, "https://e.com/a", "見出しA");
+        let server = Server::start(db).await;
+        assert_eq!(server.head(&format!("/articles/{id}")).await, 200);
+        assert_eq!(server.head(&format!("/articles/{id}/source")).await, 303);
+        assert_eq!(server.count("SELECT count(*) FROM events"), 0);
+        assert_eq!(server.count("SELECT count(*) FROM reads"), 0);
+    }
+
     #[tokio::test]
     async fn detail_records_opens_once_per_view() {
         let db = Db::open_in_memory().unwrap();

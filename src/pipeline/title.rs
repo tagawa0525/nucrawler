@@ -194,6 +194,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig {
                 title_batch_size: batch,
@@ -291,5 +292,26 @@ mod tests {
         let summary = run(&db, &llm, &mut quota(10), 2).await;
         assert_eq!((summary.calls, summary.failed), (1, 2));
         assert!(matches!(&summary.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in")));
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 2);
+        let key = crate::db::ClaimKey {
+            stage: "title",
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&ids[1..])]);
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.translated, 1);
+        assert!(!llm.requests()[0].prompt.contains("Title 0"));
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

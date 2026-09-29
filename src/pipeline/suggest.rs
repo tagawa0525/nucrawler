@@ -138,6 +138,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig::default(),
             &profile(),

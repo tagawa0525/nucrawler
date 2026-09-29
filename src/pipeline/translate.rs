@@ -318,6 +318,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig::default(),
             &PipelineConfig::default(),
@@ -567,6 +568,7 @@ mod tests {
                 llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &LlmConfig::default(),
             &PipelineConfig::default(),
@@ -607,6 +609,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &opus,
             &PipelineConfig::default(),
@@ -639,6 +642,7 @@ mod tests {
                 llm: &FakeLlm::new([]),
                 quota: &mut quota(10),
                 cancel: &cancel,
+                clock: &now,
             },
             &LlmConfig::default(),
             &PipelineConfig::default(),
@@ -651,5 +655,31 @@ mod tests {
         .await
         .unwrap();
         assert!(summary.cancelled);
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let (db, owner) = setup();
+        let claimed = article(&db, 0, 95);
+        let free = article(&db, 1, 90);
+        let key = crate::db::ClaimKey {
+            stage: "translate",
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[claimed], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok("和訳")]);
+        let summary = run(&db, owner, &llm, &mut quota(10), false).await;
+        assert_eq!(summary.translated, 1);
+        assert!(
+            llm.requests()[0]
+                .prompt
+                .contains(&format!("<article id=\"{free}\""))
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

@@ -282,6 +282,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg(batch),
             &PipelineConfig::default(),
@@ -358,6 +359,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg(5),
             &PipelineConfig::default(),
@@ -442,5 +444,32 @@ mod tests {
         let summary = run(&db, owner, &llm, &mut quota(10), 1).await;
         assert!(matches!(summary.halted, Some(Halt::LlmFailed(_))));
         assert_eq!(summary.failed, 1);
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let (db, owner, ids) = setup(2);
+        let (_, hash) = db.load_profile(owner).unwrap().unwrap();
+        let stage = crate::db::score_stage(ScoreKey {
+            user_id: owner,
+            profile_hash: &hash,
+            backend: "fake",
+            model: "sonnet",
+            prompt_version: crate::prompt::score::PROMPT_VERSION,
+        });
+        let key = crate::db::ClaimKey {
+            stage: &stage,
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&[(ids[1], 50)])]);
+        let summary = run(&db, owner, &llm, &mut quota(10), 5).await;
+        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

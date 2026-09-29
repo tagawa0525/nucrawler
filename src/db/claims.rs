@@ -171,4 +171,21 @@ mod tests {
         drop(held);
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 0);
     }
+
+    /// 選んだ記事をそのまま予約する（選ぶのと予約するのを 1 つの書き込みトランザクションで行う）。
+    #[test]
+    fn claim_selected_claims_what_it_selects() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let b = page_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z");
+        let now = t("2026-09-27T00:00:00Z");
+        let (items, held) = db
+            .claim_selected(KEY, now, ttl(), |_| Ok(vec![a, b]), |&id| id)
+            .unwrap();
+        assert_eq!(items, [a, b]);
+        assert_eq!(held.ids(), [a, b]);
+        assert!(db.claim(KEY, &[a, b], now, ttl()).unwrap().ids().is_empty());
+        drop(held);
+        assert_eq!(db.claim(KEY, &[a, b], now, ttl()).unwrap().ids(), [a, b]);
+    }
 }

@@ -293,6 +293,7 @@ mod tests {
                 llm,
                 quota,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &llm_cfg(batch),
             &PipelineConfig::default(),
@@ -513,6 +514,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut q,
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &cfg,
             &PipelineConfig::default(),
@@ -661,6 +663,7 @@ mod tests {
                 llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -698,6 +701,7 @@ mod tests {
                 llm: &llm,
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &opus,
             &PipelineConfig::default(),
@@ -722,6 +726,7 @@ mod tests {
                 llm: &FakeLlm::new([]),
                 quota: &mut quota(10),
                 cancel: &Cancel::default(),
+                clock: &now,
             },
             &opus,
             &PipelineConfig::default(),
@@ -792,6 +797,7 @@ mod tests {
                     llm: &Hanging,
                     quota: &mut quota(10),
                     cancel: &cancel,
+                    clock: &now,
                 },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
@@ -820,6 +826,7 @@ mod tests {
                 llm: &KilledWithCancel(cancel.clone()),
                 quota: &mut quota(10),
                 cancel: &cancel,
+                clock: &now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -862,6 +869,7 @@ mod tests {
                     llm: &AnswerWithCancel(cancel.clone()),
                     quota: &mut quota(10),
                     cancel: &cancel,
+                    clock: &now,
                 },
                 &llm_cfg(5),
                 &PipelineConfig::default(),
@@ -889,6 +897,7 @@ mod tests {
                 llm: &FakeLlm::new([]),
                 quota: &mut quota(10),
                 cancel: &cancel,
+                clock: &now,
             },
             &llm_cfg(5),
             &PipelineConfig::default(),
@@ -901,5 +910,30 @@ mod tests {
         .unwrap();
         assert!(summary.cancelled);
         assert_eq!(summary.calls, 0);
+    }
+
+    /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
+    #[tokio::test]
+    async fn skips_articles_claimed_elsewhere_and_releases_its_own() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 3);
+        let key = crate::db::ClaimKey {
+            stage: "digest",
+            backend: "fake",
+            model: "sonnet",
+        };
+        let other = db
+            .claim(key, &[ids[0]], now(), chrono::Duration::minutes(10))
+            .unwrap();
+        let llm = FakeLlm::new([ok(&ids[1..], 0.1)]);
+        let summary = run(&db, &llm, &mut quota(10), 5).await;
+        assert_eq!(summary.digested, 2);
+        let prompt = &llm.requests()[0].prompt;
+        assert!(
+            !prompt.contains(&format!("<article id=\"{}\"", ids[0])),
+            "{prompt}"
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
+        drop(other);
     }
 }

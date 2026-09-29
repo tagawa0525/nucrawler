@@ -144,17 +144,18 @@ fn min_select(view: ListView) -> String {
 }
 
 /// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す（白抜きの「☆」は絞らない）。
+/// 最低点と同じく小さい順に並べ、「以上」の印は付けない（★4 は ★4 以上）。
 /// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで）。ブックマークの絞り込みと、
 /// 絞り込みで既読を隠していること（`read=0`）は引き継ぐ。
 fn rating_select(view: ListView) -> String {
     let current = view.rating.map(|r| r.to_string()).unwrap_or_default();
     let options: String = [
         ("", "☆"),
+        ("1", "★1"),
+        ("2", "★2"),
+        ("3", "★3"),
+        ("4", "★4"),
         ("5", "★5"),
-        ("4", "★4↑"),
-        ("3", "★3↑"),
-        ("2", "★2↑"),
-        ("1", "★1↑"),
     ]
     .iter()
     .map(|(v, label)| {

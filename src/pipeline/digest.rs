@@ -1101,4 +1101,59 @@ mod tests {
             1
         );
     }
+
+    /// 呼び出しの最中に予約を取り直された記事には、失敗も記録しない（取り直した実行の再試行の
+    /// 回数を進めない）。LLM の失敗でも、応答の形式の誤りでも同じ。
+    #[tokio::test]
+    async fn records_no_failures_for_claims_taken_over_meanwhile() {
+        for (name, response) in [
+            (
+                "llm-failure",
+                Err(LlmError::Reported {
+                    subtype: "error".into(),
+                    message: "Not logged in".into(),
+                }),
+            ),
+            (
+                "malformed",
+                Ok(LlmResponse {
+                    output: serde_json::json!({"unexpected": true}),
+                    rate_limit: None,
+                }),
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "nucrawler-{}-digest-lost-claim-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("n.db");
+            let db = Db::open(&path).unwrap();
+            let ids = articles(&db, 2);
+            let lost = ids[0];
+            let llm = FakeLlm::with_hook([response], move |_| {
+                Db::open(&path)
+                    .unwrap()
+                    .conn()
+                    .execute(
+                        "UPDATE work_claims SET token = 'other',
+                                expires_at = '9999-01-01T00:00:00.000Z'
+                         WHERE article_id = ?1",
+                        [lost],
+                    )
+                    .unwrap();
+            });
+            let summary = run(&db, &llm, &mut quota(10), 5).await;
+            assert_eq!(summary.failed, 1, "{name}");
+            assert_eq!(
+                db.query_i64(&format!(
+                    "SELECT count(*) FROM stage_errors WHERE article_id = {lost}"
+                ))
+                .unwrap(),
+                0,
+                "{name}"
+            );
+        }
+    }
 }

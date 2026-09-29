@@ -37,15 +37,17 @@
     if (card.dataset.busy) return;
     card.dataset.busy = "1";
     const id = card.dataset.id;
+    // 既に付いていた印は、取り消しで外さない（付けたのはこのスワイプではない）
+    const had = kind === "bookmark" ? !!card.dataset.bookmarked : card.classList.contains("read");
     card.style.transform = `translateX(${kind === "bookmark" ? "" : "-"}110%)`;
-    if (!(await mark(id, kind, true).catch(() => false))) {
+    if (!had && !(await mark(id, kind, true).catch(() => false))) {
       reset(card);
       notify("記録できませんでした");
       return;
     }
     card.hidden = true;
     notify(kind === "bookmark" ? "🔖 ブックマークしました" : "既読にしました", async () => {
-      if (await mark(id, kind, false).catch(() => false)) {
+      if (had || await mark(id, kind, false).catch(() => false)) {
         reset(card);
         card.hidden = false;
       } else {

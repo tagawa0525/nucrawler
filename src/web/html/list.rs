@@ -173,7 +173,15 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
          <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}</div>",
         read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
-            format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
+            format!(
+                " data-id=\"{}\"{} tabindex=\"0\"",
+                i.article_id,
+                if i.bookmarked {
+                    " data-bookmarked=\"1\""
+                } else {
+                    ""
+                }
+            )
         } else {
             String::new()
         },

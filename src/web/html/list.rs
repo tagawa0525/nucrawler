@@ -480,18 +480,17 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"e.key === "u""#), "{html}");
-        // 戻るボタンで戻ったときの読み直しでも、既読になっていたカード（詳細を開いた記事）を隠す。
-        // 元に戻す（未読にする）送信が失敗したら、読み直しの前に隠し直す（読み直しも失敗したときに、
-        // 既読のカードが出たまま残らないように）
-        assert_eq!(
-            html.matches("setVisibility(card, true)").count(),
-            2,
+        // カードは欄の条件（既読を隠す・評価・ブックマーク）に合うかで出し隠しする。印を付け外しした後、
+        // 送信に失敗した後（元に戻すが失敗したら隠し直す）、戻るボタンで戻ったときの読み直しの後のどれでも
+        assert!(
+            html.contains("dataset.hideRead")
+                && html.contains("dataset.minRating")
+                && html.contains("dataset.bookmarked"),
             "{html}"
         );
-        // 元に戻すの送信中に始まった読み直しが隠していても、未読にできたら出し直す
-        assert!(
-            html.contains("setVisibility(card, m.read)")
-                && html.contains("setVisibility(card, false)"),
+        assert_eq!(
+            html.matches("setVisibility(card, matches(card))").count(),
+            3,
             "{html}"
         );
         let shown = ListView {
@@ -658,7 +657,17 @@ mod tests {
             ),
             "{html}"
         );
-        assert!(html.contains("<h2>1 件</h2>"), "{html}");
+        // 条件から外れたカードはその場で隠して「元に戻す」を出し、件数も合わせる（`MARKS_SCRIPT`）
+        assert!(
+            html.contains(
+                r#"<h2 class="count">1 件</h2><div class="sections" data-min-rating="4">"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("評価を外しました") && html.contains("ブックマークを外しました"),
+            "{html}"
+        );
         // 一覧と同じく、カードの印をその場で付け外しできる
         assert!(
             html.contains(r#"data-id="1""#) && html.contains(MARKS_SCRIPT),
@@ -670,6 +679,15 @@ mod tests {
             bookmarked: true,
             ..ListView::default()
         };
+        let html = filtered_page(
+            &[item(2, "2026-09-27T05:00:00.000Z")],
+            view,
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-min-rating="4" data-bookmarked="1">"#),
+            "{html}"
+        );
         let html = filtered_page(&[], view, &Page::default());
         assert!(
             html.contains(r#"<input type="hidden" name="bookmarked" value="1">"#),

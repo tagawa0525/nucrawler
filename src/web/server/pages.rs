@@ -127,6 +127,7 @@ pub(super) async fn list(
     }
     let web = state.web.clone();
     let labels = state.labels.clone();
+    let default_min = state.web.min_score;
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
@@ -166,6 +167,7 @@ pub(super) async fn list(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
+            default_min,
         };
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
@@ -209,6 +211,7 @@ fn filtered(
     let page = Page {
         warnings: &warnings,
         labels,
+        default_min: web.min_score,
     };
     Ok(html::filtered_page(&items, view, &page))
 }
@@ -254,6 +257,7 @@ pub(super) async fn search(
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
     let web = state.web.clone();
     let labels = state.labels.clone();
+    let default_min = state.web.min_score;
     let (status, page) = with_db(&state, move |db| {
         let (user, hash) = viewer(db)?;
         let vocabulary = db.topic_usage()?;
@@ -261,6 +265,7 @@ pub(super) async fn search(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
+            default_min,
         };
         // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
         let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
@@ -308,6 +313,7 @@ pub(super) async fn detail(
     // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
     let returned = params.back.is_some() || method == Method::HEAD;
     let labels = state.labels.clone();
+    let default_min = state.web.min_score;
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
@@ -343,6 +349,7 @@ pub(super) async fn detail(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
+            default_min,
         };
         let comments = db.comments(user, id)?;
         let notes = html::Notes {
@@ -377,6 +384,7 @@ pub(super) async fn source(
 
 pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
+    let default_min = state.web.min_score;
     let page = with_db(&state, move |db| {
         let terms = db.glossary_entries()?.len();
         let pending = db
@@ -388,6 +396,7 @@ pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<Strin
         let page = Page {
             warnings: &warnings,
             labels: &labels,
+            default_min,
         };
         Ok(html::settings_page(terms, pending, &page))
     })

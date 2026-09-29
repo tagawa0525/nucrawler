@@ -11,7 +11,9 @@ pub fn search_page(
     error: Option<&str>,
     page: &Page,
 ) -> String {
-    let mut body = String::from("<h1>検索</h1><p class=\"meta\"><a href=\"/\">一覧へ</a></p>");
+    // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）
+    let mut body = super::list::home_bar(page);
+    body.push_str("<h1>検索</h1>");
     if let Some(error) = error {
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));
     }

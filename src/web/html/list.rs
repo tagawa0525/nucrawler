@@ -233,7 +233,8 @@ fn rating_select(view: ListView) -> String {
 }
 
 /// 一覧の上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
-fn bar(view: ListView) -> String {
+/// 一覧・絞り込みの画面では先頭を 🔍（検索）に、ほかの画面では 🏠（一覧へ戻る）にする。
+fn bar(view: ListView, home: bool) -> String {
     let bookmark = button(
         &view.with_filters(view.rating, !view.bookmarked).href(),
         "ブックマークだけ表示",
@@ -248,15 +249,29 @@ fn bar(view: ListView) -> String {
     let read = button(&read_toggle.href(), "既読も表示", "👁", Some(view.read));
     format!(
         "<nav class=\"bar\">{}{min}{}{read}{bookmark}{}</nav>{BAR_SCRIPT}",
-        button("/search", "検索", "🔍", None),
+        if home {
+            button("/", "ホーム", "🏠", None)
+        } else {
+            button("/search", "検索", "🔍", None)
+        },
         rating_select(view),
         button("/settings", "設定", "⚙️", None),
     )
 }
 
+/// 一覧のほかの画面（検索・詳細）の上部のバー。一覧の既定の表示を指し、先頭は 🏠。
+pub(super) fn home_bar(page: &Page) -> String {
+    let view = ListView {
+        min: page.default_min,
+        default_min: page.default_min,
+        ..ListView::default()
+    };
+    bar(view, true)
+}
+
 /// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
 pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
-    let mut body = bar(view);
+    let mut body = bar(view, false);
     if items.is_empty() {
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
@@ -295,7 +310,7 @@ pub fn list_page_with_explore(
     view: ListView,
     page: &Page,
 ) -> String {
-    let mut body = bar(view);
+    let mut body = bar(view, false);
     // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
     body.push_str(if view.read {
         "<div class=\"sections\">"

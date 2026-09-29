@@ -4,12 +4,14 @@ use super::*;
 
 pub(super) async fn glossary(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
+    let default_min = state.web.min_score;
     let page = with_db(&state, move |db| {
         let entries = db.glossary_entries()?;
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
             labels: &labels,
+            default_min,
         };
         Ok(html::glossary_page(&entries, &page))
     })

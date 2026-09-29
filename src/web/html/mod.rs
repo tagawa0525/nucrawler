@@ -49,6 +49,8 @@ pub type SourceLabels = std::collections::BTreeMap<String, String>;
 pub struct Page<'a> {
     pub warnings: &'a [Warning],
     pub labels: &'a SourceLabels,
+    /// 既定の最低点（設定の `web.min_score`）。一覧のほかの画面の上部のバーが、一覧の既定を指すのに使う
+    pub default_min: u8,
 }
 
 impl Default for Page<'_> {
@@ -57,6 +59,7 @@ impl Default for Page<'_> {
         Self {
             warnings: &[],
             labels: &NONE,
+            default_min: crate::config::WebConfig::default().min_score,
         }
     }
 }
@@ -326,6 +329,7 @@ mod tests {
                 at: "2026-09-27T00:00:00.000Z".into(),
             }],
             labels: &labels,
+            ..Page::default()
         };
         let mut kyuden = item(1, "2026-09-27T05:00:00.000Z");
         kyuden.source_id = "kyuden".into();

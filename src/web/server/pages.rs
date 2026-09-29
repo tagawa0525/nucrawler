@@ -44,7 +44,7 @@ pub(super) fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
 pub(super) struct ListParams {
     /// 表示する最低点（0〜100）。無ければ設定の `web.min_score`
     min: Option<String>,
-    /// Web の一覧だけが使う（過去の欄に既読も出す）
+    /// Web の一覧だけが使う（`1` なら既読も出し、`0` なら隠す。無ければ一覧は隠し、絞り込みは出す）
     read: Option<String>,
     /// Web の一覧だけが使う（この評価（1〜5）以上に絞る。空なら絞らない）
     rating: Option<String>,
@@ -80,16 +80,34 @@ impl ListParams {
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
-) -> Result<Html<String>, AppError> {
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
     let min = params.min(&state.web)?;
-    let show_read = params.read.as_deref() == Some("1");
+    let rating = params.rating()?;
+    let bookmarked = params.bookmarked.as_deref() == Some("1");
+    // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す
+    let show_read = match params.read.as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => rating.is_some() || bookmarked,
+    };
     let view = html::ListView {
         min,
         default_min: state.web.min_score,
         read: show_read,
-        rating: params.rating()?,
-        bookmarked: params.bookmarked.as_deref() == Some("1"),
+        rating,
+        bookmarked,
     };
+    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。選択のフォームは
+    // 値を選べないので、👍 を「👍」に戻すと `rating=` や絞り込みの `read=0` が残る
+    let canonical = view.url();
+    let requested = match raw.as_deref() {
+        None | Some("") => "/".to_string(),
+        Some(q) => format!("/?{q}"),
+    };
+    if requested != canonical {
+        return Ok(Redirect::to(&canonical).into_response());
+    }
     let web = state.web.clone();
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -137,10 +155,10 @@ pub(super) async fn list(
         ))
     })
     .await?;
-    Ok(Html(page))
+    Ok(Html(page).into_response())
 }
 
-/// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す。
+/// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す（既読の表示は 👁 のとおり）。
 /// 検索と同じく閲覧ではないので、訪問は始めない。
 fn filtered(
     db: &Db,
@@ -153,6 +171,7 @@ fn filtered(
     let params = Params {
         min_rating: view.rating.map(|r| r.to_string()).unwrap_or_default(),
         bookmarked: view.bookmarked,
+        unread: !view.read,
         ..Params::default()
     };
     let query = params
@@ -621,6 +640,34 @@ mod tests {
         }
     }
 
+    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。選択のフォームは値を選べないので、
+    /// 👍 を「👍」に戻すと `rating=` や、絞り込みの `read=0` が残る。正規の形なら移らない。
+    #[tokio::test]
+    async fn list_redirects_to_the_canonical_url() {
+        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        for (from, to) in [
+            ("/?rating=", "/"),
+            ("/?rating=&read=0", "/"),
+            ("/?rating=&read=0&bookmarked=1", "/?read=0&bookmarked=1"),
+            ("/?min=50", "/"),
+            ("/?read=1&min=30", "/?min=30&read=1"),
+            ("/?rating=4&read=1", "/?rating=4"),
+        ] {
+            let res = server.get_raw(from).await;
+            assert_eq!(res.status().as_u16(), 303, "{from}");
+            assert_eq!(res.headers()["location"], to, "{from}");
+        }
+        for canonical in ["/", "/?min=30&read=1", "/?rating=4&read=0&bookmarked=1"] {
+            assert_eq!(
+                server.get_raw(canonical).await.status().as_u16(),
+                200,
+                "{canonical}"
+            );
+        }
+        // 誤った値は移さずに 400 のまま
+        assert_eq!(server.get_raw("/?rating=9").await.status().as_u16(), 400);
+    }
+
     /// `read=1` を受け取り、切り替えのリンクに反映する。
     #[tokio::test]
     async fn list_reads_the_read_toggle() {
@@ -819,6 +866,15 @@ mod tests {
             !html.contains("星四つ") && html.contains("星二つ"),
             "{html}"
         );
+        // 絞り込みの既定は既読も出す。`read=0` なら既読を隠す
+        server.post(&format!("/articles/{four}/read"), "on=1").await;
+        let (_, html) = server.get("/?rating=4").await;
+        assert!(html.contains("星四つ"), "{html}");
+        let (_, html) = server.get("/?rating=4&read=0").await;
+        assert!(
+            !html.contains("星四つ") && html.contains("該当する記事はありません"),
+            "{html}"
+        );
         let (_, html) = server.get("/?rating=4&bookmarked=1").await;
         assert!(html.contains("該当する記事はありません"), "{html}");
         assert_eq!(
@@ -826,9 +882,9 @@ mod tests {
             0
         );
         // 👍 を選び直す（空）と一覧に戻る
-        let (status, html) = server.get("/?rating=").await;
-        assert_eq!(status, 200);
-        assert!(html.contains("<h2>前回から</h2>"), "{html}");
+        let res = server.get_raw("/?rating=").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "/");
         for bad in ["0", "6", "x"] {
             let (status, _) = server.get(&format!("/?rating={bad}")).await;
             assert_eq!(status, 400, "{bad}");

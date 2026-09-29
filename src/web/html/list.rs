@@ -191,8 +191,22 @@ pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String 
     if items.is_empty() {
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
-        body.push_str(&format!("<h2>{} 件</h2>", items.len()));
+        // 欄に絞り込みの条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
+        let rating = view
+            .rating
+            .map(|r| format!(" data-min-rating=\"{r}\""))
+            .unwrap_or_default();
+        let bookmarked = if view.bookmarked {
+            " data-bookmarked=\"1\""
+        } else {
+            ""
+        };
+        body.push_str(&format!(
+            "<h2 class=\"count\">{} 件</h2><div class=\"sections\"{rating}{bookmarked}>",
+            items.len()
+        ));
         body.extend(items.iter().map(|i| card(i, true, page)));
+        body.push_str("</div>");
     }
     body.push_str(MARKS_SCRIPT);
     layout("一覧", page, &body)
@@ -239,7 +253,8 @@ pub fn list_page_with_explore(
 }
 
 /// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。既読を隠す一覧
-/// （`data-hide-read`）では、既読の印で既読にしたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
+/// （`data-hide-read`）や、評価・ブックマークで絞った画面（`data-min-rating`・`data-bookmarked`）では、印を付け外しして
+/// 欄の条件から外れたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
 /// 左右のスワイプでも印を付けられる（右でブックマーク、左で既読）。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
 /// キーボードでは j/k・↓/↑ でカードを選び、1〜5 で評価、0 で評価なし、l/→ でブックマーク、h/← で既読。
@@ -483,9 +498,9 @@ mod tests {
         // カードは欄の条件（既読を隠す・評価・ブックマーク）に合うかで出し隠しする。印を付け外しした後、
         // 送信に失敗した後（元に戻すが失敗したら隠し直す）、戻るボタンで戻ったときの読み直しの後のどれでも
         assert!(
-            html.contains("dataset.hideRead")
-                && html.contains("dataset.minRating")
-                && html.contains("dataset.bookmarked"),
+            html.contains("f.hideRead")
+                && html.contains("f.minRating")
+                && html.contains("f.bookmarked"),
             "{html}"
         );
         assert_eq!(

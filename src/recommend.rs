@@ -295,6 +295,13 @@ mod tests {
         assert!(model.weights.is_empty());
     }
 
+    /// 正則化の強さは正の有限値だけ（∞ だと勾配が ∞·0 で NaN になる）。
+    #[test]
+    #[should_panic(expected = "prior_strength must be positive and finite")]
+    fn rejects_an_infinite_prior_strength() {
+        Model::fit(&[], f64::INFINITY);
+    }
+
     /// LLM が高く付けたのに低く評価したトピックは下げ、低く付けたのに高く評価したトピックは上げる。
     #[test]
     fn learns_topics_the_llm_misjudges() {

@@ -587,10 +587,7 @@ mod tests {
 
         let (db, owner) = setup();
         article(&db, 0, 90);
-        let llm = FakeLlm::new([Err(LlmError::RateLimited {
-            resets_at: None,
-            rate_limit: None,
-        })]);
+        let llm = FakeLlm::new([Err(LlmError::RateLimited { resets_at: None })]);
         let summary = run(&db, owner, &llm, &mut quota(10), false).await;
         assert_eq!(summary.halted, Some(Halt::UsageLimit { resets_at: None }));
         assert_eq!(summary.failed, 0);

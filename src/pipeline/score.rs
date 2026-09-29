@@ -502,10 +502,7 @@ mod tests {
         );
 
         let (db, owner, _) = setup(1);
-        let llm = FakeLlm::new([Err(LlmError::RateLimited {
-            resets_at: Some(1),
-            rate_limit: None,
-        })]);
+        let llm = FakeLlm::new([Err(LlmError::RateLimited { resets_at: Some(1) })]);
         let summary = run(&db, owner, &llm, &mut quota(10), 1).await;
         assert_eq!(
             summary.halted,

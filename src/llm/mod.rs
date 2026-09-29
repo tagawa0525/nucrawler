@@ -238,13 +238,20 @@ pub mod fake {
                 hook(n);
             }
             if !self.delay.is_zero() {
+                /// 応答を待つ間だけ数える。呼び出しを途中で捨てられても（止める指示）、drop で戻す
+                struct InFlight<'a>(&'a Mutex<(usize, usize)>);
+                impl Drop for InFlight<'_> {
+                    fn drop(&mut self) {
+                        self.0.lock().unwrap().0 -= 1;
+                    }
+                }
                 {
                     let mut in_flight = self.in_flight.lock().unwrap();
                     in_flight.0 += 1;
                     in_flight.1 = in_flight.1.max(in_flight.0);
                 }
+                let _in_flight = InFlight(&self.in_flight);
                 tokio::time::sleep(self.delay).await;
-                self.in_flight.lock().unwrap().0 -= 1;
             }
             if let Some(respond) = &self.responder {
                 return respond(&req);

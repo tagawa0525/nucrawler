@@ -225,7 +225,7 @@ mod tests {
         let dir = temp_dir("lock-legacy");
         let legacy = File::create(dir.join("crawl.lock")).unwrap();
         legacy.try_lock().unwrap();
-        for kind in [LockKind::Fetch, LockKind::Fetch] {
+        for kind in [LockKind::Fetch, LockKind::Llm, LockKind::Tidy] {
             let err = acquire(&dir, kind).unwrap_err();
             assert!(matches!(err, LockError::Held { .. }), "{err}");
         }

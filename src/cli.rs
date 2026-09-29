@@ -884,6 +884,11 @@ mod tests {
             .unwrap()
             .params;
         assert_eq!((p.read, p.bookmarked), (Some(true), Some(false)));
+        // あり・なしを両方指定するのは誤り
+        for pair in [["--read", "--unread"], ["--bookmarked", "--unbookmarked"]] {
+            let args: Vec<String> = pair.iter().map(|a| a.to_string()).collect();
+            assert!(parse_search_args(&args).is_err(), "{pair:?}");
+        }
         assert_eq!(
             parse_search_args(&[]).unwrap(),
             SearchArgs {

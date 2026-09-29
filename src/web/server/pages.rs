@@ -1020,6 +1020,11 @@ mod tests {
             let (status, _) = server.get(&format!("/?rating={bad}")).await;
             assert_eq!(status, 400, "{bad}");
         }
+        // any（絞らない）は既読だけの値。ブックマークは 1・0 だけ
+        for bad in ["bookmarked=any", "bookmarked=x", "read=x"] {
+            let (status, _) = server.get(&format!("/?{bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
     }
 
     #[tokio::test]

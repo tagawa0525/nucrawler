@@ -44,7 +44,7 @@ pub(super) fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
 pub(super) struct ListParams {
     /// 表示する最低点（0〜100）。無ければ設定の `web.min_score`
     min: Option<String>,
-    /// Web の一覧だけが使う（過去の欄に既読も出す）
+    /// Web の一覧だけが使う（`1` なら既読も出し、`0` なら隠す。無ければ一覧は隠し、絞り込みは出す）
     read: Option<String>,
     /// Web の一覧だけが使う（この評価（1〜5）以上に絞る。空なら絞らない）
     rating: Option<String>,
@@ -82,13 +82,20 @@ pub(super) async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Html<String>, AppError> {
     let min = params.min(&state.web)?;
-    let show_read = params.read.as_deref() == Some("1");
+    let rating = params.rating()?;
+    let bookmarked = params.bookmarked.as_deref() == Some("1");
+    // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す
+    let show_read = match params.read.as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => rating.is_some() || bookmarked,
+    };
     let view = html::ListView {
         min,
         default_min: state.web.min_score,
         read: show_read,
-        rating: params.rating()?,
-        bookmarked: params.bookmarked.as_deref() == Some("1"),
+        rating,
+        bookmarked,
     };
     let web = state.web.clone();
     let labels = state.labels.clone();
@@ -140,7 +147,7 @@ pub(super) async fn list(
     Ok(Html(page))
 }
 
-/// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す。
+/// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す（既読の表示は 👁 のとおり）。
 /// 検索と同じく閲覧ではないので、訪問は始めない。
 fn filtered(
     db: &Db,
@@ -153,6 +160,7 @@ fn filtered(
     let params = Params {
         min_rating: view.rating.map(|r| r.to_string()).unwrap_or_default(),
         bookmarked: view.bookmarked,
+        unread: !view.read,
         ..Params::default()
     };
     let query = params

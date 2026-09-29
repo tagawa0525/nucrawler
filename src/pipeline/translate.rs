@@ -715,4 +715,72 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
         drop(other);
     }
+
+    /// 作り直しの途中で、ほかの実行が残りの記事を作り直し終えたら、その記事はもう作り直さない
+    /// （対象は毎回その時点で選び直す）。
+    #[tokio::test]
+    async fn redo_glossary_skips_translations_redone_meanwhile_by_another_run() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-redo-translate-race",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let owner = db.owner_id().unwrap();
+        let profile = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(owner, &profile, now()).unwrap();
+        let first = article(&db, 0, 95);
+        let second = article(&db, 1, 90);
+        mention_edg(&db, first);
+        mention_edg(&db, second);
+        run(
+            &db,
+            owner,
+            &FakeLlm::new([ok("初訳"), ok("初訳")]),
+            &mut quota(10),
+            false,
+        )
+        .await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["emergency diesel generator".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: None,
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        // 1 件目を作り直している間に、ほかの実行が 2 件目を今の訳語集で作り直す
+        let llm = FakeLlm::with_hook([ok("再訳")], move |n| {
+            if n != 0 {
+                return;
+            }
+            let db = Db::open(&path).unwrap();
+            let inputs: Vec<i64> = db
+                .conn()
+                .prepare("SELECT id FROM contents WHERE article_id = ?1 ORDER BY id")
+                .unwrap()
+                .query_map([second], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            db.insert_translation(
+                &NewArtifact {
+                    article_id: second,
+                    kind: ArtifactKind::Translation,
+                    backend: "fake",
+                    model: "sonnet",
+                    prompt_version: prompt::translate::PROMPT_VERSION,
+                    payload: &serde_json::json!({ "body_ja": "ほかの実行の再訳" }),
+                    inputs: &inputs,
+                    glossary_at: Some(&crate::db::timestamp(later)),
+                },
+                later,
+            )
+            .unwrap();
+        });
+        let summary = redo_glossary(&db, owner, &llm, later).await;
+        assert_eq!((summary.translated, summary.calls), (1, 1));
+    }
 }

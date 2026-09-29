@@ -968,4 +968,82 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
         drop(other);
     }
+
+    /// 作り直しの途中で、ほかの実行が残りの記事を作り直し終えたら、その記事はもう作り直さない
+    /// （対象は毎回その時点で選び直す）。
+    #[tokio::test]
+    async fn redo_glossary_skips_digests_rebuilt_meanwhile_by_another_run() {
+        let dir = std::env::temp_dir().join(format!(
+            "nucrawler-{}-redo-glossary-race",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("n.db");
+        let db = Db::open(&path).unwrap();
+        let ids = articles(&db, 2);
+        mention_edg(&db, ids[0]);
+        mention_edg(&db, ids[1]);
+        run(&db, &FakeLlm::new([ok(&ids, 0.1)]), &mut quota(10), 5).await;
+        let later = now() + chrono::Duration::hours(1);
+        let term = crate::glossary::Term {
+            sources: vec!["EDG".into()],
+            target: "非常用ディーゼル発電機".into(),
+            abbr: Some("EDG".into()),
+            note: None,
+        };
+        db.add_glossary_term(&term, later).unwrap();
+        // 1 件目を作り直している間に、ほかの実行が 2 件目を今の訳語集で作り直す
+        let other = ids[1];
+        let llm = FakeLlm::with_hook([ok(&ids[..1], 0.1)], move |n| {
+            if n != 0 {
+                return;
+            }
+            let db = Db::open(&path).unwrap();
+            let body: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT id FROM contents WHERE article_id = ?1 LIMIT 1",
+                    [other],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            db.insert_artifact(
+                &NewArtifact {
+                    article_id: other,
+                    kind: ArtifactKind::Digest,
+                    backend: "fake",
+                    model: "sonnet",
+                    prompt_version: prompt::digest::PROMPT_VERSION,
+                    payload: &item(other),
+                    inputs: &[body],
+                    glossary_at: Some(&crate::db::timestamp(later)),
+                },
+                later,
+            )
+            .unwrap();
+        });
+        let target = Target::Redo(crate::pipeline::RedoSpec {
+            filter: crate::db::RedoFilter::default(),
+            user_id: db.owner_id().unwrap(),
+            profile_hash: None,
+            glossary: true,
+        });
+        let summary = digest_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &|| later,
+            },
+            &llm_cfg(1),
+            &PipelineConfig::default(),
+            &target,
+            later,
+        )
+        .await
+        .unwrap();
+        assert_eq!((summary.digested, summary.calls), (1, 1));
+    }
 }

@@ -417,6 +417,32 @@ mod tests {
         assert_eq!(access_of(&db, id), Vec::<i64>::new());
     }
 
+    /// 見出しの和訳は公開のものとして閲覧の制限を確かめずに表示するので、本文を入力にしたものは拒む。
+    #[test]
+    fn insert_artifact_rejects_titles_with_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let m = insert_membership(&db);
+        let gated = insert_content(&db, a, Some(m));
+        let err = db
+            .insert_artifact(
+                &NewArtifact {
+                    article_id: a,
+                    kind: ArtifactKind::Title,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({ "title_ja": "会員限定の見出し" }),
+                    inputs: &[gated],
+                    glossary_at: None,
+                },
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DbError::TitleWithInputs { .. }), "{err}");
+        assert_eq!(db.query_i64("SELECT count(*) FROM artifacts").unwrap(), 0);
+    }
+
     fn title_ids(db: &Db, now: &str) -> Vec<i64> {
         db.pending_titles(t(now), "claude-cli", "sonnet", 10)
             .unwrap()

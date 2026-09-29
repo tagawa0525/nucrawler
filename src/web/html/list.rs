@@ -417,7 +417,7 @@ mod tests {
     }
 
     /// 一覧の上部は見出しも説明も出さず、ボタンだけを並べる。
-    /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。表示する最低点は数字で選ぶ（0 はすべて）。
+    /// 切り替えは今の状態を ON（緑）/ OFF（白）で示す。表示する最低点は数字で選ぶ（0 はすべて）。
     #[test]
     fn list_page_shows_only_buttons_above_the_cards() {
         let view = ListView {

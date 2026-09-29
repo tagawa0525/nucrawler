@@ -203,7 +203,8 @@ mod tests {
     /// 一覧の並び・閾値は推薦点で決まる。評価を付けると、次の読み出しから効く。
     #[test]
     fn the_list_follows_the_recommended_score() {
-        let db = Db::open_in_memory().unwrap();
+        // 仕組みを確かめるので、少ない評価でもはっきり効く強さにする（既定の強さは設定のテストで確かめる）
+        let db = Db::open_in_memory().unwrap().with_prior_strength(1.0);
         let market = article_with(&db, "https://e.com/a", 80, &["市場"]);
         let fuel = article_with(&db, "https://e.com/b", 55, &["燃料"]);
         assert_eq!(item(&db, market).score, Some(80));
@@ -256,7 +257,7 @@ mod tests {
     /// 詳細には、推薦点の補正の内訳（効いた特徴と、動かした点数）を付ける。
     #[test]
     fn detail_carries_the_adjustments() {
-        let db = Db::open_in_memory().unwrap();
+        let db = Db::open_in_memory().unwrap().with_prior_strength(1.0);
         let owner = db.owner_id().unwrap();
         let market = article_with(&db, "https://e.com/a", 80, &["市場"]);
         rate_training(&db);

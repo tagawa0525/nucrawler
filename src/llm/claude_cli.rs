@@ -18,15 +18,21 @@ pub struct ClaudeCli {
     /// 子プロセスの作業ディレクトリ（無ければ作る）
     pub cwd: PathBuf,
     pub timeout: Duration,
+    /// 呼び出しの枠（`llm-slot-N.lock`）を置くディレクトリ。同じディレクトリを使う実行の間で、
+    /// 同時に動く claude の数を `concurrency` までにする
+    pub slots: PathBuf,
+    pub concurrency: usize,
 }
 
 impl ClaudeCli {
-    /// 設定のコマンドとタイムアウトで、`cwd` を作業ディレクトリにして呼ぶ。
-    pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf) -> Self {
+    /// 設定のコマンド・タイムアウト・同時に動かす数で、`cwd` を作業ディレクトリにして呼ぶ。
+    pub fn from_config(c: &crate::config::LlmConfig, cwd: PathBuf, slots: PathBuf) -> Self {
         Self {
             command: c.command.clone().into(),
             cwd,
             timeout: Duration::from_secs(c.timeout_secs),
+            slots,
+            concurrency: c.concurrency,
         }
     }
 }
@@ -37,6 +43,10 @@ impl Llm for ClaudeCli {
     }
 
     async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        // 枠は claude が終わるまで持つ（止められて future を捨てれば、子プロセスとともに空く）
+        let _slot = crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
+            .await
+            .map_err(LlmError::Slot)?;
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
         let mut child = tokio::process::Command::new(&self.command)
@@ -326,6 +336,8 @@ mod tests {
             command: script,
             cwd: cwd.clone(),
             timeout: Duration::from_secs(10),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({"type": "object"});
         let resp = cli.call(request(&schema)).await.unwrap();
@@ -379,7 +391,7 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
-            slots: dir.join("slots"),
+            slots: dir.clone(),
             concurrency: 1,
         };
         let schema = serde_json::json!({});
@@ -395,7 +407,7 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
-            slots: dir.join("slots"),
+            slots: dir.clone(),
             concurrency: 1,
         };
         let schema = serde_json::json!({});
@@ -415,7 +427,7 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_secs(10),
-            slots: dir.join("slots"),
+            slots: dir.clone(),
             concurrency: 1,
         };
         let schema = serde_json::json!({});
@@ -442,6 +454,8 @@ mod tests {
             command: script,
             cwd: dir.join("cwd"),
             timeout: Duration::from_millis(300),
+            slots: dir.clone(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let started = std::time::Instant::now();
@@ -463,7 +477,7 @@ mod tests {
                 command: script,
                 cwd: dir.join("cwd"),
                 timeout: Duration::from_secs(10),
-                slots: dir.join("slots"),
+                slots: dir.clone(),
                 concurrency: 1,
             };
             let schema = serde_json::json!({});
@@ -481,6 +495,8 @@ mod tests {
             command: "/nonexistent/claude".into(),
             cwd: std::env::temp_dir(),
             timeout: Duration::from_secs(1),
+            slots: std::env::temp_dir(),
+            concurrency: 1,
         };
         let schema = serde_json::json!({});
         let err = cli.call(request(&schema)).await.unwrap_err();

@@ -46,6 +46,18 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
     missing.iter().copied().filter(|id| held.contains(id))
 }
 
+/// 次の呼び出しをしてよいか。LLM を呼ぶ実行は並行して動くので、判定の前に DB の最新の使用率を
+/// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
+pub fn permit(
+    db: &Db,
+    quota: &mut Quota,
+    now: DateTime<Utc>,
+    reserve: u32,
+) -> Result<Result<(), crate::quota::Stop>, DbError> {
+    quota.observe(db.latest_rate_limit()?);
+    Ok(quota.permit_reserving(now, reserve))
+}
+
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。
 pub const MISSING: &str = "missing or invalid in the llm output";
 

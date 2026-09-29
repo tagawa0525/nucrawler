@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded, permit};
 use crate::config::LlmConfig;
 use crate::db::DbError;
 use crate::errors;
@@ -51,7 +51,7 @@ pub async fn tidy_topics<L: Llm>(
     if proposed == 0 {
         return Ok(summary);
     }
-    if let Err(stop) = quota.permit(now) {
+    if let Err(stop) = permit(db, quota, now, 0)? {
         tracing::info!("tidy stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, permit,
+    record_failures,
 };
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
@@ -75,7 +76,7 @@ pub async fn digest_articles<L: Llm>(
             break;
         }
         // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-        if let Err(stop) = quota.permit_reserving(now, llm_cfg.score_reserved_calls) {
+        if let Err(stop) = permit(db, quota, now, llm_cfg.score_reserved_calls)? {
             tracing::info!("digest stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

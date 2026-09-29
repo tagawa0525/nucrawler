@@ -42,6 +42,8 @@ pub enum LlmError {
     },
     #[error("failed to talk to the llm process")]
     Io(#[source] std::io::Error),
+    #[error("failed to take a call slot")]
+    Slot(#[source] crate::pipeline::lock::LockError),
     #[error("llm call timed out after {secs}s")]
     Timeout { secs: u64 },
     #[error("llm process exited with {status}: {stderr}")]

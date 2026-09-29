@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded, permit};
 use crate::config::LlmConfig;
 use crate::db::{DbError, Evidence};
 use crate::llm::{Llm, LlmRequest};
@@ -46,7 +46,7 @@ pub async fn suggest_profile<L: Llm>(
     now: DateTime<Utc>,
 ) -> Result<SuggestSummary, SuggestStageError> {
     let mut summary = SuggestSummary::default();
-    if let Err(stop) = quota.permit(now) {
+    if let Err(stop) = permit(db, quota, now, 0)? {
         tracing::info!("suggest stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

@@ -31,7 +31,7 @@ pub(crate) async fn crawl(
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let fetcher = Fetcher::from_config(&config.http)?;
-    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"));
+    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.clone());
     let mut report = RunReport::default();
     // 取得と LLM のステージはロックが別なので、取得を終えてから LLM のロックを取る。
     // 両方を同時には持たないので、他の実行と互いに待ち合って止まることはない

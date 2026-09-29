@@ -1,10 +1,13 @@
-//! 同時実行の防止。timer から起動した crawl と手動の crawl・redo が重ならないようにする。
-//! 取得（fetch・extract）と LLM を呼ぶ処理は別のロックを取り、互いを待たずに並行して動ける。
-//! LLM を呼ぶ処理を 1 つずつにするのは、同じ記事を二重に処理せず、クォータの判定が他の
-//! 実行の呼び出しを見落とさないようにするため。取得は LLM を使わず、記事と本文を書くだけ。
+//! 同時実行の制御。
 //!
-//! ロックを分ける前の版は `crawl.lock` を排他で取っていた。更新の前後で古い版の実行が残っていても
-//! 重ならないよう、どちらのロックを取るときも `crawl.lock` を共有で取る（新しい版どうしは待たない）。
+//! - 取得（fetch・extract）は 1 つずつ（`fetch.lock` を排他）。同じホストへの間隔を守るため
+//! - LLM を呼ぶ処理は並行してよい（`llm.lock` を共有）。同じ記事の二重処理は作業の予約
+//!   （`work_claims`）で、ほかの実行の呼び出しはクォータの判定のたびに DB の使用率を読むことで防ぐ
+//! - 同時に動く claude の数は、呼び出しの枠（`llm-slot-N.lock`）でプロセスをまたいで数える
+//! - 語彙の整理は 1 つずつ（`tidy.lock` を排他）
+//!
+//! 更新の前後で古い版の実行が残っていても重ならないよう、古い版が排他で取っていたロックは共有で取る。
+//! ロックを分ける前の版は `crawl.lock` を、LLM を並行にする前の版は `llm.lock` を排他で取っていた。
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -26,40 +29,67 @@ pub enum LockError {
 /// どの処理のロックか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockKind {
-    /// fetch・extract
+    /// fetch・extract（1 つずつ）
     Fetch,
-    /// LLM を呼ぶステージと redo・suggest・eval の採点
+    /// LLM を呼ぶステージと redo・suggest・eval の採点（並行してよい）
     Llm,
-}
-
-impl LockKind {
-    fn file_name(self) -> &'static str {
-        match self {
-            LockKind::Fetch => "fetch.lock",
-            LockKind::Llm => "llm.lock",
-        }
-    }
+    /// 語彙の整理（1 つずつ。LLM を呼ぶほかの実行とは並行する）
+    Tidy,
 }
 
 /// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
 #[derive(Debug)]
 pub struct Lock {
-    // フィールドは宣言の順に解放される。取った順の逆に、`crawl.lock` を最後に放す
-    _file: File,
-    _legacy: File,
+    /// 取った順。取った順の逆に放す（古い版のためのロックを最後に放す）
+    files: Vec<File>,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        while self.files.pop().is_some() {}
+    }
 }
 
 /// ロックを分ける前の版が排他で取っていたロック。
 const LEGACY: &str = "crawl.lock";
+/// LLM を並行にする前の版が排他で取っていたロック。今は LLM を呼ぶ実行どうしが共有で取る。
+const LLM: &str = "llm.lock";
 
 /// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。
 pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
-    let legacy = try_lock(dir, LEGACY, File::try_lock_shared)?;
-    let file = try_lock(dir, kind.file_name(), File::try_lock)?;
-    Ok(Lock {
-        _file: file,
-        _legacy: legacy,
-    })
+    let shared = |name| try_lock(dir, name, File::try_lock_shared);
+    let exclusive = |name| try_lock(dir, name, File::try_lock);
+    let mut files = vec![shared(LEGACY)?];
+    match kind {
+        LockKind::Fetch => files.push(exclusive("fetch.lock")?),
+        LockKind::Llm => files.push(shared(LLM)?),
+        LockKind::Tidy => {
+            files.push(shared(LLM)?);
+            files.push(exclusive("tidy.lock")?);
+        }
+    }
+    Ok(Lock { files })
+}
+
+/// 呼び出しの枠。drop すると空く。
+#[derive(Debug)]
+pub struct Slot {
+    _file: File,
+}
+
+/// `dir` にある `n` 個の呼び出しの枠（`llm-slot-N.lock`）のうち空いているものを取る。すべて
+/// 埋まっていれば、間隔を置いて空くまで待つ（future を捨てれば待つのをやめる）。
+pub async fn acquire_slot(dir: &Path, n: usize) -> Result<Slot, LockError> {
+    loop {
+        for i in 0..n {
+            match try_lock(dir, &format!("llm-slot-{i}.lock"), File::try_lock) {
+                Ok(file) => return Ok(Slot { _file: file }),
+                Err(LockError::Held { .. }) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
 }
 
 fn try_lock(

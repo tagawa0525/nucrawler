@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, permit,
+    record_failures,
 };
 use crate::config::LlmConfig;
 use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
@@ -55,7 +56,7 @@ pub async fn translate_titles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        if let Err(stop) = permit(db, quota, now, 0)? {
             tracing::info!("title stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

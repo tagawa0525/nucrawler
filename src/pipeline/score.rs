@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, record_failures,
+    Call, LlmStage, MISSING, Outcome, call_recorded, claim_ttl, held_missing, permit,
+    record_failures,
 };
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{ClaimKey, DbError, ScoreKey, ScoreMatches, ScoreScope, StageKey, score_stage};
@@ -103,7 +104,7 @@ pub async fn score_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        if let Err(stop) = permit(db, quota, now, 0)? {
             tracing::info!("score stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

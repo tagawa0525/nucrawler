@@ -223,7 +223,13 @@ impl Quota {
     /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
     pub fn record_call(&mut self, usage: Option<RateLimit>) {
         self.calls += 1;
-        // 応答に含まれない枠は、それまでの値を残す。
+        self.observe(usage);
+    }
+
+    /// ほかの実行を含めて分かった最新の使用率（DB の最新の llm_calls）を取り込む。LLM を呼ぶ実行は
+    /// 並行して動くので、判定の前に読んで、ほかの実行の呼び出しも判定に入れる。
+    pub fn observe(&mut self, usage: Option<RateLimit>) {
+        // 含まれない枠は、それまでの値を残す。
         if let Some(new) = usage {
             let old = self.usage.unwrap_or_default();
             self.usage = Some(RateLimit {

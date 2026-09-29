@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, record_failures};
+use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, permit, record_failures};
 use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
@@ -88,7 +88,7 @@ pub async fn translate_articles<L: Llm>(
             summary.cancelled = true;
             break;
         }
-        if let Err(stop) = quota.permit(now) {
+        if let Err(stop) = permit(db, quota, now, 0)? {
             tracing::info!("translate stops: {stop}");
             summary.halted = Some(Halt::Quota(stop));
             break;

@@ -27,7 +27,7 @@ pub(crate) async fn redo(
     let db = Db::open(&data.join("nucrawler.db"))?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"));
+    let llm = ClaudeCli::from_config(&config.llm, data.join("llm-cwd"), data.clone());
     let mut quota = Quota::new(
         config.quota.clone(),
         db.latest_rate_limit()?,

@@ -805,6 +805,42 @@ mod tests {
         );
     }
 
+    /// 未読だけの一覧は、件数の上限より前に既読を除く（上位が既読で埋まっても、下の未読が出る）。
+    #[test]
+    fn unread_list_filters_before_the_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let read = scored_article(
+            &db,
+            "https://e.com/read",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            95,
+        );
+        let unread = scored_article(
+            &db,
+            "https://e.com/unread",
+            Lang::En,
+            "2026-09-26T00:00:00.000Z",
+            80,
+        );
+        db.set_read(owner, read, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let q = |unread| ListQuery {
+            limit: 1,
+            unread,
+            ..list_query(&db, false)
+        };
+        let ids = |q| {
+            db.list_articles(q)
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(q(false)), [read]);
+        assert_eq!(ids(q(true)), [unread]);
+    }
     #[test]
     fn list_marks_read_translation_and_locks() {
         let db = Db::open_in_memory().unwrap();

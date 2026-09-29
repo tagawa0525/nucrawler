@@ -149,18 +149,16 @@ fn warning_banner(w: &Warning, page: &Page) -> String {
     }
 }
 
-/// 絵文字だけのボタン。名前は読み上げとツールチップに回す。
-/// `state` があれば切り替えとして ON（緑）/ OFF（白）を示す。`href` はエスケープ済みで渡す。
-fn button(href: &str, name: &str, emoji: &str, state: Option<bool>) -> String {
-    let (class, label) = match state {
-        None => (String::new(), name.to_string()),
-        Some(on) => {
-            let (class, state) = if on { ("on", "ON") } else { ("off", "OFF") };
-            (format!(" {class}"), format!("{name}：{state}"))
-        }
+/// 絵文字だけのボタン。名前は読み上げとツールチップに回す。`class` は `btn` に足すクラス（空でもよい）。
+/// `href` はエスケープ済みで渡す。
+fn button(href: &str, name: &str, emoji: &str, class: &str) -> String {
+    let class = if class.is_empty() {
+        String::new()
+    } else {
+        format!(" {class}")
     };
     format!(
-        "<a class=\"btn{class}\" href=\"{href}\" aria-label=\"{label}\" title=\"{label}\">{emoji}</a>"
+        "<a class=\"btn{class}\" href=\"{href}\" aria-label=\"{name}\" title=\"{name}\">{emoji}</a>"
     )
 }
 

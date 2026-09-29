@@ -84,14 +84,28 @@ impl ListParams {
     }
 }
 
+/// 一覧の印で絞る値。`1` はあり、`0` はなし、`any` は絞らない（`Some(None)`）。無ければ `None`（既定）。
+fn mark(value: Option<&str>, name: &'static str) -> Result<Option<Option<bool>>, AppError> {
+    match value {
+        None => Ok(None),
+        Some("1") => Ok(Some(Some(true))),
+        Some("0") => Ok(Some(Some(false))),
+        Some("any") => Ok(Some(None)),
+        Some(_) => Err(AppError::BadRequest(match name {
+            "read" => "read must be 1, 0 or any",
+            _ => "bookmarked must be 1, 0 or any",
+        })),
+    }
+}
+
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let rating = params.rating()?;
-    let bookmarked = params.bookmarked.as_deref() == Some("1");
-    let filtering = rating.is_some() || bookmarked;
+    let bookmarked = mark(params.bookmarked.as_deref(), "bookmarked")?.flatten();
+    let filtering = rating.is_some() || bookmarked == Some(true);
     // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
     // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
     let leaving = params.rating.as_deref() == Some("") && !filtering;
@@ -103,16 +117,13 @@ pub(super) async fn list(
     };
     // 最低点の既定は、一覧では設定の最低点、絞り込みでは 0（点数で絞らない）
     let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
-    // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す
-    let show_read = match params.read.as_deref() {
-        Some("1") => true,
-        Some("0") => false,
-        _ => filtering,
-    };
+    // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
+    let read =
+        mark(params.read.as_deref(), "read")?.unwrap_or(if filtering { None } else { Some(false) });
     let view = html::ListView {
         min,
         default_min: state.web.min_score,
-        read: show_read,
+        read,
         rating,
         bookmarked,
     };
@@ -137,9 +148,10 @@ pub(super) async fn list(
         }
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
-        // 既読は件数の上限より前に除く（上位が既読で埋まっても、下の未読が出るように）
+        // 既読・ブックマークでは件数の上限より前に絞る（上位が既読で埋まっても、下の未読が出るように）
         let items = db.list_articles(ListQuery {
-            read: (!show_read).then_some(false),
+            read: view.read,
+            bookmarked: view.bookmarked,
             ..list_query(&web, user, hash.as_deref(), now, min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
@@ -161,8 +173,11 @@ pub(super) async fn list(
                 .into_iter()
                 .filter(|i| !listed.contains(&i.article_id))
                 .collect();
-            // 一覧と同じく、既読の記事は出さない
-            html::hide_read(picks, show_read)
+            // 一覧と同じく、既読・ブックマークで絞る
+            html::filter_read(picks, view.read)
+                .into_iter()
+                .filter(|i| view.bookmarked.is_none_or(|b| i.bookmarked == b))
+                .collect()
         };
         let warnings = warnings(db)?;
         let page = Page {
@@ -195,8 +210,8 @@ fn filtered(
             .map(|r| r.to_string())
             .unwrap_or_default(),
         unrated: view.rating == Some(0),
-        bookmarked: view.bookmarked.then_some(true),
-        read: (!view.read).then_some(false),
+        bookmarked: view.bookmarked,
+        read: view.read,
         min_score: if view.min > 0 {
             view.min.to_string()
         } else {
@@ -688,7 +703,8 @@ mod tests {
             ("/?rating=&read=0&bookmarked=1", "/?read=0&bookmarked=1"),
             ("/?min=50", "/"),
             ("/?read=1&min=30", "/?min=30&read=1"),
-            ("/?rating=4&read=1", "/?rating=4"),
+            // 絞り込みの既読の既定は絞らない（any）
+            ("/?rating=4&read=any", "/?rating=4"),
             // 絞り込みの最低点の既定は 0（00）
             ("/?rating=4&min=0", "/?rating=4"),
             ("/?rating=4&min=60", "/?min=60&rating=4"),
@@ -753,13 +769,13 @@ mod tests {
         assert_eq!(res.headers()["location"], "/");
     }
 
-    /// `read=1` を受け取り、切り替えのリンクに反映する。
+    /// `read=1`（既読だけ）を受け取り、切り替えのリンクに反映する（押すと一覧の既定の未読だけへ）。
     #[tokio::test]
     async fn list_reads_the_read_toggle() {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
         let (status, html) = server.get("/?min=0&read=1").await;
         assert_eq!(status, 200);
-        assert!(html.contains("既読も表示：ON"), "{html}");
+        assert!(html.contains("既読：既読だけ（押すと未読だけ）"), "{html}");
         assert!(html.contains(r#"href="/?min=0""#), "{html}");
         assert!(
             html.contains(r#"<input type="hidden" name="read" value="1">"#),

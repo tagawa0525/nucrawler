@@ -40,11 +40,11 @@ impl BarView for SearchView {
             self.0.min_rating.trim().parse().ok()
         }
     }
-    fn read(&self) -> bool {
-        self.0.read != Some(false)
+    fn read(&self) -> Option<bool> {
+        self.0.read
     }
-    fn bookmarked(&self) -> bool {
-        self.0.bookmarked == Some(true)
+    fn bookmarked(&self) -> Option<bool> {
+        self.0.bookmarked
     }
     fn with_min(&self, min: u8) -> Self {
         self.with(|p| {
@@ -64,11 +64,11 @@ impl BarView for SearchView {
                 .unwrap_or_default();
         })
     }
-    fn with_read(&self, read: bool) -> Self {
-        self.with(|p| p.read = if read { None } else { Some(false) })
+    fn with_read(&self, read: Option<bool>) -> Self {
+        self.with(|p| p.read = read)
     }
-    fn with_bookmarked(&self, bookmarked: bool) -> Self {
-        self.with(|p| p.bookmarked = bookmarked.then_some(true))
+    fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self {
+        self.with(|p| p.bookmarked = bookmarked)
     }
     fn min_name(&self) -> &'static str {
         "min_score"
@@ -271,7 +271,7 @@ mod tests {
         assert!(!html.contains(r#"aria-label="検索""#), "{html}");
         assert!(!html.contains("一覧へ"), "{html}");
         assert!(
-            html.contains(r#"name="rating""#) && html.contains("既読も表示"),
+            html.contains(r#"name="rating""#) && html.contains("既読："),
             "{html}"
         );
     }
@@ -321,11 +321,11 @@ mod tests {
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読も表示：OFF""#),
+            bar.contains(r#"<a class="btn not" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読：未読だけ（押すと絞らない）""#),
             "{bar}"
         );
         assert!(
-            bar.contains(r#"<a class="btn off" href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマークだけ表示：OFF""#),
+            bar.contains(r#"<a class="btn" href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;bookmarked=1&amp;min_rating=4&amp;min_score=60" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）""#),
             "{bar}"
         );
         // JavaScript が無いときは、選択を検索の欄で送り、ほかの条件を hidden で送る（選択で置き換わる条件は送らない）

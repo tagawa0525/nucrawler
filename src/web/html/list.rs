@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// 一覧を「前回の訪問の後に届いた記事」と「それより前の記事」に分ける。既読の記事は一覧の問い合わせで
-/// 除いておく（`ListQuery::unread`）。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、
+/// 一覧を「前回の訪問の後に届いた記事」と「それより前の記事」に分ける。既読で絞るのは一覧の問い合わせで
+/// 済ませておく（`ListQuery::read`）。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、
 /// すべてを前者にする。
 pub fn split_sections(
     items: Vec<ListItem>,
@@ -17,30 +17,45 @@ pub fn split_sections(
         .partition(|i| i.fetched_at.as_str() > boundary)
 }
 
-/// 既読の記事を除く（`include_read` なら除かない）。確認枠はその日に選んだ記事を出し直すので、
-/// 選んだ後に既読にした記事をここで除く。
-pub fn hide_read(items: Vec<ListItem>, include_read: bool) -> Vec<ListItem> {
-    if include_read {
-        return items;
+/// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ、`None` は絞らない）。確認枠はその日に
+/// 選んだ記事を出し直すので、選んだ後に既読にした記事などをここで絞る。
+pub fn filter_read(items: Vec<ListItem>, read: Option<bool>) -> Vec<ListItem> {
+    match read {
+        None => items,
+        Some(read) => items.into_iter().filter(|i| i.is_read() == read).collect(),
     }
-    items.into_iter().filter(|i| !i.is_read()).collect()
 }
 
-/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1` で持つ。
-/// 評価（`rating=N`）・ブックマーク（`bookmarked=1`）で絞るときは、一覧の代わりに該当する記事を出す。
-/// 絞り込みは評価した（読んだことの多い）記事を探すので、既定で既読も出し、隠すときに `read=0` を持つ。
+/// 印で絞る切り替え（👁・🔖）の次の状態。絞らない → 印のある記事だけ → 印の無い記事だけ → 絞らない。
+fn next_mark(mark: Option<bool>) -> Option<bool> {
+    match mark {
+        None => Some(true),
+        Some(true) => Some(false),
+        Some(false) => None,
+    }
+}
+
+/// 印で絞る切り替えの値（URL と欄の条件）。1 はあり、0 はなし。
+fn mark_value(on: bool) -> &'static str {
+    if on { "1" } else { "0" }
+}
+
+/// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1`（既読だけ）・`read=0`（未読だけ）・
+/// `read=any`（絞らない）で、ブックマークは `bookmarked=1`・`bookmarked=0` で持つ（この表示の既定なら省く）。
+/// 評価（`rating=N`）・ブックマーク中だけ（`bookmarked=1`）で絞るときは、一覧の代わりに該当する記事を出す。
+/// 一覧の既読の既定は未読だけ、絞り込みは評価した（読んだことの多い）記事を探すので絞らない。
 #[derive(Clone, Copy)]
 pub struct ListView {
     /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）
     pub min: u8,
     /// 既定の最低点（設定の `web.min_score`）
     pub default_min: u8,
-    /// 既読の記事も出す（一覧の既定は出さない、絞り込みの既定は出す）
-    pub read: bool,
+    /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ、`None` は絞らない）
+    pub read: Option<bool>,
     /// この評価（1〜5）以上の記事に絞る。0 なら評価の無い記事だけ
     pub rating: Option<u8>,
-    /// ブックマークした記事に絞る
-    pub bookmarked: bool,
+    /// ブックマークで絞る（`Some(true)` はブックマーク中だけで絞り込みの画面、`Some(false)` はしていない記事だけ）
+    pub bookmarked: Option<bool>,
 }
 
 impl Default for ListView {
@@ -49,9 +64,9 @@ impl Default for ListView {
         Self {
             min,
             default_min: min,
-            read: false,
+            read: Some(false),
             rating: None,
-            bookmarked: false,
+            bookmarked: None,
         }
     }
 }
@@ -65,9 +80,14 @@ impl ListView {
         self.min == 0
     }
 
-    /// 評価・ブックマークで絞っているか。
+    /// 評価・ブックマーク中だけで絞っているか（一覧の代わりに全期間から探す）。
     pub fn filtered(self) -> bool {
-        self.rating.is_some() || self.bookmarked
+        self.rating.is_some() || self.bookmarked == Some(true)
+    }
+
+    /// この表示での既読の既定。一覧は未読だけ、絞り込みは絞らない。
+    pub fn read_default(self) -> Option<bool> {
+        if self.filtered() { None } else { Some(false) }
     }
 
     /// この表示での最低点の既定。一覧は設定の最低点、絞り込みは 0（点数で絞らない）。
@@ -76,14 +96,14 @@ impl ListView {
     }
 
     /// 絞り込みを変えた表示。一覧と絞り込みを行き来するときは、既読の表示と最低点を行き先の既定に戻す。
-    fn with_filters(self, rating: Option<u8>, bookmarked: bool) -> Self {
+    fn with_filters(self, rating: Option<u8>, bookmarked: Option<bool>) -> Self {
         let mut next = Self {
             rating,
             bookmarked,
             ..self
         };
         if next.filtered() != self.filtered() {
-            next.read = next.filtered();
+            next.read = next.read_default();
             next.min = next.min_default();
         }
         next
@@ -94,13 +114,13 @@ impl ListView {
     pub fn url(self) -> String {
         let min = format!("min={}", self.min);
         let rating = format!("rating={}", self.rating.unwrap_or_default());
-        let filtered = self.filtered();
+        let read = format!("read={}", self.read.map_or("any", mark_value));
+        let bookmarked = format!("bookmarked={}", self.bookmarked.map_or("", mark_value));
         let query: Vec<&str> = [
             (self.min != self.min_default(), min.as_str()),
-            (!filtered && self.read, "read=1"),
             (self.rating.is_some(), rating.as_str()),
-            (filtered && !self.read, "read=0"),
-            (self.bookmarked, "bookmarked=1"),
+            (self.read != self.read_default(), read.as_str()),
+            (self.bookmarked.is_some(), bookmarked.as_str()),
         ]
         .into_iter()
         .filter_map(|(on, q)| on.then_some(q))
@@ -134,14 +154,14 @@ pub(super) trait BarView: Clone {
     fn extra_min(&self) -> Option<u8>;
     /// 評価の絞り込み（0 は評価の無い記事だけ）
     fn rating(&self) -> Option<u8>;
-    /// 既読の記事も出すか
-    fn read(&self) -> bool;
-    /// ブックマークした記事だけか
-    fn bookmarked(&self) -> bool;
+    /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ）
+    fn read(&self) -> Option<bool>;
+    /// ブックマークで絞る（`Some(true)` はブックマーク中だけ、`Some(false)` はしていない記事だけ）
+    fn bookmarked(&self) -> Option<bool>;
     fn with_min(&self, min: u8) -> Self;
     fn with_rating(&self, rating: Option<u8>) -> Self;
-    fn with_read(&self, read: bool) -> Self;
-    fn with_bookmarked(&self, bookmarked: bool) -> Self;
+    fn with_read(&self, read: Option<bool>) -> Self;
+    fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self;
     /// JavaScript が無いとき、評価の選択と一緒に今の条件を送るか
     fn keeps_state_on_rating(&self) -> bool {
         true
@@ -172,10 +192,10 @@ impl BarView for ListView {
     fn rating(&self) -> Option<u8> {
         self.rating
     }
-    fn read(&self) -> bool {
+    fn read(&self) -> Option<bool> {
         self.read
     }
-    fn bookmarked(&self) -> bool {
+    fn bookmarked(&self) -> Option<bool> {
         self.bookmarked
     }
     fn with_min(&self, min: u8) -> Self {
@@ -184,10 +204,10 @@ impl BarView for ListView {
     fn with_rating(&self, rating: Option<u8>) -> Self {
         self.with_filters(rating, self.bookmarked)
     }
-    fn with_read(&self, read: bool) -> Self {
+    fn with_read(&self, read: Option<bool>) -> Self {
         ListView { read, ..*self }
     }
-    fn with_bookmarked(&self, bookmarked: bool) -> Self {
+    fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self {
         self.with_filters(self.rating, bookmarked)
     }
     /// 一覧から絞り込みへ移るときは、一覧の条件を持ち込まない（絞り込みの既定にする）
@@ -317,29 +337,70 @@ fn rating_select(view: &impl BarView) -> String {
 /// 上部のバー。検索・点数・評価・既読・ブックマーク・設定の順で、カードの下の印と同じ並びにする。
 /// 一覧・絞り込みの画面では先頭を 🔍（検索）に、ほかの画面では 🏠（一覧へ戻る）にする。
 pub(super) fn bar(view: &impl BarView, home: bool) -> String {
-    let bookmark = button(
-        &view.with_bookmarked(!view.bookmarked()).bar_href(),
-        "ブックマークだけ表示",
-        "🔖",
-        Some(view.bookmarked()),
-    );
-    let read = button(
-        &view.with_read(!view.read()).bar_href(),
-        "既読も表示",
+    let read = mark_button(
+        &view.with_read(next_mark(view.read())).bar_href(),
+        "既読",
         "👁",
-        Some(view.read()),
+        view.read(),
+        ["絞らない", "既読だけ", "未読だけ"],
+    );
+    let bookmark = mark_button(
+        &view
+            .with_bookmarked(next_mark(view.bookmarked()))
+            .bar_href(),
+        "ブックマーク",
+        "🔖",
+        view.bookmarked(),
+        ["絞らない", "ブックマーク中だけ", "ブックマークなしだけ"],
     );
     format!(
         "<nav class=\"bar\">{}{}{}{read}{bookmark}{}</nav>{BAR_SCRIPT}",
         if home {
-            button("/", "ホーム", "🏠", None)
+            button("/", "ホーム", "🏠", "")
         } else {
-            button("/search", "検索", "🔍", None)
+            button("/search", "検索", "🔍", "")
         },
         min_select(view),
         rating_select(view),
-        button("/settings", "設定", "⚙️", None),
+        button("/settings", "設定", "⚙️", ""),
     )
+}
+
+/// 印で絞る切り替え（👁・🔖）。絞らない（白）・印のある記事だけ（緑）・印の無い記事だけ（赤と斜線）を示し、
+/// 押すと次の状態へ移る（`href`）。名前には今の状態と、押したときの次の状態を出す。
+/// `states` は 絞らない・印のある記事だけ・印の無い記事だけ の言い方。
+fn mark_button(
+    href: &str,
+    name: &str,
+    emoji: &str,
+    mark: Option<bool>,
+    states: [&str; 3],
+) -> String {
+    let state = |mark: Option<bool>| match mark {
+        None => states[0],
+        Some(true) => states[1],
+        Some(false) => states[2],
+    };
+    let class = match mark {
+        None => "",
+        Some(true) => "on",
+        Some(false) => "not",
+    };
+    let label = format!(
+        "{name}：{}（押すと{}）",
+        state(mark),
+        state(next_mark(mark))
+    );
+    button(href, &label, emoji, class)
+}
+
+/// 欄（`.sections`）に持たせる、印で絞る条件（`data-read`・`data-bookmarked`。1 はあり、0 はなし）。
+/// 印を付け外しして条件から外れたカードは、その場で隠す（`MARKS_SCRIPT`）。
+fn mark_conditions(read: Option<bool>, bookmarked: Option<bool>) -> String {
+    [("read", read), ("bookmarked", bookmarked)]
+        .into_iter()
+        .filter_map(|(name, mark)| mark.map(|on| format!(" data-{name}=\"{}\"", mark_value(on))))
+        .collect()
 }
 
 /// 一覧のほかの画面（検索・詳細）の上部のバー。一覧の既定の表示を指し、先頭は 🏠。
@@ -359,23 +420,14 @@ pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String 
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
         // 欄に絞り込みの条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
-        let hide_read = if view.read {
-            ""
-        } else {
-            " data-hide-read=\"1\""
-        };
+        let marks = mark_conditions(view.read, view.bookmarked);
         let rating = match view.rating {
             None => String::new(),
             Some(0) => " data-unrated=\"1\"".to_string(),
             Some(r) => format!(" data-min-rating=\"{r}\""),
         };
-        let bookmarked = if view.bookmarked {
-            " data-bookmarked=\"1\""
-        } else {
-            ""
-        };
         body.push_str(&format!(
-            "<h2 class=\"count\">{} 件</h2><div class=\"sections\"{hide_read}{rating}{bookmarked}>",
+            "<h2 class=\"count\">{} 件</h2><div class=\"sections\"{marks}{rating}>",
             items.len()
         ));
         body.extend(items.iter().map(|i| card(i, true, page)));
@@ -394,22 +446,21 @@ pub fn list_page_with_explore(
     page: &Page,
 ) -> String {
     let mut body = bar(&view, false);
-    // 既読を隠す一覧では、既読にしたカードをその場で隠す（`MARKS_SCRIPT`）
-    body.push_str(if view.read {
-        "<div class=\"sections\">"
-    } else {
-        "<div class=\"sections\" data-hide-read=\"1\">"
-    });
+    // 欄に印で絞る条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
+    body.push_str(&format!(
+        "<div class=\"sections\"{}>",
+        mark_conditions(view.read, view.bookmarked)
+    ));
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
     }
     body.extend(new.iter().map(|i| card(i, true, page)));
     if !earlier.is_empty() {
-        body.push_str(if view.read {
-            "<h2>過去の記事</h2>"
-        } else {
-            "<h2>過去の未読</h2>"
+        body.push_str(match view.read {
+            None => "<h2>過去の記事</h2>",
+            Some(true) => "<h2>過去の既読</h2>",
+            Some(false) => "<h2>過去の未読</h2>",
         });
         body.extend(earlier.iter().map(|i| card(i, true, page)));
     }
@@ -426,7 +477,7 @@ pub fn list_page_with_explore(
 }
 
 /// 一覧のカードの印（`marks`）を、ページを移らずにその場で付け外しする。既読を隠す一覧
-/// （`data-hide-read`）や、評価・ブックマークで絞った画面（`data-min-rating`・`data-bookmarked`）では、印を付け外しして
+/// （`data-read`・`data-bookmarked`）や、評価で絞った画面（`data-min-rating`・`data-unrated`）では、印を付け外しして
 /// 欄の条件から外れたカードを隠し、しばらく「元に戻す」を出す（u キーでも戻す）。
 /// 左右のスワイプでも印を付けられる（右でブックマーク、左で既読）。縦のスクロールはブラウザに任せ
 /// （`touch-action: pan-y`）、画面の端から始まる操作はブラウザの「戻る」に譲る。
@@ -589,8 +640,8 @@ mod tests {
         assert_eq!(ids(&new), [1, 5]);
         assert_eq!(ids(&earlier), [2, 3, 4]);
         // 既読は、いつ付いたかによらず除く（確認枠）。既読も出すなら残す
-        assert_eq!(ids(&hide_read(items.clone(), false)), [1, 2]);
-        assert_eq!(ids(&hide_read(items.clone(), true)), [1, 2, 3, 4, 5]);
+        assert_eq!(ids(&filter_read(items.clone(), Some(false))), [1, 2]);
+        assert_eq!(ids(&filter_read(items.clone(), None)), [1, 2, 3, 4, 5]);
         // 初回（区切りが無い）は、すべて前回からの欄
         let (new, earlier) = split_sections(items, None);
         assert_eq!(ids(&new), [1, 2, 3, 4, 5]);
@@ -671,7 +722,7 @@ mod tests {
             at(r#"href="/search""#),
             at(r#"name="min""#),
             at(r#"name="rating""#),
-            at(r#"aria-label="既読も表示"#),
+            at(r#"aria-label="既読："#),
             at(r#"href="/?bookmarked=1""#),
             at(r#"href="/settings""#),
         ];
@@ -709,7 +760,7 @@ mod tests {
         );
         // 既読を隠す一覧では、既読にしたカードをその場で隠し、しばらく「元に戻す」（u キー）を出す
         assert!(
-            html.contains(r#"<div class="sections" data-hide-read="1">"#),
+            html.contains(r#"<div class="sections" data-read="0">"#),
             "{html}"
         );
         assert!(
@@ -720,7 +771,7 @@ mod tests {
         // カードは欄の条件（既読を隠す・評価・ブックマーク）に合うかで出し隠しする。印を付け外しした後、
         // 送信に失敗した後（元に戻すが失敗したら隠し直す）、戻るボタンで戻ったときの読み直しの後のどれでも
         assert!(
-            html.contains("f.hideRead")
+            html.contains("want(f.read")
                 && html.contains("f.minRating")
                 && html.contains("f.bookmarked"),
             "{html}"
@@ -731,7 +782,7 @@ mod tests {
             "{html}"
         );
         let shown = ListView {
-            read: true,
+            read: None,
             ..ListView::default()
         };
         let html = list_page(
@@ -740,7 +791,7 @@ mod tests {
             shown,
             &Page::default(),
         );
-        assert!(!html.contains(r#"data-hide-read="1""#), "{html}");
+        assert!(html.contains(r#"<div class="sections">"#), "{html}");
         // ←/→ で既読・ブックマーク、↓/↑ で選ぶ
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
@@ -798,7 +849,7 @@ mod tests {
         assert!(!html.contains(r#"<option value="100">"#), "{html}");
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/?min=0&amp;read=1" aria-label="既読も表示：OFF" title="既読も表示：OFF">👁</a>"#
+                r#"<a class="btn not" href="/?min=0&amp;read=any" aria-label="既読：未読だけ（押すと絞らない）" title="既読：未読だけ（押すと絞らない）">👁</a>"#
             ),
             "{html}"
         );
@@ -822,21 +873,22 @@ mod tests {
                 ..ListView::default()
             };
             let html = list_page(&[], &[], view, &Page::default());
-            let at = html.find("👁").unwrap();
+            let at = html.find("👁</a>").unwrap();
             let start = html[..at].rfind("href=\"").unwrap() + 6;
             html[start..start + html[start..].find('"').unwrap()].to_string()
         };
-        assert_eq!(eye(50, false), "/?read=1");
-        assert_eq!(eye(50, true), "/");
-        assert_eq!(eye(30, false), "/?min=30&amp;read=1");
-        assert_eq!(eye(30, true), "/?min=30");
+        // 未読だけ（一覧の既定）→ 絞らない → 既読だけ
+        assert_eq!(eye(50, Some(false)), "/?read=any");
+        assert_eq!(eye(50, None), "/?read=1");
+        assert_eq!(eye(30, Some(false)), "/?min=30&amp;read=any");
+        assert_eq!(eye(30, None), "/?min=30&amp;read=1");
         let read = ListView {
-            read: true,
+            read: None,
             ..ListView::default()
         };
         let html = list_page(&[], &[], read, &Page::default());
         assert!(
-            html.contains(r#"<input type="hidden" name="read" value="1">"#),
+            html.contains(r#"<input type="hidden" name="read" value="any">"#),
             "{html}"
         );
         let odd = ListView {
@@ -879,7 +931,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/?bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+                r#"<a class="btn" href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）" title="ブックマーク：絞らない（押すとブックマーク中だけ）">🔖</a>"#
             ),
             "{html}"
         );
@@ -893,7 +945,7 @@ mod tests {
         let view = ListView {
             min: 0,
             rating: Some(4),
-            read: true,
+            read: None,
             ..ListView::default()
         };
         let mut rated = item(1, "2026-09-27T05:00:00.000Z");
@@ -913,7 +965,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn on" href="/?rating=4&amp;read=0" aria-label="既読も表示：ON" title="既読も表示：ON">"#
+                r#"<a class="btn" href="/?rating=4&amp;read=1" aria-label="既読：絞らない（押すと既読だけ）" title="既読：絞らない（押すと既読だけ）">"#
             ),
             "{html}"
         );
@@ -927,7 +979,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/?rating=4&amp;bookmarked=1" aria-label="ブックマークだけ表示：OFF" title="ブックマークだけ表示：OFF">🔖</a>"#
+                r#"<a class="btn" href="/?rating=4&amp;bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）" title="ブックマーク：絞らない（押すとブックマーク中だけ）">🔖</a>"#
             ),
             "{html}"
         );
@@ -951,8 +1003,8 @@ mod tests {
         let view = ListView {
             min: 0,
             rating: Some(4),
-            bookmarked: true,
-            read: true,
+            bookmarked: Some(true),
+            read: None,
             ..ListView::default()
         };
         let html = filtered_page(
@@ -961,7 +1013,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<div class="sections" data-min-rating="4" data-bookmarked="1">"#),
+            html.contains(r#"<div class="sections" data-bookmarked="1" data-min-rating="4">"#),
             "{html}"
         );
         let html = filtered_page(&[], view, &Page::default());
@@ -971,20 +1023,20 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<a class="btn on" href="/?rating=4" aria-label="ブックマークだけ表示：ON""#
+                r#"<a class="btn on" href="/?rating=4&amp;bookmarked=0" aria-label="ブックマーク：ブックマーク中だけ（押すとブックマークなしだけ）""#
             ),
             "{html}"
         );
         assert!(html.contains("該当する記事はありません"), "{html}");
         let view = ListView {
             min: 0,
-            bookmarked: true,
-            read: true,
+            bookmarked: Some(true),
+            read: None,
             ..ListView::default()
         };
         let html = filtered_page(&[], view, &Page::default());
         assert!(
-            html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
+            html.contains(r#"href="/?bookmarked=0" aria-label="ブックマーク：ブックマーク中だけ（押すとブックマークなしだけ）""#),
             "{html}"
         );
 
@@ -1000,11 +1052,11 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"href="/?rating=4" aria-label="既読も表示：OFF""#),
+            html.contains(r#"href="/?rating=4" aria-label="既読：未読だけ（押すと絞らない）""#),
             "{html}"
         );
         assert!(
-            html.contains(r#"<div class="sections" data-hide-read="1" data-min-rating="4">"#),
+            html.contains(r#"<div class="sections" data-read="0" data-min-rating="4">"#),
             "{html}"
         );
         assert!(
@@ -1018,21 +1070,21 @@ mod tests {
         // 一覧と絞り込みを行き来するときは、👁 を行き先の既定に戻す（一覧は OFF、絞り込みは ON）
         let bookmark_off = ListView {
             min: 0,
-            bookmarked: true,
+            bookmarked: Some(true),
             ..ListView::default()
         };
         let html = filtered_page(&[], bookmark_off, &Page::default());
         assert!(
-            html.contains(r#"href="/" aria-label="ブックマークだけ表示：ON""#),
+            html.contains(r#"href="/?bookmarked=0" aria-label="ブックマーク：ブックマーク中だけ（押すとブックマークなしだけ）""#),
             "{html}"
         );
         let from_list = ListView {
-            read: true,
+            read: None,
             ..ListView::default()
         };
         let html = list_page(&[], &[], from_list, &Page::default());
         assert!(
-            html.contains(r#"href="/?bookmarked=1" aria-label="ブックマークだけ表示：OFF""#),
+            html.contains(r#"href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）""#),
             "{html}"
         );
         // 一覧の評価の選択は、一覧の 👁 を絞り込みへ持ち込まない
@@ -1056,13 +1108,13 @@ mod tests {
                 },
                 &Page::default(),
             );
-            let at = html.find("👁</span></a>").expect(&html);
+            let at = html.find("👁</a>").expect(&html);
             let start = html[..at].rfind("<a ").unwrap();
             html[start..at].to_string()
         };
         assert_eq!(
             eye(Some(false)),
-            r#"<a class="btn not" href="/?read=any" aria-label="既読：未読だけ（押すと絞らない）" title="既読：未読だけ（押すと絞らない）"><span>"#
+            r#"<a class="btn not" href="/?read=any" aria-label="既読：未読だけ（押すと絞らない）" title="既読：未読だけ（押すと絞らない）">"#
         );
         assert!(
             eye(None).starts_with(
@@ -1080,7 +1132,7 @@ mod tests {
         );
         let bookmark = |view: ListView| {
             let html = filtered_page(&[], view, &Page::default());
-            let at = html.find("🔖</span></a>").expect(&html);
+            let at = html.find("🔖</a>").expect(&html);
             let start = html[..at].rfind("<a ").unwrap();
             html[start..at].to_string()
         };
@@ -1141,7 +1193,7 @@ mod tests {
             ListView {
                 min: 0,
                 rating: Some(4),
-                read: true,
+                read: None,
                 ..ListView::default()
             },
             &Page::default(),
@@ -1155,7 +1207,7 @@ mod tests {
     fn rating_select_offers_unrated_and_resets_the_score_across_modes() {
         let unrated = ListView {
             min: 0,
-            read: true,
+            read: None,
             rating: Some(0),
             ..ListView::default()
         };
@@ -1209,7 +1261,7 @@ mod tests {
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
         let view = ListView {
-            read: true,
+            read: None,
             ..ListView::default()
         };
         let html = list_page(&[], &earlier, view, &Page::default());

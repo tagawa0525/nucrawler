@@ -273,8 +273,49 @@ mod tests {
         for hidden in ["評価 2", "無関係", "未採点"] {
             assert!(!section.contains(hidden), "{hidden}: {html}");
         }
-        let (_, all) = server.get("/?all=1").await;
+        let (_, all) = server.get("/?min=0").await;
         assert!(!all.contains("確認枠"), "{all}");
+    }
+
+    /// 表示する最低点は `min` で選べる。0 は未採点なども含めてすべて。
+    /// 確認枠は設定の最低点で選び、一覧に既に出ている記事は重ねて出さない。
+    #[tokio::test]
+    async fn list_takes_the_minimum_score() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, digest) = seed(&db, "https://e.com/forty", "四十点");
+        score(&db, digest, 40);
+        let (_, digest) = seed(&db, "https://e.com/twenty", "二十点");
+        score(&db, digest, 20);
+        seed(&db, "https://e.com/unscored", "未採点");
+        let server = Server::start(db).await;
+        let (status, html) = server.get("/?min=30").await;
+        assert_eq!(status, 200);
+        assert!(html.contains("四十点"), "{html}");
+        assert!(!html.contains("未採点"), "{html}");
+        // 二十点は一覧に無く、確認枠（設定の 50 点未満）にだけ出うる。四十点は確認枠に重ねない
+        let explore = html.split("<h2>確認枠</h2>").nth(1).unwrap_or("");
+        assert!(!explore.contains("四十点"), "{html}");
+        assert!(
+            !html
+                .split("<h2>確認枠</h2>")
+                .next()
+                .unwrap()
+                .contains("二十点"),
+            "{html}"
+        );
+        assert_eq!(html.matches("四十点").count(), 1, "{html}");
+        assert!(
+            html.contains(r#"<option value="30" selected>30</option>"#),
+            "{html}"
+        );
+        let (_, html) = server.get("/?min=0").await;
+        for title in ["四十点", "二十点", "未採点"] {
+            assert!(html.contains(title), "{title}: {html}");
+        }
+        for bad in ["x", "101", "-1"] {
+            let (status, _) = server.get(&format!("/?min={bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
     }
 
     /// 確認枠の記事も一覧と同じく、今回の訪問で既読にしたものは残し、前の訪問までに既読になったものは出さない。
@@ -447,7 +488,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
-        let (status, html) = server.get("/?all=1").await;
+        let (status, html) = server.get("/?min=0").await;
         assert_eq!(status, 200);
         assert!(html.contains("見出しA"), "{html}");
         assert_eq!(
@@ -463,11 +504,14 @@ mod tests {
     #[tokio::test]
     async fn list_reads_the_read_toggle() {
         let server = Server::start(Db::open_in_memory().unwrap()).await;
-        let (status, html) = server.get("/?all=1&read=1").await;
+        let (status, html) = server.get("/?min=0&read=1").await;
         assert_eq!(status, 200);
         assert!(html.contains("過去の既読も表示：ON"), "{html}");
-        assert!(html.contains(r#"href="/?all=1""#), "{html}");
-        assert!(html.contains(r#"href="/?read=1""#), "{html}");
+        assert!(html.contains(r#"href="/?min=0""#), "{html}");
+        assert!(
+            html.contains(r#"<input type="hidden" name="read" value="1">"#),
+            "{html}"
+        );
     }
 
     #[tokio::test]
@@ -584,7 +628,7 @@ mod tests {
         server
             .post(&format!("/articles/{id}/bookmark"), "on=1")
             .await;
-        let (_, html) = server.get("/?all=1").await;
+        let (_, html) = server.get("/?min=0").await;
         assert!(html.contains("見出しA"), "{html}");
         let (_, html) = server.get("/search?bookmarked=1").await;
         assert!(html.contains("見出しA"), "{html}");

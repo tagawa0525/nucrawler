@@ -364,33 +364,40 @@ mod tests {
         );
     }
 
-    /// 一覧の上部は見出しも説明も出さず、絵文字のボタンだけを並べる。
-    /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。
-    /// ⭐ は「おすすめだけ」なので、すべて表示のとき OFF になる。
+    /// 一覧の上部は見出しも説明も出さず、ボタンだけを並べる。
+    /// 切り替えは今の状態を ON（緑）/ OFF（赤）で示す。表示する最低点は数字で選ぶ（0 はすべて）。
     #[test]
-    fn list_page_shows_only_emoji_buttons_above_the_cards() {
+    fn list_page_shows_only_buttons_above_the_cards() {
         let view = ListView {
-            all: true,
-            read: false,
+            min: 0,
+            ..ListView::default()
         };
         let html = list_page(&[], &[], view, &Page::default());
         assert!(!html.contains("<h1>"), "{html}");
         for text in ["おすすめだけ表示", "過去の既読", "スワイプ", "l / →"] {
             assert!(!html.contains(&format!(">{text}")), "{text}: {html}");
         }
+        assert!(!html.contains('⭐'), "{html}");
         assert!(
             html.contains(r#"<a class="btn" href="/search" aria-label="検索" title="検索">🔍</a>"#),
             "{html}"
         );
         assert!(
             html.contains(
-                r#"<a class="btn off" href="/" aria-label="おすすめだけ表示：OFF" title="おすすめだけ表示：OFF">⭐</a>"#
+                r#"<form class="min" method="get" action="/"><select name="min" aria-label="表示する最低点" title="表示する最低点" onchange="this.form.submit()">"#
             ),
             "{html}"
         );
         assert!(
+            html.contains(r#"<option value="0" selected>0</option>"#),
+            "{html}"
+        );
+        assert!(html.contains(r#"<option value="50">50</option>"#), "{html}");
+        assert!(html.contains(r#"<option value="90">90</option>"#), "{html}");
+        assert!(!html.contains(r#"<option value="100">"#), "{html}");
+        assert!(
             html.contains(
-                r#"<a class="btn off" href="/?all=1&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">👁</a>"#
+                r#"<a class="btn off" href="/?min=0&amp;read=1" aria-label="過去の既読も表示：OFF" title="過去の既読も表示：OFF">👁</a>"#
             ),
             "{html}"
         );
@@ -403,26 +410,47 @@ mod tests {
         );
     }
 
-    /// 切り替えのリンクは、もう一方の切り替えの状態を引き継ぐ。
+    /// 最低点の選択と 👁 は、もう一方の状態を引き継ぐ。既定の最低点は URL に出さない。
+    /// 設定の最低点が 10 刻みでなくても選べる。
     #[test]
-    fn list_page_toggles_keep_the_other_view() {
-        let links = |all, read| {
-            let html = list_page(&[], &[], ListView { all, read }, &Page::default());
-            let mut hrefs: Vec<_> = html
-                .match_indices(r#"href="/"#)
-                .map(|(at, _)| {
-                    let rest = &html[at + 6..];
-                    rest[..rest.find('"').unwrap()].to_string()
-                })
-                .filter(|h| h == "/" || h.starts_with("/?"))
-                .collect();
-            hrefs.sort();
-            hrefs
+    fn list_page_controls_keep_the_other_view() {
+        let eye = |min, read| {
+            let view = ListView {
+                min,
+                read,
+                ..ListView::default()
+            };
+            let html = list_page(&[], &[], view, &Page::default());
+            let at = html.find("👁").unwrap();
+            let start = html[..at].rfind("href=\"").unwrap() + 6;
+            html[start..start + html[start..].find('"').unwrap()].to_string()
         };
-        assert_eq!(links(false, false), ["/?all=1", "/?read=1"]);
-        assert_eq!(links(true, false), ["/", "/?all=1&amp;read=1"]);
-        assert_eq!(links(false, true), ["/", "/?all=1&amp;read=1"]);
-        assert_eq!(links(true, true), ["/?all=1", "/?read=1"]);
+        assert_eq!(eye(50, false), "/?read=1");
+        assert_eq!(eye(50, true), "/");
+        assert_eq!(eye(30, false), "/?min=30&amp;read=1");
+        assert_eq!(eye(30, true), "/?min=30");
+        let read = ListView {
+            read: true,
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], read, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="read" value="1">"#),
+            "{html}"
+        );
+        let odd = ListView {
+            min: 55,
+            default_min: 55,
+            read: false,
+        };
+        let html = list_page(&[], &[], odd, &Page::default());
+        let at = |v: &str| html.find(&format!(r#"<option value="{v}""#)).unwrap();
+        assert!(at("50") < at("55") && at("55") < at("60"), "{html}");
+        assert!(
+            html.contains(r#"<option value="55" selected>55</option>"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"name="read""#), "{html}");
     }
 
     #[test]
@@ -433,8 +461,8 @@ mod tests {
         let html = list_page(&[], &earlier, ListView::default(), &Page::default());
         assert!(html.contains("<h2>過去の未読</h2>"), "{html}");
         let view = ListView {
-            all: false,
             read: true,
+            ..ListView::default()
         };
         let html = list_page(&[], &earlier, view, &Page::default());
         assert!(html.contains("<h2>過去の記事</h2>"), "{html}");
@@ -465,7 +493,7 @@ mod tests {
         assert!(html.contains("和訳待ち"));
         // digest が無ければ原題を出す
         assert!(html.contains("Title 3"));
-        assert!(html.contains(r#"href="/?all=1""#), "toggle to show all");
+        assert!(html.contains(r#"<select name="min""#), "threshold: {html}");
     }
 
     /// カードのソース・日付の横に、いいねとブックマークの印を出す。

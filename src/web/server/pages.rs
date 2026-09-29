@@ -65,11 +65,13 @@ pub(super) async fn list(
             Vec::new()
         } else {
             let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
-            db.explore(
+            let picks = db.explore(
                 list_query(&web, user, hash.as_deref(), now, false),
                 web.explore_per_day as usize,
                 &today.to_string(),
-            )?
+            )?;
+            // 一覧の過去の欄と同じく、前の訪問までに既読にした記事は出さない
+            html::hide_read_before(picks, boundary.as_deref(), show_read)
         };
         let warnings = warnings(db)?;
         let page = Page {

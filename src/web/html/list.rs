@@ -16,15 +16,23 @@ pub fn split_sections(
     let (new, earlier): (Vec<_>, Vec<_>) = items
         .into_iter()
         .partition(|i| i.fetched_at.as_str() > boundary);
-    // 前の訪問までに既読になった記事は隠す。今回の訪問で既読にした記事は、再読み込みしても残す
-    let read_before = |i: &ListItem| i.read_at.as_deref().is_some_and(|at| at <= boundary);
-    (
-        new,
-        earlier
-            .into_iter()
-            .filter(|i| include_read || !read_before(i))
-            .collect(),
-    )
+    (new, hide_read_before(earlier, Some(boundary), include_read))
+}
+
+/// 前の訪問までに既読になった記事を除く（`include_read` なら除かない）。今回の訪問で既読にした記事は、
+/// 再読み込みしても残す。`boundary`（`Db::begin_visit` の区切り）が無ければ（初回）、除かない。
+pub fn hide_read_before(
+    items: Vec<ListItem>,
+    boundary: Option<&str>,
+    include_read: bool,
+) -> Vec<ListItem> {
+    let Some(boundary) = boundary.filter(|_| !include_read) else {
+        return items;
+    };
+    items
+        .into_iter()
+        .filter(|i| i.read_at.as_deref().is_none_or(|at| at > boundary))
+        .collect()
 }
 
 /// 一覧の表示の切り替え。どちらもリンク（`all=1` / `read=1`）で切り替える。

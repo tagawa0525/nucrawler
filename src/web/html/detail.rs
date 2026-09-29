@@ -50,10 +50,10 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             format!(" 🔒 {}限定", escape(&i.locked_by.join("・")))
         }
     ));
+    // 点数そのものは一覧のカードと同じく印の行の先頭に出し、ここには当たった語と理由だけを出す
     if i.score.is_some() {
         body.push_str(&format!(
-            "<p>{}{}{}</p>",
-            super::list::score_badge(i),
+            "<p>{}{}</p>",
             super::list::matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
@@ -82,8 +82,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             escape(&topics.join("、"))
         ));
     }
-    // 詳細の点数は理由と一緒に上に出しているので、印の行には置かない
-    body.push_str(&super::list::marks(i, ""));
+    // 一覧のカードと同じく 点数・評価・既読・ブックマーク の順
+    body.push_str(&super::list::marks(i, &super::list::score_badge(i)));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -387,6 +387,27 @@ mod tests {
                 "<span class=\"match\">燃料</span><span class=\"match excluded\">除外 核融合</span>"
             ),
             "{html}"
+        );
+    }
+
+    /// 詳細の印の行も一覧のカードと同じく 点数・評価・既読・ブックマーク の順。点数は理由の段落には重ねない。
+    #[test]
+    fn detail_marks_lead_with_the_score_like_the_list() {
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="actions marks"><span class="score">80</span><form method="post" action="/articles/7/rating""#),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"<span class="score">"#).count(), 1, "{html}");
+        let marks = html.split(r#"<div class="actions marks">"#).nth(1).unwrap();
+        assert!(
+            marks.find("/articles/7/read").unwrap() < marks.find("/articles/7/bookmark").unwrap(),
+            "{marks}"
         );
     }
 

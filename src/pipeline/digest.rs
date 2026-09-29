@@ -1,8 +1,6 @@
 //! 要約ステージ：digest の無い記事を数件ずつ LLM に渡し、応答を検証して成果物として保存する。
 //! 呼び出しの前にクォータを確かめ、上限に達したら残りは次回に回す。
 
-use std::collections::VecDeque;
-
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
@@ -50,23 +48,6 @@ pub async fn digest_articles<L: Llm>(
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let mut summary = DigestSummary::default();
-    // 訳語集の変更による作り直しは、先に対象を決めてバッチに分けて要約する
-    let mut outdated = match target {
-        Target::Redo(spec) if spec.glossary => Some(outdated_digests(
-            db,
-            RedoKey {
-                user_id: spec.user_id,
-                profile_hash: spec.profile_hash.as_deref(),
-                backend,
-                model,
-                prompt_version: prompt::digest::PROMPT_VERSION,
-            },
-            &spec.filter,
-            llm_cfg,
-            now,
-        )?),
-        _ => None,
-    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -83,52 +64,38 @@ pub async fn digest_articles<L: Llm>(
             backend,
             model,
         };
-        // 予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (batch, _claim) = match (&mut outdated, target) {
-            (Some(queue), _) => {
-                let n = llm_cfg.digest_batch_size.min(queue.len());
-                let items: Vec<DigestInput> = queue.drain(..n).collect();
-                let ids: Vec<i64> = items.iter().map(|b| b.article_id).collect();
-                let claim = db.claim(claim_key, &ids, clock(), claim_ttl(llm_cfg))?;
-                let items = items
-                    .into_iter()
-                    .filter(|b| claim.ids().contains(&b.article_id))
-                    .collect();
-                (items, claim)
-            }
-            (None, Target::Pending { .. }) => db.claim_selected(
-                claim_key,
-                clock(),
-                claim_ttl(llm_cfg),
-                |db| db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size),
-                |b| b.article_id,
-            )?,
-            (None, Target::Redo(spec)) => db.claim_selected(
-                claim_key,
-                clock(),
-                claim_ttl(llm_cfg),
-                |db| {
-                    db.redo_digest(
-                        RedoKey {
-                            user_id: spec.user_id,
-                            profile_hash: spec.profile_hash.as_deref(),
-                            backend,
-                            model,
-                            prompt_version: prompt::digest::PROMPT_VERSION,
-                        },
+        // 予約は処理を終える（この周の終わりで drop する）まで持つ。対象は毎回、予約と同じ
+        // トランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を作ると、ほかの実行が
+        // 作り直し終えた記事をもう一度作り直してしまう）
+        let (batch, _claim) = db.claim_selected(
+            claim_key,
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| match target {
+                Target::Redo(spec) if spec.glossary => {
+                    let mut items = outdated_digests(
+                        db,
+                        redo_key(spec, backend, model),
                         &spec.filter,
+                        llm_cfg,
                         now,
-                        llm_cfg.digest_batch_size,
-                    )
-                },
-                |b| b.article_id,
-            )?,
-        };
+                    )?;
+                    items.truncate(llm_cfg.digest_batch_size);
+                    Ok(items)
+                }
+                Target::Pending { .. } => {
+                    db.pending_digest(cutoff, now, backend, model, llm_cfg.digest_batch_size)
+                }
+                Target::Redo(spec) => db.redo_digest(
+                    redo_key(spec, backend, model),
+                    &spec.filter,
+                    now,
+                    llm_cfg.digest_batch_size,
+                ),
+            },
+            |b| b.article_id,
+        )?;
         if batch.is_empty() {
-            // 先に決めた作り直しの対象がほかの実行に予約されていたら、残りに進む
-            if outdated.as_ref().is_some_and(|queue| !queue.is_empty()) {
-                continue;
-            }
             break;
         }
         let ids: Vec<i64> = batch.iter().map(|b| b.article_id).collect();
@@ -230,7 +197,7 @@ fn outdated_digests(
     filter: &crate::db::RedoFilter,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
-) -> Result<VecDeque<DigestInput>, DbError> {
+) -> Result<Vec<DigestInput>, DbError> {
     let entries = db.glossary_entries()?;
     Ok(db
         .redo_digest_existing(key, filter, now)?
@@ -242,6 +209,17 @@ fn outdated_digests(
         })
         .map(|(input, _)| input)
         .collect())
+}
+
+/// `redo` の対象を選ぶキー（このモデル・プロンプト版の成果物がまだ無い記事）。
+fn redo_key<'a>(spec: &'a super::RedoSpec, backend: &'a str, model: &'a str) -> RedoKey<'a> {
+    RedoKey {
+        user_id: spec.user_id,
+        profile_hash: spec.profile_hash.as_deref(),
+        backend,
+        model,
+        prompt_version: prompt::digest::PROMPT_VERSION,
+    }
 }
 
 #[cfg(test)]

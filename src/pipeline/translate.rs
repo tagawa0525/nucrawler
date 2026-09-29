@@ -1,7 +1,5 @@
 //! 和訳ステージ：依頼された記事と、点数の高い英語記事の本文を 1 件ずつ全文和訳する。
 
-use std::collections::VecDeque;
-
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{Call, LlmStage, Outcome, call_recorded, claim_ttl, record_failures};
@@ -66,23 +64,6 @@ pub async fn translate_articles<L: Llm>(
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
     let schema = prompt::translate::schema();
     let mut summary = TranslateSummary::default();
-    // 訳語集の変更による作り直しは、先に対象を決めて順に訳す
-    let mut outdated = match target {
-        Target::Redo(spec) if spec.glossary => Some(outdated_translations(
-            db,
-            RedoKey {
-                user_id: spec.user_id,
-                profile_hash: spec.profile_hash.as_deref(),
-                backend,
-                model,
-                prompt_version: prompt::translate::PROMPT_VERSION,
-            },
-            &spec.filter,
-            llm_cfg,
-            now,
-        )?),
-        _ => None,
-    };
     loop {
         if cancel.is_requested() {
             summary.cancelled = true;
@@ -98,51 +79,33 @@ pub async fn translate_articles<L: Llm>(
             backend,
             model,
         };
-        // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ
-        let (inputs, _claim) = match (&mut outdated, target) {
-            (Some(queue), _) => {
-                let items: Vec<TranslateInput> = queue.pop_front().into_iter().collect();
-                let ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
-                let claim = db.claim(claim_key, &ids, clock(), claim_ttl(llm_cfg))?;
-                let items = items
-                    .into_iter()
-                    .filter(|i| claim.ids().contains(&i.article_id))
-                    .collect();
-                (items, claim)
-            }
-            (None, Target::Pending { .. }) => db.claim_selected(
-                claim_key,
-                clock(),
-                claim_ttl(llm_cfg),
-                |db| db.pending_translate(query, cutoff, now, 1),
-                |i| i.article_id,
-            )?,
-            (None, Target::Redo(spec)) => db.claim_selected(
-                claim_key,
-                clock(),
-                claim_ttl(llm_cfg),
-                |db| {
-                    db.redo_translate(
-                        RedoKey {
-                            user_id: spec.user_id,
-                            profile_hash: spec.profile_hash.as_deref(),
-                            backend,
-                            model,
-                            prompt_version: prompt::translate::PROMPT_VERSION,
-                        },
+        // 全文は長いので 1 件ずつ訳す。予約は処理を終える（この周の終わりで drop する）まで持つ。
+        // 対象は毎回、予約と同じトランザクションの中で選ぶ（訳語集の変更による作り直しも、先に一覧を
+        // 作ると、ほかの実行が作り直し終えた記事をもう一度訳してしまう）
+        let (inputs, _claim) = db.claim_selected(
+            claim_key,
+            clock(),
+            claim_ttl(llm_cfg),
+            |db| match target {
+                Target::Redo(spec) if spec.glossary => {
+                    let mut items = outdated_translations(
+                        db,
+                        redo_key(spec, backend, model),
                         &spec.filter,
+                        llm_cfg,
                         now,
-                        1,
-                    )
-                },
-                |i| i.article_id,
-            )?,
-        };
+                    )?;
+                    items.truncate(1);
+                    Ok(items)
+                }
+                Target::Pending { .. } => db.pending_translate(query, cutoff, now, 1),
+                Target::Redo(spec) => {
+                    db.redo_translate(redo_key(spec, backend, model), &spec.filter, now, 1)
+                }
+            },
+            |i| i.article_id,
+        )?;
         let Some(input) = inputs.into_iter().next() else {
-            // 先に決めた作り直しの対象がほかの実行に予約されていたら、残りに進む
-            if outdated.as_ref().is_some_and(|queue| !queue.is_empty()) {
-                continue;
-            }
             break;
         };
         let key = StageKey {
@@ -228,7 +191,7 @@ fn outdated_translations(
     filter: &crate::db::RedoFilter,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
-) -> Result<VecDeque<TranslateInput>, DbError> {
+) -> Result<Vec<TranslateInput>, DbError> {
     let entries = db.glossary_entries()?;
     Ok(db
         .redo_translate_existing(key, filter, now)?
@@ -239,6 +202,17 @@ fn outdated_translations(
         })
         .map(|(input, _)| input)
         .collect())
+}
+
+/// `redo` の対象を選ぶキー（このモデル・プロンプト版の成果物がまだ無い記事）。
+fn redo_key<'a>(spec: &'a super::RedoSpec, backend: &'a str, model: &'a str) -> RedoKey<'a> {
+    RedoKey {
+        user_id: spec.user_id,
+        profile_hash: spec.profile_hash.as_deref(),
+        backend,
+        model,
+        prompt_version: prompt::translate::PROMPT_VERSION,
+    }
 }
 
 #[cfg(test)]

@@ -404,6 +404,37 @@ mod tests {
         .unwrap()
     }
 
+    /// 呼び出しの記録には、ステージを始めた時刻ではなく呼び出した時刻を残す（長いステージの呼び出しが
+    /// すべて開始時刻になると、呼び出しの時系列を組み立てられない）。
+    #[tokio::test]
+    async fn records_calls_at_the_time_they_are_made() {
+        let db = Db::open_in_memory().unwrap();
+        let ids = articles(&db, 1);
+        let later = || now() + chrono::Duration::hours(1);
+        let llm = FakeLlm::new([ok(&ids, 0.1)]);
+        digest_articles(
+            LlmStage {
+                db: &db,
+                llm: &llm,
+                quota: &mut quota(10),
+                cancel: &Cancel::default(),
+                clock: &later,
+            },
+            &llm_cfg(1),
+            &PipelineConfig::default(),
+            &Target::Pending {
+                requests_only: false,
+            },
+            now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.query_strings("SELECT at FROM llm_calls").unwrap(),
+            [crate::db::timestamp(later())]
+        );
+    }
+
     fn mention_edg(db: &Db, article_id: i64) {
         db.insert_content(
             article_id,

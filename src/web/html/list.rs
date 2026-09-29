@@ -83,9 +83,14 @@ impl ListView {
         next
     }
 
-    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。既読の表示は既定と違うときだけ付ける。
-    /// 絞り込みの画面では、最低点は効かないので付けない。
+    /// この表示の一覧の URL（HTML の属性値としてエスケープ済み）。
     fn href(self) -> String {
+        escape(&self.url())
+    }
+
+    /// この表示の一覧の正規の URL。既定と同じ値は付けない（既読の表示は既定と違うときだけ）。
+    /// 絞り込みの画面では、最低点は効かないので付けない。
+    pub fn url(self) -> String {
         let min = format!("min={}", self.min);
         let rating = format!("rating={}", self.rating.unwrap_or_default());
         let filtered = self.filtered();
@@ -102,7 +107,7 @@ impl ListView {
         if query.is_empty() {
             "/".to_string()
         } else {
-            format!("/?{}", query.join("&amp;"))
+            format!("/?{}", query.join("&"))
         }
     }
 }

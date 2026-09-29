@@ -80,7 +80,8 @@ impl ListParams {
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
-) -> Result<Html<String>, AppError> {
+    RawQuery(raw): RawQuery,
+) -> Result<Response, AppError> {
     let min = params.min(&state.web)?;
     let rating = params.rating()?;
     let bookmarked = params.bookmarked.as_deref() == Some("1");
@@ -97,6 +98,16 @@ pub(super) async fn list(
         rating,
         bookmarked,
     };
+    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。選択のフォームは
+    // 値を選べないので、👍 を「👍」に戻すと `rating=` や絞り込みの `read=0` が残る
+    let canonical = view.url();
+    let requested = match raw.as_deref() {
+        None | Some("") => "/".to_string(),
+        Some(q) => format!("/?{q}"),
+    };
+    if requested != canonical {
+        return Ok(Redirect::to(&canonical).into_response());
+    }
     let web = state.web.clone();
     let labels = state.labels.clone();
     let page = with_db(&state, move |db| {
@@ -144,7 +155,7 @@ pub(super) async fn list(
         ))
     })
     .await?;
-    Ok(Html(page))
+    Ok(Html(page).into_response())
 }
 
 /// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す（既読の表示は 👁 のとおり）。
@@ -871,9 +882,9 @@ mod tests {
             0
         );
         // 👍 を選び直す（空）と一覧に戻る
-        let (status, html) = server.get("/?rating=").await;
-        assert_eq!(status, 200);
-        assert!(html.contains("<h2>前回から</h2>"), "{html}");
+        let res = server.get_raw("/?rating=").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "/");
         for bad in ["0", "6", "x"] {
             let (status, _) = server.get(&format!("/?rating={bad}")).await;
             assert_eq!(status, 400, "{bad}");

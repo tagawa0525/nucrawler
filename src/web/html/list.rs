@@ -209,7 +209,7 @@ pub(super) fn marks(i: &ListItem) -> String {
         "<div class=\"actions marks\"><form method=\"post\" action=\"/articles/{id}/rating\" class=\"rating\">\
          {stars}</form>{}{}</div>",
         toggle("bookmark", "ブックマーク", "🔖", i.bookmarked),
-        toggle("read", "既読", "✓", i.is_read()),
+        toggle("read", "既読", "👁", i.is_read()),
     )
 }
 

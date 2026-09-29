@@ -82,6 +82,8 @@ pub struct SearchQuery<'a> {
     pub unread: bool,
     /// ブックマークしている
     pub bookmarked: bool,
+    /// 評価の無い記事だけ
+    pub unrated: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
     /// 一覧の既定と同じく、評価 1〜2・非軽水炉・未採点・この点数未満を隠す
@@ -214,6 +216,9 @@ impl SearchFilters {
         }
         if q.bookmarked {
             f.rows.push_str(" AND rows.bookmarked = 1");
+        }
+        if q.unrated {
+            f.rows.push_str(" AND rows.rating IS NULL");
         }
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND rows.rec >= :min_score");

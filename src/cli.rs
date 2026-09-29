@@ -867,6 +867,7 @@ mod tests {
                     translated: true,
                     unread: true,
                     bookmarked: true,
+                    unrated: false,
                     min_rating: "4".into(),
                     min_score: "60".into(),
                     sort: "score".into(),

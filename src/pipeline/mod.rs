@@ -128,6 +128,19 @@ impl Stage {
         Stage::Tidy,
     ];
 
+    /// LLM を使う工程なら、その工程。
+    pub fn llm_task(self) -> Option<crate::config::LlmTask> {
+        use crate::config::LlmTask;
+        match self {
+            Stage::Fetch | Stage::Extract => None,
+            Stage::Digest => Some(LlmTask::Digest),
+            Stage::Score => Some(LlmTask::Score),
+            Stage::Translate => Some(LlmTask::Translate),
+            Stage::Title => Some(LlmTask::Title),
+            Stage::Tidy => Some(LlmTask::Tidy),
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Stage::Fetch => "fetch",

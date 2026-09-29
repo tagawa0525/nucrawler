@@ -303,14 +303,15 @@ impl Quota {
         }
     }
 
-    /// 次の呼び出しをしてよいか。
-    pub fn permit(&self, now: DateTime<Utc>) -> Result<(), Stop> {
+    /// `backend` で次の呼び出しをしてよいか。月の予算のバックエンドなら月の消費クレジットで、
+    /// それ以外は使用率で判定する。呼び出し回数の上限はバックエンドをまたいで数える。
+    pub fn permit(&self, backend: &str, now: DateTime<Utc>) -> Result<(), Stop> {
         if self.calls >= self.max_calls {
             return Err(Stop::MaxCalls {
                 limit: self.max_calls,
             });
         }
-        if let Some(credits) = &self.credits {
+        if let Some(credits) = self.credits.as_ref().filter(|c| c.backend == backend) {
             let used = credits.used_nano as f64 / 1e9;
             let limit = credits.cfg.allowance(now);
             if used >= limit {
@@ -347,8 +348,13 @@ impl Quota {
 
     /// `permit` に加え、残りの呼び出し回数が `reserve` 以下なら止める。前段のステージが
     /// 回数を使い切って、後段（採点）がいつまでも実行されない状態を防ぐ。
-    pub fn permit_reserving(&self, now: DateTime<Utc>, reserve: u32) -> Result<(), Stop> {
-        self.permit(now)?;
+    pub fn permit_reserving(
+        &self,
+        backend: &str,
+        now: DateTime<Utc>,
+        reserve: u32,
+    ) -> Result<(), Stop> {
+        self.permit(backend, now)?;
         if self.max_calls.saturating_sub(self.calls) <= reserve {
             return Err(Stop::Reserved { reserved: reserve });
         }
@@ -480,14 +486,16 @@ mod tests {
         ] {
             let now = jst(time);
             assert_eq!(
-                quota(usage(0.5, 0.1, now, 5.0)).permit(now).is_ok(),
+                quota(usage(0.5, 0.1, now, 5.0))
+                    .permit("claude-cli", now)
+                    .is_ok(),
                 allowed,
                 "{time}"
             );
         }
         let now = jst("2026-09-28T03:10:00");
         assert!(matches!(
-            quota(usage(0.5, 0.1, now, 5.0)).permit(now),
+            quota(usage(0.5, 0.1, now, 5.0)).permit("claude-cli", now),
             Err(Stop::FiveHour { limit, .. }) if limit == 0.20
         ));
     }
@@ -518,9 +526,9 @@ mod tests {
                 Quota::with_credits(QuotaConfig::default(), credits(1000.0), "copilot-cli", None);
             assert_eq!(q.credits_backend(), Some("copilot-cli"));
             q.observe_credits(399 * NANO);
-            assert!(q.permit(now).is_ok(), "{now}");
+            assert!(q.permit("copilot-cli", now).is_ok(), "{now}");
             q.observe_credits(400 * NANO);
-            let err = q.permit(now).unwrap_err();
+            let err = q.permit("copilot-cli", now).unwrap_err();
             assert!(
                 matches!(err, Stop::MonthlyCredits { used, limit }
                     if used == 400.0 && (limit - 400.0).abs() < 1e-9),
@@ -565,7 +573,7 @@ mod tests {
             Quota::with_credits(QuotaConfig::default(), credits(1000.0), "copilot-cli", None);
         q.observe(Some(usage(1.0, 1.0, now, 6.9)));
         q.observe_credits(0);
-        assert!(q.permit(now).is_ok());
+        assert!(q.permit("copilot-cli", now).is_ok());
         assert_eq!(
             Quota::new(QuotaConfig::default(), None, None).credits_backend(),
             None
@@ -582,9 +590,12 @@ mod tests {
             Some(1),
         );
         q.observe_credits(0);
-        assert!(q.permit(now).is_ok());
+        assert!(q.permit("copilot-cli", now).is_ok());
         q.record_call(None);
-        assert_eq!(q.permit(now), Err(Stop::MaxCalls { limit: 1 }));
+        assert_eq!(
+            q.permit("copilot-cli", now),
+            Err(Stop::MaxCalls { limit: 1 })
+        );
     }
 
     #[test]
@@ -594,19 +605,21 @@ mod tests {
             five_hour: window(0.99, now - chrono::Duration::minutes(1)),
             seven_day: window(0.99, now - chrono::Duration::minutes(1)),
         };
-        assert!(quota(u).permit(now).is_ok());
+        assert!(quota(u).permit("claude-cli", now).is_ok());
     }
 
     #[test]
     fn unknown_usage_is_allowed() {
         let q = Quota::new(QuotaConfig::default(), None, None);
-        assert!(q.permit(jst("2026-09-28T22:00:00")).is_ok());
+        assert!(q.permit("claude-cli", jst("2026-09-28T22:00:00")).is_ok());
     }
 
     #[test]
     fn weekly_absolute_limit() {
         let now = jst("2026-09-28T10:30:00");
-        let err = quota(usage(0.1, 0.71, now, 6.9)).permit(now).unwrap_err();
+        let err = quota(usage(0.1, 0.71, now, 6.9))
+            .permit("claude-cli", now)
+            .unwrap_err();
         assert!(matches!(err, Stop::Weekly { .. }), "{err}");
     }
 
@@ -614,11 +627,21 @@ mod tests {
     fn weekly_pace_allows_one_day_ahead_of_linear() {
         let now = jst("2026-09-28T10:30:00");
         // 経過 0.7 日（10%）：許容は 70% × (0.1 + 1/7) ≈ 17%
-        assert!(quota(usage(0.1, 0.15, now, 0.7)).permit(now).is_ok());
-        let err = quota(usage(0.1, 0.20, now, 0.7)).permit(now).unwrap_err();
+        assert!(
+            quota(usage(0.1, 0.15, now, 0.7))
+                .permit("claude-cli", now)
+                .is_ok()
+        );
+        let err = quota(usage(0.1, 0.20, now, 0.7))
+            .permit("claude-cli", now)
+            .unwrap_err();
         assert!(matches!(err, Stop::WeeklyPace { .. }), "{err}");
         // 週の始めでも 1 日分は使える
-        assert!(quota(usage(0.1, 0.05, now, 0.0)).permit(now).is_ok());
+        assert!(
+            quota(usage(0.1, 0.05, now, 0.0))
+                .permit("claude-cli", now)
+                .is_ok()
+        );
     }
 
     /// 応答に含まれない枠は、それまでの値を残す。
@@ -634,23 +657,26 @@ mod tests {
             five_hour: window(0.2, now + chrono::Duration::hours(2)),
             seven_day: None,
         }));
-        assert!(matches!(q.permit(now), Err(Stop::Weekly { .. })));
+        assert!(matches!(
+            q.permit("claude-cli", now),
+            Err(Stop::Weekly { .. })
+        ));
     }
 
     #[test]
     fn reserving_keeps_calls_for_later_stages() {
         let now = jst("2026-09-28T10:30:00");
         let mut q = Quota::new(QuotaConfig::default(), None, Some(3));
-        assert!(q.permit_reserving(now, 1).is_ok());
+        assert!(q.permit_reserving("claude-cli", now, 1).is_ok());
         q.record_call(None);
-        assert!(q.permit_reserving(now, 1).is_ok());
+        assert!(q.permit_reserving("claude-cli", now, 1).is_ok());
         q.record_call(None);
         assert_eq!(
-            q.permit_reserving(now, 1),
+            q.permit_reserving("claude-cli", now, 1),
             Err(Stop::Reserved { reserved: 1 })
         );
         // 後段は残した回数を使える
-        assert!(q.permit(now).is_ok());
+        assert!(q.permit("claude-cli", now).is_ok());
         // ほかの理由（5 時間枠など）で止まるときは、そちらを返す
         let q = Quota::new(
             QuotaConfig::default(),
@@ -658,7 +684,7 @@ mod tests {
             Some(3),
         );
         assert!(matches!(
-            q.permit_reserving(now, 1),
+            q.permit_reserving("claude-cli", now, 1),
             Err(Stop::FiveHour { .. })
         ));
     }
@@ -672,17 +698,23 @@ mod tests {
             Some(3),
         );
         q.record_call(None);
-        assert!(q.permit(now).is_ok());
+        assert!(q.permit("claude-cli", now).is_ok());
         // 応答で使用率が上がれば、それに従って止まる
         q.record_call(Some(usage(0.9, 0.1, now, 5.0)));
-        assert!(matches!(q.permit(now), Err(Stop::FiveHour { .. })));
+        assert!(matches!(
+            q.permit("claude-cli", now),
+            Err(Stop::FiveHour { .. })
+        ));
         let mut q = Quota::new(
             QuotaConfig::default(),
             Some(usage(0.1, 0.1, now, 5.0)),
             Some(1),
         );
         q.record_call(Some(usage(0.1, 0.1, now, 5.0)));
-        assert_eq!(q.permit(now), Err(Stop::MaxCalls { limit: 1 }));
+        assert_eq!(
+            q.permit("claude-cli", now),
+            Err(Stop::MaxCalls { limit: 1 })
+        );
     }
 
     /// ほかの実行が記録した使用率を取り込めば、それで判定する。
@@ -690,16 +722,16 @@ mod tests {
     fn observed_usage_from_other_runs_counts() {
         let now = jst("2026-09-28T11:00:00");
         let mut q = Quota::new(QuotaConfig::default(), None, None);
-        assert!(q.permit(now).is_ok());
+        assert!(q.permit("claude-cli", now).is_ok());
         q.observe(Some(usage(0.9, 0.1, now, 3.0)));
         assert!(
-            matches!(q.permit(now), Err(Stop::FiveHour { .. })),
+            matches!(q.permit("claude-cli", now), Err(Stop::FiveHour { .. })),
             "{:?}",
-            q.permit(now)
+            q.permit("claude-cli", now)
         );
         // 取り込めるものが無ければ、それまでの値を残す
         q.observe(None);
-        assert!(q.permit(now).is_err());
+        assert!(q.permit("claude-cli", now).is_err());
     }
 
     /// 並行した呼び出しの結果は順が前後するので、同じ枠（リセット時刻が同じ）の中では使用率を
@@ -714,12 +746,24 @@ mod tests {
         };
         let mut q = Quota::new(QuotaConfig::default(), Some(five(0.9, resets)), None);
         q.observe(Some(five(0.2, resets)));
-        assert!(q.permit(now).is_err(), "a stale lower reading is ignored");
+        assert!(
+            q.permit("claude-cli", now).is_err(),
+            "a stale lower reading is ignored"
+        );
         q.observe(Some(five(0.1, resets - chrono::Duration::hours(5))));
-        assert!(q.permit(now).is_err(), "an older window is ignored");
+        assert!(
+            q.permit("claude-cli", now).is_err(),
+            "an older window is ignored"
+        );
         q.record_call(Some(five(0.3, resets)));
-        assert!(q.permit(now).is_err(), "own stale response is ignored too");
+        assert!(
+            q.permit("claude-cli", now).is_err(),
+            "own stale response is ignored too"
+        );
         q.observe(Some(five(0.1, resets + chrono::Duration::hours(5))));
-        assert!(q.permit(now).is_ok(), "a newer window replaces it");
+        assert!(
+            q.permit("claude-cli", now).is_ok(),
+            "a newer window replaces it"
+        );
     }
 }

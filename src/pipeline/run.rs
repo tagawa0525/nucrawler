@@ -8,10 +8,10 @@ use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
 use super::{digest, extract, fetch, score, suggest, tidy, title, translate};
 use crate::cli::RedoKind;
-use crate::config::{Config, LlmConfig, Source};
+use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
 use crate::http::Fetcher;
-use crate::llm::Llm;
+use crate::llm::{Llm, LlmSet};
 use crate::profile::Profile;
 use crate::quota::Quota;
 
@@ -48,15 +48,21 @@ pub struct RunEnv<'a, L> {
     pub clock: &'a dyn Fn() -> DateTime<Utc>,
 }
 
-impl<L> RunEnv<'_, L> {
-    fn stage(&mut self) -> LlmStage<'_, L> {
+impl<L: LlmSet> RunEnv<'_, L> {
+    /// `task` の工程を、その工程のバックエンドで動かす環境。
+    fn stage(&mut self, task: LlmTask) -> LlmStage<'_, L::Llm> {
         LlmStage {
             db: self.db,
-            llm: self.llm,
+            llm: self.llm.for_task(task),
             quota: self.quota,
             cancel: self.cancel,
             clock: self.clock,
         }
+    }
+
+    /// `task` の工程のバックエンド（`llm_calls` などに記録する名前）
+    fn backend(&self, task: LlmTask) -> &'static str {
+        self.llm.for_task(task).backend()
     }
 }
 
@@ -67,9 +73,9 @@ pub struct RunReport {
     /// 認証切れなど、利用者が対処すべき LLM の失敗
     pub llm_failure: Option<String>,
     pub cancelled: bool,
-    /// 利用上限や LLM の失敗で、この実行の後続の LLM ステージを呼ばない（crawl をロックの単位に
-    /// 分けて呼んでも引き継ぐ）
-    pub llm_blocked: bool,
+    /// 利用上限や LLM の失敗で止まったバックエンド。この実行では、そのバックエンドを使う後続の
+    /// LLM ステージを呼ばない（crawl をロックの単位に分けて呼んでも引き継ぐ）
+    pub llm_blocked: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -80,7 +86,7 @@ pub struct CrawlOptions {
     pub force_tidy: bool,
 }
 
-pub async fn crawl<L: Llm>(
+pub async fn crawl<L: LlmSet>(
     mut env: RunEnv<'_, L>,
     stages: &[Stage],
     opts: CrawlOptions,
@@ -94,6 +100,15 @@ pub async fn crawl<L: Llm>(
         if env.cancel.is_requested() {
             break;
         }
+        if let Some(task) = stage.llm_task()
+            && report.llm_blocked.contains(&env.backend(task))
+        {
+            tracing::warn!(
+                stage = stage.name(),
+                "skipped: the llm is unavailable in this run"
+            );
+            continue;
+        }
         match stage {
             Stage::Fetch => {
                 let summary =
@@ -104,14 +119,6 @@ pub async fn crawl<L: Llm>(
                     "fetch stage finished"
                 );
                 report.failed_sources += summary.failed_sources.len();
-            }
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Tidy
-                if report.llm_blocked =>
-            {
-                tracing::warn!(
-                    stage = stage.name(),
-                    "skipped: the llm is unavailable in this run"
-                );
             }
             Stage::Digest => {
                 // 採点が計画に無ければ、採点のための予約はしない
@@ -125,7 +132,7 @@ pub async fn crawl<L: Llm>(
                 };
                 let now = (env.clock)();
                 let summary = digest::digest_articles(
-                    env.stage(),
+                    env.stage(LlmTask::Digest),
                     &digest_cfg,
                     &config.pipeline,
                     &Target::Pending {
@@ -140,12 +147,12 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "digest stage finished"
                 );
-                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
+                block(report, env.backend(LlmTask::Digest), summary.halted);
             }
             Stage::Score => {
                 let now = (env.clock)();
                 let summary = score::score_articles(
-                    env.stage(),
+                    env.stage(LlmTask::Score),
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
@@ -159,12 +166,12 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "score stage finished"
                 );
-                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
+                block(report, env.backend(LlmTask::Score), summary.halted);
             }
             Stage::Translate => {
                 let now = (env.clock)();
                 let summary = translate::translate_articles(
-                    env.stage(),
+                    env.stage(LlmTask::Translate),
                     &config.llm,
                     &config.pipeline,
                     db.owner_id()?,
@@ -180,29 +187,31 @@ pub async fn crawl<L: Llm>(
                     calls = summary.calls,
                     "translate stage finished"
                 );
-                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
+                block(report, env.backend(LlmTask::Translate), summary.halted);
             }
             Stage::Title => {
                 let now = (env.clock)();
-                let summary = title::translate_titles(env.stage(), &config.llm, now).await?;
+                let summary =
+                    title::translate_titles(env.stage(LlmTask::Title), &config.llm, now).await?;
                 tracing::info!(
                     translated = summary.translated,
                     failed = summary.failed,
                     calls = summary.calls,
                     "title stage finished"
                 );
-                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
+                block(report, env.backend(LlmTask::Title), summary.halted);
             }
             Stage::Tidy => {
                 let now = (env.clock)();
                 let summary =
-                    tidy::tidy_topics(env.stage(), &config.llm, opts.force_tidy, now).await?;
+                    tidy::tidy_topics(env.stage(LlmTask::Tidy), &config.llm, opts.force_tidy, now)
+                        .await?;
                 tracing::info!(
                     merged = summary.merged,
                     calls = summary.calls,
                     "tidy stage finished"
                 );
-                report.llm_blocked |= report_halt(summary.halted, &mut report.llm_failure);
+                block(report, env.backend(LlmTask::Tidy), summary.halted);
             }
             Stage::Extract => {
                 let summary = extract::extract_pages(
@@ -230,7 +239,7 @@ pub async fn crawl<L: Llm>(
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の
 /// 成果物がまだ無いものだけを処理するので、途中で止めても同じ呼び出しで続きから再開できる。
 /// 新しい digest ができた記事は、次の crawl で自動的に採点し直される。
-pub async fn redo<L: Llm>(
+pub async fn redo<L: LlmSet>(
     mut env: RunEnv<'_, L>,
     config: &Config,
     kind: RedoKind,
@@ -256,8 +265,14 @@ pub async fn redo<L: Llm>(
                 score_reserved_calls: 0,
                 ..config.llm.clone()
             };
-            let summary =
-                digest::digest_articles(env.stage(), &cfg, &config.pipeline, &target, now).await?;
+            let summary = digest::digest_articles(
+                env.stage(LlmTask::Digest),
+                &cfg,
+                &config.pipeline,
+                &target,
+                now,
+            )
+            .await?;
             tracing::info!(
                 digested = summary.digested,
                 failed = summary.failed,
@@ -272,7 +287,7 @@ pub async fn redo<L: Llm>(
                 ..config.llm.clone()
             };
             let summary = translate::translate_articles(
-                env.stage(),
+                env.stage(LlmTask::Translate),
                 &cfg,
                 &config.pipeline,
                 owner,
@@ -295,14 +310,15 @@ pub async fn redo<L: Llm>(
 
 /// `profile suggest`：反応を根拠に、プロファイルの更新案を 1 回の呼び出しで作る。案は保存しない。
 /// 上限などで呼べなかったら案は `None`。
-pub async fn suggest_profile<L: Llm>(
+pub async fn suggest_profile<L: LlmSet>(
     mut env: RunEnv<'_, L>,
     config: &Config,
     profile: &Profile,
     evidence: &[Evidence],
 ) -> Result<(RunReport, Suggested), RunError> {
     let mut report = RunReport::default();
-    let summary = suggest::suggest_profile(env.stage(), &config.llm, profile, evidence).await?;
+    let summary =
+        suggest::suggest_profile(env.stage(LlmTask::Score), &config.llm, profile, evidence).await?;
     // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
     let reason = match &summary.halted {
         Some(Halt::Quota(stop)) => stop.to_string(),
@@ -329,7 +345,7 @@ pub enum Suggested {
 
 /// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。
 /// 候補は保存しない。
-pub async fn eval_profile<L: Llm>(
+pub async fn eval_profile<L: LlmSet>(
     mut env: RunEnv<'_, L>,
     config: &Config,
     profile: &Profile,
@@ -339,7 +355,7 @@ pub async fn eval_profile<L: Llm>(
     let mut report = RunReport::default();
     let now = (env.clock)();
     let summary = score::score_articles(
-        env.stage(),
+        env.stage(LlmTask::Score),
         &config.llm,
         &config.pipeline,
         owner,
@@ -356,6 +372,14 @@ pub async fn eval_profile<L: Llm>(
     report_halt(summary.halted, &mut report.llm_failure);
     report.cancelled = env.cancel.is_requested();
     Ok(report)
+}
+
+/// 止めた理由をログに出し、同じ実行でそのバックエンドをもう使わないほうがよいなら、止まった
+/// バックエンドに加える（ほかのバックエンドの工程は続ける）。
+fn block(report: &mut RunReport, backend: &'static str, halt: Option<Halt>) {
+    if report_halt(halt, &mut report.llm_failure) && !report.llm_blocked.contains(&backend) {
+        report.llm_blocked.push(backend);
+    }
 }
 
 /// 止めた理由をログに出し、同じ実行で LLM をもう使わないほうがよいなら true を返す。

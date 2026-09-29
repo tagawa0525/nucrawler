@@ -56,7 +56,7 @@ pub async fn suggest_profile<L: Llm>(
             return Ok(summary);
         }
     };
-    if let Err(stop) = permit(db, &shared, clock(), 0)? {
+    if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
         tracing::info!("suggest stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

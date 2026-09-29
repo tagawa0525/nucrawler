@@ -131,7 +131,7 @@ pub async fn translate_articles<L: Llm>(
             if shared.stopped() {
                 break;
             }
-            if let Err(stop) = permit(db, &shared, clock(), 0)? {
+            if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
                 tracing::info!("translate stops: {stop}");
                 summary.halted = Some(Halt::Quota(stop));
                 break;

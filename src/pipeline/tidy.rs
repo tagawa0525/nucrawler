@@ -64,7 +64,7 @@ pub async fn tidy_topics<L: Llm>(
             return Ok(summary);
         }
     };
-    if let Err(stop) = permit(db, &shared, clock(), 0)? {
+    if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
         tracing::info!("tidy stops: {stop}");
         summary.halted = Some(Halt::Quota(stop));
         return Ok(summary);

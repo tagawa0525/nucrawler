@@ -109,6 +109,22 @@ pub enum LlmError {
     NoStructuredOutput,
 }
 
+/// 工程ごとの LLM。工程によってバックエンドを変えられる。
+pub trait LlmSet {
+    type Llm: Llm;
+
+    fn for_task(&self, task: crate::config::LlmTask) -> &Self::Llm;
+}
+
+/// 1 つの LLM は、どの工程にも自分を使う。
+impl<L: Llm> LlmSet for L {
+    type Llm = L;
+
+    fn for_task(&self, _: crate::config::LlmTask) -> &L {
+        self
+    }
+}
+
 /// 設定で選んだバックエンド（`llm.backend`）。
 pub enum Backend {
     Claude(claude_cli::ClaudeCli),

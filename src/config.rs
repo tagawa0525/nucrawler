@@ -82,6 +82,17 @@ pub enum LlmBackend {
     CopilotCli,
 }
 
+/// LLM を使う工程。バックエンドとモデルを選ぶ単位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmTask {
+    Digest,
+    /// 採点（`profile suggest`・`eval --profile` も採点のモデルを使う）
+    Score,
+    Translate,
+    Title,
+    Tidy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {

@@ -91,6 +91,15 @@ pub(super) async fn list(
     let rating = params.rating()?;
     let bookmarked = params.bookmarked.as_deref() == Some("1");
     let filtering = rating.is_some() || bookmarked;
+    // JavaScript が無いときの評価の「-」は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
+    // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
+    let leaving = params.rating.as_deref() == Some("") && !filtering;
+    let carried = |value: Option<&str>| value.filter(|_| !leaving).map(str::to_string);
+    let params = ListParams {
+        min: carried(params.min.as_deref()),
+        read: carried(params.read.as_deref()),
+        ..params
+    };
     // 最低点の既定は、一覧では設定の最低点、絞り込みでは 0（点数で絞らない）
     let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
     // 既読の表示の既定は、一覧では出さず、絞り込み（評価した記事を探す）では出す

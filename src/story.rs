@@ -317,6 +317,16 @@ mod tests {
         assert!(index.candidates(100, &HashMap::new()).is_empty());
     }
 
+    /// どの記事にもある bigram も重みを 0 にしない（2 件だけのプールでも、同じ文は候補になる）。
+    #[test]
+    fn identical_reports_in_a_tiny_pool_are_candidates() {
+        let text = "欧州投資銀行、フィンランドのSMR開発に初融資";
+        let index = Index::new(vec![doc(1, "wnn", 20, text), doc(2, "jaif", 20, text)]);
+        let cs = index.candidates(2, &HashMap::new());
+        assert_eq!(ids(&cs), [1]);
+        assert!((cs[0].similarity - 1.0).abs() < 1e-9, "{cs:?}");
+    }
+
     #[test]
     fn caps_candidates_from_the_same_source() {
         let mut docs: Vec<Doc> = (1..=6)

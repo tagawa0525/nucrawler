@@ -152,6 +152,8 @@ pub async fn judge_stories<L: Llm>(
         backend,
         model,
     };
+    // 前の実行が判定を保存してからグループを作り直す前に落ちていても、候補を選ぶ前に直しておく
+    rebuild(db)?;
     let shared = Shared::new(quota);
     // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
     let parts = run_workers(llm_cfg.concurrency, |_| async {

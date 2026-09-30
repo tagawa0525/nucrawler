@@ -414,15 +414,37 @@ pub(super) async fn source(
     Ok(Redirect::to(&url).into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct SettingsParams {
+    /// パスワードの変更の結果（`changed`・`wrong`・`locked`）
+    password: Option<String>,
+}
+
 pub(super) async fn settings(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
+    Query(params): Query<SettingsParams>,
     headers: HeaderMap,
 ) -> Result<Html<String>, AppError> {
+    let notice = params
+        .password
+        .as_deref()
+        .and_then(html::PasswordNotice::from_query);
+    let page = settings_html(&state, me, &headers, notice).await?;
+    Ok(Html(page))
+}
+
+/// 設定画面（パスワードの変更で条件を満たさないときも、理由を添えてこれを出す）。
+pub(super) async fn settings_html(
+    state: &AppState,
+    me: crate::db::Viewer,
+    headers: &HeaderMap,
+    notice: Option<html::PasswordNotice>,
+) -> Result<String, AppError> {
     let labels = state.labels.clone();
     let min_score = state.web.min_score;
-    let base = format!("http://{}", request_host(&headers, &state.web));
-    let page = with_db(&state, move |db| {
+    let base = format!("http://{}", request_host(headers, &state.web));
+    with_db(state, move |db| {
         let (user, hash) = viewer(db, me)?;
         // 購読用のフィードの URL（コピーして使うので絶対 URL）
         let feed_url = db
@@ -446,11 +468,11 @@ pub(super) async fn settings(
             terms,
             pending,
             feed_url.as_deref(),
+            notice,
             &page,
         ))
     })
-    .await?;
-    Ok(Html(page))
+    .await
 }
 
 #[cfg(test)]

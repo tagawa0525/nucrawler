@@ -115,6 +115,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
         .route("/settings/feed-token", post(rotate_feed_token))
+        .route("/settings/password", post(change_password))
         // 外側の層から順に掛かる：Origin の確認（ログインを含むすべての書き込み）→ ログインの確認
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

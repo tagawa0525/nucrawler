@@ -339,6 +339,97 @@ pub(super) async fn logout(
         .into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct PasswordForm {
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    new: String,
+}
+
+/// 本人のパスワードの変更。新しいパスワードの条件と今のパスワードの長さは、計算の前に確かめる（満たさなければ 400）。
+/// 照合・新しいハッシュの作成・判定と書き込みは、ログインと同じく `PasswordHasher` の 1 つのクロージャで行う。
+/// 変えたら、要求元のものも含めてセッションとフィードのトークンをすべて失効させ、要求元には新しいセッションを出す
+/// （Cookie を写し取った相手も同じセッションなので、残すとパスワードを変えても使い続けられる）。
+pub(super) async fn change_password(
+    State(state): State<AppState>,
+    Extension(me): Extension<Viewer>,
+    Extension(SessionToken(session)): Extension<SessionToken>,
+    headers: HeaderMap,
+    Form(form): Form<PasswordForm>,
+) -> Result<Response, AppError> {
+    let rule = auth::check_password(&form.new).err().or_else(|| {
+        (!auth::within_password_limit(&form.current)).then_some(auth::PasswordRule::TooLong)
+    });
+    if let Some(rule) = rule {
+        // 理由は設定画面に出す
+        let notice = html::PasswordNotice::Invalid(rule.to_string());
+        let page = settings_html(&state, me, &headers, Some(notice)).await?;
+        return Ok((StatusCode::BAD_REQUEST, Html(page)).into_response());
+    }
+    let db = state.db.clone();
+    let outcome = state
+        .hasher
+        .run(move || -> Result<crate::db::PasswordChange, DbError> {
+            let lock = || db.lock().unwrap_or_else(PoisonError::into_inner);
+            // 時刻は DB を読み書きする直前にそれぞれ取る。照合と計算の前の時刻で書くと、計算の間に切れたセッションを
+            // 有効とみなし、失敗の待ち時間や新しいセッションの期限も古い時刻から数えてしまう
+            let Some(read) = lock().session_password(&session, chrono::Utc::now())? else {
+                return Ok(crate::db::PasswordChange::NoSession);
+            };
+            // 待ち時間中は照合も計算もせずに断る。照合して、正しいときだけ新しいハッシュを作ると、
+            // その時間の差で、盗んだセッションから待ち時間中も正しさを確かめられてしまう
+            if read.locked {
+                return Ok(crate::db::PasswordChange::Locked);
+            }
+            let read = read.hash;
+            let verified =
+                auth::verify_password(read.as_deref().unwrap_or(auth::dummy_hash()), &form.current);
+            // 新しいハッシュは、照合が通ったときだけ作る（書かないハッシュのために計算しない）
+            let new_hash = if verified {
+                auth::hash_password(&form.new)?
+            } else {
+                String::new()
+            };
+            lock().change_password(
+                &session,
+                read.as_deref(),
+                verified,
+                &new_hash,
+                chrono::Utc::now(),
+            )
+        })
+        .await;
+    use crate::db::PasswordChange;
+    Ok(match outcome {
+        Err(Busy) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "混み合っています。少し待ってから試してください",
+        )
+            .into_response(),
+        Ok(result) => match result? {
+            PasswordChange::Changed { token } => {
+                let max_age = auth::SESSION_DAYS * 24 * 60 * 60;
+                (
+                    [(header::SET_COOKIE, session_cookie_header(&token, max_age))],
+                    Redirect::to("/settings?password=changed"),
+                )
+                    .into_response()
+            }
+            PasswordChange::WrongPassword => {
+                Redirect::to("/settings?password=wrong").into_response()
+            }
+            PasswordChange::Locked => Redirect::to("/settings?password=locked").into_response(),
+            // セッションが無い（失効した・照合の間に変わった）ので、ログインし直してもらう
+            PasswordChange::NoSession => (
+                [(header::SET_COOKIE, session_cookie_header("", 0))],
+                Redirect::to("/login"),
+            )
+                .into_response(),
+        },
+    })
+}
+
 /// フィードのトークンを作り直す（古い購読用の URL は使えなくなる）。
 pub(super) async fn rotate_feed_token(
     State(state): State<AppState>,
@@ -698,6 +789,183 @@ mod tests {
         let (_, theirs) = server.get(&format!("/feed.xml?token={theirs}")).await;
         assert_ne!(feed_id(&mine), feed_id(&theirs));
         assert!(!feed_id(&mine).contains("token"), "{mine}");
+    }
+
+    /// パスワードの変更のフォームを、所有者のセッションで送る。
+    async fn change(server: &Server, current: &str, new: &str) -> reqwest::Response {
+        server
+            .client
+            .post(format!("{}/settings/password", server.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form(&[("current", current), ("new", new)]))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    const NEW_PASSWORD: &str = "a brand new passphrase";
+
+    /// 変えると、要求元のものも含めてセッションとフィードのトークンがすべて失効し、要求元には新しいセッションの
+    /// Cookie を返す。新しいパスワードで照合が通る。
+    #[tokio::test]
+    async fn changing_the_password_rotates_sessions_and_the_feed() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings").await;
+        assert!(html.contains(r#"action="/settings/password""#), "{html}");
+        // 文字数の判定はサーバーだけ（ブラウザの minlength は UTF-16 で数え、サーバーの数え方と違う）
+        assert!(!html.contains("minlength"), "{html}");
+        let feed = server.feed_path();
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "/settings?password=changed");
+        let cookie = cookie_of(&res);
+        for attr in ["HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=2592000"] {
+            assert!(cookie.contains(attr), "{attr}: {cookie}");
+        }
+        assert!(!cookie.contains("Secure"), "{cookie}");
+        let token = cookie
+            .strip_prefix(&format!("{SESSION_COOKIE}="))
+            .and_then(|c| c.split(';').next())
+            .unwrap()
+            .to_string();
+        // 変更前の Cookie（要求元のもの）とフィードの URL は使えない
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 303);
+        assert_eq!(server.get_raw(&feed).await.status().as_u16(), 401);
+        let res = server
+            .client
+            .get(format!("{}/settings", server.base))
+            .header(reqwest::header::COOKIE, format!("{SESSION_COOKIE}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 200);
+        let hash = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .login_hash("owner")
+            .unwrap()
+            .unwrap();
+        assert!(crate::auth::verify_password(&hash, NEW_PASSWORD));
+    }
+
+    /// 今のパスワードの誤りはログインの失敗と同じく数え、6 回目でその人のセッションがすべて消える。
+    #[tokio::test]
+    async fn wrong_current_passwords_are_counted() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        for _ in 0..5 {
+            let res = change(&server, "not my password", NEW_PASSWORD).await;
+            assert_eq!(res.status().as_u16(), 303);
+            assert_eq!(res.headers()["location"], "/settings?password=wrong");
+        }
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+        change(&server, "not my password", NEW_PASSWORD).await;
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 303);
+        let (_, html) = server.get("/login").await;
+        assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// 新しいパスワードが条件を満たさない、または今のパスワードが長すぎるときは 400 で、何も変わらない。
+    #[tokio::test]
+    async fn invalid_passwords_are_rejected_before_hashing() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let long = "a".repeat(1025);
+        for (current, new) in [
+            (PASSWORD, "short"),
+            (PASSWORD, long.as_str()),
+            (long.as_str(), NEW_PASSWORD),
+        ] {
+            let res = change(&server, current, new).await;
+            assert_eq!(res.status().as_u16(), 400, "{current:.10} / {new:.10}");
+            // 理由は設定画面に出す
+            let html = res.text().await.unwrap();
+            assert!(html.contains(r#"action="/settings/password""#), "{html}");
+            assert!(
+                html.contains("12 文字以上にしてください")
+                    || html.contains("1024 バイト以下にしてください"),
+                "{html}"
+            );
+        }
+        assert_eq!(
+            server.count("SELECT failed_logins FROM users WHERE login = 'owner'"),
+            0
+        );
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+    }
+
+    /// 待ち時間中は、今のパスワードが正しくても変えられない（照合もしないので、応答の時間から正しさも分からない）。
+    #[tokio::test]
+    async fn locked_accounts_cannot_change_the_password() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        for _ in 0..6 {
+            db.finish_login("owner", None, false, chrono::Utc::now())
+                .unwrap();
+        }
+        let server = Server::start(db).await;
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.headers()["location"], "/settings?password=locked");
+        let hash = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .login_hash("owner")
+            .unwrap()
+            .unwrap();
+        assert!(crate::auth::verify_password(&hash, PASSWORD));
+    }
+
+    /// 他サイトからの変更は 403 で、パスワードもセッションも変わらない。
+    #[tokio::test]
+    async fn cross_site_password_changes_are_refused() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let res = server
+            .client
+            .post(format!("{}/settings/password", server.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("origin", "https://evil.example")
+            .body(form(&[("current", PASSWORD), ("new", NEW_PASSWORD)]))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+    }
+
+    /// パスワードの変更の計算も、ログインと同じ枠を使う（空きが無ければ 503）。
+    #[tokio::test]
+    async fn password_changes_share_the_hashing_limit() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(gate));
+        let mut busy = Vec::new();
+        for _ in 0..2 {
+            let gate = gate.clone();
+            let mut task = Box::pin(server.state.hasher.run(move || {
+                gate.lock().unwrap().recv().unwrap();
+            }));
+            assert!(futures_poll_once(&mut task).await);
+            busy.push(task);
+        }
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.status().as_u16(), 503);
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        for task in busy {
+            task.await.unwrap();
+        }
     }
 
     /// IP ごとの失敗は、ポートを除いたアドレスで数え、15 分途切れたら数え直す。記録の数には上限がある。

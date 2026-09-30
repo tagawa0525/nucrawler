@@ -2,21 +2,26 @@
 
 use super::*;
 
-/// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が 0 なら、評価 1〜2・未採点・
+/// 利用者の一覧の既定の最低点。プロファイルがあれば設定の最低点（`min_score`）、無ければ採点が無いので最低点なし。
+pub(super) fn default_min(min_score: u8, profile_hash: Option<&str>) -> Option<u8> {
+    profile_hash.map(|_| min_score)
+}
+
+/// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が無ければ推薦点で絞らず、0 なら、評価 1〜2・未採点・
 /// 軽水炉と無関係の記事も出す（すべて）。既読は一覧の既定と同じく未読だけ（フィード・JSON の一覧もこれを使う）。
 fn list_query<'a>(
     web: &WebConfig,
     user: i64,
     profile_hash: Option<&'a str>,
     now: chrono::DateTime<Utc>,
-    min_score: u8,
+    min_score: Option<u8>,
 ) -> ListQuery<'a> {
     ListQuery {
         user_id: user,
         profile_hash,
         min_score,
         since: now - Duration::days(web.list_days.into()),
-        show_all: min_score == 0,
+        show_all: min_score == Some(0),
         read: Some(false),
         bookmarked: None,
         limit: web.list_limit,
@@ -30,7 +35,7 @@ pub(super) fn list_items(
     user: i64,
     profile_hash: Option<&str>,
     now: chrono::DateTime<Utc>,
-    min_score: u8,
+    min_score: Option<u8>,
 ) -> Result<Vec<crate::db::ListItem>, DbError> {
     db.list_articles(list_query(web, user, profile_hash, now, min_score))
 }
@@ -43,7 +48,7 @@ pub(super) fn warnings(db: &Db) -> Result<Vec<crate::db::Warning>, DbError> {
 
 #[derive(serde::Deserialize)]
 pub(super) struct ListParams {
-    /// 表示する最低点（0〜100）。無ければ設定の `web.min_score`
+    /// 表示する最低点（0〜100）。無ければ既定（`default_min`）
     min: Option<String>,
     /// Web の一覧だけが使う（`1` なら既読も出し、`0` なら隠す。無ければ一覧は隠し、絞り込みは出す）
     read: Option<String>,
@@ -54,18 +59,15 @@ pub(super) struct ListParams {
 }
 
 impl ListParams {
-    pub(super) fn min(&self, web: &WebConfig) -> Result<u8, AppError> {
-        self.min_or(web.min_score)
-    }
-
-    /// 表示する最低点。無ければ `default`。
-    fn min_or(&self, default: u8) -> Result<u8, AppError> {
+    /// 表示する最低点。無ければ（JavaScript が無いときの選択で送られる空の値も）`default`。
+    pub(super) fn min_or(&self, default: Option<u8>) -> Result<Option<u8>, AppError> {
         match self.min.as_deref() {
-            None => Ok(default),
+            None | Some("") => Ok(default),
             Some(v) => v
                 .parse()
                 .ok()
                 .filter(|min| *min <= 100)
+                .map(Some)
                 .ok_or(AppError::BadRequest("min must be 0..=100")),
         }
     }
@@ -122,14 +124,17 @@ pub(super) async fn list(
         read: carried(params.read.as_deref()),
         ..params
     };
-    // 最低点の既定は、一覧では設定の最低点、絞り込みでは 0（点数で絞らない）
-    let min = params.min_or(if filtering { 0 } else { state.web.min_score })?;
+    // 最低点の既定は、一覧では利用者の既定（プロファイルが無ければ最低点なし）、絞り込みでは 0（点数で絞らない）。
+    // 正規の URL がプロファイルの有無で変わるので、利用者を先に引く
+    let (user, hash) = with_db(&state, |db| Ok(viewer(db)?)).await?;
+    let list_min = default_min(state.web.min_score, hash.as_deref());
+    let min = params.min_or(if filtering { Some(0) } else { list_min })?;
     // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
     let read =
         read_mark(params.read.as_deref())?.unwrap_or(if filtering { None } else { Some(false) });
     let view = html::ListView {
         min,
-        default_min: state.web.min_score,
+        default_min: list_min,
         read,
         rating,
         bookmarked,
@@ -146,10 +151,8 @@ pub(super) async fn list(
     }
     let web = state.web.clone();
     let labels = state.labels.clone();
-    let default_min = state.web.min_score;
     let page = with_db(&state, move |db| {
         let now = Utc::now();
-        let (user, hash) = viewer(db)?;
         if view.filtered() {
             return filtered(db, &web, &labels, user, hash.as_deref(), view);
         }
@@ -162,14 +165,13 @@ pub(super) async fn list(
             ..list_query(&web, user, hash.as_deref(), now, min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
-        // 「すべて」では閾値未満も並んでいるので、確認枠は出さない
-        let explore = if view.shows_all() {
-            Vec::new()
-        } else {
-            // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく設定の最低点
+        // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、
+        // 閾値未満という区別も無いので出さない
+        let explore = if let Some(floor) = view.default_min.filter(|_| !view.shows_all()) {
+            // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく既定の最低点
             let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
             let picks = db.explore(
-                list_query(&web, user, hash.as_deref(), now, web.min_score),
+                list_query(&web, user, hash.as_deref(), now, Some(floor)),
                 web.explore_per_day as usize,
                 &today.to_string(),
             )?;
@@ -185,12 +187,14 @@ pub(super) async fn list(
                 .into_iter()
                 .filter(|i| view.bookmarked.is_none_or(|b| i.bookmarked == b))
                 .collect()
+        } else {
+            Vec::new()
         };
         let warnings = warnings(db)?;
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-            default_min,
+            default_min: view.default_min,
         };
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
@@ -219,11 +223,11 @@ fn filtered(
         unrated: view.rating == Some(0),
         bookmarked: view.bookmarked,
         read: view.read,
-        min_score: if view.min > 0 {
-            view.min.to_string()
-        } else {
-            String::new()
-        },
+        min_score: view
+            .min
+            .filter(|m| *m > 0)
+            .map(|m| m.to_string())
+            .unwrap_or_default(),
         ..Params::default()
     };
     let query = params
@@ -234,7 +238,7 @@ fn filtered(
     let page = Page {
         warnings: &warnings,
         labels,
-        default_min: web.min_score,
+        default_min: view.default_min,
     };
     Ok(html::filtered_page(&items, view, &page))
 }
@@ -255,7 +259,8 @@ pub(super) async fn feed(
     let xml = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, web.min_score)?;
+        let min = default_min(web.min_score, hash.as_deref());
+        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         Ok(feed::atom(
             &items,
             &base,
@@ -280,7 +285,6 @@ pub(super) async fn search(
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
     let web = state.web.clone();
     let labels = state.labels.clone();
-    let default_min = state.web.min_score;
     let (status, page) = with_db(&state, move |db| {
         let (user, hash) = viewer(db)?;
         let vocabulary = db.topic_usage()?;
@@ -288,7 +292,7 @@ pub(super) async fn search(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-            default_min,
+            default_min: default_min(web.min_score, hash.as_deref()),
         };
         // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
         let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
@@ -336,7 +340,7 @@ pub(super) async fn detail(
     // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
     let returned = params.back.is_some() || method == Method::HEAD;
     let labels = state.labels.clone();
-    let default_min = state.web.min_score;
+    let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
@@ -372,7 +376,7 @@ pub(super) async fn detail(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-            default_min,
+            default_min: default_min(min_score, hash.as_deref()),
         };
         let comments = db.comments(user, id)?;
         let notes = html::Notes {
@@ -407,8 +411,9 @@ pub(super) async fn source(
 
 pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
-    let default_min = state.web.min_score;
+    let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
+        let (_, hash) = viewer(db)?;
         let terms = db.glossary_entries()?.len();
         let pending = db
             .report_counts()?
@@ -419,7 +424,7 @@ pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<Strin
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-            default_min,
+            default_min: default_min(min_score, hash.as_deref()),
         };
         Ok(html::settings_page(terms, pending, &page))
     })

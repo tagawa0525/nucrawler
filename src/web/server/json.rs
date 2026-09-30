@@ -11,12 +11,12 @@ pub(super) async fn api_list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, AppError> {
-    let min = params.min(&state.web)?;
     let web = state.web.clone();
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db)?;
+        let min = params.min_or(default_min(web.min_score, hash.as_deref()))?;
         let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, &labels,

@@ -55,8 +55,8 @@ impl ListItem {
 pub struct ListQuery<'a> {
     pub user_id: i64,
     pub profile_hash: Option<&'a str>,
-    /// `show_all` でないときに表示する最低点
-    pub min_score: u8,
+    /// `show_all` でないときに表示する最低点。`None` なら推薦点で絞らない（プロファイルが無く採点が無い利用者の既定）
+    pub min_score: Option<u8>,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
     /// 評価 1〜2、閾値未満、未採点、非軽水炉の記事も表示する
@@ -152,7 +152,7 @@ enum ItemScope<'a> {
     List {
         since: chrono::DateTime<chrono::Utc>,
         show_all: bool,
-        min_score: u8,
+        min_score: Option<u8>,
         read: Option<bool>,
         bookmarked: Option<bool>,
         limit: usize,
@@ -547,9 +547,10 @@ impl Db {
         per_day: usize,
         today: &str,
     ) -> Result<Vec<ListItem>, DbError> {
-        if per_day == 0 {
+        // 最低点が無ければ、閾値未満という区別も無い
+        let Some(min_score) = q.min_score.filter(|_| per_day > 0) else {
             return Ok(Vec::new());
-        }
+        };
         let labeled: std::collections::HashSet<i64> = self
             .eval_labels(q.user_id)?
             .into_iter()
@@ -571,7 +572,7 @@ impl Db {
                 q.profile_hash,
                 ItemScope::Explore {
                     since: q.since,
-                    min_score: q.min_score,
+                    min_score,
                     limit: need,
                 },
             )?;
@@ -596,7 +597,7 @@ impl Db {
                     // 選んだ後に同じグループのほかの記事を評価したら、記事自身の評価と同じく外す
                     .filter(|i| {
                         i.lwr_relevant == Some(true)
-                            && i.score.is_some_and(|s| s < q.min_score)
+                            && i.score.is_some_and(|s| s < min_score)
                             && !i.story_rated
                     }),
             );
@@ -642,7 +643,7 @@ impl Db {
             _ => "1",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
-            ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
+            ItemScope::One(id) => (Some(id), None, true, None, 1, BY_SCORE),
             ItemScope::List {
                 since,
                 show_all,
@@ -655,12 +656,12 @@ impl Db {
                 since,
                 min_score,
                 limit,
-            } => (None, Some(since), true, min_score, limit, "random()"),
+            } => (None, Some(since), true, Some(min_score), limit, "random()"),
             ItemScope::Search(q) => (
                 None,
                 q.since,
                 q.hide_below.is_none(),
-                q.hide_below.unwrap_or(0),
+                q.hide_below,
                 q.limit,
                 match q.order {
                     SearchOrder::Newest => NEWEST,
@@ -782,10 +783,10 @@ impl Db {
                       AS story_rank
              FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では評価 1〜2、非軽水炉、未採点、閾値未満を隠す
+             -- 既定では評価 1〜2、非軽水炉を隠し、最低点があれば未採点と閾値未満も隠す
              WHERE (:all = 1
                 OR ((rows.rating IS NULL OR rows.rating > 2)
-                    AND rows.relevant = 1 AND rows.rec >= :min))
+                    AND rows.relevant = 1 AND (:min IS NULL OR rows.rec >= :min)))
                {rows_filter}
                {list_filter}
              ) AS rows

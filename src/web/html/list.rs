@@ -50,10 +50,11 @@ fn mark_value(on: bool) -> &'static str {
 /// 一覧の既読の既定は未読だけ、絞り込みは評価した（読んだことの多い）記事を探すので絞らない。
 #[derive(Clone, Copy)]
 pub struct ListView {
-    /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）
-    pub min: u8,
-    /// 既定の最低点（設定の `web.min_score`）
-    pub default_min: u8,
+    /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）。`None` なら推薦点で絞らない
+    /// （最低点なし。評価 1〜2・軽水炉と無関係の記事は隠す）
+    pub min: Option<u8>,
+    /// 一覧の既定の最低点。プロファイルがあれば設定の `web.min_score`、無ければ採点が無いので最低点なし（`None`）
+    pub default_min: Option<u8>,
     /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ、`None` は絞らない）
     pub read: Option<bool>,
     /// この評価（1〜5）以上の記事に絞る。0 なら評価の無い記事だけ
@@ -64,7 +65,7 @@ pub struct ListView {
 
 impl Default for ListView {
     fn default() -> Self {
-        let min = crate::config::WebConfig::default().min_score;
+        let min = Some(crate::config::WebConfig::default().min_score);
         Self {
             min,
             default_min: min,
@@ -81,7 +82,7 @@ const MIN_STEP: u8 = 10;
 impl ListView {
     /// 「すべて」の表示か（評価 1〜2・未採点・軽水炉と無関係の記事も出す）。
     pub fn shows_all(self) -> bool {
-        self.min == 0
+        self.min == Some(0)
     }
 
     /// 評価・ブックマーク中だけで絞っているか（一覧の代わりに全期間から探す）。
@@ -94,9 +95,13 @@ impl ListView {
         if self.filtered() { None } else { Some(false) }
     }
 
-    /// この表示での最低点の既定。一覧は設定の最低点、絞り込みは 0（点数で絞らない）。
-    fn min_default(self) -> u8 {
-        if self.filtered() { 0 } else { self.default_min }
+    /// この表示での最低点の既定。一覧は利用者の既定（`default_min`）、絞り込みは 0（点数で絞らない）。
+    fn min_default(self) -> Option<u8> {
+        if self.filtered() {
+            Some(0)
+        } else {
+            self.default_min
+        }
     }
 
     /// 絞り込みを変えた表示。一覧と絞り込みを行き来するときは、既読の表示と最低点を行き先の既定に戻す。
@@ -116,12 +121,16 @@ impl ListView {
     /// この表示の一覧の正規の URL。既定と同じ値は付けない（最低点・既読の表示は、この表示での既定と
     /// 違うときだけ）。
     pub fn url(self) -> String {
-        let min = format!("min={}", self.min);
+        // 最低点なしは、既定が最低点なしの表示でしか選べないので、いつも省ける
+        let min = self.min.map(|m| format!("min={m}")).unwrap_or_default();
         let rating = format!("rating={}", self.rating.unwrap_or_default());
         let read = format!("read={}", self.read.map_or("any", mark_value));
         let bookmarked = format!("bookmarked={}", self.bookmarked.map_or("", mark_value));
         let query: Vec<&str> = [
-            (self.min != self.min_default(), min.as_str()),
+            (
+                self.min.is_some() && self.min != self.min_default(),
+                min.as_str(),
+            ),
             (self.rating.is_some(), rating.as_str()),
             (self.read != self.read_default(), read.as_str()),
             (self.bookmarked.is_some(), bookmarked.as_str()),
@@ -152,10 +161,14 @@ pub(super) trait BarView: Clone {
     fn action(&self) -> &'static str;
     /// この表示の正規の URL
     fn bar_url(&self) -> String;
-    /// 表示する最低点（0 は絞らない）
-    fn min(&self) -> u8;
+    /// 表示する最低点（0 は絞らない。`None` は最低点なし）
+    fn min(&self) -> Option<u8>;
     /// 最低点の選択肢に加える値（設定の最低点）
     fn extra_min(&self) -> Option<u8>;
+    /// 最低点なしを選べるなら、その表示（一覧の既定が最低点なしのとき）
+    fn without_min(&self) -> Option<Self> {
+        None
+    }
     /// 評価の絞り込み（0 は評価の無い記事だけ）
     fn rating(&self) -> Option<u8>;
     /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ）
@@ -187,11 +200,16 @@ impl BarView for ListView {
     fn bar_url(&self) -> String {
         ListView::url(*self)
     }
-    fn min(&self) -> u8 {
+    fn min(&self) -> Option<u8> {
         self.min
     }
     fn extra_min(&self) -> Option<u8> {
-        Some(self.default_min)
+        self.default_min
+    }
+    fn without_min(&self) -> Option<Self> {
+        self.min_default()
+            .is_none()
+            .then_some(ListView { min: None, ..*self })
     }
     fn rating(&self) -> Option<u8> {
         self.rating
@@ -203,7 +221,10 @@ impl BarView for ListView {
         self.bookmarked
     }
     fn with_min(&self, min: u8) -> Self {
-        ListView { min, ..*self }
+        ListView {
+            min: Some(min),
+            ..*self
+        }
     }
     fn with_rating(&self, rating: Option<u8>) -> Self {
         self.with_filters(rating, self.bookmarked)
@@ -272,32 +293,41 @@ pub(super) const BAR_SCRIPT: &str =
 
 /// 表示する最低点の選択。0〜90 の 10 刻みと設定・今の最低点から選び、選ぶとすぐ表示を切り替える
 /// （JavaScript が無ければ「表示」のボタンで）。0 は点数で絞らない（すべて。開いた一覧では「-」、閉じた選択では 00）で、
-/// それ以外のあいだは緑にする。
+/// それ以外のあいだは緑にする。一覧の既定が最低点なし（プロファイルが無い）なら、先頭に最低点なし（「--」）を置く。
 fn min_select(view: &impl BarView) -> String {
     let name = view.min_name();
     let mut values: Vec<u8> = (0..100).step_by(MIN_STEP.into()).collect();
     values.extend(view.extra_min());
-    values.push(view.min());
+    values.extend(view.min());
     values.sort_unstable();
     values.dedup();
-    let options: String = values
+    // 空の値は、JavaScript が無いときに送っても既定（最低点なし）になる
+    let unfloored = view
+        .without_min()
+        .map(|target| option("", &target, view.min().is_none(), "--"));
+    let options: String = unfloored
         .into_iter()
-        .map(|v| {
+        .chain(values.into_iter().map(|v| {
             let target = view.with_min(v);
+            let selected = view.min() == Some(v);
             if v == 0 {
                 // 絞らない
-                blank_option("0", &target, v == view.min(), "00")
+                blank_option("0", &target, selected, "00")
             } else {
                 // 桁をそろえる（1 桁は 0 を付ける）
-                option(&v.to_string(), &target, v == view.min(), &format!("{v:02}"))
+                option(&v.to_string(), &target, selected, &format!("{v:02}"))
             }
-        })
+        }))
         .collect();
     format!(
         "<form class=\"min{}\" method=\"get\" action=\"{}\"><select name=\"{name}\" aria-label=\"表示する最低点\" \
          title=\"表示する最低点\" onchange=\"{JUMP}\">{options}</select>{}\
          <noscript><button>表示</button></noscript></form>",
-        if view.min() == 0 { "" } else { " on" },
+        if view.min().is_some_and(|m| m > 0) {
+            " on"
+        } else {
+            ""
+        },
         view.action(),
         state_inputs(view, &[name]),
     )
@@ -852,7 +882,7 @@ mod tests {
     #[test]
     fn list_page_shows_only_buttons_above_the_cards() {
         let view = ListView {
-            min: 0,
+            min: Some(0),
             ..ListView::default()
         };
         let html = list_page(&[], &[], view, &Page::default());
@@ -919,10 +949,10 @@ mod tests {
             html[start..start + html[start..].find('"').unwrap()].to_string()
         };
         // 未読だけ（一覧の既定）→ 絞らない → 既読だけ
-        assert_eq!(eye(50, Some(false)), "/?read=any");
-        assert_eq!(eye(50, None), "/?read=1");
-        assert_eq!(eye(30, Some(false)), "/?min=30&amp;read=any");
-        assert_eq!(eye(30, None), "/?min=30&amp;read=1");
+        assert_eq!(eye(Some(50), Some(false)), "/?read=any");
+        assert_eq!(eye(Some(50), None), "/?read=1");
+        assert_eq!(eye(Some(30), Some(false)), "/?min=30&amp;read=any");
+        assert_eq!(eye(Some(30), None), "/?min=30&amp;read=1");
         let read = ListView {
             read: None,
             ..ListView::default()
@@ -933,8 +963,8 @@ mod tests {
             "{html}"
         );
         let odd = ListView {
-            min: 55,
-            default_min: 55,
+            min: Some(55),
+            default_min: Some(55),
             ..ListView::default()
         };
         let html = list_page(&[], &[], odd, &Page::default());
@@ -984,7 +1014,7 @@ mod tests {
     fn filtered_page_shows_the_bar_and_the_matches() {
         // 絞り込んだ画面の既定は、既読も出す
         let view = ListView {
-            min: 0,
+            min: Some(0),
             rating: Some(4),
             read: None,
             ..ListView::default()
@@ -1042,7 +1072,7 @@ mod tests {
         );
 
         let view = ListView {
-            min: 0,
+            min: Some(0),
             rating: Some(4),
             bookmarked: Some(true),
             read: None,
@@ -1070,7 +1100,7 @@ mod tests {
         );
         assert!(html.contains("該当する記事はありません"), "{html}");
         let view = ListView {
-            min: 0,
+            min: Some(0),
             bookmarked: Some(true),
             read: None,
             ..ListView::default()
@@ -1083,7 +1113,7 @@ mod tests {
 
         // 👁 を OFF にした絞り込みは、既読を隠し（その場でも隠す）、絞り込みを変えても OFF を引き継ぐ
         let view = ListView {
-            min: 0,
+            min: Some(0),
             rating: Some(4),
             ..ListView::default()
         };
@@ -1110,7 +1140,7 @@ mod tests {
         );
         // 一覧と絞り込みを行き来するときは、👁 を行き先の既定に戻す（一覧は OFF、絞り込みは ON）
         let bookmark_off = ListView {
-            min: 0,
+            min: Some(0),
             bookmarked: Some(true),
             ..ListView::default()
         };
@@ -1204,7 +1234,7 @@ mod tests {
         };
         // ブックマーク中だけ（絞り込み）→ ブックマークなしだけ（一覧の既定へ戻る）
         let only = ListView {
-            min: 0,
+            min: Some(0),
             read: None,
             bookmarked: Some(true),
             ..ListView::default()
@@ -1257,7 +1287,7 @@ mod tests {
         let html = filtered_page(
             &[],
             ListView {
-                min: 0,
+                min: Some(0),
                 rating: Some(4),
                 read: None,
                 ..ListView::default()
@@ -1272,7 +1302,7 @@ mod tests {
     #[test]
     fn rating_select_offers_unrated_and_resets_the_score_across_modes() {
         let unrated = ListView {
-            min: 0,
+            min: Some(0),
             read: None,
             rating: Some(0),
             ..ListView::default()
@@ -1291,7 +1321,10 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("f.unrated"), "{html}");
-        let scored = ListView { min: 60, ..unrated };
+        let scored = ListView {
+            min: Some(60),
+            ..unrated
+        };
         let html = filtered_page(&[], scored, &Page::default());
         // 絞り込みの中では最低点を引き継ぐ
         assert!(
@@ -1309,7 +1342,7 @@ mod tests {
         );
         // 一覧から絞り込みへ移ると、最低点は 00 になる
         let list = ListView {
-            min: 30,
+            min: Some(30),
             ..ListView::default()
         };
         let html = list_page(&[], &[], list, &Page::default());

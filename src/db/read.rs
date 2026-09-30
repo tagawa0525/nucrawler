@@ -593,8 +593,11 @@ impl Db {
             items.extend(
                 self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?
                     .into_iter()
+                    // 選んだ後に同じグループのほかの記事を評価したら、記事自身の評価と同じく外す
                     .filter(|i| {
-                        i.lwr_relevant == Some(true) && i.score.is_some_and(|s| s < q.min_score)
+                        i.lwr_relevant == Some(true)
+                            && i.score.is_some_and(|s| s < q.min_score)
+                            && !i.story_rated
                     }),
             );
         }
@@ -772,6 +775,8 @@ impl Db {
                        SELECT topic FROM score_matches
                        WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded,
                     s.score, rows.story_id, rows.story_others,
+                    coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
+                    rows.rating IS NOT NULL OR rows.story_rated AS story_rated,
                     row_number() OVER (
                       PARTITION BY coalesce(rows.story_id, -rows.id) ORDER BY {order})
                       AS story_rank
@@ -836,8 +841,8 @@ impl Db {
                 locked_by: Vec::new(),
                 story_id: r.get(21)?,
                 story_others: Vec::new(),
-                story_read: false,
-                story_rated: false,
+                story_read: r.get(23)?,
+                story_rated: r.get(24)?,
             };
             Ok((
                 item,

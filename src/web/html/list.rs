@@ -22,7 +22,11 @@ pub fn split_sections(
 pub fn filter_read(items: Vec<ListItem>, read: Option<bool>) -> Vec<ListItem> {
     match read {
         None => items,
-        Some(read) => items.into_iter().filter(|i| i.is_read() == read).collect(),
+        // 同じ報道のグループのどれかを読んでいれば、既読として扱う（一覧と同じ）
+        Some(read) => items
+            .into_iter()
+            .filter(|i| (i.is_read() || i.story_read) == read)
+            .collect(),
     }
 }
 

@@ -11,3 +11,13 @@ END;
 
 -- 2 件以上のグループの記事（代表以外）を、全件を読まずに引く
 CREATE INDEX article_stories_grouped ON article_stories (story_id) WHERE story_id <> article_id;
+
+-- 記事を消してグループの代表（story_id と同じ ID の記事）の行が消えたら、残りの記事を残りのうち最小の
+-- ID に付け替える（story_id はいつも、そのグループにいる最小の記事の ID）。1 件だけ残れば自分の ID になる。
+-- つながりが切れた分のグループの分かれ方は、次の作り直しで直る。
+CREATE TRIGGER article_stories_on_delete AFTER DELETE ON article_stories
+WHEN OLD.story_id = OLD.article_id BEGIN
+    UPDATE article_stories
+    SET story_id = (SELECT min(article_id) FROM article_stories WHERE story_id = OLD.article_id)
+    WHERE story_id = OLD.article_id;
+END;

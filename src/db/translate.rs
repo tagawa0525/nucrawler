@@ -5,6 +5,7 @@ use super::*;
 /// 和訳の対象を選ぶ条件。
 #[derive(Debug, Clone, Copy)]
 pub struct TranslateQuery<'a> {
+    /// 先回りの和訳で、点数と閲覧できる要約を見る利用者（依頼は誰のものでも拾う）
     pub user_id: i64,
     /// 先回りの和訳に使う、現在のプロファイルのハッシュ（無ければ先回りはしない）
     pub profile_hash: Option<&'a str>,
@@ -70,7 +71,7 @@ impl Db {
     }
 
     /// 和訳がまだ 1 つも無く、公開の本文（body/fulltext）がある英語の記事のうち、
-    /// 依頼されたもの（期間を問わない）と、`requests_only` でなければ現在のプロファイルで
+    /// 誰かが依頼したもの（期間を問わない）と、`requests_only` でなければ現在のプロファイルで
     /// `min_score` 以上に採点されたもの（`cutoff` 以降）を返す。依頼を先（古い順）、次に点数の高い順。
     /// このモデルの和訳の失敗で再試行待ち・断念済みの記事は含めない。
     pub fn pending_translate(
@@ -83,9 +84,9 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "WITH base AS (
                SELECT a.id, a.title, coalesce(a.published_at, a.fetched_at) AS at,
-                      (SELECT tr.requested_at FROM translation_requests AS tr
-                       WHERE tr.article_id = a.id AND tr.user_id = ?1 AND tr.done_at IS NULL)
-                        AS requested_at,
+                      -- 和訳は全員で共有するので、依頼は誰のものでも拾い、最も古い依頼で並べる
+                      (SELECT min(tr.requested_at) FROM translation_requests AS tr
+                       WHERE tr.article_id = a.id AND tr.done_at IS NULL) AS requested_at,
                       -- 利用者が閲覧できる最新の digest。先回りの判定（点数と lwr_relevant）は
                       -- この版だけで行い、古い版の高得点では先回りしない
                       (SELECT r.id FROM artifacts AS r
@@ -578,5 +579,43 @@ mod tests {
             .pending_translate(q, t("2026-09-10T00:00:00Z"), t("2026-09-27T00:00:00Z"), 10)
             .unwrap();
         assert_eq!(ids.len(), 1);
+    }
+
+    /// 依頼は誰のものでも拾い、記事ごとに最も古い未完了の依頼の時刻で並べる（和訳は全員で共有するので）。
+    #[test]
+    fn pending_translate_serves_requests_from_every_user() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, login, display_name) VALUES (2, 'other', 'other')",
+                [],
+            )
+            .unwrap();
+        let theirs = scored_article(
+            &db,
+            "https://e.com/theirs",
+            Lang::En,
+            "2026-08-01T00:00:00.000Z",
+            10,
+        );
+        let both = scored_article(
+            &db,
+            "https://e.com/both",
+            Lang::En,
+            "2026-08-01T00:00:00.000Z",
+            10,
+        );
+        db.request_translation(2, theirs, t("2026-09-26T02:00:00Z"))
+            .unwrap();
+        // 所有者の依頼は後でも、ほかの人がそれより前に依頼していれば、その時刻で並ぶ
+        db.request_translation(owner, both, t("2026-09-26T03:00:00Z"))
+            .unwrap();
+        db.request_translation(2, both, t("2026-09-26T01:00:00Z"))
+            .unwrap();
+
+        let now = "2026-09-27T00:00:00Z";
+        assert_eq!(translate_ids(&db, true, now), [both, theirs]);
+        assert_eq!(translate_ids(&db, false, now), [both, theirs]);
     }
 }

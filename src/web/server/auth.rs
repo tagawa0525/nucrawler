@@ -371,8 +371,9 @@ pub(super) async fn change_password(
         .hasher
         .run(move || -> Result<crate::db::PasswordChange, DbError> {
             let lock = || db.lock().unwrap_or_else(PoisonError::into_inner);
-            let now = chrono::Utc::now();
-            let read = lock().session_password_hash(&session, now)?;
+            // 時刻は DB を読み書きする直前にそれぞれ取る。照合と計算の前の時刻で書くと、計算の間に切れたセッションを
+            // 有効とみなし、失敗の待ち時間や新しいセッションの期限も古い時刻から数えてしまう
+            let read = lock().session_password_hash(&session, chrono::Utc::now())?;
             let verified =
                 auth::verify_password(read.as_deref().unwrap_or(auth::dummy_hash()), &form.current);
             // 新しいハッシュは、照合が通ったときだけ作る（書かないハッシュのために計算しない）
@@ -381,7 +382,13 @@ pub(super) async fn change_password(
             } else {
                 String::new()
             };
-            lock().change_password(&session, read.as_deref(), verified, &new_hash, now)
+            lock().change_password(
+                &session,
+                read.as_deref(),
+                verified,
+                &new_hash,
+                chrono::Utc::now(),
+            )
         })
         .await;
     use crate::db::PasswordChange;

@@ -20,6 +20,7 @@ mod stories;
 #[cfg(test)]
 mod test_support;
 mod translate;
+mod users;
 mod vocab;
 mod warnings;
 
@@ -36,6 +37,7 @@ pub use sources::*;
 pub use stages::*;
 pub use stories::*;
 pub use translate::*;
+pub use users::*;
 pub use vocab::*;
 pub use warnings::*;
 
@@ -80,6 +82,13 @@ pub enum DbError {
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
+    /// ログイン ID がほかの利用者と重なった
+    #[error("login {0:?} is already taken")]
+    LoginTaken(String),
+    #[error("no user with login {0:?}")]
+    UnknownUser(String),
+    #[error(transparent)]
+    Auth(#[from] crate::auth::AuthError),
 }
 
 /// 適用順に並べたマイグレーション。`PRAGMA user_version` は適用済みの件数。
@@ -115,6 +124,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0028_llm_credits.sql"),
     include_str!("migrations/0029_stories.sql"),
     include_str!("migrations/0030_story_for_every_article.sql"),
+    include_str!("migrations/0031_login.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

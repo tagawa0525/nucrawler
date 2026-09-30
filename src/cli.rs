@@ -36,6 +36,12 @@ pub enum ParseError {
     ServeUsage,
     #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
     EvalUsage,
+    #[error(
+        "usage: nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | \
+         nucrawler user disable LOGIN | nucrawler user rename LOGIN NEW_LOGIN | nucrawler user list  \
+         (LOGIN: 1-254 bytes)"
+    )]
+    UserUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -63,6 +69,7 @@ pub enum Command {
     Topics,
     Search,
     Eval,
+    User,
     Help,
 }
 
@@ -85,6 +92,7 @@ commands:
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
+  user      Web UI の利用者の管理（user add LOGIN NAME / reset-password LOGIN / disable LOGIN / rename LOGIN NEW_LOGIN / list）
   help      このヘルプを表示
 ";
 
@@ -116,6 +124,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("topics") => Command::Topics,
         Some("search") => Command::Search,
         Some("eval") => Command::Eval,
+        Some("user") => Command::User,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -443,6 +452,43 @@ pub fn parse_topics_args(args: &[String]) -> Result<TopicsArgs, ParseError> {
         }),
         [cmd] if cmd == "export" => Ok(TopicsArgs::Export),
         _ => Err(ParseError::TopicsUsage),
+    }
+}
+
+/// `user` サブコマンドの引数。パスワードは引数で受け取らず、CLI が作って表示する（シェルの履歴に残さないため）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum UserArgs {
+    /// `user add LOGIN NAME`：利用者を作り、初期パスワードを表示する
+    Add { login: String, display_name: String },
+    /// `user reset-password LOGIN`：資格をすべて失効させ、新しいパスワードを表示する
+    ResetPassword { login: String },
+    /// `user disable LOGIN`：資格をすべて失効させる（戻すときは reset-password）
+    Disable { login: String },
+    /// `user rename LOGIN NEW_LOGIN`
+    Rename { login: String, new_login: String },
+    /// `user list`
+    List,
+}
+
+pub fn parse_user_args(args: &[String]) -> Result<UserArgs, ParseError> {
+    let login = |s: &String| {
+        crate::auth::valid_login(s)
+            .then(|| s.clone())
+            .ok_or(ParseError::UserUsage)
+    };
+    match args {
+        [cmd, id, name] if cmd == "add" => Ok(UserArgs::Add {
+            login: login(id)?,
+            display_name: name.clone(),
+        }),
+        [cmd, id] if cmd == "reset-password" => Ok(UserArgs::ResetPassword { login: login(id)? }),
+        [cmd, id] if cmd == "disable" => Ok(UserArgs::Disable { login: login(id)? }),
+        [cmd, id, new] if cmd == "rename" => Ok(UserArgs::Rename {
+            login: login(id)?,
+            new_login: login(new)?,
+        }),
+        [cmd] if cmd == "list" => Ok(UserArgs::List),
+        _ => Err(ParseError::UserUsage),
     }
 }
 
@@ -922,6 +968,68 @@ mod tests {
         for bad in [&[][..], &["list"][..], &["check", "a", "b"][..]] {
             let err = parse_sources_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::SourcesUsage), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn parses_user_args() {
+        assert_eq!(
+            parse(args(&["user", "list"])).unwrap().command,
+            Command::User
+        );
+        assert_eq!(
+            parse_user_args(&args(&["add", "a@example.com", "A さん"])).unwrap(),
+            UserArgs::Add {
+                login: "a@example.com".into(),
+                display_name: "A さん".into()
+            }
+        );
+        for (cmd, expected) in [
+            (
+                "reset-password",
+                UserArgs::ResetPassword { login: "a".into() },
+            ),
+            ("disable", UserArgs::Disable { login: "a".into() }),
+        ] {
+            assert_eq!(parse_user_args(&args(&[cmd, "a"])).unwrap(), expected);
+        }
+        assert_eq!(
+            parse_user_args(&args(&["rename", "owner", "me@example.com"])).unwrap(),
+            UserArgs::Rename {
+                login: "owner".into(),
+                new_login: "me@example.com".into()
+            }
+        );
+        assert_eq!(parse_user_args(&args(&["list"])).unwrap(), UserArgs::List);
+    }
+
+    #[test]
+    fn rejects_bad_user_args() {
+        for bad in [
+            &[][..],
+            &["add", "a"][..],
+            &["disable"][..],
+            &["remove", "a"][..],
+            &["list", "x"][..],
+            // ログイン ID は空でなく 254 バイト以下
+            &["add", "", "A"][..],
+            &["rename", "owner", " "][..],
+            &["rename", "", "me@example.com"][..],
+            &["reset-password", ""][..],
+            &["disable", " "][..],
+        ] {
+            let err = parse_user_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::UserUsage), "{bad:?}: {err}");
+        }
+        let long = "a".repeat(255);
+        for bad in [
+            &["add", &long, "A"][..],
+            &["reset-password", &long][..],
+            &["disable", &long][..],
+            &["rename", &long, "me@example.com"][..],
+        ] {
+            let err = parse_user_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::UserUsage), "{bad:?}: {err}");
         }
     }
 

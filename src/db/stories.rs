@@ -201,7 +201,15 @@ impl Db {
         user_id: i64,
         article_id: i64,
     ) -> Result<Vec<StoryArticle>, DbError> {
-        todo!("{user_id} {article_id}")
+        self.story_articles(
+            user_id,
+            article_id,
+            "SELECT s2.article_id FROM article_stories AS s1
+             JOIN article_stories AS s2
+               ON s2.story_id = s1.story_id AND s2.article_id <> s1.article_id
+             WHERE s1.article_id = :article",
+            "at ASC, id ASC",
+        )
     }
 
     /// 記事の関連記事（新しい順）：記事のグループの誰かの最新の判定が same か related とした記事と、
@@ -212,7 +220,84 @@ impl Db {
         user_id: i64,
         article_id: i64,
     ) -> Result<Vec<StoryArticle>, DbError> {
-        todo!("{user_id} {article_id}")
+        let linked = self.story_articles(
+            user_id,
+            article_id,
+            "WITH mine AS (
+               SELECT s2.article_id AS id FROM article_stories AS s1
+               JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+               WHERE s1.article_id = :article
+               UNION SELECT :article),
+             latest AS (
+               SELECT r.id, r.article_id FROM artifacts AS r
+               WHERE r.kind = 'story' AND r.id = (
+                 SELECT r2.id FROM artifacts AS r2
+                 WHERE r2.article_id = r.article_id AND r2.kind = 'story'
+                 ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)),
+             linked AS (
+               SELECT l.other_id AS id FROM latest AS x
+               JOIN story_links AS l ON l.artifact_id = x.id
+               WHERE x.article_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related')
+               UNION
+               SELECT x.article_id FROM latest AS x
+               JOIN story_links AS l ON l.artifact_id = x.id
+               WHERE l.other_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related'))
+             SELECT id FROM linked WHERE id NOT IN (SELECT id FROM mine)",
+            "at DESC, id DESC",
+        )?;
+        // 関連の記事がグループに入っていれば、グループごとに新しい 1 件にまとめる
+        let stories = self.story_ids()?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(linked
+            .into_iter()
+            .filter(|a| seen.insert(stories.get(&a.article_id).copied().unwrap_or(-a.article_id)))
+            .map(|a| StoryArticle {
+                others: stories.get(&a.article_id).map_or(0, |story| {
+                    stories.values().filter(|s| *s == story).count() - 1
+                }),
+                ..a
+            })
+            .collect())
+    }
+
+    /// `ids_sql`（`:article` を使う、記事 ID の列を返す SQL）の記事を `order` の順に読む。
+    fn story_articles(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        ids_sql: &str,
+        order: &str,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        let sql = format!(
+            "SELECT id, source_id, at, title, title_ja FROM (
+               SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at, a.title,
+                      coalesce(
+                        nullif(trim((SELECT r.title_ja FROM artifacts AS r
+                                     WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable}
+                                     ORDER BY r.created_at DESC, r.id DESC LIMIT 1)), ''),
+                        (SELECT r.title_ja FROM artifacts AS r
+                         WHERE r.article_id = a.id AND r.kind = 'title'
+                         ORDER BY r.created_at DESC, r.id DESC LIMIT 1)) AS title_ja
+               FROM articles AS a
+               WHERE a.id IN ({ids_sql}))
+             ORDER BY {order}",
+            viewable = super::read::viewable("r"),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {":user": user_id, ":article": article_id},
+            |r| {
+                Ok(StoryArticle {
+                    article_id: r.get(0)?,
+                    source_id: r.get(1)?,
+                    at: r.get(2)?,
+                    title: r.get(3)?,
+                    title_ja: r.get(4)?,
+                    others: 0,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// 記事からグループの ID への対応。
@@ -535,9 +620,9 @@ mod tests {
         let b = article_on(&db, 2, 24);
         let c = article_on(&db, 3, 26);
         let alone = article_on(&db, 4, 26);
-        for (x, y) in [(a, b), (b, a), (c, a), (a, c)] {
-            story(&db, x, &[same(y)], "2026-09-27T00:00:00Z");
-        }
+        story(&db, a, &[same(b), same(c)], "2026-09-27T00:00:00Z");
+        story(&db, b, &[same(a)], "2026-09-27T00:00:00Z");
+        story(&db, c, &[same(a)], "2026-09-27T00:00:00Z");
         db.rebuild_stories().unwrap();
         let user = db.owner_id().unwrap();
         let members = db.story_members(user, a).unwrap();

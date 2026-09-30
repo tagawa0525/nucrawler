@@ -540,6 +540,27 @@ mod tests {
         assert_eq!(stories(&db), [(wnn, wnn), (ans, wnn), (jaif, wnn)]);
     }
 
+    /// 候補にしたが same でも related でもない記事も、無関係の組として残す（逆向きの判定で使う）。
+    #[tokio::test]
+    async fn records_rejected_candidates_as_unrelated() {
+        let db = Db::open_in_memory().unwrap();
+        fillers(&db);
+        let wnn = article(&db, "wnn", 15, EIB_WNN);
+        let jaif = article(&db, "jaif", 27, EIB_JAIF);
+        let llm = FakeLlm::new([judgments(&[(jaif, &[], &[]), (wnn, &[jaif], &[])])]);
+        run(&db, &llm, &mut quota(10)).await;
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT l.relation || '|' || l.other_id FROM story_links AS l
+                 JOIN artifacts AS r ON r.id = l.artifact_id WHERE r.article_id = {jaif}"
+            ))
+            .unwrap(),
+            [format!("unrelated|{wnn}")]
+        );
+        // 判定が割れたのでまとめない
+        assert!(stories(&db).is_empty());
+    }
+
     /// 応答に無かった記事は失敗として記録する（ほかの記事は保存する）。
     #[tokio::test]
     async fn records_missing_judgments_as_failures() {

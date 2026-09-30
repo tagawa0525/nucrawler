@@ -559,10 +559,22 @@ mod tests {
                 )
                 .is_err()
         );
+        // 候補にしたが無関係と判定した組も残す
+        db.conn()
+            .execute(
+                "INSERT INTO story_links (artifact_id, other_id, relation, similarity)
+                 VALUES (2, 1, 'unrelated', 0.2)",
+                [],
+            )
+            .unwrap();
         db.conn()
             .execute("DELETE FROM articles WHERE id = 2", [])
             .unwrap();
-        assert_eq!(count("SELECT count(*) FROM story_links"), 0);
+        assert_eq!(
+            db.query_strings("SELECT relation FROM story_links")
+                .unwrap(),
+            ["unrelated"]
+        );
         assert_eq!(count("SELECT count(*) FROM article_stories"), 1);
         db.conn()
             .execute("DELETE FROM articles WHERE id = 1", [])

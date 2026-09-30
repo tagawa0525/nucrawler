@@ -12,6 +12,8 @@ pub enum StoryRelation {
     Same,
     /// 同じ案件の別の出来事（続報など）
     Related,
+    /// 候補にしたが、どちらでもない
+    Unrelated,
 }
 
 impl StoryRelation {
@@ -19,6 +21,7 @@ impl StoryRelation {
         match self {
             Self::Same => "same",
             Self::Related => "related",
+            Self::Unrelated => "unrelated",
         }
     }
 }
@@ -438,6 +441,47 @@ mod tests {
             .unwrap();
         db.rebuild_stories().unwrap();
         assert!(stories(&db).is_empty());
+    }
+
+    /// 両方の向きで判定した組は、相手の最新の判定も same でなければつながない（判定が割れたら
+    /// まとめない）。相手が判定していない（候補にしていない）ときは、片方の same でつなぐ。
+    #[test]
+    fn rebuild_stories_requires_both_directions_to_agree() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..6)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let [a, b, c, d, e, f] = ids[..] else {
+            unreachable!()
+        };
+        let with = |other_id, relation| StoryLink {
+            relation,
+            ..same(other_id)
+        };
+        story(&db, a, &[same(b)], "2026-09-27T00:00:00Z");
+        story(
+            &db,
+            b,
+            &[with(a, StoryRelation::Related)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, c, &[same(d)], "2026-09-27T00:00:00Z");
+        story(
+            &db,
+            d,
+            &[with(c, StoryRelation::Unrelated)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, e, &[same(f)], "2026-09-27T00:00:00Z");
+        story(&db, f, &[same(e)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        assert_eq!(stories(&db), [(e, e), (f, e)]);
     }
 
     #[test]

@@ -48,7 +48,7 @@ LLM は自由記述でも読めるので困らなかったが、計算では当�
 
 ### 計算の採点は `scores` に入れる
 
-計算の採点も `scores` の行として持ち、`backend = 'algorithm'`・`model = 'topics'`・`prompt_version = ALGORITHM_VERSION`
+計算の採点も `scores` の行として持ち、`backend = 'algorithm'`・`model = 'topics c=0.9'`（係数を含める。下記）・`prompt_version = ALGORITHM_VERSION`
 （計算の方法を変えたら上げる）とする。当たった関心分野と推薦しない話題は、LLM と同じく `score_matches` に入れる。
 
 - `eval`・推薦点の補正・一覧・確認枠・和訳の先回りが、採点の出どころによらずそのまま使える
@@ -118,9 +118,10 @@ X が空でなければ 0 点
 ```
 
 - 当たりが増えるほど点が上がり、上限を超えない。重み 1 の分野に 1 つ当たれば 100c 点
-- c（0〜1）は最高点の係数で、最初は 0.9 とする。一覧の既定の最低点（`web.min_score`、既定 50）に対して、
+- c（0〜1）は最高点の係数で、設定 `[recommend] algorithm_scale`（既定 0.9）で変えられる。既定の 0.9 は、一覧の既定の最低点（`web.min_score`、既定 50）に対して、
   重み 0.6 の分野 1 つ（54 点）から出て、重み 0.4 の分野 1 つ（36 点）では出ない
-- 係数と式は計算の版（`ALGORITHM_VERSION`）に含め、変えたら版を上げる
+- 係数は採点のモデル名に含める（例 `topics c=0.9`）。設定を変えると別のキーになるので、自動的に採点し直しになり、
+  `eval` では変える前と後の係数が並ぶ（係数を試して比べられる）。式を変えたら計算の版（`ALGORITHM_VERSION`）を上げる
 - 理由（`reason`）には当たった関心分野と推薦しない話題を書く（例「当たった関心：規制・審査、燃料」）
 - 採点する記事は LLM の採点と同じ（利用者が閲覧できる最新の要約があり、軽水炉に関係する記事。`Db::pending_score`）。
   要約の無い記事（本文が取れず要約できない）は採点しない
@@ -222,6 +223,7 @@ X が空でなければ 0 点
    - `examples/profile.toml` に、つなぎ込みの例を足す
 2. 計算の採点と `eval` での比較
    - `src/algorithm.rs`（I/O を持たない）：プロファイル・記事のトピック・要約の文から、点数と当たりを返す
+   - 設定 `[recommend] algorithm_scale`（既定 0.9、0 より大きく 1 以下）
    - `ScoreInput` に要点と原題を足す
    - crawl の要約の直後に LLM を使わない `match` ステージを足し、プロファイルのある全員の分を、期間を区切らずに作る（`backend = 'algorithm'`）
    - 語彙の世代（`vocabulary_revision` とトリガー、`scores.vocabulary_revision`）と、古い世代の採点の作り直し

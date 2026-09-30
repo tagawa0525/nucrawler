@@ -129,6 +129,10 @@ pub struct ArticleDetail {
     pub has_body: bool,
     /// 推薦点の補正の内訳：効いた特徴と、その特徴が無かったときから動かした点数（大きい順）
     pub adjustments: Vec<(crate::recommend::Feature, i32)>,
+    /// 同じ報道のほかの記事（日時の順）
+    pub story: Vec<super::StoryArticle>,
+    /// 関連記事（新しい順。関連のグループは 1 件にまとめる）
+    pub related: Vec<super::StoryArticle>,
 }
 
 impl ArticleDetail {
@@ -471,6 +475,8 @@ impl Db {
             item,
             has_body,
             adjustments,
+            story: Vec::new(),
+            related: Vec::new(),
         }))
     }
 

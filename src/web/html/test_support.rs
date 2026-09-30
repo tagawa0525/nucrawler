@@ -51,6 +51,8 @@ pub(super) fn detail() -> ArticleDetail {
         translations: vec![],
         has_body: true,
         adjustments: Vec::new(),
+        story: Vec::new(),
+        related: Vec::new(),
     }
 }
 

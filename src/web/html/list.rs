@@ -615,6 +615,23 @@ mod tests {
     use crate::db::Rating;
     use crate::web::html::test_support::*;
 
+    /// 同じ報道のグループの代表には、ほかの記事の数とソース（重ねずに）を添える。
+    #[test]
+    fn card_mentions_other_reports_of_the_story() {
+        let labels = crate::web::html::SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
+        let page = Page {
+            labels: &labels,
+            ..Page::default()
+        };
+        let mut i = item(1, "2026-09-27T05:00:00.000Z");
+        i.story_id = Some(1);
+        i.story_others = vec!["wnn".into(), "iaea".into(), "wnn".into()];
+        let html = card(&i, true, &page);
+        assert!(html.contains("他 3 件（WNN・iaea）"), "{html}");
+        let html = card(&item(2, "2026-09-27T05:00:00.000Z"), true, &page);
+        assert!(!html.contains("他 "), "{html}");
+    }
+
     #[test]
     fn splits_new_and_earlier_unread() {
         let read_at = |id: i64, at: &str| {

@@ -495,6 +495,77 @@ mod tests {
         }
     }
 
+    fn group(db: &Db, ids: &[i64]) {
+        let story = *ids.iter().min().unwrap();
+        for id in ids {
+            db.conn()
+                .execute(
+                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    [*id, story],
+                )
+                .unwrap();
+        }
+    }
+
+    /// 一覧に出たグループの記事は、確認枠に重ねない。
+    #[tokio::test]
+    async fn explore_skips_stories_already_listed() {
+        let db = Db::open_in_memory().unwrap();
+        let (forty, digest) = seed(&db, "https://e.com/forty", "四十点");
+        score(&db, digest, 40);
+        let (twenty, digest) = seed(&db, "https://e.com/twenty", "二十点");
+        score(&db, digest, 20);
+        group(&db, &[forty, twenty]);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/?min=30").await;
+        assert!(html.contains("四十点"), "{html}");
+        assert!(!html.contains("二十点"), "{html}");
+    }
+
+    /// 詳細には、同じ報道のほかの記事と関連記事を出す。
+    #[tokio::test]
+    async fn detail_shows_the_story_and_related_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let (a, _) = seed(&db, "https://e.com/a", "記事A");
+        let (b, _) = seed(&db, "https://e.com/b", "記事B");
+        let (c, _) = seed(&db, "https://e.com/c", "続報C");
+        let judge = |id: i64, links: &[(i64, crate::db::StoryRelation)]| {
+            let links: Vec<crate::db::StoryLink> = links
+                .iter()
+                .map(|&(other_id, relation)| crate::db::StoryLink {
+                    other_id,
+                    relation,
+                    similarity: 0.5,
+                })
+                .collect();
+            db.insert_story(
+                &crate::db::NewArtifact {
+                    article_id: id,
+                    kind: crate::db::ArtifactKind::Story,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({"candidates": [], "same": [], "related": []}),
+                    inputs: &[],
+                    glossary_at: None,
+                },
+                &links,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        };
+        use crate::db::StoryRelation::{Related, Same};
+        judge(a, &[(b, Same), (c, Related)]);
+        judge(b, &[(a, Same)]);
+        db.rebuild_stories().unwrap();
+        let server = Server::start(db).await;
+        let (_, html) = server.get(&format!("/articles/{a}")).await;
+        let story = html.split("<h2>同じ報道</h2>").nth(1).expect("story");
+        assert!(story.contains("記事B"), "{html}");
+        let related = html.split("<h2>関連記事</h2>").nth(1).expect("related");
+        assert!(related.contains("続報C"), "{html}");
+    }
+
     /// 確認枠の記事も一覧と同じく、既読にしたものは出さない（`read=1` なら出す）。
     #[tokio::test]
     async fn explore_hides_read_picks() {

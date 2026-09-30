@@ -430,6 +430,11 @@ mod tests {
         let (status, html) = server.get("/login?next=%2Fsettings").await;
         assert_eq!(status, 200);
         assert!(html.contains(r#"name="next" value="/settings""#), "{html}");
+        // ログイン ID はメールアドレスに限らない（`owner` など）ので、ブラウザにメールアドレスとして検証させない
+        assert!(
+            html.contains(r#"<input name="login" type="text""#),
+            "{html}"
+        );
         assert_eq!(server.get_raw("/feed.xml").await.status().as_u16(), 401);
         // 期限切れや知らないセッションも、無いのと同じ
         let res = server

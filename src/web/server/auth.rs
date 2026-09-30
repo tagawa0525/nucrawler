@@ -798,6 +798,8 @@ mod tests {
         let server = Server::start(db).await;
         let (_, html) = server.get("/settings").await;
         assert!(html.contains(r#"action="/settings/password""#), "{html}");
+        // 文字数の判定はサーバーだけ（ブラウザの minlength は UTF-16 で数え、サーバーの数え方と違う）
+        assert!(!html.contains("minlength"), "{html}");
         let feed = server.feed_path();
         let res = change(&server, PASSWORD, NEW_PASSWORD).await;
         assert_eq!(res.status().as_u16(), 303);

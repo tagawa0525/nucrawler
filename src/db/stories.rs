@@ -34,6 +34,21 @@ pub struct StoryLink {
     pub similarity: f64,
 }
 
+/// 詳細に並べる、同じ報道・関連の記事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoryArticle {
+    pub article_id: i64,
+    pub source_id: String,
+    /// 公開（無ければ取得）の日時
+    pub at: String,
+    /// 原題
+    pub title: String,
+    /// 最新の要約の見出し、無ければ見出しの和訳
+    pub title_ja: Option<String>,
+    /// 同じグループのほかの記事の数（関連の記事をグループごとにまとめたとき）
+    pub others: usize,
+}
+
 /// 判定する記事。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryPending {
@@ -178,6 +193,26 @@ impl Db {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([serde_json::to_string(ids)?], doc_row)?;
         rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// 記事と同じ報道のグループのほかの記事（日時の順）。
+    pub fn story_members(
+        &self,
+        user_id: i64,
+        article_id: i64,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        todo!("{user_id} {article_id}")
+    }
+
+    /// 記事の関連記事（新しい順）：記事のグループの誰かの最新の判定が same か related とした記事と、
+    /// その逆向きのもの。同じグループの記事は除く。関連の記事がグループに入っていれば、グループごとに
+    /// 新しい 1 件にまとめる。
+    pub fn related_articles(
+        &self,
+        user_id: i64,
+        article_id: i64,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        todo!("{user_id} {article_id}")
     }
 
     /// 記事からグループの ID への対応。
@@ -472,6 +507,95 @@ mod tests {
             .map(|d| (d.article_id, d.text.as_str()))
             .collect();
         assert_eq!(got, [(a, "日本語の原題")]);
+    }
+
+    fn article_on(db: &Db, n: i64, day: u32) -> i64 {
+        ja_article(
+            db,
+            &format!("https://e.com/n{n}"),
+            &format!("2026-09-{day:02}T00:00:00.000Z"),
+        )
+    }
+
+    fn rel(other_id: i64) -> StoryLink {
+        StoryLink {
+            relation: StoryRelation::Related,
+            ..same(other_id)
+        }
+    }
+
+    fn ids_of(v: &[StoryArticle]) -> Vec<(i64, usize)> {
+        v.iter().map(|a| (a.article_id, a.others)).collect()
+    }
+
+    #[test]
+    fn story_members_lists_the_rest_of_the_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 25);
+        let b = article_on(&db, 2, 24);
+        let c = article_on(&db, 3, 26);
+        let alone = article_on(&db, 4, 26);
+        for (x, y) in [(a, b), (b, a), (c, a), (a, c)] {
+            story(&db, x, &[same(y)], "2026-09-27T00:00:00Z");
+        }
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        let members = db.story_members(user, a).unwrap();
+        assert_eq!(ids_of(&members), [(b, 0), (c, 0)]);
+        assert_eq!(members[0].title, "日本語の原題");
+        assert!(db.story_members(user, alone).unwrap().is_empty());
+    }
+
+    /// グループの誰かの判定の関連と、逆向きの関連を合わせる。グループにつながらなかった same の組
+    /// （判定が割れた・上限を超えた）も関連として出し、無関係の組は出さない。関連がグループなら
+    /// 1 件にまとめる。
+    #[test]
+    fn related_articles_gather_links_of_the_whole_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 20);
+        let b = article_on(&db, 2, 20);
+        let x = article_on(&db, 3, 21);
+        let y = article_on(&db, 4, 22);
+        let z = article_on(&db, 5, 23);
+        let w = article_on(&db, 6, 24);
+        let v = article_on(&db, 7, 25);
+        let unrelated = article_on(&db, 8, 26);
+        // a と b が同じ報道、x と y が同じ報道
+        for (p, q) in [(x, y), (y, x)] {
+            story(&db, p, &[same(q)], "2026-09-27T00:00:00Z");
+        }
+        let unrelated_v = StoryLink {
+            relation: StoryRelation::Unrelated,
+            ..same(v)
+        };
+        story(
+            &db,
+            a,
+            &[same(b), rel(x), rel(y), unrelated_v],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, b, &[same(a), rel(z)], "2026-09-27T00:00:00Z");
+        // 逆向き：w が a を関連と判定した
+        story(&db, w, &[rel(a)], "2026-09-27T00:00:00Z");
+        // v は a を same としたが、a は v を無関係とした（判定が割れてつながらない）
+        story(&db, v, &[same(a)], "2026-09-27T00:00:00Z");
+        story(
+            &db,
+            unrelated,
+            &[StoryLink {
+                relation: StoryRelation::Unrelated,
+                ..same(b)
+            }],
+            "2026-09-27T00:00:00Z",
+        );
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        // x・y は新しい y の 1 件にまとめる
+        assert_eq!(
+            ids_of(&db.related_articles(user, a).unwrap()),
+            [(v, 0), (w, 0), (z, 0), (y, 1)]
+        );
+        assert_eq!(ids_of(&db.related_articles(user, x).unwrap()), [(a, 1)]);
     }
 
     /// same の組を推移的につなぐ。記事ごとに最新の判定だけを使い、related はつながない。

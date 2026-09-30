@@ -481,10 +481,10 @@ pub fn parse_user_args(args: &[String]) -> Result<UserArgs, ParseError> {
             login: login(id)?,
             display_name: name.clone(),
         }),
-        [cmd, id] if cmd == "reset-password" => Ok(UserArgs::ResetPassword { login: id.clone() }),
-        [cmd, id] if cmd == "disable" => Ok(UserArgs::Disable { login: id.clone() }),
+        [cmd, id] if cmd == "reset-password" => Ok(UserArgs::ResetPassword { login: login(id)? }),
+        [cmd, id] if cmd == "disable" => Ok(UserArgs::Disable { login: login(id)? }),
         [cmd, id, new] if cmd == "rename" => Ok(UserArgs::Rename {
-            login: id.clone(),
+            login: login(id)?,
             new_login: login(new)?,
         }),
         [cmd] if cmd == "list" => Ok(UserArgs::List),

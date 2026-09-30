@@ -40,6 +40,11 @@
     - 理由 2：A と同じだが、A と同じグループの B とは違う、という食い違いが起きない
   - 辺を推移的につなぐと、別の出来事どうしが鎖状にまとまるおそれがある（IAEA 総会の一連の記事など）
     - グループ単位で判定させるので、新しい記事はグループの全員と比べてから加わる
+    - 同じ組を両方の向きで判定していて、相手の最新の判定が same でなければ（related か無関係なら）つながない
+      - 手元の DB のコピーで試すと、片方は same、もう片方は related や無関係と割れる組があった
+        （美浜3号機の手動停止とその調査結果、電事連の会見と中間貯蔵の搬入計画など）
+      - 判定が割れる組は迷いのある組なので、「迷ったらまとめない」に合わせる
+      - そのため、候補にしたが same でも related でもない記事も、無関係（unrelated）の組として残す
     - 加えて、グループの大きさの上限（定数、8 件）を超える same は related に落として記録し、警告のログを出す
   - related は推移的につながない
     - 詳細ページでは、関連の相手をグループごとに 1 件へまとめる（代表と「他 n 件」）
@@ -55,7 +60,7 @@
 
 1. **マイグレーション `0029_stories.sql`**
    - `artifacts.kind` の CHECK に `story` を足す。0023 と同じくテーブルを作り直し、索引と全文検索のトリガーを戻す。story は検索の索引に入れない
-   - `story_links (artifact_id REFERENCES artifacts ON DELETE CASCADE, other_id REFERENCES articles ON DELETE CASCADE, relation CHECK IN ('same','related'), similarity REAL NOT NULL, PRIMARY KEY (artifact_id, other_id))`。similarity は `components` でつなぐ順に使う
+   - `story_links (artifact_id REFERENCES artifacts ON DELETE CASCADE, other_id REFERENCES articles ON DELETE CASCADE, relation CHECK IN ('same','related','unrelated'), similarity REAL NOT NULL, PRIMARY KEY (artifact_id, other_id))`。similarity は `components` でつなぐ順に使う
    - `article_stories (article_id PRIMARY KEY REFERENCES articles ON DELETE CASCADE, story_id INTEGER NOT NULL)`。索引は `story_id`
    - `src/db/mod.rs` の `MIGRATIONS` に追加する
 2. **`ArtifactKind::Story`**
@@ -84,12 +89,14 @@
      - text は「最新の閲覧できる要約の title_ja + summary_ja → 最新の title の title_ja → 日本語の原題」の順
    - `insert_story(NewArtifact, links)`：`insert_artifact` と `story_links` の挿入を、1 つのトランザクションで行う
    - `rebuild_stories()`：記事ごとに最新の story 成果物の same 辺を読み、`story::components` で `article_stories` を作り直す
+     - 相手の最新の判定が同じ組を same 以外にしている辺は使わない
 5. **`prompt::story`（新規。`prompt/title.rs` と同じ形）**
    - `PROMPT_VERSION`
    - `system_prompt`：same と related の定義と例を示す
      - same：同じ事実の報道。当事者の発表、それを報じる記事、翻訳を含む
      - related：同じ案件で出来事が別。続報・前段階・同じ案件の別の発表
      - 迷ったら無関係にする
+     - 複数の出来事をまとめた記事（週報・特集など）は、その中の 1 つの出来事と same にせず related にする
    - `schema`：`{items:[{id, same:[候補ID], related:[候補ID]}]}`
      - 候補 ID は単独記事の ID か、グループの `story_id`
      - same も related も 0 件以上の配列にする
@@ -111,8 +118,8 @@
 7. **ステージ**
    - `Stage::Story`（名前 `story`、LLM のロック）
    - 順は `fetch → extract → digest → score → translate → title → story → tidy`
-   - `src/pipeline/mod.rs`（enum、`ALL`、`name`、`lock`、`lock_groups` のテスト）、`src/pipeline/run.rs` の振り分け、
-     `src/db/stages.rs` と `src/status.rs` の未処理件数
+   - `src/pipeline/mod.rs`（enum、`ALL`、`name`、`lock`、`lock_groups` のテスト）と `src/pipeline/run.rs` の振り分け
+   - `status` はソースごとの件数だけを出すので変えない
 8. **設定**
    - `llm.story_backend`（省けば `llm.backend`。006 の工程ごとのバックエンドと同じ）
    - `llm.story_model`（既定 `sonnet`）

@@ -576,6 +576,41 @@ mod tests {
         assert!(db.stories().unwrap().grouped().is_empty());
     }
 
+    /// グループの代表（最小の ID の記事）を消すと、残りの記事は残りのうち最小の ID に付け替わる
+    /// （消えた記事がグループに残らない）。1 件だけ残れば自分のグループに戻る。
+    #[test]
+    fn deleting_the_representative_relabels_the_story() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..5)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let [a, b, c, d, e] = ids[..] else {
+            unreachable!()
+        };
+        story(&db, a, &[same(b), same(c)], "2026-09-27T00:00:00Z");
+        story(&db, d, &[same(e)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        for id in [a, d] {
+            db.conn()
+                .execute("DELETE FROM articles WHERE id = ?1", [id])
+                .unwrap();
+        }
+        assert_eq!(stories(&db), [(b, b), (c, b)]);
+        assert_eq!(
+            db.query_strings(
+                "SELECT article_id || '|' || story_id FROM article_stories ORDER BY 1"
+            )
+            .unwrap(),
+            [format!("{b}|{b}"), format!("{c}|{b}"), format!("{e}|{e}")]
+        );
+    }
+
     /// 作り直しは変わった行だけを書き、グループから外れた記事は自分の ID に戻す。
     #[test]
     fn rebuild_stories_writes_only_what_changed() {

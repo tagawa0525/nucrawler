@@ -631,6 +631,23 @@ mod tests {
         assert!(db.story_members(user, alone).unwrap().is_empty());
     }
 
+    /// 関連のグループの代表は、判定に出た記事ではなく、そのグループで最も新しい記事にする。
+    #[test]
+    fn related_story_is_shown_by_its_newest_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 20);
+        let old = article_on(&db, 2, 21);
+        let new = article_on(&db, 3, 25);
+        for (p, q) in [(old, new), (new, old)] {
+            story(&db, p, &[same(q)], "2026-09-27T00:00:00Z");
+        }
+        // 逆向きの関連は古い記事からだけ
+        story_version(&db, old, &[same(new), rel(a)], "2026-09-28T00:00:00Z", 2);
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        assert_eq!(ids_of(&db.related_articles(user, a).unwrap()), [(new, 1)]);
+    }
+
     /// グループの誰かの判定の関連と、逆向きの関連を合わせる。グループにつながらなかった same の組
     /// （判定が割れた・上限を超えた）も関連として出し、無関係の組は出さない。関連がグループなら
     /// 1 件にまとめる。

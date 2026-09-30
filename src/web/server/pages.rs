@@ -739,6 +739,7 @@ mod tests {
     #[tokio::test]
     async fn list_shows_articles_and_starts_a_visit() {
         let db = Db::open_in_memory().unwrap();
+        give_profile(&db);
         seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         let (status, html) = server.get("/?min=0").await;
@@ -748,9 +749,51 @@ mod tests {
             server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             1
         );
-        // 未採点の記事は既定の一覧には出ない
+        // プロファイルがあれば、未採点の記事は既定の一覧には出ない
         let (_, html) = server.get("/").await;
         assert!(!html.contains("見出しA"), "{html}");
+    }
+
+    /// プロファイルが無ければ採点が無いので、既定の一覧は推薦点で絞らず、未採点の記事を新しい順に出す
+    /// （評価 1〜2 と軽水炉と無関係の記事は隠す）。確認枠は出さない。フィードと JSON の一覧も同じ既定。
+    /// `?min=0`（すべて）と `?min=N`（N 点以上）は既定と別の表示で、URL もそのまま残る。
+    #[tokio::test]
+    async fn list_without_a_profile_has_no_score_floor() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "https://e.com/a", "未採点");
+        seed_with(&db, "https://e.com/unrelated", "無関係", false);
+        let server = Server::start(db).await;
+
+        let (status, html) = server.get("/").await;
+        assert_eq!(status, 200);
+        assert!(
+            html.contains("未採点") && !html.contains("無関係"),
+            "{html}"
+        );
+        assert!(!html.contains("確認枠"), "{html}");
+        // 最低点の選択は「最低点なし」を選んでいる
+        assert!(
+            html.contains(r#"<option value="" data-href="/" selected>--</option>"#),
+            "{html}"
+        );
+
+        for canonical in ["/?min=0", "/?min=50"] {
+            let res = server.get_raw(canonical).await;
+            assert_eq!(res.status().as_u16(), 200, "{canonical}");
+        }
+        let (_, html) = server.get("/?min=0").await;
+        assert!(html.contains("未採点") && html.contains("無関係"), "{html}");
+        let (_, html) = server.get("/?min=50").await;
+        assert!(!html.contains("未採点"), "{html}");
+        // JavaScript が無いときの選択で送られる空の値は、既定（最低点なし）
+        let res = server.get_raw("/?min=").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "/");
+
+        let (_, xml) = server.get("/feed.xml").await;
+        assert!(xml.contains("未採点") && !xml.contains("無関係"), "{xml}");
+        let (_, json) = server.get_json("/api/articles").await;
+        assert_eq!(json["articles"].as_array().unwrap().len(), 1, "{json}");
     }
 
     /// 既読にした記事は、同じ訪問のうちでも「前回から」の欄でも、次に一覧を出したときには出さない。
@@ -791,7 +834,10 @@ mod tests {
     /// 👍 を「👍」に戻すと `rating=` や、絞り込みの `read=0` が残る。正規の形なら移らない。
     #[tokio::test]
     async fn list_redirects_to_the_canonical_url() {
-        let server = Server::start(Db::open_in_memory().unwrap()).await;
+        // 既定の最低点（設定の値）は、プロファイルがあるときのもの
+        let db = Db::open_in_memory().unwrap();
+        give_profile(&db);
+        let server = Server::start(db).await;
         for (from, to) in [
             ("/?rating=", "/"),
             ("/?rating=&read=0", "/"),

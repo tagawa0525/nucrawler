@@ -1118,6 +1118,39 @@ mod tests {
         );
     }
 
+    /// 最低点なし（プロファイルの無い利用者の既定）は推薦点で絞らず、未採点も新しい順に出す。
+    /// 評価 1〜2 と軽水炉と無関係の記事を隠すのは、最低点があるときと同じ。
+    #[test]
+    fn list_without_a_score_floor_shows_unscored_articles_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let digested = |url: &str, relevant: bool, at: &str| {
+            let id = page_article(&db, url, at);
+            add_digest(&db, id, "sonnet", "題", relevant, "2026-09-27T00:00:00Z");
+            id
+        };
+        let older = digested("https://e.com/older", true, "2026-09-25T00:00:00.000Z");
+        let newer = digested("https://e.com/newer", true, "2026-09-26T00:00:00.000Z");
+        digested("https://e.com/unrelated", false, "2026-09-26T00:00:00.000Z");
+        let disliked = digested("https://e.com/down", true, "2026-09-26T00:00:00.000Z");
+        db.rate(owner, disliked, Rating::new(2), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // 要約前の記事は、軽水炉と関係があるか分からないので出さない（最低点があるときと同じ）
+        page_article(&db, "https://e.com/raw", "2026-09-26T00:00:00.000Z");
+
+        let ids: Vec<i64> = db
+            .list_articles(ListQuery {
+                profile_hash: None,
+                min_score: None,
+                ..list_query(&db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
+        assert_eq!(ids, [newer, older]);
+    }
+
     /// 未読だけの一覧は、件数の上限より前に既読を除く（上位が既読で埋まっても、下の未読が出る）。
     #[test]
     fn unread_list_filters_before_the_limit() {

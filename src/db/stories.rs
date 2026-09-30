@@ -427,6 +427,36 @@ mod tests {
         assert_eq!(pool[0].at, t("2026-09-26T00:00:00Z"));
     }
 
+    /// 会員限定の本文から作った要約は、比べる文にも判定の条件にも使わない（判定は公開の成果物として
+    /// 残すので）。
+    #[test]
+    fn stories_ignore_gated_digests() {
+        let db = Db::open_in_memory().unwrap();
+        let m = insert_membership(&db);
+        let a = page_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        let gated = insert_content(&db, a, Some(m));
+        db.insert_artifact(
+            &NewArtifact {
+                article_id: a,
+                kind: ArtifactKind::Digest,
+                backend: "claude-cli",
+                model: "sonnet",
+                prompt_version: 1,
+                payload: &serde_json::json!({"title_ja": "会員限定の要約", "summary_ja": "本文"}),
+                inputs: &[gated],
+                glossary_at: None,
+            },
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(pending(&db).is_empty());
+        let pool = db
+            .story_pool(t("2026-09-20T00:00:00Z"), t("2026-09-30T00:00:00Z"))
+            .unwrap();
+        assert!(pool.is_empty(), "{pool:?}");
+        assert!(db.story_docs(&[a]).unwrap().is_empty());
+    }
+
     /// 指定した記事の比べる文（プールと同じ文。文の無い記事は含めない）。
     #[test]
     fn story_docs_reads_the_given_articles() {

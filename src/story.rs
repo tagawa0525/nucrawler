@@ -35,7 +35,7 @@ pub struct Doc {
 pub struct Candidate {
     /// 単独の記事ならその記事の ID、グループならグループの ID（`story_id`）
     pub id: i64,
-    /// グループの記事（単独なら 1 件）。プールにあるものだけ
+    /// グループの記事（単独なら 1 件）。グループならプールの外の記事も含む
     pub members: Vec<i64>,
     /// 対象との類似度（グループなら記事の最大値）
     pub similarity: f64,
@@ -170,19 +170,19 @@ impl Index {
             })
             .map(|(id, similarity, _)| Candidate {
                 id,
-                members: self.members(id, stories),
+                members: Self::members(id, stories),
                 similarity,
             })
             .collect()
     }
 
-    /// 候補の単位の記事（ID の順）。グループでなければその記事だけ。
-    fn members(&self, unit: i64, stories: &HashMap<i64, i64>) -> Vec<i64> {
-        let mut members: Vec<i64> = self
-            .docs
+    /// 候補の単位の記事（ID の順）。グループならプールの外の記事も含めた全員、グループでなければ
+    /// その記事だけ。
+    fn members(unit: i64, stories: &HashMap<i64, i64>) -> Vec<i64> {
+        let mut members: Vec<i64> = stories
             .iter()
-            .map(|(d, _)| d.article_id)
-            .filter(|id| stories.get(id) == Some(&unit))
+            .filter(|(_, story)| **story == unit)
+            .map(|(id, _)| *id)
             .collect();
         if members.is_empty() {
             members.push(unit);

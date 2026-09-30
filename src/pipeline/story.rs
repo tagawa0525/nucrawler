@@ -205,7 +205,8 @@ pub async fn judge_stories<L: Llm>(
                 break;
             };
             let pool = db.story_pool(first - window, last + window)?;
-            let docs: HashMap<i64, Doc> = pool.iter().map(|d| (d.article_id, d.clone())).collect();
+            let mut docs: HashMap<i64, Doc> =
+                pool.iter().map(|d| (d.article_id, d.clone())).collect();
             let index = Index::new(pool);
             let stories = db.story_ids()?;
             // 候補の無い記事は、LLM を呼ばずに判定済みにする
@@ -223,6 +224,17 @@ pub async fn judge_stories<L: Llm>(
             if targets.is_empty() {
                 continue;
             }
+            // グループの記事は期間の外にもいるので、プールに無い分を読み足す
+            let outside: Vec<i64> = targets
+                .iter()
+                .flat_map(|(_, cs)| cs.iter().flat_map(|c| c.members.iter().copied()))
+                .filter(|id| !docs.contains_key(id))
+                .collect();
+            docs.extend(
+                db.story_docs(&outside)?
+                    .into_iter()
+                    .map(|d| (d.article_id, d)),
+            );
             let requested: Vec<p::Target> = targets
                 .iter()
                 .filter_map(|(id, candidates)| {

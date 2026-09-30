@@ -53,6 +53,26 @@ const STORY_TEXT: &str = "coalesce(
         ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
        CASE WHEN a.lang = 'ja' THEN a.title END)";
 
+/// `id, source_id, at, text` の行。
+struct DocRow(i64, String, String, String);
+
+fn doc_row(r: &rusqlite::Row) -> rusqlite::Result<DocRow> {
+    Ok(DocRow(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+}
+
+impl TryFrom<DocRow> for Doc {
+    type Error = DbError;
+
+    fn try_from(DocRow(article_id, source_id, at, text): DocRow) -> Result<Doc, DbError> {
+        Ok(Doc {
+            article_id,
+            source_id,
+            at: parse_at(at)?,
+            text,
+        })
+    }
+}
+
 fn parse_at(at: String) -> Result<chrono::DateTime<chrono::Utc>, DbError> {
     chrono::DateTime::parse_from_rfc3339(&at)
         .map(|t| t.to_utc())
@@ -138,29 +158,24 @@ impl Db {
              ORDER BY at DESC, id DESC"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([timestamp(from), timestamp(to)], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (article_id, source_id, at, text) = row?;
-            Ok(Doc {
-                article_id,
-                source_id,
-                at: parse_at(at)?,
-                text,
-            })
-        })
-        .collect()
+        let rows = stmt.query_map([timestamp(from), timestamp(to)], doc_row)?;
+        rows.map(|row| row?.try_into()).collect()
     }
 
     /// 指定した記事の比べる文（[`Db::story_pool`] と同じ文。文の無い記事は含めない）。
     pub fn story_docs(&self, ids: &[i64]) -> Result<Vec<Doc>, DbError> {
-        todo!("{ids:?}")
+        let sql = format!(
+            "SELECT id, source_id, at, text FROM (
+               SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at,
+                      {STORY_TEXT} AS text
+               FROM articles AS a
+               WHERE a.id IN (SELECT value FROM json_each(?1)))
+             WHERE text IS NOT NULL
+             ORDER BY at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([serde_json::to_string(ids)?], doc_row)?;
+        rows.map(|row| row?.try_into()).collect()
     }
 
     /// 記事からグループの ID への対応。

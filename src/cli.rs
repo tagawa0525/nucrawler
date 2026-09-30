@@ -1014,13 +1014,23 @@ mod tests {
             // ログイン ID は空でなく 254 バイト以下
             &["add", "", "A"][..],
             &["rename", "owner", " "][..],
+            &["rename", "", "me@example.com"][..],
+            &["reset-password", ""][..],
+            &["disable", " "][..],
         ] {
             let err = parse_user_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::UserUsage), "{bad:?}: {err}");
         }
         let long = "a".repeat(255);
-        let err = parse_user_args(&args(&["add", &long, "A"])).unwrap_err();
-        assert!(matches!(err, ParseError::UserUsage), "{err}");
+        for bad in [
+            &["add", &long, "A"][..],
+            &["reset-password", &long][..],
+            &["disable", &long][..],
+            &["rename", &long, "me@example.com"][..],
+        ] {
+            let err = parse_user_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::UserUsage), "{bad:?}: {err}");
+        }
     }
 
     #[test]

@@ -307,11 +307,13 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// 記事からグループの ID への対応。
+    /// 2 件以上のグループの記事から、グループの ID への対応（載っていない記事は自分のグループ）。
     pub fn story_ids(&self) -> Result<HashMap<i64, i64>, DbError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT article_id, story_id FROM article_stories")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT article_id, story_id FROM article_stories WHERE story_id <> article_id
+             UNION
+             SELECT story_id, story_id FROM article_stories WHERE story_id <> article_id",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -337,6 +339,7 @@ impl Db {
     }
 
     /// 記事ごとの最新の判定の same の組をつないで、グループ（`article_stories`）を作り直す。
+    /// 今のグループと比べ、グループの ID が変わる記事の行だけを書く（外れた記事は自分の ID に戻す）。
     /// 相手の最新の判定が同じ組を same 以外（related・unrelated）にしていれば、判定が割れたので
     /// つながない。グループが大きくなりすぎるので捨てた組を返す。
     pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
@@ -368,12 +371,19 @@ impl Db {
             rows.collect::<Result<_, _>>()?
         };
         let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
-        tx.execute("DELETE FROM article_stories", [])?;
-        for (article_id, story_id) in stories {
-            tx.execute(
-                "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
-                [article_id, story_id],
-            )?;
+        let current = self.story_ids()?;
+        let story_of = |map: &std::collections::BTreeMap<i64, i64>, id: i64| {
+            map.get(&id).copied().unwrap_or(id)
+        };
+        let current: std::collections::BTreeMap<i64, i64> = current.into_iter().collect();
+        for &id in current.keys().chain(stories.keys()) {
+            let new = story_of(&stories, id);
+            if story_of(&current, id) != new {
+                tx.execute(
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
+                    [id, new],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(rejected)

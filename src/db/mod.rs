@@ -114,6 +114,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0027_open_source.sql"),
     include_str!("migrations/0028_llm_credits.sql"),
     include_str!("migrations/0029_stories.sql"),
+    include_str!("migrations/0030_story_for_every_article.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -543,7 +544,7 @@ mod tests {
                          '2026-09-28T00:00:00.000Z');
                  INSERT INTO story_links (artifact_id, other_id, relation, similarity)
                    VALUES (2, 2, 'same', 0.5);
-                 INSERT INTO article_stories (article_id, story_id) VALUES (1, 1), (2, 1);",
+                 UPDATE article_stories SET story_id = 1 WHERE article_id = 2;",
             )
             .unwrap();
         assert_eq!(

@@ -508,7 +508,7 @@ mod tests {
         for id in ids {
             db.conn()
                 .execute(
-                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
                     [*id, story],
                 )
                 .unwrap();

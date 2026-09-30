@@ -875,7 +875,7 @@ mod tests {
         for id in ids {
             db.conn()
                 .execute(
-                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
                     [*id, story],
                 )
                 .unwrap();
@@ -908,7 +908,7 @@ mod tests {
         assert_eq!(items[0].story_id, Some(a));
         // 日時の順
         assert_eq!(items[0].story_others, ["jaif", "wnn"]);
-        assert_eq!(items[1].story_id, None);
+        assert_eq!(items[1].story_id, Some(other));
         assert!(items[1].story_others.is_empty());
         let limited: Vec<i64> = db
             .list_articles(ListQuery {

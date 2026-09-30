@@ -34,8 +34,8 @@ pub struct ListItem {
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
     pub locked_by: Vec<String>,
-    /// 同じ報道のグループ（`article_stories.story_id`）
-    pub story_id: Option<i64>,
+    /// 同じ報道のグループ（`article_stories.story_id`。単独の記事なら自分の ID）
+    pub story_id: i64,
     /// 同じグループのほかの記事のソース（記事ごと、日時の順）
     pub story_others: Vec<String>,
     /// 同じグループのどれか（この記事を含む）を読んだ
@@ -778,7 +778,7 @@ impl Db {
                     coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
                     rows.rating IS NOT NULL OR rows.story_rated AS story_rated,
                     row_number() OVER (
-                      PARTITION BY coalesce(rows.story_id, -rows.id) ORDER BY {order})
+                      PARTITION BY rows.story_id ORDER BY {order})
                       AS story_rank
              FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
@@ -875,7 +875,7 @@ mod tests {
         for id in ids {
             db.conn()
                 .execute(
-                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
                     [*id, story],
                 )
                 .unwrap();
@@ -905,10 +905,10 @@ mod tests {
         group(&db, &[a, b, c]);
         assert_eq!(list_ids(&db, false), [b, other]);
         let items = db.list_articles(list_query(&db, false)).unwrap();
-        assert_eq!(items[0].story_id, Some(a));
+        assert_eq!(items[0].story_id, a);
         // 日時の順
         assert_eq!(items[0].story_others, ["jaif", "wnn"]);
-        assert_eq!(items[1].story_id, None);
+        assert_eq!(items[1].story_id, other);
         assert!(items[1].story_others.is_empty());
         let limited: Vec<i64> = db
             .list_articles(ListQuery {

@@ -173,20 +173,12 @@ pub(super) async fn list(
                 web.explore_per_day as usize,
                 &today.to_string(),
             )?;
-            // 最低点を下げて一覧に既に出ている記事は重ねない（同じ報道のグループも）
+            // 最低点を下げて一覧に既に出ている記事は、同じ報道のグループごと重ねない
             let listed: std::collections::HashSet<i64> =
-                new.iter().chain(&earlier).map(|i| i.article_id).collect();
-            let listed_stories: std::collections::HashSet<i64> = new
-                .iter()
-                .chain(&earlier)
-                .filter_map(|i| i.story_id)
-                .collect();
+                new.iter().chain(&earlier).map(|i| i.story_id).collect();
             let picks = picks
                 .into_iter()
-                .filter(|i| {
-                    !listed.contains(&i.article_id)
-                        && i.story_id.is_none_or(|s| !listed_stories.contains(&s))
-                })
+                .filter(|i| !listed.contains(&i.story_id))
                 .collect();
             // 一覧と同じく、既読・ブックマークで絞る
             html::filter_read(picks, view.read)
@@ -508,7 +500,7 @@ mod tests {
         for id in ids {
             db.conn()
                 .execute(
-                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
                     [*id, story],
                 )
                 .unwrap();

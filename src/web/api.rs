@@ -209,7 +209,7 @@ mod tests {
             has_translation: false,
             translation_requested: false,
             locked_by: vec![],
-            story_id: None,
+            story_id: 1,
             story_others: vec![],
             story_read: false,
             story_rated: false,

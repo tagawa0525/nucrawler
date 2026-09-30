@@ -1,9 +1,7 @@
 //! 同じ報道の判定（story）：判定する記事、比べる記事のプール、判定の保存とグループの作り直し。
 
-use std::collections::HashMap;
-
 use super::*;
-use crate::story::{Doc, Edge};
+use crate::story::{Doc, Edge, Stories};
 
 /// 判定した組の関係。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,15 +251,13 @@ impl Db {
             "at DESC, id DESC",
         )?;
         // 関連の記事がグループに入っていれば、グループごとに新しい 1 件にまとめる
-        let stories = self.story_ids()?;
+        let stories = self.stories()?;
         let mut seen = std::collections::HashSet::new();
         Ok(linked
             .into_iter()
-            .filter(|a| seen.insert(stories.get(&a.article_id).copied().unwrap_or(-a.article_id)))
+            .filter(|a| seen.insert(stories.story_of(a.article_id)))
             .map(|a| StoryArticle {
-                others: stories.get(&a.article_id).map_or(0, |story| {
-                    stories.values().filter(|s| *s == story).count() - 1
-                }),
+                others: stories.members(stories.story_of(a.article_id)).len() - 1,
                 ..a
             })
             .collect())
@@ -307,13 +303,15 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// 記事からグループの ID への対応。
-    pub fn story_ids(&self) -> Result<HashMap<i64, i64>, DbError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT article_id, story_id FROM article_stories")?;
+    /// 記事からグループの ID への対応（2 件以上のグループの記事だけを部分索引で読む）。
+    pub fn stories(&self) -> Result<Stories, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT article_id, story_id FROM article_stories WHERE story_id <> article_id
+             UNION
+             SELECT story_id, story_id FROM article_stories WHERE story_id <> article_id",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(Stories::new(rows.collect::<Result<Vec<_>, _>>()?))
     }
 
     /// 判定（kind = story）と、その組を 1 つのトランザクションで登録する。
@@ -337,6 +335,7 @@ impl Db {
     }
 
     /// 記事ごとの最新の判定の same の組をつないで、グループ（`article_stories`）を作り直す。
+    /// 今のグループと比べ、グループの ID が変わる記事の行だけを書く（外れた記事は自分の ID に戻す）。
     /// 相手の最新の判定が同じ組を same 以外（related・unrelated）にしていれば、判定が割れたので
     /// つながない。グループが大きくなりすぎるので捨てた組を返す。
     pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
@@ -368,12 +367,21 @@ impl Db {
             rows.collect::<Result<_, _>>()?
         };
         let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
-        tx.execute("DELETE FROM article_stories", [])?;
-        for (article_id, story_id) in stories {
-            tx.execute(
-                "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
-                [article_id, story_id],
-            )?;
+        let current = self.stories()?;
+        let touched: std::collections::BTreeSet<i64> = current
+            .grouped()
+            .into_iter()
+            .chain(stories.grouped())
+            .map(|(id, _)| id)
+            .collect();
+        for id in touched {
+            let new = stories.story_of(id);
+            if current.story_of(id) != new {
+                tx.execute(
+                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
+                    [id, new],
+                )?;
+            }
         }
         tx.commit()?;
         Ok(rejected)
@@ -461,9 +469,7 @@ mod tests {
     }
 
     fn stories(db: &Db) -> Vec<(i64, i64)> {
-        let mut v: Vec<_> = db.story_ids().unwrap().into_iter().collect();
-        v.sort_unstable();
-        v
+        db.stories().unwrap().grouped()
     }
 
     #[test]
@@ -554,6 +560,99 @@ mod tests {
             ]
         );
         assert_eq!(pool[0].at, t("2026-09-26T00:00:00Z"));
+    }
+
+    /// 記事は追加したときから自分の ID のグループに入っている。記事からグループへの対応には、
+    /// 2 件以上のグループの記事だけを載せる（ほかは自分のグループ）。
+    #[test]
+    fn every_article_starts_in_its_own_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = ja_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        assert_eq!(
+            db.query_strings("SELECT article_id || '|' || story_id FROM article_stories")
+                .unwrap(),
+            [format!("{a}|{a}")]
+        );
+        assert!(db.stories().unwrap().grouped().is_empty());
+    }
+
+    /// グループの代表（最小の ID の記事）を消すと、残りの記事は残りのうち最小の ID に付け替わる
+    /// （消えた記事がグループに残らない）。1 件だけ残れば自分のグループに戻る。
+    #[test]
+    fn deleting_the_representative_relabels_the_story() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..5)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let [a, b, c, d, e] = ids[..] else {
+            unreachable!()
+        };
+        story(&db, a, &[same(b), same(c)], "2026-09-27T00:00:00Z");
+        story(&db, d, &[same(e)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        for id in [a, d] {
+            db.conn()
+                .execute("DELETE FROM articles WHERE id = ?1", [id])
+                .unwrap();
+        }
+        assert_eq!(stories(&db), [(b, b), (c, b)]);
+        assert_eq!(
+            db.query_strings(
+                "SELECT article_id || '|' || story_id FROM article_stories ORDER BY 1"
+            )
+            .unwrap(),
+            [format!("{b}|{b}"), format!("{c}|{b}"), format!("{e}|{e}")]
+        );
+    }
+
+    /// 作り直しは変わった行だけを書き、グループから外れた記事は自分の ID に戻す。
+    #[test]
+    fn rebuild_stories_writes_only_what_changed() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..10)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let (a, b) = (ids[0], ids[1]);
+        story(&db, a, &[same(b)], "2026-09-27T00:00:00Z");
+        story(&db, b, &[same(a)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        let before = db.conn().total_changes();
+        db.rebuild_stories().unwrap();
+        assert_eq!(db.conn().total_changes(), before, "nothing changed");
+        // b の新しい判定で割れたので、a と b はそれぞれ自分のグループに戻る
+        story_version(
+            &db,
+            b,
+            &[StoryLink {
+                relation: StoryRelation::Related,
+                ..same(a)
+            }],
+            "2026-09-28T00:00:00Z",
+            2,
+        );
+        let before = db.conn().total_changes();
+        db.rebuild_stories().unwrap();
+        assert_eq!(db.conn().total_changes() - before, 1, "only b moves");
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT article_id || '|' || story_id FROM article_stories
+                 WHERE article_id IN ({a}, {b}) ORDER BY article_id"
+            ))
+            .unwrap(),
+            [format!("{a}|{a}"), format!("{b}|{b}")]
+        );
     }
 
     /// 会員限定の本文から作った要約は、比べる文にも判定の条件にも使わない（判定は公開の成果物として

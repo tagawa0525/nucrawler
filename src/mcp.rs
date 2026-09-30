@@ -700,7 +700,7 @@ mod tests {
             db.list_articles(ListQuery {
                 user_id: db.owner_id().unwrap(),
                 profile_hash: Some(&hash),
-                min_score: 0,
+                min_score: Some(0),
                 since: now() - Duration::days(7),
                 show_all: true,
                 read: None,

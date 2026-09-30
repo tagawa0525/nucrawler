@@ -45,16 +45,21 @@ pub(super) fn seed_with(db: &Db, url: &str, title_ja: &str, lwr_relevant: bool) 
     (id, digest)
 }
 
-/// 所有者の現在のプロファイルで digest を採点する。
-pub(super) fn score(db: &Db, digest: i64, score: u8) {
-    let owner = db.owner_id().unwrap();
+/// 所有者に（空の）プロファイルを置き、そのハッシュを返す。
+pub(super) fn give_profile(db: &Db) -> String {
     let profile = crate::profile::Profile {
         interests: vec![],
         exclude: vec![],
     };
-    db.save_profile(owner, &profile, chrono::Utc::now())
+    db.save_profile(db.owner_id().unwrap(), &profile, chrono::Utc::now())
         .unwrap();
-    let hash = crate::profile::hash(&profile);
+    crate::profile::hash(&profile)
+}
+
+/// 所有者の現在のプロファイルで digest を採点する。
+pub(super) fn score(db: &Db, digest: i64, score: u8) {
+    let owner = db.owner_id().unwrap();
+    let hash = give_profile(db);
     let key = crate::db::ScoreKey {
         user_id: owner,
         profile_hash: &hash,

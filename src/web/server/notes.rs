@@ -195,9 +195,9 @@ pub(super) async fn reports(
 ) -> Result<Html<String>, AppError> {
     let filter = report_filter(params.status.as_deref(), params.kind.as_deref())?;
     let labels = state.labels.clone();
-    let default_min = state.web.min_score;
+    let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, hash) = viewer(db)?;
         let reports = db.reports(user, &filter)?;
         let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
@@ -205,7 +205,7 @@ pub(super) async fn reports(
         let page = Page {
             warnings: &warnings,
             labels: &labels,
-            default_min,
+            default_min: default_min(min_score, hash.as_deref()),
         };
         Ok(html::reports_page(
             &reports, &counts, &filter, &terms, &page,

@@ -27,9 +27,9 @@ impl BarView for SearchView {
             q => format!("/search?{q}"),
         }
     }
-    fn min(&self) -> u8 {
-        // 検索の条件と同じく、前後の空白を除いて読む
-        self.0.min_score.trim().parse().unwrap_or(0)
+    fn min(&self) -> Option<u8> {
+        // 検索の条件と同じく、前後の空白を除いて読む（無ければ 0：絞らない）
+        Some(self.0.min_score.trim().parse().unwrap_or(0))
     }
     fn extra_min(&self) -> Option<u8> {
         None

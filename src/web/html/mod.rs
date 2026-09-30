@@ -49,8 +49,8 @@ pub type SourceLabels = std::collections::BTreeMap<String, String>;
 pub struct Page<'a> {
     pub warnings: &'a [Warning],
     pub labels: &'a SourceLabels,
-    /// 既定の最低点（設定の `web.min_score`）。一覧のほかの画面の上部のバーが、一覧の既定を指すのに使う
-    pub default_min: u8,
+    /// 利用者の一覧の既定の最低点（プロファイルが無ければ最低点なし）。一覧のほかの画面の上部のバーが、一覧の既定を指すのに使う
+    pub default_min: Option<u8>,
 }
 
 impl Default for Page<'_> {
@@ -59,7 +59,7 @@ impl Default for Page<'_> {
         Self {
             warnings: &[],
             labels: &NONE,
-            default_min: crate::config::WebConfig::default().min_score,
+            default_min: Some(crate::config::WebConfig::default().min_score),
         }
     }
 }

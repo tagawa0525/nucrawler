@@ -167,7 +167,7 @@ pub(super) fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
     ListQuery {
         user_id: db.owner_id().unwrap(),
         profile_hash: Some("h1"),
-        min_score: 60,
+        min_score: Some(60),
         since: t("2026-09-20T00:00:00Z"),
         show_all,
         read: None,

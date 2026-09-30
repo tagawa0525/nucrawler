@@ -1,9 +1,7 @@
 //! 同じ報道の判定（story）：判定する記事、比べる記事のプール、判定の保存とグループの作り直し。
 
-use std::collections::HashMap;
-
 use super::*;
-use crate::story::{Doc, Edge};
+use crate::story::{Doc, Edge, Stories};
 
 /// 判定した組の関係。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,15 +251,13 @@ impl Db {
             "at DESC, id DESC",
         )?;
         // 関連の記事がグループに入っていれば、グループごとに新しい 1 件にまとめる
-        let stories = self.story_ids()?;
+        let stories = self.stories()?;
         let mut seen = std::collections::HashSet::new();
         Ok(linked
             .into_iter()
-            .filter(|a| seen.insert(stories.get(&a.article_id).copied().unwrap_or(-a.article_id)))
+            .filter(|a| seen.insert(stories.story_of(a.article_id)))
             .map(|a| StoryArticle {
-                others: stories.get(&a.article_id).map_or(0, |story| {
-                    stories.values().filter(|s| *s == story).count() - 1
-                }),
+                others: stories.members(stories.story_of(a.article_id)).len() - 1,
                 ..a
             })
             .collect())
@@ -307,15 +303,15 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// 2 件以上のグループの記事から、グループの ID への対応（載っていない記事は自分のグループ）。
-    pub fn story_ids(&self) -> Result<HashMap<i64, i64>, DbError> {
+    /// 記事からグループの ID への対応（2 件以上のグループの記事だけを部分索引で読む）。
+    pub fn stories(&self) -> Result<Stories, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT article_id, story_id FROM article_stories WHERE story_id <> article_id
              UNION
              SELECT story_id, story_id FROM article_stories WHERE story_id <> article_id",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        Ok(Stories::new(rows.collect::<Result<Vec<_>, _>>()?))
     }
 
     /// 判定（kind = story）と、その組を 1 つのトランザクションで登録する。
@@ -371,14 +367,16 @@ impl Db {
             rows.collect::<Result<_, _>>()?
         };
         let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
-        let current = self.story_ids()?;
-        let story_of = |map: &std::collections::BTreeMap<i64, i64>, id: i64| {
-            map.get(&id).copied().unwrap_or(id)
-        };
-        let current: std::collections::BTreeMap<i64, i64> = current.into_iter().collect();
-        for &id in current.keys().chain(stories.keys()) {
-            let new = story_of(&stories, id);
-            if story_of(&current, id) != new {
+        let current = self.stories()?;
+        let touched: std::collections::BTreeSet<i64> = current
+            .grouped()
+            .into_iter()
+            .chain(stories.grouped())
+            .map(|(id, _)| id)
+            .collect();
+        for id in touched {
+            let new = stories.story_of(id);
+            if current.story_of(id) != new {
                 tx.execute(
                     "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
                     [id, new],
@@ -471,9 +469,7 @@ mod tests {
     }
 
     fn stories(db: &Db) -> Vec<(i64, i64)> {
-        let mut v: Vec<_> = db.story_ids().unwrap().into_iter().collect();
-        v.sort_unstable();
-        v
+        db.stories().unwrap().grouped()
     }
 
     #[test]
@@ -577,7 +573,7 @@ mod tests {
                 .unwrap(),
             [format!("{a}|{a}")]
         );
-        assert!(db.story_ids().unwrap().is_empty());
+        assert!(db.stories().unwrap().grouped().is_empty());
     }
 
     /// 作り直しは変わった行だけを書き、グループから外れた記事は自分の ID に戻す。

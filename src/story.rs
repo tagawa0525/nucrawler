@@ -42,6 +42,50 @@ pub struct Candidate {
     pub similarity: f64,
 }
 
+/// 記事から同じ報道のグループの ID（最小の記事 ID）への対応。2 件以上のグループの記事だけを持ち、
+/// 載っていない記事は自分の ID の大きさ 1 のグループにいる（`article_stories` と同じ決まり）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stories {
+    story_of: HashMap<i64, i64>,
+    members: HashMap<i64, Vec<i64>>,
+}
+
+impl Stories {
+    /// `grouped` は 2 件以上のグループの記事とグループの ID。
+    pub fn new(grouped: impl IntoIterator<Item = (i64, i64)>) -> Stories {
+        let story_of: HashMap<i64, i64> = grouped.into_iter().collect();
+        let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (&article, &story) in &story_of {
+            members.entry(story).or_default().push(article);
+        }
+        members.values_mut().for_each(|m| m.sort_unstable());
+        Stories { story_of, members }
+    }
+
+    /// 記事のグループの ID。
+    pub fn story_of(&self, article_id: i64) -> i64 {
+        self.story_of
+            .get(&article_id)
+            .copied()
+            .unwrap_or(article_id)
+    }
+
+    /// グループの記事（ID の順）。大きさ 1 のグループならその記事だけ。
+    pub fn members(&self, story_id: i64) -> Vec<i64> {
+        self.members
+            .get(&story_id)
+            .cloned()
+            .unwrap_or_else(|| vec![story_id])
+    }
+
+    /// 2 件以上のグループの記事とグループの ID（記事の ID の順）。
+    pub fn grouped(&self) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = self.story_of.iter().map(|(&a, &s)| (a, s)).collect();
+        v.sort_unstable();
+        v
+    }
+}
+
 /// same の組。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edge {
@@ -126,32 +170,25 @@ impl Index {
         Some(cosine(va, vb))
     }
 
-    /// `target` の候補を、類似度の高い順に返す。`stories` は記事からグループの ID への対応。
-    /// 対象と同じグループの記事は候補にしない。
-    pub fn candidates(&self, target: i64, stories: &HashMap<i64, i64>) -> Vec<Candidate> {
+    /// `target` の候補を、類似度の高い順に返す。対象と同じグループの記事は候補にしない。
+    pub fn candidates(&self, target: i64, stories: &Stories) -> Vec<Candidate> {
         let Some(&t) = self.by_id.get(&target) else {
             return Vec::new();
         };
         let (target_doc, target_vec) = &self.docs[t];
-        let own_story = stories.get(&target);
+        let own_story = stories.story_of(target);
         let window = chrono::Duration::days(WINDOW_DAYS);
         // 候補の単位ごとに、類似度の最大値と、対象と別のソースの記事があるか
         let mut units: BTreeMap<i64, (f64, bool)> = BTreeMap::new();
         for (doc, v) in &self.docs {
-            if doc.article_id == target
-                || (doc.at - target_doc.at).abs() > window
-                || (own_story.is_some() && stories.get(&doc.article_id) == own_story)
-            {
+            let unit = stories.story_of(doc.article_id);
+            if unit == own_story || (doc.at - target_doc.at).abs() > window {
                 continue;
             }
             let similarity = cosine(target_vec, v);
             if similarity < MIN_SIMILARITY {
                 continue;
             }
-            let unit = stories
-                .get(&doc.article_id)
-                .copied()
-                .unwrap_or(doc.article_id);
             let entry = units.entry(unit).or_insert((similarity, false));
             entry.0 = entry.0.max(similarity);
             entry.1 |= doc.source_id != target_doc.source_id;
@@ -176,25 +213,10 @@ impl Index {
             })
             .map(|(id, similarity, _)| Candidate {
                 id,
-                members: Self::members(id, stories),
+                members: stories.members(id),
                 similarity,
             })
             .collect()
-    }
-
-    /// 候補の単位の記事（ID の順）。グループならプールの外の記事も含めた全員、グループでなければ
-    /// その記事だけ。
-    fn members(unit: i64, stories: &HashMap<i64, i64>) -> Vec<i64> {
-        let mut members: Vec<i64> = stories
-            .iter()
-            .filter(|(_, story)| **story == unit)
-            .map(|(id, _)| *id)
-            .collect();
-        if members.is_empty() {
-            members.push(unit);
-        }
-        members.sort_unstable();
-        members
     }
 }
 
@@ -206,9 +228,9 @@ fn cosine(a: &Vector, b: &Vector) -> f64 {
         .sum()
 }
 
-/// same の組をつないだグループ（2 件以上）の、記事とグループの ID（最小の記事 ID）の対応と、
-/// つなぐとグループが `max_size` を超えるので捨てた組。組は類似度の高い順につなぐ。
-pub fn components(edges: &[Edge], max_size: usize) -> (BTreeMap<i64, i64>, Vec<Edge>) {
+/// same の組をつないだグループと、つなぐとグループが `max_size` を超えるので捨てた組。
+/// 組は類似度の高い順につなぐ。
+pub fn components(edges: &[Edge], max_size: usize) -> (Stories, Vec<Edge>) {
     let mut sorted = edges.to_vec();
     sorted.sort_by(|x, y| {
         y.similarity
@@ -247,12 +269,12 @@ pub fn components(edges: &[Edge], max_size: usize) -> (BTreeMap<i64, i64>, Vec<E
         let r = root(&mut parent, id);
         groups.entry(r).or_default().push(id);
     }
-    let mut stories = BTreeMap::new();
+    let mut grouped = Vec::new();
     for members in groups.into_values().filter(|m| m.len() >= 2) {
         let story_id = *members.iter().min().unwrap_or(&0);
-        stories.extend(members.into_iter().map(|m| (m, story_id)));
+        grouped.extend(members.into_iter().map(|m| (m, story_id)));
     }
-    (stories, rejected)
+    (Stories::new(grouped), rejected)
 }
 
 #[cfg(test)]
@@ -314,13 +336,13 @@ mod tests {
         ];
         docs.extend(filler(100));
         let index = Index::new(docs);
-        let cs = index.candidates(2, &HashMap::new());
+        let cs = index.candidates(2, &Stories::default());
         assert_eq!(ids(&cs), [1]);
         assert_eq!(cs[0].members, [1]);
         assert!(cs[0].similarity >= MIN_SIMILARITY, "{cs:?}");
         assert_eq!(index.similarity(1, 2), Some(cs[0].similarity));
         // 似ていない記事は候補にならない
-        assert!(index.candidates(100, &HashMap::new()).is_empty());
+        assert!(index.candidates(100, &Stories::default()).is_empty());
     }
 
     /// どの記事にもある bigram も重みを 0 にしない（2 件だけのプールでも、同じ文は候補になる）。
@@ -328,7 +350,7 @@ mod tests {
     fn identical_reports_in_a_tiny_pool_are_candidates() {
         let text = "欧州投資銀行、フィンランドのSMR開発に初融資";
         let index = Index::new(vec![doc(1, "wnn", 20, text), doc(2, "jaif", 20, text)]);
-        let cs = index.candidates(2, &HashMap::new());
+        let cs = index.candidates(2, &Stories::default());
         assert_eq!(ids(&cs), [1]);
         assert!((cs[0].similarity - 1.0).abs() < 1e-9, "{cs:?}");
     }
@@ -348,7 +370,7 @@ mod tests {
         docs.push(doc(7, "wnn", 20, "ウクライナ情勢に関するIAEA事務局長声明"));
         docs.extend(filler(100));
         let index = Index::new(docs);
-        let cs = index.candidates(1, &HashMap::new());
+        let cs = index.candidates(1, &Stories::default());
         // 記事 2〜6 が対象と同じ iaea
         let same_source = cs.iter().filter(|c| (2..=6).contains(&c.id)).count();
         assert_eq!(same_source, MAX_SAME_SOURCE, "{cs:?}");
@@ -369,7 +391,7 @@ mod tests {
         docs.push(doc(8, "u", 20, text));
         docs.extend(filler(100));
         let index = Index::new(docs);
-        let stories: HashMap<i64, i64> = (1..=6).map(|n| (n, 1)).collect();
+        let stories = Stories::new((1..=6).map(|n| (n, 1)));
         let cs = index.candidates(7, &stories);
         assert_eq!(ids(&cs), [1, 8], "{cs:?}");
         assert_eq!(cs[0].members, [1, 2, 3, 4, 5, 6]);
@@ -386,7 +408,7 @@ mod tests {
         docs.extend(filler(100));
         let index = Index::new(docs);
         // 記事 50 はプールに無いが、記事 1 と同じグループ
-        let stories: HashMap<i64, i64> = [(1, 1), (50, 1)].into();
+        let stories = Stories::new([(1, 1), (50, 1)]);
         let cs = index.candidates(2, &stories);
         assert_eq!(ids(&cs), [1]);
         assert_eq!(cs[0].members, [1, 50]);
@@ -401,7 +423,7 @@ mod tests {
         };
         let (stories, rejected) = components(&[e(5, 3), e(3, 9), e(20, 21)], MAX_STORY_SIZE);
         assert_eq!(
-            stories.into_iter().collect::<Vec<_>>(),
+            stories.grouped(),
             [(3, 3), (5, 3), (9, 3), (20, 20), (21, 20)]
         );
         assert!(rejected.is_empty());
@@ -412,10 +434,7 @@ mod tests {
     fn components_cap_the_story_size() {
         let e = |a, b, similarity| Edge { a, b, similarity };
         let (stories, rejected) = components(&[e(1, 2, 0.9), e(2, 3, 0.2), e(3, 4, 0.8)], 3);
-        assert_eq!(
-            stories.into_iter().collect::<Vec<_>>(),
-            [(1, 1), (2, 1), (3, 3), (4, 3)]
-        );
+        assert_eq!(stories.grouped(), [(1, 1), (2, 1), (3, 3), (4, 3)]);
         assert_eq!(rejected, [e(2, 3, 0.2)]);
     }
 }

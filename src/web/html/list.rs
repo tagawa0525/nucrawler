@@ -648,7 +648,6 @@ mod tests {
             ..Page::default()
         };
         let mut i = item(1, "2026-09-27T05:00:00.000Z");
-        i.story_id = Some(1);
         i.story_others = vec!["wnn".into(), "iaea".into(), "wnn".into()];
         let html = card(&i, true, &page);
         assert!(html.contains("他 3 件（WNN・iaea）"), "{html}");

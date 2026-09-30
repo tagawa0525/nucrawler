@@ -27,10 +27,9 @@ pub struct Article {
 /// 候補の単位。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
-    /// 単独の記事ならその記事の ID、グループならグループの ID
+    /// グループの ID（単独の記事なら、その記事の ID）
     pub id: i64,
-    /// 既存のグループか
-    pub story: bool,
+    /// グループの記事（単独の記事なら、その記事だけ）
     pub members: Vec<Article>,
 }
 
@@ -125,7 +124,8 @@ pub fn build_prompt(targets: &[Target]) -> String {
         push_article(&mut out, "target", &t.article);
         out.push_str(&format!("<candidates for=\"{}\">\n", t.article.article_id));
         for c in &t.candidates {
-            if c.story {
+            // 2 件以上なら、すでに同じ報道としてまとめたグループ
+            if c.members.len() > 1 {
                 out.push_str(&format!("<story id=\"{}\">\n", c.id));
                 for m in &c.members {
                     push_article(&mut out, "article", m);
@@ -244,7 +244,6 @@ mod tests {
     fn single(id: i64, text: &str) -> Candidate {
         Candidate {
             id,
-            story: false,
             members: vec![article(id, "wnn", text)],
         }
     }
@@ -257,7 +256,6 @@ mod tests {
                     single(1, "欧州投資銀行、初のSMR向け融資"),
                     Candidate {
                         id: 2,
-                        story: true,
                         members: vec![
                             article(2, "wnn", "EIB、SMRに融資"),
                             article(3, "ans", "EIBのSMR融資"),

@@ -210,7 +210,7 @@ pub async fn judge_stories<L: Llm>(
             let mut docs: HashMap<i64, Doc> =
                 pool.iter().map(|d| (d.article_id, d.clone())).collect();
             let index = Index::new(pool);
-            let stories = db.story_ids()?;
+            let stories = db.stories()?;
             // 候補の無い記事は、LLM を呼ばずに判定済みにする
             let mut targets: Vec<(i64, Vec<Candidate>)> = Vec::new();
             for b in &batch {
@@ -246,7 +246,6 @@ pub async fn judge_stories<L: Llm>(
                             .iter()
                             .map(|c| p::Candidate {
                                 id: c.id,
-                                story: stories.values().any(|s| *s == c.id),
                                 members: c
                                     .members
                                     .iter()
@@ -436,9 +435,7 @@ mod tests {
     }
 
     fn stories(db: &Db) -> Vec<(i64, i64)> {
-        let mut v: Vec<_> = db.story_ids().unwrap().into_iter().collect();
-        v.sort_unstable();
-        v
+        db.stories().unwrap().grouped()
     }
 
     /// 候補の無い記事は、LLM を呼ばずに判定済みにする。

@@ -21,7 +21,7 @@ pub fn login_page(next: Option<&str>, failed: bool, labels: &SourceLabels) -> St
     let body = format!(
         "<h1>ログイン</h1>{message}\
          <form method=\"post\" action=\"/login\">{next}\
-         <p><label>ログイン ID<br><input name=\"login\" type=\"email\" autocomplete=\"username\" required></label></p>\
+         <p><label>ログイン ID<br><input name=\"login\" type=\"text\" autocomplete=\"username\" autocapitalize=\"none\" spellcheck=\"false\" required></label></p>\
          <p><label>パスワード<br><input name=\"password\" type=\"password\" autocomplete=\"current-password\" required></label></p>\
          <p><button>ログイン</button></p></form>\
          <p class=\"meta\">パスワードを忘れたら、管理者にリセットを頼んでください。</p>"

@@ -39,6 +39,23 @@ pub struct StoryPending {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
+/// 記事（別名 `a`）の比べる文。最新の要約の見出しと要約、無ければ最新の見出しの和訳、
+/// 無ければ日本語の原題（どれも無ければ NULL）。
+const STORY_TEXT: &str = "coalesce(
+       (SELECT concat_ws(char(10), r.title_ja, r.summary_ja) FROM artifacts AS r
+        WHERE r.article_id = a.id AND r.kind = 'digest'
+        ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
+       (SELECT r.title_ja FROM artifacts AS r
+        WHERE r.article_id = a.id AND r.kind = 'title'
+        ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
+       CASE WHEN a.lang = 'ja' THEN a.title END)";
+
+fn parse_at(at: String) -> Result<chrono::DateTime<chrono::Utc>, DbError> {
+    chrono::DateTime::parse_from_rfc3339(&at)
+        .map(|t| t.to_utc())
+        .map_err(|_| DbError::UnexpectedValue(format!("article time {at:?}")))
+}
+
 impl Db {
     /// 同じ報道を判定する記事（新しい順）：`cutoff` 以降の記事で、story がまだ無く、比べる文があるもの。
     /// 比べる文は要約か、要約されない記事（公開の本文が無い）の見出しの和訳か日本語の原題。
@@ -52,22 +69,99 @@ impl Db {
         model: &str,
         limit: usize,
     ) -> Result<Vec<StoryPending>, DbError> {
-        todo!("{cutoff} {now} {backend} {model} {limit}")
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, coalesce(a.published_at, a.fetched_at) FROM articles AS a
+             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'story')
+               AND (
+                 EXISTS (
+                   SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'digest')
+                 OR (
+                   NOT EXISTS (
+                     SELECT 1 FROM contents AS c
+                     WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
+                       AND c.access_membership_id IS NULL)
+                   AND (a.lang = 'ja' OR EXISTS (
+                     SELECT 1 FROM artifacts AS r
+                     WHERE r.article_id = a.id AND r.kind = 'title'))))
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = a.id AND e.stage = 'story'
+                   AND e.backend = ?3 AND e.model = ?4
+                   AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = a.id AND w.stage = 'story'
+                   AND w.backend = ?3 AND w.model = ?4)
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?6",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                timestamp(cutoff),
+                MAX_ATTEMPTS,
+                backend,
+                model,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            ],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (article_id, at) = row?;
+            Ok(StoryPending {
+                article_id,
+                at: parse_at(at)?,
+            })
+        })
+        .collect()
     }
 
-    /// `from` から `to` までの記事のうち、比べる文があるもの（[`Db::pending_stories`] と同じ文）。
+    /// `from` から `to` までの記事のうち、比べる文があるもの（新しい順）。
     /// 文は最新の要約の見出しと要約、無ければ最新の見出しの和訳、無ければ日本語の原題。
     pub fn story_pool(
         &self,
         from: chrono::DateTime<chrono::Utc>,
         to: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Doc>, DbError> {
-        todo!("{from} {to}")
+        let sql = format!(
+            "SELECT id, source_id, at, text FROM (
+               SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at,
+                      {STORY_TEXT} AS text
+               FROM articles AS a
+               WHERE coalesce(a.published_at, a.fetched_at) BETWEEN ?1 AND ?2)
+             WHERE text IS NOT NULL
+             ORDER BY at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([timestamp(from), timestamp(to)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (article_id, source_id, at, text) = row?;
+            Ok(Doc {
+                article_id,
+                source_id,
+                at: parse_at(at)?,
+                text,
+            })
+        })
+        .collect()
     }
 
     /// 記事からグループの ID への対応。
     pub fn story_ids(&self) -> Result<HashMap<i64, i64>, DbError> {
-        todo!()
+        let mut stmt = self
+            .conn
+            .prepare("SELECT article_id, story_id FROM article_stories")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// 判定（kind = story）と、その組を 1 つのトランザクションで登録する。
@@ -77,13 +171,53 @@ impl Db {
         links: &[StoryLink],
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        todo!("{artifact:?} {links:?} {now}")
+        let tx = self.conn.unchecked_transaction()?;
+        let id = super::artifacts::write_artifact(&tx, artifact, now)?;
+        for link in links {
+            tx.execute(
+                "INSERT INTO story_links (artifact_id, other_id, relation, similarity)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, link.other_id, link.relation.as_str(), link.similarity],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     /// 記事ごとの最新の判定の same の組をつないで、グループ（`article_stories`）を作り直す。
     /// グループが大きくなりすぎるので捨てた組を返す。
     pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
-        todo!()
+        let tx = self.conn.unchecked_transaction()?;
+        let edges: Vec<Edge> = {
+            let mut stmt = tx.prepare(
+                "SELECT r.article_id, l.other_id, l.similarity
+                 FROM story_links AS l
+                 JOIN artifacts AS r ON r.id = l.artifact_id
+                 WHERE l.relation = 'same'
+                   AND r.id = (
+                     SELECT r2.id FROM artifacts AS r2
+                     WHERE r2.article_id = r.article_id AND r2.kind = 'story'
+                     ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(Edge {
+                    a: r.get(0)?,
+                    b: r.get(1)?,
+                    similarity: r.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
+        tx.execute("DELETE FROM article_stories", [])?;
+        for (article_id, story_id) in stories {
+            tx.execute(
+                "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                [article_id, story_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rejected)
     }
 }
 
@@ -132,13 +266,23 @@ mod tests {
     }
 
     fn story(db: &Db, article_id: i64, links: &[StoryLink], at: &str) -> i64 {
+        story_version(db, article_id, links, at, 1)
+    }
+
+    fn story_version(
+        db: &Db,
+        article_id: i64,
+        links: &[StoryLink],
+        at: &str,
+        prompt_version: i64,
+    ) -> i64 {
         db.insert_story(
             &NewArtifact {
                 article_id,
                 kind: ArtifactKind::Story,
                 backend: "claude-cli",
                 model: "sonnet",
-                prompt_version: 1,
+                prompt_version,
                 payload: &serde_json::json!({"candidates": [], "same": [], "related": []}),
                 inputs: &[],
                 glossary_at: None,
@@ -271,13 +415,13 @@ mod tests {
         };
         story(&db, a, &[same(b)], "2026-09-27T00:00:00Z");
         story(&db, c, &[same(b)], "2026-09-27T00:00:00Z");
-        // d の古い判定は e と same だったが、新しい判定では related
+        // d の古い判定は e と same だったが、新しいプロンプトの版の判定では related
         story(&db, d, &[same(e)], "2026-09-27T00:00:00Z");
         let related = StoryLink {
             relation: StoryRelation::Related,
             ..same(e)
         };
-        let id = story(&db, d, &[related], "2026-09-28T00:00:00Z");
+        let id = story_version(&db, d, &[related], "2026-09-28T00:00:00Z", 2);
         assert!(db.rebuild_stories().unwrap().is_empty());
         assert_eq!(stories(&db), [(a, a), (b, a), (c, a)]);
         assert_eq!(

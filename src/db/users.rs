@@ -670,7 +670,10 @@ mod tests {
         let mine = login(&db, Some("hash-1"), true, NOW).unwrap();
         let other = login(&db, Some("hash-1"), true, NOW).unwrap();
         let feed = db.rotate_feed_token(&mine, t(NOW)).unwrap().unwrap();
-        let read = db.session_password_hash(&mine, t(NOW)).unwrap();
+        let read = db
+            .session_password(&mine, t(NOW))
+            .unwrap()
+            .and_then(|p| p.hash);
         assert_eq!(read.as_deref(), Some("hash-1"));
         let outcome = db
             .change_password(&mine, read.as_deref(), true, "hash-2", t(NOW))
@@ -736,7 +739,10 @@ mod tests {
     fn credential_changes_after_revocation_write_nothing() {
         let (db, _) = db_with_user();
         let session = login(&db, Some("hash-1"), true, NOW).unwrap();
-        let read = db.session_password_hash(&session, t(NOW)).unwrap();
+        let read = db
+            .session_password(&session, t(NOW))
+            .unwrap()
+            .and_then(|p| p.hash);
         db.disable_user("a@example.com").unwrap();
         let outcome = db
             .change_password(&session, read.as_deref(), true, "hash-2", t(NOW))
@@ -749,6 +755,32 @@ mod tests {
             .query_row("SELECT count(feed_token) FROM users", [], |r| r.get(0))
             .unwrap();
         assert_eq!(feeds, 0);
+    }
+
+    /// パスワードの変更の 1 段目は、ハッシュと一緒に待ち時間中かを返す（待ち時間中は照合も計算もせずに断るため）。
+    /// ログインの失敗ではセッションは消えないので、待ち時間中でもセッションはある。
+    #[test]
+    fn session_password_reports_the_lockout() {
+        let (db, _) = db_with_user();
+        let session = login(&db, Some("hash-1"), true, NOW).unwrap();
+        assert_eq!(
+            db.session_password(&session, t(NOW)).unwrap(),
+            Some(SessionPassword {
+                hash: Some("hash-1".into()),
+                locked: false
+            })
+        );
+        for _ in 0..6 {
+            login(&db, Some("hash-1"), false, NOW);
+        }
+        assert_eq!(
+            db.session_password(&session, t(NOW)).unwrap(),
+            Some(SessionPassword {
+                hash: Some("hash-1".into()),
+                locked: true
+            })
+        );
+        assert_eq!(db.session_password("unknown", t(NOW)).unwrap(), None);
     }
 
     #[test]

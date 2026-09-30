@@ -875,12 +875,43 @@ mod tests {
         ] {
             let res = change(&server, current, new).await;
             assert_eq!(res.status().as_u16(), 400, "{current:.10} / {new:.10}");
+            // 理由は設定画面に出す
+            let html = res.text().await.unwrap();
+            assert!(html.contains(r#"action="/settings/password""#), "{html}");
+            assert!(
+                html.contains("12 文字以上にしてください")
+                    || html.contains("1024 バイト以下にしてください"),
+                "{html}"
+            );
         }
         assert_eq!(
             server.count("SELECT failed_logins FROM users WHERE login = 'owner'"),
             0
         );
         assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+    }
+
+    /// 待ち時間中は、今のパスワードが正しくても変えられない（照合もしないので、応答の時間から正しさも分からない）。
+    #[tokio::test]
+    async fn locked_accounts_cannot_change_the_password() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        for _ in 0..6 {
+            db.finish_login("owner", None, false, chrono::Utc::now())
+                .unwrap();
+        }
+        let server = Server::start(db).await;
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.headers()["location"], "/settings?password=locked");
+        let hash = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .login_hash("owner")
+            .unwrap()
+            .unwrap();
+        assert!(crate::auth::verify_password(&hash, PASSWORD));
     }
 
     /// 他サイトからの変更は 403 で、パスワードもセッションも変わらない。

@@ -155,6 +155,15 @@ mod tests {
         assert!(!verify_password("not a hash", "correct horse battery"));
     }
 
+    /// ダミーのハッシュは埋め込んだ定数で、要求の処理中に計算しない（初めての照合だけ遅くなると、ID の有無が漏れる）。
+    /// 照合の時間を揃えるため、強さのパラメータは実際のハッシュと同じ。
+    #[test]
+    fn dummy_hash_is_a_constant_with_the_real_params() {
+        let params = |h: &str| h.rsplitn(3, '$').nth(2).unwrap().to_string();
+        assert_eq!(dummy_hash(), DUMMY_HASH);
+        assert_eq!(params(DUMMY_HASH), params(&hash_password("x").unwrap()));
+    }
+
     /// ダミーのハッシュは、どのパスワードでも照合に通らない（ID が無いときも照合して時間を揃えるため）。
     #[test]
     fn dummy_hash_never_verifies() {

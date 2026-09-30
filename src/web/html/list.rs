@@ -22,7 +22,11 @@ pub fn split_sections(
 pub fn filter_read(items: Vec<ListItem>, read: Option<bool>) -> Vec<ListItem> {
     match read {
         None => items,
-        Some(read) => items.into_iter().filter(|i| i.is_read() == read).collect(),
+        // 同じ報道のグループのどれかを読んでいれば、既読として扱う（一覧と同じ）
+        Some(read) => items
+            .into_iter()
+            .filter(|i| (i.is_read() || i.story_read) == read)
+            .collect(),
     }
 }
 
@@ -557,6 +561,25 @@ pub(super) fn score_badge(i: &ListItem) -> String {
     }
 }
 
+/// 同じ報道のグループのほかの記事の数とソース（ソースは重ねない）。グループでなければ空。
+fn story_others(i: &ListItem, page: &Page) -> String {
+    if i.story_others.is_empty() {
+        return String::new();
+    }
+    let mut sources: Vec<&str> = Vec::new();
+    for s in &i.story_others {
+        let label = page.source(s);
+        if !sources.contains(&label) {
+            sources.push(label);
+        }
+    }
+    format!(
+        " ・他 {} 件（{}）",
+        i.story_others.len(),
+        escape(&sources.join("・"))
+    )
+}
+
 /// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
 /// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
@@ -587,7 +610,8 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{title_score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}{marks}</div>",
+         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}{story}</div>{matches}{summary}{marks}</div>",
+        story = story_others(i, page),
         read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)
@@ -614,6 +638,23 @@ mod tests {
     use super::*;
     use crate::db::Rating;
     use crate::web::html::test_support::*;
+
+    /// 同じ報道のグループの代表には、ほかの記事の数とソース（重ねずに）を添える。
+    #[test]
+    fn card_mentions_other_reports_of_the_story() {
+        let labels = crate::web::html::SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
+        let page = Page {
+            labels: &labels,
+            ..Page::default()
+        };
+        let mut i = item(1, "2026-09-27T05:00:00.000Z");
+        i.story_id = Some(1);
+        i.story_others = vec!["wnn".into(), "iaea".into(), "wnn".into()];
+        let html = card(&i, true, &page);
+        assert!(html.contains("他 3 件（WNN・iaea）"), "{html}");
+        let html = card(&item(2, "2026-09-27T05:00:00.000Z"), true, &page);
+        assert!(!html.contains("他 "), "{html}");
+    }
 
     #[test]
     fn splits_new_and_earlier_unread() {

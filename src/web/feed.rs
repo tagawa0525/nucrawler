@@ -114,6 +114,10 @@ mod tests {
             translation_requested: false,
             bookmarked: false,
             locked_by: vec![],
+            story_id: None,
+            story_others: vec![],
+            story_read: false,
+            story_rated: false,
         }
     }
 

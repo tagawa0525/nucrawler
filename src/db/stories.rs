@@ -34,6 +34,21 @@ pub struct StoryLink {
     pub similarity: f64,
 }
 
+/// 詳細に並べる、同じ報道・関連の記事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoryArticle {
+    pub article_id: i64,
+    pub source_id: String,
+    /// 公開（無ければ取得）の日時
+    pub at: String,
+    /// 原題
+    pub title: String,
+    /// 最新の要約の見出し、無ければ見出しの和訳
+    pub title_ja: Option<String>,
+    /// 同じグループのほかの記事の数（関連の記事をグループごとにまとめたとき）
+    pub others: usize,
+}
+
 /// 判定する記事。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoryPending {
@@ -178,6 +193,118 @@ impl Db {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([serde_json::to_string(ids)?], doc_row)?;
         rows.map(|row| row?.try_into()).collect()
+    }
+
+    /// 記事と同じ報道のグループのほかの記事（日時の順）。
+    pub fn story_members(
+        &self,
+        user_id: i64,
+        article_id: i64,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        self.story_articles(
+            user_id,
+            article_id,
+            "SELECT s2.article_id FROM article_stories AS s1
+             JOIN article_stories AS s2
+               ON s2.story_id = s1.story_id AND s2.article_id <> s1.article_id
+             WHERE s1.article_id = :article",
+            "at ASC, id ASC",
+        )
+    }
+
+    /// 記事の関連記事（新しい順）：記事のグループの誰かの最新の判定が same か related とした記事と、
+    /// その逆向きのもの。同じグループの記事は除く。関連の記事がグループに入っていれば、グループごとに
+    /// そのグループで最も新しい 1 件にまとめる（判定に出た記事でなくてもよい）。
+    pub fn related_articles(
+        &self,
+        user_id: i64,
+        article_id: i64,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        let linked = self.story_articles(
+            user_id,
+            article_id,
+            "WITH mine AS (
+               SELECT s2.article_id AS id FROM article_stories AS s1
+               JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+               WHERE s1.article_id = :article
+               UNION SELECT :article),
+             latest AS (
+               SELECT r.id, r.article_id FROM artifacts AS r
+               WHERE r.kind = 'story' AND r.id = (
+                 SELECT r2.id FROM artifacts AS r2
+                 WHERE r2.article_id = r.article_id AND r2.kind = 'story'
+                 ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)),
+             linked AS (
+               SELECT l.other_id AS id FROM latest AS x
+               JOIN story_links AS l ON l.artifact_id = x.id
+               WHERE x.article_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related')
+               UNION
+               SELECT x.article_id FROM latest AS x
+               JOIN story_links AS l ON l.artifact_id = x.id
+               WHERE l.other_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related')),
+             -- 関連の記事がグループに入っていれば、代表を選べるようグループ全員に広げる
+             expanded AS (
+               SELECT id FROM linked
+               UNION
+               SELECT s2.article_id FROM linked
+               JOIN article_stories AS s1 ON s1.article_id = linked.id
+               JOIN article_stories AS s2 ON s2.story_id = s1.story_id)
+             SELECT id FROM expanded WHERE id NOT IN (SELECT id FROM mine)",
+            "at DESC, id DESC",
+        )?;
+        // 関連の記事がグループに入っていれば、グループごとに新しい 1 件にまとめる
+        let stories = self.story_ids()?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(linked
+            .into_iter()
+            .filter(|a| seen.insert(stories.get(&a.article_id).copied().unwrap_or(-a.article_id)))
+            .map(|a| StoryArticle {
+                others: stories.get(&a.article_id).map_or(0, |story| {
+                    stories.values().filter(|s| *s == story).count() - 1
+                }),
+                ..a
+            })
+            .collect())
+    }
+
+    /// `ids_sql`（`:article` を使う、記事 ID の列を返す SQL）の記事を `order` の順に読む。
+    fn story_articles(
+        &self,
+        user_id: i64,
+        article_id: i64,
+        ids_sql: &str,
+        order: &str,
+    ) -> Result<Vec<StoryArticle>, DbError> {
+        let sql = format!(
+            "SELECT id, source_id, at, title, title_ja FROM (
+               SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at, a.title,
+                      coalesce(
+                        nullif(trim((SELECT r.title_ja FROM artifacts AS r
+                                     WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable}
+                                     ORDER BY r.created_at DESC, r.id DESC LIMIT 1)), ''),
+                        (SELECT r.title_ja FROM artifacts AS r
+                         WHERE r.article_id = a.id AND r.kind = 'title'
+                         ORDER BY r.created_at DESC, r.id DESC LIMIT 1)) AS title_ja
+               FROM articles AS a
+               WHERE a.id IN ({ids_sql}))
+             ORDER BY {order}",
+            viewable = super::read::viewable("r"),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::named_params! {":user": user_id, ":article": article_id},
+            |r| {
+                Ok(StoryArticle {
+                    article_id: r.get(0)?,
+                    source_id: r.get(1)?,
+                    at: r.get(2)?,
+                    title: r.get(3)?,
+                    title_ja: r.get(4)?,
+                    others: 0,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// 記事からグループの ID への対応。
@@ -472,6 +599,113 @@ mod tests {
             .map(|d| (d.article_id, d.text.as_str()))
             .collect();
         assert_eq!(got, [(a, "日本語の原題")]);
+    }
+
+    fn article_on(db: &Db, n: i64, day: u32) -> i64 {
+        ja_article(
+            db,
+            &format!("https://e.com/n{n}"),
+            &format!("2026-09-{day:02}T00:00:00.000Z"),
+        )
+    }
+
+    fn rel(other_id: i64) -> StoryLink {
+        StoryLink {
+            relation: StoryRelation::Related,
+            ..same(other_id)
+        }
+    }
+
+    fn ids_of(v: &[StoryArticle]) -> Vec<(i64, usize)> {
+        v.iter().map(|a| (a.article_id, a.others)).collect()
+    }
+
+    #[test]
+    fn story_members_lists_the_rest_of_the_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 25);
+        let b = article_on(&db, 2, 24);
+        let c = article_on(&db, 3, 26);
+        let alone = article_on(&db, 4, 26);
+        story(&db, a, &[same(b), same(c)], "2026-09-27T00:00:00Z");
+        story(&db, b, &[same(a)], "2026-09-27T00:00:00Z");
+        story(&db, c, &[same(a)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        let members = db.story_members(user, a).unwrap();
+        assert_eq!(ids_of(&members), [(b, 0), (c, 0)]);
+        assert_eq!(members[0].title, "日本語の原題");
+        assert!(db.story_members(user, alone).unwrap().is_empty());
+    }
+
+    /// 関連のグループの代表は、判定に出た記事ではなく、そのグループで最も新しい記事にする。
+    #[test]
+    fn related_story_is_shown_by_its_newest_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 20);
+        let old = article_on(&db, 2, 21);
+        let new = article_on(&db, 3, 25);
+        for (p, q) in [(old, new), (new, old)] {
+            story(&db, p, &[same(q)], "2026-09-27T00:00:00Z");
+        }
+        // 逆向きの関連は古い記事からだけ
+        story_version(&db, old, &[same(new), rel(a)], "2026-09-28T00:00:00Z", 2);
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        assert_eq!(ids_of(&db.related_articles(user, a).unwrap()), [(new, 1)]);
+    }
+
+    /// グループの誰かの判定の関連と、逆向きの関連を合わせる。グループにつながらなかった same の組
+    /// （判定が割れた・上限を超えた）も関連として出し、無関係の組は出さない。関連がグループなら
+    /// 1 件にまとめる。
+    #[test]
+    fn related_articles_gather_links_of_the_whole_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article_on(&db, 1, 20);
+        let b = article_on(&db, 2, 20);
+        let x = article_on(&db, 3, 21);
+        let y = article_on(&db, 4, 22);
+        let z = article_on(&db, 5, 23);
+        let w = article_on(&db, 6, 24);
+        let v = article_on(&db, 7, 25);
+        let unrelated = article_on(&db, 8, 26);
+        // a と b が同じ報道、x と y が同じ報道
+        for (p, q) in [(x, y), (y, x)] {
+            story(&db, p, &[same(q)], "2026-09-27T00:00:00Z");
+        }
+        let unrelated_v = StoryLink {
+            relation: StoryRelation::Unrelated,
+            ..same(v)
+        };
+        story(
+            &db,
+            a,
+            &[same(b), rel(x), rel(y), unrelated_v],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, b, &[same(a), rel(z)], "2026-09-27T00:00:00Z");
+        // 逆向き：w が a を関連と判定した
+        story(&db, w, &[rel(a)], "2026-09-27T00:00:00Z");
+        // v は a を same としたが、a は v を無関係とした（判定が割れてつながらない）
+        story(&db, v, &[same(a)], "2026-09-27T00:00:00Z");
+        story(
+            &db,
+            unrelated,
+            &[StoryLink {
+                relation: StoryRelation::Unrelated,
+                ..same(b)
+            }],
+            "2026-09-27T00:00:00Z",
+        );
+        db.rebuild_stories().unwrap();
+        let user = db.owner_id().unwrap();
+        // x・y は新しい y の 1 件にまとめる
+        assert_eq!(
+            ids_of(&db.related_articles(user, a).unwrap()),
+            [(v, 0), (w, 0), (z, 0), (y, 1)]
+        );
+        // a と b は同じ日時なので、ID の大きい b が代表
+        assert_eq!(ids_of(&db.related_articles(user, x).unwrap()), [(b, 1)]);
     }
 
     /// same の組を推移的につなぐ。記事ごとに最新の判定だけを使い、related はつながない。

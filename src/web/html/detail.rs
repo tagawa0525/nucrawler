@@ -83,6 +83,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     }
     // 一覧のカードと同じく 点数・評価・既読・ブックマーク の順
     body.push_str(&super::list::marks(i, &super::list::score_badge(i)));
+    body.push_str(&story_section("同じ報道", &d.story, page));
+    body.push_str(&story_section("関連記事", &d.related, page));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -102,6 +104,34 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     // 評価・印は一覧と同じく、ページを移らずにその場で付け外しする
     body.push_str(super::list::MARKS_SCRIPT);
     layout(&title, page, &body)
+}
+
+/// 同じ報道・関連記事の節（記事が無ければ出さない）。関連のグループは「他 n 件」を添える。
+fn story_section(heading: &str, articles: &[crate::db::StoryArticle], page: &Page) -> String {
+    if articles.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("<h2>{heading}</h2><ul>");
+    for a in articles {
+        let title = [a.title_ja.as_deref().unwrap_or(""), &a.title]
+            .into_iter()
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or("");
+        let others = if a.others > 0 {
+            format!(" ・他 {} 件", a.others)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<li><a href=\"/articles/{}\">{}</a> <span class=\"meta\">{} ・{}{others}</span></li>",
+            a.article_id,
+            escape(title),
+            escape(page.source(&a.source_id)),
+            crate::jst::format_local(&a.at),
+        ));
+    }
+    out.push_str("</ul>");
+    out
 }
 
 /// コメントの欄。コメントは改行を保って並べ、書く欄と自分のコメントの編集は畳んでおく。
@@ -313,6 +343,63 @@ mod tests {
     use super::*;
     use crate::db::ArtifactVersion;
     use crate::web::html::test_support::*;
+
+    fn story_article(
+        id: i64,
+        source: &str,
+        title_ja: &str,
+        others: usize,
+    ) -> crate::db::StoryArticle {
+        crate::db::StoryArticle {
+            article_id: id,
+            source_id: source.into(),
+            at: "2026-09-25T00:00:00.000Z".into(),
+            title: "Title".into(),
+            title_ja: Some(title_ja.into()),
+            others,
+        }
+    }
+
+    /// 同じ報道のほかの記事と、関連記事（グループなら「他 n 件」）へのリンクを出す。
+    #[test]
+    fn detail_page_links_the_story_and_related_articles() {
+        let mut d = detail();
+        d.story = vec![story_article(8, "jaif", "同じ報道の記事", 0)];
+        d.related = vec![story_article(9, "ans", "続報の記事", 2)];
+        let html = detail_page(
+            &d,
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        let story = html
+            .split("<h2>同じ報道</h2>")
+            .nth(1)
+            .expect("story section");
+        assert!(
+            story.contains("<a href=\"/articles/8\">同じ報道の記事</a>"),
+            "{html}"
+        );
+        assert!(story.contains("jaif"), "{html}");
+        let related = html
+            .split("<h2>関連記事</h2>")
+            .nth(1)
+            .expect("related section");
+        assert!(
+            related.contains("<a href=\"/articles/9\">続報の記事</a>"),
+            "{html}"
+        );
+        assert!(related.contains("他 2 件"), "{html}");
+        // 無ければ節を出さない
+        let html = detail_page(
+            &detail(),
+            &Notes::default(),
+            DetailView::default(),
+            &Page::default(),
+        );
+        assert!(!html.contains("<h2>同じ報道</h2>"), "{html}");
+        assert!(!html.contains("<h2>関連記事</h2>"), "{html}");
+    }
 
     /// 詳細の画面にも一覧と同じ上部のバーを出し、「← 一覧」の代わりに先頭の 🏠 で一覧へ戻る。
     #[test]

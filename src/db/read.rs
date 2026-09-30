@@ -34,6 +34,14 @@ pub struct ListItem {
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
     pub locked_by: Vec<String>,
+    /// 同じ報道のグループ（`article_stories.story_id`）
+    pub story_id: Option<i64>,
+    /// 同じグループのほかの記事のソース（記事ごと、日時の順）
+    pub story_others: Vec<String>,
+    /// 同じグループのどれか（この記事を含む）を読んだ
+    pub story_read: bool,
+    /// 同じグループのどれか（この記事を含む）に評価を付けた
+    pub story_rated: bool,
 }
 
 impl ListItem {
@@ -125,6 +133,10 @@ pub struct ArticleDetail {
     pub has_body: bool,
     /// 推薦点の補正の内訳：効いた特徴と、その特徴が無かったときから動かした点数（大きい順）
     pub adjustments: Vec<(crate::recommend::Feature, i32)>,
+    /// 同じ報道のほかの記事（日時の順）
+    pub story: Vec<super::StoryArticle>,
+    /// 関連記事（新しい順。関連のグループは 1 件にまとめる）
+    pub related: Vec<super::StoryArticle>,
 }
 
 impl ArticleDetail {
@@ -157,11 +169,12 @@ enum ItemScope<'a> {
 
 /// 既読・ブックマークの印で絞る条件（組み立てた行 `rows` の条件、`AND` で始まる）。
 /// `Some(true)` は印のある記事だけ、`Some(false)` は印の無い記事だけ、`None` は絞らない。
-fn mark_filter(read: Option<bool>, bookmarked: Option<bool>) -> String {
+/// 既読（`read_at` の列の式）とブックマークの条件。
+fn mark_filter(read_at: &str, read: Option<bool>, bookmarked: Option<bool>) -> String {
     let read = match read {
-        Some(true) => " AND rows.read_at IS NOT NULL",
-        Some(false) => " AND rows.read_at IS NULL",
-        None => "",
+        Some(true) => format!(" AND {read_at} IS NOT NULL"),
+        Some(false) => format!(" AND {read_at} IS NULL"),
+        None => String::new(),
     };
     let bookmarked = match bookmarked {
         Some(true) => " AND rows.bookmarked = 1",
@@ -230,7 +243,8 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.rating >= :min_rating");
             f.params.push((":min_rating".into(), Box::new(min)));
         }
-        f.rows.push_str(&mark_filter(q.read, q.bookmarked));
+        f.rows
+            .push_str(&mark_filter("rows.read_at", q.read, q.bookmarked));
         if q.unrated {
             f.rows.push_str(" AND rows.rating IS NULL");
         }
@@ -465,6 +479,8 @@ impl Db {
             item,
             has_body,
             adjustments,
+            story: self.story_members(user_id, article_id)?,
+            related: self.related_articles(user_id, article_id)?,
         }))
     }
 
@@ -577,8 +593,11 @@ impl Db {
             items.extend(
                 self.query_items(q.user_id, q.profile_hash, ItemScope::One(id))?
                     .into_iter()
+                    // 選んだ後に同じグループのほかの記事を評価したら、記事自身の評価と同じく外す
                     .filter(|i| {
-                        i.lwr_relevant == Some(true) && i.score.is_some_and(|s| s < q.min_score)
+                        i.lwr_relevant == Some(true)
+                            && i.score.is_some_and(|s| s < q.min_score)
+                            && !i.story_rated
                     }),
             );
         }
@@ -596,16 +615,31 @@ impl Db {
         const BY_SCORE: &str = "rows.rec IS NULL, rows.rec DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
         let list_filter = match scope {
+            // 同じ報道のグループは、どれかを読んだ・評価したらグループごと選ばない
             ItemScope::Explore { .. } => "AND rows.relevant = 1 AND rows.rec < :min
                  AND rows.rating IS NULL AND rows.read_at IS NULL
+                 AND rows.story_read_at IS NULL AND rows.story_rated = 0
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
                 .to_string(),
+            // 同じ報道のグループは、どれかを読んだら既読、どれかの評価が 1〜2 なら隠す
             ItemScope::List {
                 read, bookmarked, ..
-            } => mark_filter(read, bookmarked),
+            } => format!(
+                "{} AND (:all = 1 OR rows.story_low = 0)",
+                mark_filter(
+                    "coalesce(rows.read_at, rows.story_read_at)",
+                    read,
+                    bookmarked
+                )
+            ),
             _ => String::new(),
+        };
+        // 一覧と確認枠では、同じ報道のグループを並びの先頭の 1 件にまとめる
+        let fold = match scope {
+            ItemScope::List { .. } | ItemScope::Explore { .. } => "rows.story_rank = 1",
+            _ => "1",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
@@ -694,7 +728,33 @@ impl Db {
                          WHERE aa.article_id = i.id
                            AND aa.membership_id NOT IN (
                              SELECT membership_id FROM user_memberships WHERE user_id = :user)
-                         ORDER BY m.name)) AS locked_by
+                         ORDER BY m.name)) AS locked_by,
+                      (SELECT st.story_id FROM article_stories AS st
+                       WHERE st.article_id = i.id) AS story_id,
+                      -- 同じ報道のグループのほかの記事のソース（日時の順）
+                      (SELECT json_group_array(source_id) FROM (
+                         SELECT a2.source_id FROM article_stories AS s1
+                         JOIN article_stories AS s2
+                           ON s2.story_id = s1.story_id AND s2.article_id <> s1.article_id
+                         JOIN articles AS a2 ON a2.id = s2.article_id
+                         WHERE s1.article_id = i.id
+                         ORDER BY coalesce(a2.published_at, a2.fetched_at), a2.id))
+                        AS story_others,
+                      -- グループのどれかを読んだ時刻、どれかに付けた評価
+                      (SELECT max(rd.read_at) FROM article_stories AS s1
+                       JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                       JOIN reads AS rd ON rd.article_id = s2.article_id AND rd.user_id = :user
+                       WHERE s1.article_id = i.id) AS story_read_at,
+                      EXISTS (
+                        SELECT 1 FROM article_stories AS s1
+                        JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                        JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
+                        WHERE s1.article_id = i.id) AS story_rated,
+                      EXISTS (
+                        SELECT 1 FROM article_stories AS s1
+                        JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                        JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
+                        WHERE s1.article_id = i.id AND rt.value <= 2) AS story_low
                FROM items AS i
                LEFT JOIN artifacts AS d ON d.id = i.digest_id
              ),
@@ -703,6 +763,7 @@ impl Db {
                FROM rows
                LEFT JOIN scores AS s ON s.id = rows.score_id
              )
+             SELECT * FROM (
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
@@ -713,7 +774,12 @@ impl Db {
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
                        WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded,
-                    s.score
+                    s.score, rows.story_id, rows.story_others,
+                    coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
+                    rows.rating IS NOT NULL OR rows.story_rated AS story_rated,
+                    row_number() OVER (
+                      PARTITION BY coalesce(rows.story_id, -rows.id) ORDER BY {order})
+                      AS story_rank
              FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では評価 1〜2、非軽水炉、未採点、閾値未満を隠す
@@ -722,6 +788,8 @@ impl Db {
                     AND rows.relevant = 1 AND rows.rec >= :min))
                {rows_filter}
                {list_filter}
+             ) AS rows
+             WHERE {fold}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
@@ -771,19 +839,25 @@ impl Db {
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),
+                story_id: r.get(21)?,
+                story_others: Vec::new(),
+                story_read: r.get(23)?,
+                story_rated: r.get(24)?,
             };
             Ok((
                 item,
                 r.get::<_, String>(16)?,
                 r.get::<_, String>(18)?,
                 r.get::<_, String>(19)?,
+                r.get::<_, String>(22)?,
             ))
         })?;
         rows.map(|row| {
-            let (mut item, locked_by, matched, excluded) = row?;
+            let (mut item, locked_by, matched, excluded, story_others) = row?;
             item.locked_by = serde_json::from_str(&locked_by)?;
             item.matched = serde_json::from_str(&matched)?;
             item.excluded = serde_json::from_str(&excluded)?;
+            item.story_others = serde_json::from_str(&story_others)?;
             Ok(item)
         })
         .collect()
@@ -794,6 +868,161 @@ impl Db {
 mod tests {
     use super::*;
     use crate::db::test_support::*;
+
+    /// 記事を同じ報道のグループにする（グループの ID は最小の記事 ID）。
+    fn group(db: &Db, ids: &[i64]) {
+        let story = *ids.iter().min().unwrap();
+        for id in ids {
+            db.conn()
+                .execute(
+                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    [*id, story],
+                )
+                .unwrap();
+        }
+    }
+
+    fn set_source(db: &Db, id: i64, source: &str) {
+        db.conn()
+            .execute(
+                "UPDATE articles SET source_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, source],
+            )
+            .unwrap();
+    }
+
+    /// 一覧では、同じ報道のグループを推薦点の最も高い 1 件にまとめ、ほかの記事のソースを添える。
+    /// 件数の上限はまとめた後の件数に掛ける。
+    #[test]
+    fn list_folds_a_story_into_its_best_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-24T00:00:00Z", 80);
+        let other = scored_article(&db, "https://e.com/o", Lang::En, "2026-09-24T00:00:00Z", 65);
+        set_source(&db, a, "wnn");
+        set_source(&db, c, "jaif");
+        group(&db, &[a, b, c]);
+        assert_eq!(list_ids(&db, false), [b, other]);
+        let items = db.list_articles(list_query(&db, false)).unwrap();
+        assert_eq!(items[0].story_id, Some(a));
+        // 日時の順
+        assert_eq!(items[0].story_others, ["jaif", "wnn"]);
+        assert_eq!(items[1].story_id, None);
+        assert!(items[1].story_others.is_empty());
+        let limited: Vec<i64> = db
+            .list_articles(ListQuery {
+                limit: 2,
+                ..list_query(&db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
+        assert_eq!(limited, [b, other]);
+    }
+
+    /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。評価 1〜2 も同じ。
+    #[test]
+    fn list_hides_a_story_read_or_rated_low_anywhere() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 85);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        let user = db.owner_id().unwrap();
+        let unread = |db: &Db| -> Vec<i64> {
+            db.list_articles(ListQuery {
+                read: Some(false),
+                ..list_query(db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+        };
+        assert_eq!(unread(&db), [b, d]);
+        db.set_read(user, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(unread(&db), [d]);
+        db.rate(
+            user,
+            c,
+            Some(Rating::new(1).unwrap()),
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(unread(&db).is_empty());
+        // 「すべて」では隠さない
+        assert_eq!(list_ids(&db, true).len(), 2);
+    }
+
+    /// 検索ではまとめない（グループの記事を全部出し、ほかの記事のソースは添える）。
+    #[test]
+    fn search_keeps_every_article_of_a_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        group(&db, &[a, b]);
+        let items = db.search_articles(&search_query(&db)).unwrap();
+        let mut ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [a, b]);
+        assert!(items.iter().all(|i| i.story_others == ["s"]));
+    }
+
+    /// 選んだ後にグループのほかの記事を評価したら、その日の確認枠からも外す（記事自身の評価と同じ）。
+    /// 読んだことは印として返し、一覧と同じく画面で絞る。
+    #[test]
+    fn explore_drops_picks_whose_story_was_rated_later() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let user = db.owner_id().unwrap();
+        let picks = |db: &Db| -> Vec<(i64, bool)> {
+            db.explore(list_query(db, false), 5, "2026-09-27")
+                .unwrap()
+                .into_iter()
+                .map(|i| (i.article_id, i.story_read))
+                .collect()
+        };
+        assert_eq!(picks(&db).len(), 2);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        db.set_read(user, d, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.rate(
+            user,
+            b,
+            Some(Rating::new(4).unwrap()),
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(picks(&db), [(c, true)]);
+    }
+
+    /// 確認枠でも 1 グループ 1 件にし、読んだグループは選ばない。
+    #[test]
+    fn explore_picks_one_article_per_unread_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 40);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 40);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        let user = db.owner_id().unwrap();
+        db.set_read(user, c, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let picks = db.explore(list_query(&db, false), 5, "2026-09-27").unwrap();
+        let ids: Vec<i64> = picks.iter().map(|i| i.article_id).collect();
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        assert!([a, b].contains(&ids[0]), "{ids:?}");
+    }
 
     /// 一覧を開くたびに区切りが進むと、再読み込みや詳細からの戻りで「前回から」の記事が
     /// 「それ以前」に移ってしまう。間隔の短い閲覧は同じ訪問とみなし、区切りを保つ。

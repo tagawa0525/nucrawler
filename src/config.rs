@@ -90,15 +90,18 @@ pub enum LlmTask {
     Score,
     Translate,
     Title,
+    /// 同じ報道・関連の判定
+    Story,
     Tidy,
 }
 
 impl LlmTask {
-    pub const ALL: [LlmTask; 5] = [
+    pub const ALL: [LlmTask; 6] = [
         LlmTask::Digest,
         LlmTask::Score,
         LlmTask::Translate,
         LlmTask::Title,
+        LlmTask::Story,
         LlmTask::Tidy,
     ];
 }
@@ -109,11 +112,12 @@ pub struct LlmConfig {
     /// LLM を呼ぶバックエンドの既定。工程ごとに `*_backend` で変えられる。各工程のモデル名は、
     /// その工程のバックエンドの名前にする
     pub backend: LlmBackend,
-    /// 要約・採点・和訳・見出しの和訳・語彙の整理のバックエンド（省けば `backend`）
+    /// 要約・採点・和訳・見出しの和訳・同じ報道の判定・語彙の整理のバックエンド（省けば `backend`）
     pub digest_backend: Option<LlmBackend>,
     pub score_backend: Option<LlmBackend>,
     pub translate_backend: Option<LlmBackend>,
     pub title_backend: Option<LlmBackend>,
+    pub story_backend: Option<LlmBackend>,
     pub tidy_backend: Option<LlmBackend>,
     /// `claude` の実行ファイル（PATH から探す）。省けば `claude`
     pub command: Option<String>,
@@ -147,6 +151,10 @@ pub struct LlmConfig {
     pub title_model: String,
     /// 1 回の呼び出しで和訳する見出しの数
     pub title_batch_size: usize,
+    /// 同じ報道・関連の判定に使うモデル
+    pub story_model: String,
+    /// 1 回の呼び出しで判定する記事数（候補の無い記事は LLM を呼ばずに済ませる）
+    pub story_batch_size: usize,
     /// 同時に動かすバックエンド（claude・copilot）の数の上限（プロセスをまたいで数える）
     pub concurrency: usize,
 }
@@ -167,6 +175,7 @@ impl LlmConfig {
             LlmTask::Score => self.score_backend,
             LlmTask::Translate => self.translate_backend,
             LlmTask::Title => self.title_backend,
+            LlmTask::Story => self.story_backend,
             LlmTask::Tidy => self.tidy_backend,
         }
         .unwrap_or(self.backend)
@@ -214,6 +223,7 @@ impl Default for LlmConfig {
             score_backend: None,
             translate_backend: None,
             title_backend: None,
+            story_backend: None,
             tidy_backend: None,
             command: None,
             copilot_command: None,
@@ -231,6 +241,8 @@ impl Default for LlmConfig {
             tidy_interval_days: 7,
             title_model: "sonnet".into(),
             title_batch_size: 30,
+            story_model: String::new(),
+            story_batch_size: 0,
             concurrency: 2,
         }
     }
@@ -693,6 +705,7 @@ mod tests {
             LlmTask::Digest,
             LlmTask::Translate,
             LlmTask::Title,
+            LlmTask::Story,
             LlmTask::Tidy,
         ] {
             assert_eq!(c.llm.backend_for(task), LlmBackend::CopilotCli, "{task:?}");
@@ -707,7 +720,8 @@ mod tests {
         let c = parse_config(
             "[llm]\nbackend = \"copilot-cli\"\ndigest_backend = \"claude-cli\"\n\
              score_backend = \"claude-cli\"\ntranslate_backend = \"claude-cli\"\n\
-             title_backend = \"claude-cli\"\ntidy_backend = \"claude-cli\"\n",
+             title_backend = \"claude-cli\"\nstory_backend = \"claude-cli\"\n\
+             tidy_backend = \"claude-cli\"\n",
             p(),
         );
         assert!(c.is_ok(), "{c:?}");
@@ -764,6 +778,7 @@ mod tests {
             ("[llm]\ntranslate_min_score = 0\n", "translate_min_score"),
             ("[llm]\ntidy_interval_days = 0\n", "tidy_interval_days"),
             ("[llm]\ntitle_batch_size = 0\n", "title_batch_size"),
+            ("[llm]\nstory_batch_size = 0\n", "story_batch_size"),
             ("[llm]\nconcurrency = 0\n", "concurrency"),
         ] {
             let err = parse_config(toml, p()).unwrap_err();
@@ -794,6 +809,7 @@ mod tests {
         assert_eq!(d.tidy_model, "sonnet");
         assert_eq!(d.tidy_interval_days, 7);
         assert_eq!((d.title_model.as_str(), d.title_batch_size), ("sonnet", 30));
+        assert_eq!((d.story_model.as_str(), d.story_batch_size), ("sonnet", 10));
         assert_eq!(d.concurrency, 2);
     }
 

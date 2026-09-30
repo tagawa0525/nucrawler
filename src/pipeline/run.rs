@@ -201,6 +201,7 @@ pub async fn crawl<L: LlmSet>(
                 );
                 block(report, env.backend(LlmTask::Title), summary.halted);
             }
+            Stage::Story => todo!("the story stage"),
             Stage::Tidy => {
                 let now = (env.clock)();
                 let summary =

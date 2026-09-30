@@ -65,7 +65,8 @@ fn prompt_article(doc: &Doc) -> p::Article {
     }
 }
 
-/// 判定と組を保存する。候補の単位への same / related は、その単位の記事すべてへの組にする。
+/// 判定と組を保存する。候補の単位への same / related は、その単位の記事すべてへの組にし、
+/// どちらでもない候補は無関係の組にする。
 #[allow(clippy::too_many_arguments)]
 fn save(
     db: &Db,
@@ -78,20 +79,19 @@ fn save(
     now: DateTime<Utc>,
 ) -> Result<(), DbError> {
     let mut links = Vec::new();
-    for (units, relation) in [
-        (same, StoryRelation::Same),
-        (related, StoryRelation::Related),
-    ] {
-        for unit in units {
-            let Some(c) = candidates.iter().find(|c| c.id == *unit) else {
-                continue;
-            };
-            links.extend(c.members.iter().map(|&other_id| StoryLink {
-                other_id,
-                relation,
-                similarity: c.similarity,
-            }));
-        }
+    for c in candidates {
+        let relation = if same.contains(&c.id) {
+            StoryRelation::Same
+        } else if related.contains(&c.id) {
+            StoryRelation::Related
+        } else {
+            StoryRelation::Unrelated
+        };
+        links.extend(c.members.iter().map(|&other_id| StoryLink {
+            other_id,
+            relation,
+            similarity: c.similarity,
+        }));
     }
     let payload = serde_json::json!({
         "candidates": candidates.iter().map(|c| c.id).collect::<Vec<_>>(),
@@ -533,8 +533,8 @@ mod tests {
         let jaif = article(&db, "jaif", 27, EIB_JAIF);
         let llm = FakeLlm::new([judgments(&[
             (jaif, &[wnn, ans], &[]),
-            (ans, &[], &[]),
-            (wnn, &[], &[]),
+            (ans, &[wnn, jaif], &[]),
+            (wnn, &[ans, jaif], &[]),
         ])]);
         run(&db, &llm, &mut quota(10)).await;
         assert_eq!(stories(&db), [(wnn, wnn), (ans, wnn), (jaif, wnn)]);

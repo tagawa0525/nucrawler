@@ -188,19 +188,26 @@ impl Db {
     }
 
     /// 記事ごとの最新の判定の same の組をつないで、グループ（`article_stories`）を作り直す。
-    /// グループが大きくなりすぎるので捨てた組を返す。
+    /// 相手の最新の判定が同じ組を same 以外（related・unrelated）にしていれば、判定が割れたので
+    /// つながない。グループが大きくなりすぎるので捨てた組を返す。
     pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
         let tx = self.conn.unchecked_transaction()?;
         let edges: Vec<Edge> = {
             let mut stmt = tx.prepare(
-                "SELECT r.article_id, l.other_id, l.similarity
-                 FROM story_links AS l
-                 JOIN artifacts AS r ON r.id = l.artifact_id
-                 WHERE l.relation = 'same'
-                   AND r.id = (
+                "WITH latest AS (
+                   SELECT r.article_id, l.other_id, l.relation, l.similarity
+                   FROM story_links AS l
+                   JOIN artifacts AS r ON r.id = l.artifact_id
+                   WHERE r.id = (
                      SELECT r2.id FROM artifacts AS r2
                      WHERE r2.article_id = r.article_id AND r2.kind = 'story'
-                     ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)",
+                     ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1))
+                 SELECT x.article_id, x.other_id, x.similarity FROM latest AS x
+                 WHERE x.relation = 'same'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM latest AS y
+                     WHERE y.article_id = x.other_id AND y.other_id = x.article_id
+                       AND y.relation <> 'same')",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(Edge {

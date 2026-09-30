@@ -42,18 +42,20 @@ CREATE TRIGGER search_docs_artifact_delete AFTER DELETE ON artifacts BEGIN
     DELETE FROM search_docs WHERE artifact_id = OLD.id;
 END;
 
--- 判定した組。same は同じ出来事の報道、related は同じ案件の別の出来事（続報など）。similarity は
--- 候補を選んだときの文字の類似度で、グループをつなぐ順に使う。
+-- 判定した組。same は同じ出来事の報道、related は同じ案件の別の出来事（続報など）、unrelated は候補に
+-- したがどちらでもないもの（逆向きの判定と割れたら、つながないために残す）。similarity は候補を選んだ
+-- ときの文字の類似度で、グループをつなぐ順に使う。
 CREATE TABLE story_links (
     artifact_id INTEGER NOT NULL REFERENCES artifacts (id) ON DELETE CASCADE,
     other_id    INTEGER NOT NULL REFERENCES articles (id) ON DELETE CASCADE,
-    relation    TEXT NOT NULL CHECK (relation IN ('same', 'related')),
+    relation    TEXT NOT NULL CHECK (relation IN ('same', 'related', 'unrelated')),
     similarity  REAL NOT NULL,
     PRIMARY KEY (artifact_id, other_id)
 );
 CREATE INDEX story_links_by_other ON story_links (other_id);
 
--- 一覧で 1 件にまとめるグループ。same の組をつないだもの（2 件以上）で、story_links から作り直す派生データ。
+-- 一覧で 1 件にまとめるグループ。same の組（相手の判定も same か、相手が判定していないもの）をつないだもの
+-- （2 件以上）で、story_links から作り直す派生データ。
 -- story_id はグループの最小の記事 ID。
 CREATE TABLE article_stories (
     article_id INTEGER PRIMARY KEY REFERENCES articles (id) ON DELETE CASCADE,

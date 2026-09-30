@@ -475,8 +475,8 @@ impl Db {
             item,
             has_body,
             adjustments,
-            story: Vec::new(),
-            related: Vec::new(),
+            story: self.story_members(user_id, article_id)?,
+            related: self.related_articles(user_id, article_id)?,
         }))
     }
 

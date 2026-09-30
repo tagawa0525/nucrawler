@@ -83,6 +83,8 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     }
     // 一覧のカードと同じく 点数・評価・既読・ブックマーク の順
     body.push_str(&super::list::marks(i, &super::list::score_badge(i)));
+    body.push_str(&story_section("同じ報道", &d.story, page));
+    body.push_str(&story_section("関連記事", &d.related, page));
     if d.digests.len() > 1 {
         body.push_str("<p class=\"versions meta\">要約の版：");
         for v in &d.digests {
@@ -102,6 +104,34 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     // 評価・印は一覧と同じく、ページを移らずにその場で付け外しする
     body.push_str(super::list::MARKS_SCRIPT);
     layout(&title, page, &body)
+}
+
+/// 同じ報道・関連記事の節（記事が無ければ出さない）。関連のグループは「他 n 件」を添える。
+fn story_section(heading: &str, articles: &[crate::db::StoryArticle], page: &Page) -> String {
+    if articles.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("<h2>{heading}</h2><ul>");
+    for a in articles {
+        let title = [a.title_ja.as_deref().unwrap_or(""), &a.title]
+            .into_iter()
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or("");
+        let others = if a.others > 0 {
+            format!(" ・他 {} 件", a.others)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "<li><a href=\"/articles/{}\">{}</a> <span class=\"meta\">{} ・{}{others}</span></li>",
+            a.article_id,
+            escape(title),
+            escape(page.source(&a.source_id)),
+            crate::jst::format_local(&a.at),
+        ));
+    }
+    out.push_str("</ul>");
+    out
 }
 
 /// コメントの欄。コメントは改行を保って並べ、書く欄と自分のコメントの編集は畳んでおく。

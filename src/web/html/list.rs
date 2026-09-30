@@ -557,6 +557,25 @@ pub(super) fn score_badge(i: &ListItem) -> String {
     }
 }
 
+/// 同じ報道のグループのほかの記事の数とソース（ソースは重ねない）。グループでなければ空。
+fn story_others(i: &ListItem, page: &Page) -> String {
+    if i.story_others.is_empty() {
+        return String::new();
+    }
+    let mut sources: Vec<&str> = Vec::new();
+    for s in &i.story_others {
+        let label = page.source(s);
+        if !sources.contains(&label) {
+            sources.push(label);
+        }
+    }
+    format!(
+        " ・他 {} 件（{}）",
+        i.story_others.len(),
+        escape(&sources.join("・"))
+    )
+}
+
 /// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
 /// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
@@ -587,7 +606,8 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
         .map_or_else(String::new, |s| format!("<div>{}</div>", escape(s)));
     format!(
         "<div class=\"card{read}\"{swipe}>{title_score}<a class=\"title\" href=\"/articles/{id}\">{title}</a>\
-         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}</div>{matches}{summary}{marks}</div>",
+         <div class=\"meta\">{source} ・{at}{rating}{bookmarked}{lock}{translation}{story}</div>{matches}{summary}{marks}</div>",
+        story = story_others(i, page),
         read = if i.is_read() { " read" } else { "" },
         swipe = if swipe {
             format!(" data-id=\"{}\" tabindex=\"0\"", i.article_id)

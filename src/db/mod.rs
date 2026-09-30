@@ -482,6 +482,92 @@ mod tests {
         );
     }
 
+    /// 同じ報道の判定（story）を保存できるよう作り直しても、行・参照している側の行・全文検索を保つ。
+    /// story は検索に入れない。判定した組とグループは、記事を消すと消える。
+    #[test]
+    fn migration_adds_stories() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("'story'"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/a', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (2, 'r', 'https://e.example/b', 'u', 'ja', '2026-09-27T00:00:00.000Z');
+             INSERT INTO contents (id, article_id, kind, text, origin, fetched_at)
+               VALUES (1, 1, 'body', 'x', 'page', '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifacts
+               (id, article_id, kind, backend, model, prompt_version, input_scope, payload,
+                created_at)
+               VALUES (1, 1, 'digest', 'b', 'm', 1, 'public',
+                       '{\"title_ja\": \"題\", \"summary_ja\": \"要約\"}',
+                       '2026-09-27T00:00:00.000Z');
+             INSERT INTO artifact_inputs VALUES (1, 1, 1);
+             INSERT INTO artifact_topics (artifact_id, topic_id) VALUES (1, 1);
+             INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, created_at)
+               VALUES (1, 1, 'h', 'b', 'm', 1, 50, '2026-09-27T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        let count = |sql: &str| db.query_i64(sql).unwrap();
+        for table in ["artifacts", "artifact_inputs", "artifact_topics", "scores"] {
+            assert_eq!(
+                count(&format!("SELECT count(*) FROM {table}")),
+                1,
+                "{table}"
+            );
+        }
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id = 1"),
+            1
+        );
+
+        db.conn()
+            .execute_batch(
+                "INSERT INTO artifacts
+                   (id, article_id, kind, backend, model, prompt_version, input_scope, payload,
+                    created_at)
+                 VALUES (2, 1, 'story', 'b', 'm', 1, 'public',
+                         '{\"candidates\": [2], \"same\": [2], \"related\": []}',
+                         '2026-09-28T00:00:00.000Z');
+                 INSERT INTO story_links (artifact_id, other_id, relation, similarity)
+                   VALUES (2, 2, 'same', 0.5);
+                 INSERT INTO article_stories (article_id, story_id) VALUES (1, 1), (2, 1);",
+            )
+            .unwrap();
+        assert_eq!(
+            count("SELECT count(*) FROM search_docs WHERE artifact_id = 2"),
+            0
+        );
+        assert!(
+            db.conn()
+                .execute(
+                    "INSERT INTO story_links (artifact_id, other_id, relation, similarity)
+                     VALUES (2, 1, 'other', 0.5)",
+                    [],
+                )
+                .is_err()
+        );
+        db.conn()
+            .execute("DELETE FROM articles WHERE id = 2", [])
+            .unwrap();
+        assert_eq!(count("SELECT count(*) FROM story_links"), 0);
+        assert_eq!(count("SELECT count(*) FROM article_stories"), 1);
+        db.conn()
+            .execute("DELETE FROM articles WHERE id = 1", [])
+            .unwrap();
+        assert_eq!(count("SELECT count(*) FROM artifacts"), 0);
+        assert_eq!(count("SELECT count(*) FROM article_stories"), 0);
+    }
+
     #[test]
     fn migration_adds_prompt_version_to_scores() {
         let conn = Connection::open_in_memory().unwrap();

@@ -9,6 +9,8 @@ pub enum ArtifactKind {
     Judgment,
     /// 本文が無く要約できない記事の見出しの和訳
     Title,
+    /// 同じ報道・関連の判定（payload は記事の ID だけ）
+    Story,
 }
 
 impl ArtifactKind {
@@ -18,6 +20,7 @@ impl ArtifactKind {
             Self::Translation => "translation",
             Self::Judgment => "judgment",
             Self::Title => "title",
+            Self::Story => "story",
         }
     }
 }
@@ -432,6 +435,35 @@ mod tests {
             ["title|public|見出し"]
         );
         assert_eq!(access_of(&db, id), Vec::<i64>::new());
+    }
+
+    /// 同じ報道の判定は記事の ID しか持たないので、入力が無くても保存できる。
+    #[test]
+    fn insert_artifact_accepts_stories_without_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        let a = page_article(&db, "https://e.com/a", "2026-09-20T00:00:00.000Z");
+        let id = db
+            .insert_artifact(
+                &NewArtifact {
+                    article_id: a,
+                    kind: ArtifactKind::Story,
+                    backend: "claude-cli",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({"candidates": [], "same": [], "related": []}),
+                    inputs: &[],
+                    glossary_at: None,
+                },
+                t("2026-09-27T00:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT kind || '|' || input_scope FROM artifacts WHERE id = {id}"
+            ))
+            .unwrap(),
+            ["story|public"]
+        );
     }
 
     /// 見出しの和訳は公開のものとして閲覧の制限を確かめずに表示するので、本文を入力にしたものは拒む。

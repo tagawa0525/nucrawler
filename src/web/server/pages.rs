@@ -275,6 +275,7 @@ pub(super) async fn feed(
             &items,
             &base,
             &self_href,
+            user,
             &labels,
             &crate::db::timestamp(now),
         )))

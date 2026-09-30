@@ -19,6 +19,7 @@ pub mod robots;
 pub mod search;
 pub mod source;
 pub mod status;
+pub mod story;
 pub mod suggest;
 pub mod text;
 pub mod topics;

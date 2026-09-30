@@ -8,6 +8,7 @@ pub mod llm_call;
 pub mod lock;
 pub mod run;
 pub mod score;
+pub mod story;
 pub mod suggest;
 pub mod tidy;
 pub mod title;
@@ -113,6 +114,8 @@ pub enum Stage {
     Translate,
     /// 本文が無く要約できない英語記事の見出しの和訳
     Title,
+    /// 同じ報道・関連の判定（一覧で同じ報道を 1 件にまとめる）
+    Story,
     /// 語彙の整理。前回から `llm.tidy_interval_days` 日たったときだけ実行する
     Tidy,
 }
@@ -125,6 +128,7 @@ impl Stage {
         Stage::Score,
         Stage::Translate,
         Stage::Title,
+        Stage::Story,
         Stage::Tidy,
     ];
 
@@ -137,6 +141,7 @@ impl Stage {
             Stage::Score => Some(LlmTask::Score),
             Stage::Translate => Some(LlmTask::Translate),
             Stage::Title => Some(LlmTask::Title),
+            Stage::Story => Some(LlmTask::Story),
             Stage::Tidy => Some(LlmTask::Tidy),
         }
     }
@@ -149,6 +154,7 @@ impl Stage {
             Stage::Score => "score",
             Stage::Translate => "translate",
             Stage::Title => "title",
+            Stage::Story => "story",
             Stage::Tidy => "tidy",
         }
     }
@@ -161,7 +167,9 @@ impl Stage {
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title => LockKind::Llm,
+            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Story => {
+                LockKind::Llm
+            }
             Stage::Tidy => LockKind::Tidy,
         }
     }
@@ -281,7 +289,13 @@ mod tests {
                 (LockKind::Fetch, vec![Stage::Fetch, Stage::Extract]),
                 (
                     LockKind::Llm,
-                    vec![Stage::Digest, Stage::Score, Stage::Translate, Stage::Title]
+                    vec![
+                        Stage::Digest,
+                        Stage::Score,
+                        Stage::Translate,
+                        Stage::Title,
+                        Stage::Story
+                    ]
                 ),
                 (LockKind::Tidy, vec![Stage::Tidy]),
             ]

@@ -926,6 +926,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_user_args() {
+        assert_eq!(
+            parse(args(&["user", "list"])).unwrap().command,
+            Command::User
+        );
+        assert_eq!(
+            parse_user_args(&args(&["add", "a@example.com", "A さん"])).unwrap(),
+            UserArgs::Add {
+                login: "a@example.com".into(),
+                display_name: "A さん".into()
+            }
+        );
+        for (cmd, expected) in [
+            (
+                "reset-password",
+                UserArgs::ResetPassword { login: "a".into() },
+            ),
+            ("disable", UserArgs::Disable { login: "a".into() }),
+        ] {
+            assert_eq!(parse_user_args(&args(&[cmd, "a"])).unwrap(), expected);
+        }
+        assert_eq!(
+            parse_user_args(&args(&["rename", "owner", "me@example.com"])).unwrap(),
+            UserArgs::Rename {
+                login: "owner".into(),
+                new_login: "me@example.com".into()
+            }
+        );
+        assert_eq!(parse_user_args(&args(&["list"])).unwrap(), UserArgs::List);
+    }
+
+    #[test]
+    fn rejects_bad_user_args() {
+        for bad in [
+            &[][..],
+            &["add", "a"][..],
+            &["disable"][..],
+            &["remove", "a"][..],
+            &["list", "x"][..],
+            // ログイン ID は空でなく 254 バイト以下
+            &["add", "", "A"][..],
+            &["rename", "owner", " "][..],
+        ] {
+            let err = parse_user_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::UserUsage), "{bad:?}: {err}");
+        }
+        let long = "a".repeat(255);
+        let err = parse_user_args(&args(&["add", &long, "A"])).unwrap_err();
+        assert!(matches!(err, ParseError::UserUsage), "{err}");
+    }
+
+    #[test]
     fn no_subcommand_is_help() {
         assert_eq!(parse(args(&[])).unwrap().command, Command::Help);
     }

@@ -20,6 +20,7 @@ mod stories;
 #[cfg(test)]
 mod test_support;
 mod translate;
+mod users;
 mod vocab;
 mod warnings;
 
@@ -36,6 +37,7 @@ pub use sources::*;
 pub use stages::*;
 pub use stories::*;
 pub use translate::*;
+pub use users::*;
 pub use vocab::*;
 pub use warnings::*;
 

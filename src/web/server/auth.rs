@@ -670,6 +670,36 @@ mod tests {
         );
     }
 
+    /// フィードの ID は利用者ごとに違い、トークンを作り直しても変わらない（リーダーが別の利用者の購読と混ぜないように）。
+    #[tokio::test]
+    async fn feed_ids_are_per_user_and_survive_token_rotation() {
+        let db = Db::open_in_memory().unwrap();
+        let other = other_user(&db, "b@example.com");
+        insert_session(&db, other, "b-session");
+        let server = Server::start(db).await;
+        let feed_id = |xml: &str| {
+            xml.split_once("<id>")
+                .and_then(|(_, rest)| rest.split_once("</id>"))
+                .unwrap()
+                .0
+                .to_string()
+        };
+        let (_, mine) = server.get(&server.feed_path()).await;
+        let (_, rotated) = server.get(&server.feed_path()).await;
+        assert_eq!(feed_id(&mine), feed_id(&rotated));
+        let theirs = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .rotate_feed_token("b-session", chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        let (_, theirs) = server.get(&format!("/feed.xml?token={theirs}")).await;
+        assert_ne!(feed_id(&mine), feed_id(&theirs));
+        assert!(!feed_id(&mine).contains("token"), "{mine}");
+    }
+
     /// IP ごとの失敗は、ポートを除いたアドレスで数え、15 分途切れたら数え直す。記録の数には上限がある。
     #[test]
     fn ip_throttle_counts_by_address() {

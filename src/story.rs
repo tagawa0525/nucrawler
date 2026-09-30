@@ -11,8 +11,9 @@ use chrono::{DateTime, Utc};
 /// 候補にする記事の日時（公開、無ければ取得）の差の上限（日）。同じ出来事でも、
 /// 報じるのが 2 週間ほど遅れるソースがある。
 pub const WINDOW_DAYS: i64 = 21;
-/// 候補にする類似度の下限。手元の DB では、同じ報道の組が 0.18 以上に出た。
-pub const MIN_SIMILARITY: f64 = 0.15;
+/// 候補にする類似度の下限。手元の DB（2026-09-30、±21 日の 275 件）では、同じ報道と判定した
+/// 別ソースの組 32 組のうち 31 組がこれ以上に出た。
+pub const MIN_SIMILARITY: f64 = 0.17;
 /// 対象と別のソースから選ぶ候補の単位（グループか単独の記事）の数の上限。
 pub const MAX_OTHER_SOURCE: usize = 5;
 /// 対象と同じソースから選ぶ候補の単位の数の上限（連番の発表が候補を占めないように）。
@@ -73,7 +74,9 @@ fn bigrams(text: &str) -> HashMap<(char, char), usize> {
     counts
 }
 
-/// プールの記事の TF-IDF ベクトル（長さ 1 に揃える）。IDF はプールの中で数える。
+/// プールの記事の TF-IDF ベクトル（長さ 1 に揃える）。IDF はプールの中で数え、どの記事にもある
+/// bigram も重みが 0 にならないよう平滑化する（`ln((N + 1) / (df + 1)) + 1`。0 にすると、小さな
+/// プールでは同じ文どうしでも類似度が 0 になる）。
 #[derive(Debug)]
 pub struct Index {
     docs: Vec<(Doc, Vector)>,
@@ -96,7 +99,10 @@ impl Index {
             .map(|(doc, counts)| {
                 let mut v: Vector = counts
                     .into_iter()
-                    .map(|(g, tf)| (g, tf as f64 * (n / df[&g] as f64).ln()))
+                    .map(|(g, tf)| {
+                        let idf = ((n + 1.0) / (df[&g] as f64 + 1.0)).ln() + 1.0;
+                        (g, tf as f64 * idf)
+                    })
                     .collect();
                 let norm = v.values().map(|x| x * x).sum::<f64>().sqrt();
                 if norm > 0.0 {
@@ -343,7 +349,8 @@ mod tests {
         docs.extend(filler(100));
         let index = Index::new(docs);
         let cs = index.candidates(1, &HashMap::new());
-        let same_source = cs.iter().filter(|c| c.id != 7).count();
+        // 記事 2〜6 が対象と同じ iaea
+        let same_source = cs.iter().filter(|c| (2..=6).contains(&c.id)).count();
         assert_eq!(same_source, MAX_SAME_SOURCE, "{cs:?}");
         assert!(ids(&cs).contains(&7), "{cs:?}");
         // 類似度の高い順

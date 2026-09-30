@@ -594,6 +594,40 @@ mod tests {
         );
     }
 
+    /// 判定を保存した後、グループを作り直す前に落ちた実行の分も、次の実行の最初に作り直す
+    /// （判定する記事が無くても）。
+    #[tokio::test]
+    async fn rebuilds_stories_left_stale_by_an_earlier_run() {
+        let db = Db::open_in_memory().unwrap();
+        let a = article(&db, "wnn", 15, EIB_WNN);
+        let b = article(&db, "jaif", 27, EIB_JAIF);
+        for (x, y) in [(a, b), (b, a)] {
+            db.insert_story(
+                &crate::db::NewArtifact {
+                    article_id: x,
+                    kind: crate::db::ArtifactKind::Story,
+                    backend: "fake",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({"candidates": [], "same": [], "related": []}),
+                    inputs: &[],
+                    glossary_at: None,
+                },
+                &[crate::db::StoryLink {
+                    other_id: y,
+                    relation: crate::db::StoryRelation::Same,
+                    similarity: 0.5,
+                }],
+                now(),
+            )
+            .unwrap();
+        }
+        assert!(stories(&db).is_empty());
+        let llm = FakeLlm::new([]);
+        run(&db, &llm, &mut quota(10)).await;
+        assert_eq!(stories(&db), [(a, a), (b, a)]);
+    }
+
     /// 1 件の記事が複数の候補と same なら、それらが 1 つのグループにまとまる。
     #[tokio::test]
     async fn one_article_can_join_several_candidates() {

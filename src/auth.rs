@@ -1,6 +1,144 @@
 //! 認証の部品：パスワードのハッシュと照合、トークンと初期パスワードの生成、ログインの失敗の待ち時間。
 //! 乱数は OS から取る。DB と Web には依存しない（計画 009）。
 
+use std::sync::LazyLock;
+
+use argon2::Argon2;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("failed to read random bytes from the OS")]
+    Random(#[from] getrandom::Error),
+    #[error("failed to hash a password: {0}")]
+    Hash(argon2::password_hash::Error),
+}
+
+/// 本人が決めるパスワードの最短の文字数。
+pub const MIN_PASSWORD_CHARS: usize = 12;
+/// パスワードの最長のバイト数。極端に長い入力でハッシュの計算を重くされないよう、計算の前に確かめる。
+pub const MAX_PASSWORD_BYTES: usize = 1024;
+/// ログイン ID の最長のバイト数（メールアドレスの上限）。
+pub const MAX_LOGIN_BYTES: usize = 254;
+/// セッションの有効期間（ログインから）。
+pub const SESSION_DAYS: i64 = 30;
+/// ID ごとの失敗の回数の上限。待ち時間はここで上限に達するので、これより先は数えない。
+pub const MAX_FAILURES: u8 = 10;
+
+/// 新しいパスワードが条件を満たさない理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordRule {
+    TooShort,
+    TooLong,
+}
+
+impl std::fmt::Display for PasswordRule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasswordRule::TooShort => {
+                write!(
+                    f,
+                    "パスワードは {MIN_PASSWORD_CHARS} 文字以上にしてください"
+                )
+            }
+            PasswordRule::TooLong => {
+                write!(
+                    f,
+                    "パスワードは {MAX_PASSWORD_BYTES} バイト以下にしてください"
+                )
+            }
+        }
+    }
+}
+
+/// 本人が決めるパスワードの条件。文字の種類は問わない（長さのほうが強さに効くため）。
+pub fn check_password(password: &str) -> Result<(), PasswordRule> {
+    if !within_password_limit(password) {
+        Err(PasswordRule::TooLong)
+    } else if password.chars().count() < MIN_PASSWORD_CHARS {
+        Err(PasswordRule::TooShort)
+    } else {
+        Ok(())
+    }
+}
+
+/// ハッシュを計算してよい長さか（ログインの入力にも掛ける上限）。
+pub fn within_password_limit(password: &str) -> bool {
+    password.len() <= MAX_PASSWORD_BYTES
+}
+
+/// ログイン ID として使えるか（空白だけでなく、254 バイト以下）。
+pub fn valid_login(login: &str) -> bool {
+    !login.trim().is_empty() && login.len() <= MAX_LOGIN_BYTES
+}
+
+/// argon2id（既定の強さ）でハッシュにし、PHC 文字列（`$argon2id$...`）で返す。ソルトは毎回 OS の乱数から作る。
+pub fn hash_password(password: &str) -> Result<String, AuthError> {
+    Argon2::default()
+        .hash_password(password.as_bytes())
+        .map(|h| h.to_string())
+        .map_err(AuthError::Hash)
+}
+
+/// `hash` がこのパスワードのものか。壊れたハッシュは通さない。
+pub fn verify_password(hash: &str, password: &str) -> bool {
+    Argon2::default()
+        .verify_password(password.as_bytes(), hash)
+        .is_ok()
+}
+
+/// ID が無いときやパスワードが無いときに照合する相手。どのパスワードでも通らないが、照合には同じ時間がかかる。
+pub fn dummy_hash() -> &'static str {
+    // 元の値は上限を超える長さにする。ログインの入力は計算の前に上限で断るので、この値とは一致しえない
+    static DUMMY: LazyLock<String> = LazyLock::new(|| {
+        hash_password(&"x".repeat(MAX_PASSWORD_BYTES + 1))
+            .expect("argon2id with default params hashes any input")
+    });
+    &DUMMY
+}
+
+/// 256 bit の乱数を 16 進の 64 文字で返す（セッション・フィードのトークン）。
+pub fn random_token() -> Result<String, AuthError> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 初期パスワードの文字。紛らわしい 0・O・1・l・I を除いた英数字（57 文字）。
+const INITIAL_CHARS: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// CLI が発行する初期パスワード（20 文字、約 116 bit）。
+pub fn initial_password() -> Result<String, AuthError> {
+    // 偏らないよう、文字の数の倍数（57 × 4 = 228）未満のバイトだけを使う
+    let limit = (256 / INITIAL_CHARS.len() * INITIAL_CHARS.len()) as u8;
+    let mut out = String::with_capacity(20);
+    let mut buf = [0u8; 64];
+    while out.len() < 20 {
+        getrandom::fill(&mut buf)?;
+        out.extend(
+            buf.iter()
+                .filter(|b| **b < limit)
+                .map(|b| INITIAL_CHARS[usize::from(*b) % INITIAL_CHARS.len()] as char)
+                .take(20 - out.len()),
+        );
+    }
+    Ok(out)
+}
+
+/// 続けて `failures` 回失敗した後の待ち時間。5 回までは待たず、6〜9 回目は 1・2・4・8 分、10 回目以降は 15 分。
+pub fn lockout(failures: u8) -> Option<chrono::Duration> {
+    match failures {
+        0..=5 => None,
+        6..=9 => Some(chrono::Duration::minutes(1 << (failures - 6))),
+        _ => Some(chrono::Duration::minutes(15)),
+    }
+}
+
+/// 失敗を 1 回数えた後の回数（`MAX_FAILURES` で止める）。
+pub fn next_failure_count(failures: u8) -> u8 {
+    failures.saturating_add(1).min(MAX_FAILURES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

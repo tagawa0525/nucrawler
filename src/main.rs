@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use nucrawler::auth::{self, AuthError};
 use nucrawler::check::{self, CheckError};
-use nucrawler::cli::{self, Command, ProfileArgs, SearchArgs, SourcesArgs, TopicsArgs};
+use nucrawler::cli::{self, Command, ProfileArgs, SearchArgs, SourcesArgs, TopicsArgs, UserArgs};
 use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
@@ -39,6 +40,8 @@ enum Error {
     LlmFailed(String),
     #[error(transparent)]
     Profile(#[from] ProfileError),
+    #[error(transparent)]
+    Auth(#[from] AuthError),
     #[error(transparent)]
     Topics(#[from] TopicsError),
     #[error(transparent)]
@@ -151,6 +154,7 @@ async fn run() -> Result<(), Error> {
             .await
         }
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
+        Command::User => user(inv.data_dir, cli::parse_user_args(&inv.args)?),
         Command::Search => search(
             inv.config_dir,
             inv.data_dir,
@@ -211,6 +215,57 @@ fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> R
     let query = args.params.to_query(owner, hash.as_deref(), limit)?;
     for item in db.search_articles(&query)? {
         println!("{}", nucrawler::search::result_line(&item));
+    }
+    Ok(())
+}
+
+/// Web UI の利用者を管理する（CLI を使えるのは稼働ホストに入れる管理者だけ）。パスワードは CLI が作って 1 回だけ表示する。
+fn user(data: Option<PathBuf>, args: UserArgs) -> Result<(), Error> {
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let new_password = || -> Result<(String, String), Error> {
+        let password = auth::initial_password()?;
+        let hash = auth::hash_password(&password)?;
+        Ok((password, hash))
+    };
+    match args {
+        UserArgs::Add {
+            login,
+            display_name,
+        } => {
+            let (password, hash) = new_password()?;
+            db.add_user(&login, &display_name, &hash)?;
+            println!("added {login}; initial password: {password}");
+        }
+        UserArgs::ResetPassword { login } => {
+            let (password, hash) = new_password()?;
+            db.reset_password(&login, &hash)?;
+            println!("reset {login} (sessions and feed URL revoked); new password: {password}");
+        }
+        UserArgs::Disable { login } => {
+            db.disable_user(&login)?;
+            println!(
+                "disabled {login}; run `nucrawler user reset-password {login}` to enable again"
+            );
+        }
+        UserArgs::Rename { login, new_login } => {
+            db.rename_user(&login, &new_login)?;
+            println!("renamed {login} to {new_login}");
+        }
+        UserArgs::List => {
+            for u in db.users()? {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    u.login,
+                    u.display_name,
+                    if u.is_admin { "admin" } else { "user" },
+                    if u.has_password {
+                        "password set"
+                    } else {
+                        "no password"
+                    }
+                );
+            }
+        }
     }
     Ok(())
 }

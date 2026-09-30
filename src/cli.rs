@@ -36,6 +36,12 @@ pub enum ParseError {
     ServeUsage,
     #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
     EvalUsage,
+    #[error(
+        "usage: nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | \
+         nucrawler user disable LOGIN | nucrawler user rename LOGIN NEW_LOGIN | nucrawler user list  \
+         (LOGIN: 1-254 bytes)"
+    )]
+    UserUsage,
 }
 
 /// トップレベルのサブコマンド。各サブコマンド固有の引数は `args` に残し、
@@ -63,6 +69,7 @@ pub enum Command {
     Topics,
     Search,
     Eval,
+    User,
     Help,
 }
 
@@ -85,6 +92,7 @@ commands:
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
+  user      Web UI の利用者の管理（user add LOGIN NAME / reset-password LOGIN / disable LOGIN / rename LOGIN NEW_LOGIN / list）
   help      このヘルプを表示
 ";
 
@@ -116,6 +124,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("topics") => Command::Topics,
         Some("search") => Command::Search,
         Some("eval") => Command::Eval,
+        Some("user") => Command::User,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -443,6 +452,43 @@ pub fn parse_topics_args(args: &[String]) -> Result<TopicsArgs, ParseError> {
         }),
         [cmd] if cmd == "export" => Ok(TopicsArgs::Export),
         _ => Err(ParseError::TopicsUsage),
+    }
+}
+
+/// `user` サブコマンドの引数。パスワードは引数で受け取らず、CLI が作って表示する（シェルの履歴に残さないため）。
+#[derive(Debug, PartialEq, Eq)]
+pub enum UserArgs {
+    /// `user add LOGIN NAME`：利用者を作り、初期パスワードを表示する
+    Add { login: String, display_name: String },
+    /// `user reset-password LOGIN`：資格をすべて失効させ、新しいパスワードを表示する
+    ResetPassword { login: String },
+    /// `user disable LOGIN`：資格をすべて失効させる（戻すときは reset-password）
+    Disable { login: String },
+    /// `user rename LOGIN NEW_LOGIN`
+    Rename { login: String, new_login: String },
+    /// `user list`
+    List,
+}
+
+pub fn parse_user_args(args: &[String]) -> Result<UserArgs, ParseError> {
+    let login = |s: &String| {
+        crate::auth::valid_login(s)
+            .then(|| s.clone())
+            .ok_or(ParseError::UserUsage)
+    };
+    match args {
+        [cmd, id, name] if cmd == "add" => Ok(UserArgs::Add {
+            login: login(id)?,
+            display_name: name.clone(),
+        }),
+        [cmd, id] if cmd == "reset-password" => Ok(UserArgs::ResetPassword { login: id.clone() }),
+        [cmd, id] if cmd == "disable" => Ok(UserArgs::Disable { login: id.clone() }),
+        [cmd, id, new] if cmd == "rename" => Ok(UserArgs::Rename {
+            login: id.clone(),
+            new_login: login(new)?,
+        }),
+        [cmd] if cmd == "list" => Ok(UserArgs::List),
+        _ => Err(ParseError::UserUsage),
     }
 }
 

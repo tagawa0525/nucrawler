@@ -104,6 +104,7 @@ nucrawler profile import FILE | nucrawler profile export | nucrawler profile sug
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
+nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler user disable LOGIN | nucrawler user rename LOGIN NEW_LOGIN | nucrawler user list
 ```
 
 - `crawl` は途中で Ctrl-C（または SIGTERM）で止めても、次回は続きから処理する。2 回目のシグナルで即座に終了する
@@ -155,6 +156,13 @@ nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
   書き出した語彙では LLM が足した語に `added_at` が付く。その行を消して取り込めば、人が決めた語になり統合されなくなる。
   統合した語は別名として残り（`topic_aliases` に統合した時刻と LLM を記録）、LLM が同じ名前を付けても統合先に付く。
   誤った統合は、`topics export` した語彙に統合元を足して `topics import` すれば語に戻る
+- `user` は Web UI の利用者（ログイン ID はメールアドレスなど 254 バイト以下）を管理する。管理者は所有者で、
+  CLI を使えるのは稼働ホストに入れる人だけなので、CLI の操作が管理者の確認を兼ねる。パスワードは引数で受け取らず
+  （シェルの履歴に残さないため）、`add` と `reset-password` が紛らわしい文字を除いた英数字 20 文字を作って 1 回だけ表示する。
+  保存するのは argon2id のハッシュだけ。`reset-password` と `disable` は、パスワード・ログイン中のセッション・フィードの URL・
+  ログインの失敗の記録をまとめて失効させる（`disable` はパスワードも無くし、戻すときは `reset-password`）。
+  所有者の初期のログイン ID は `owner` なので、`rename owner you@example.com` と `reset-password` で使えるようにする。
+  利用者の削除は無い（評価や既読の記録ごと消えるため）。Web UI のログインは計画 009 で入れる途中で、今の Web UI は所有者として動く
 - 訳語集は要約と和訳で訳語と略語を揃えるための一覧で、DB が正本（初期値は DB を作るときに入る）。
   1 つの訳語（略語を添えられる）に原語を複数結び付け、表記の揺れや略語をまとめて同じ訳にする。
   LLM には、渡す記事（切り詰めた後の見出しと本文）に原語が出てくる語だけを載せる。

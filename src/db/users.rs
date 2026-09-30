@@ -4,6 +4,420 @@
 
 use super::*;
 
+use rusqlite::OptionalExtension;
+
+use crate::auth;
+
+/// 利用者の一覧の 1 行（`nucrawler user list`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSummary {
+    pub login: String,
+    pub display_name: String,
+    /// 管理者（所有者）
+    pub is_admin: bool,
+    /// パスワードが設定済みで、ログインできる
+    pub has_password: bool,
+}
+
+/// セッションから引いた利用者。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewer {
+    pub user_id: i64,
+    pub is_admin: bool,
+}
+
+/// 本人のパスワードの変更の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordChange {
+    /// 変えた。ほかのセッションとフィードのトークンは消え、要求元には新しいセッションを出す
+    Changed { token: String },
+    /// 今のパスワードが違う（ログインの失敗と同じく数える）
+    WrongPassword,
+    /// ログインの失敗が続いて待ち時間中
+    Locked,
+    /// セッションが無いか、照合の間にパスワードが変わった（停止・リセット・別の変更）
+    NoSession,
+}
+
+/// 書き込みのトランザクションの中で読み直す、利用者の認証の状態。
+struct AuthState {
+    id: i64,
+    password_hash: Option<String>,
+    failed_logins: u8,
+    locked_until: Option<String>,
+}
+
+impl AuthState {
+    const COLUMNS: &str = "u.id, u.password_hash, u.failed_logins, u.locked_until";
+
+    fn from_row(r: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: r.get(0)?,
+            password_hash: r.get(1)?,
+            failed_logins: r.get(2)?,
+            locked_until: r.get(3)?,
+        })
+    }
+
+    /// 待ち時間中か（`now` は `timestamp` の書式。同じ書式なので文字列で比べられる）。
+    fn locked(&self, now: &str) -> bool {
+        self.locked_until
+            .as_deref()
+            .is_some_and(|until| until > now)
+    }
+
+    /// 照合に使ったハッシュが今も同じか。ハッシュには毎回違うソルトが入るので、設定し直せば必ず変わる。
+    fn same_hash(&self, read_hash: Option<&str>) -> bool {
+        read_hash.is_some() && self.password_hash.as_deref() == read_hash
+    }
+}
+
+/// 一意の制約に反したか（ログイン ID の重複）。
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(f, _)
+        if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+}
+
+impl Db {
+    /// 認証の状態を書き換えるトランザクション。始めた時点で書き込みのロックを取り、ほかのプロセスの書き込みと重ならない。
+    fn immediate(&self) -> Result<rusqlite::Transaction<'_>, DbError> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    }
+
+    /// 利用者を作る。パスワードのハッシュは呼び出し側が作る。
+    pub fn add_user(
+        &self,
+        login: &str,
+        display_name: &str,
+        password_hash: &str,
+    ) -> Result<i64, DbError> {
+        self.conn
+            .execute(
+                "INSERT INTO users (login, display_name, password_hash) VALUES (?1, ?2, ?3)",
+                [login, display_name, password_hash],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    DbError::LoginTaken(login.to_string())
+                } else {
+                    e.into()
+                }
+            })?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 利用者の一覧（ログイン ID の順）。
+    pub fn users(&self) -> Result<Vec<UserSummary>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT login, display_name, is_owner, password_hash IS NOT NULL FROM users ORDER BY login",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UserSummary {
+                login: r.get(0)?,
+                display_name: r.get(1)?,
+                is_admin: r.get(2)?,
+                has_password: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// ログイン ID を変える（所有者の `owner` をメールアドレスにするときなど）。
+    pub fn rename_user(&self, login: &str, new_login: &str) -> Result<(), DbError> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE users SET login = ?2 WHERE login = ?1",
+                [login, new_login],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    DbError::LoginTaken(new_login.to_string())
+                } else {
+                    e.into()
+                }
+            })?;
+        if changed == 0 {
+            return Err(DbError::UnknownUser(login.to_string()));
+        }
+        Ok(())
+    }
+
+    /// 資格をすべて失効させてから、新しいパスワードを設定する（`nucrawler user reset-password`）。
+    pub fn reset_password(&self, login: &str, password_hash: &str) -> Result<(), DbError> {
+        self.replace_credentials(login, Some(password_hash))
+    }
+
+    /// 資格をすべて失効させ、パスワードも無くす（`nucrawler user disable`）。戻すときはリセットする。
+    pub fn disable_user(&self, login: &str) -> Result<(), DbError> {
+        self.replace_credentials(login, None)
+    }
+
+    fn replace_credentials(&self, login: &str, password_hash: Option<&str>) -> Result<(), DbError> {
+        let tx = self.immediate()?;
+        let id: i64 = self
+            .conn
+            .query_row("SELECT id FROM users WHERE login = ?1", [login], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| DbError::UnknownUser(login.to_string()))?;
+        self.revoke_credentials(id)?;
+        self.conn.execute(
+            "UPDATE users SET password_hash = ?2 WHERE id = ?1",
+            rusqlite::params![id, password_hash],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// パスワード以外の資格（セッション・フィードのトークン）と、ログインの失敗の記録をまとめて消す。
+    /// 止めるときにどれかを消し忘れると、そこから読み続けられるので、失効はすべてここを通す。
+    fn revoke_credentials(&self, user_id: i64) -> Result<(), DbError> {
+        self.conn
+            .execute("DELETE FROM sessions WHERE user_id = ?1", [user_id])?;
+        self.conn.execute(
+            "UPDATE users SET feed_token = NULL, failed_logins = 0, locked_until = NULL WHERE id = ?1",
+            [user_id],
+        )?;
+        Ok(())
+    }
+
+    /// ログインの 1 段目：照合の相手（今のパスワードのハッシュ）。ID が無いかパスワードが無ければ `None`
+    /// （呼び出し側はダミーのハッシュで照合して時間を揃える）。
+    pub fn login_hash(&self, login: &str) -> Result<Option<String>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT password_hash FROM users WHERE login = ?1",
+                [login],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// ログインの 3 段目：照合の結果（`verified`）と、1 段目で読んだハッシュ（`read_hash`）から判定して書く。
+    /// 成功は、照合が通り、ハッシュが今も同じで、待ち時間中でないときだけで、セッションのトークンを返す。
+    /// 待ち時間中の試行は数えない。それ以外の失敗は、ID があれば回数と待ち時間を更新する。
+    pub fn finish_login(
+        &self,
+        login: &str,
+        read_hash: Option<&str>,
+        verified: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<String>, DbError> {
+        let tx = self.immediate()?;
+        let state = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM users AS u WHERE u.login = ?1",
+                    AuthState::COLUMNS
+                ),
+                [login],
+                AuthState::from_row,
+            )
+            .optional()?;
+        let token = match state {
+            None => None,
+            Some(state) if state.locked(&timestamp(now)) => None,
+            Some(state) if verified && state.same_hash(read_hash) => {
+                self.conn.execute(
+                    "UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?1",
+                    [state.id],
+                )?;
+                Some(self.new_session(state.id, now)?)
+            }
+            Some(state) => {
+                self.record_failure(&state, now)?;
+                None
+            }
+        };
+        tx.commit()?;
+        Ok(token)
+    }
+
+    /// ログインの失敗を 1 回数える。待ち時間に入ったら `true`。
+    fn record_failure(
+        &self,
+        state: &AuthState,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        let failures = auth::next_failure_count(state.failed_logins);
+        let until = auth::lockout(failures).map(|wait| timestamp(now + wait));
+        self.conn.execute(
+            "UPDATE users SET failed_logins = ?2, locked_until = ?3 WHERE id = ?1",
+            rusqlite::params![state.id, failures, until],
+        )?;
+        Ok(until.is_some())
+    }
+
+    /// セッションを作り、トークンを返す。ついでに全員の期限切れのセッションを消す（捨てられた Cookie の行が残らないよう）。
+    fn new_session(
+        &self,
+        user_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<String, DbError> {
+        let at = timestamp(now);
+        self.conn
+            .execute("DELETE FROM sessions WHERE expires_at <= ?1", [&at])?;
+        let token = auth::random_token()?;
+        self.conn.execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                token,
+                user_id,
+                at,
+                timestamp(now + chrono::Duration::days(auth::SESSION_DAYS))
+            ],
+        )?;
+        Ok(token)
+    }
+
+    /// セッションの利用者（期限切れなら `None`）。
+    pub fn session_viewer(
+        &self,
+        token: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Viewer>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT u.id, u.is_owner FROM sessions AS s JOIN users AS u ON u.id = s.user_id
+                 WHERE s.token = ?1 AND s.expires_at > ?2",
+                [token, &timestamp(now)],
+                |r| {
+                    Ok(Viewer {
+                        user_id: r.get(0)?,
+                        is_admin: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn logout(&self, token: &str) -> Result<(), DbError> {
+        self.conn
+            .execute("DELETE FROM sessions WHERE token = ?1", [token])?;
+        Ok(())
+    }
+
+    /// パスワードの変更の 1 段目：セッションの利用者の今のパスワードのハッシュ。
+    pub fn session_password_hash(
+        &self,
+        token: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<String>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT u.password_hash FROM sessions AS s JOIN users AS u ON u.id = s.user_id
+                 WHERE s.token = ?1 AND s.expires_at > ?2",
+                [token, &timestamp(now)],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// パスワードの変更の 3 段目：照合の結果から判定して書く。セッションがまだあり、照合に使ったハッシュが今も同じで、
+    /// 待ち時間中でないときだけ変える。今のパスワードの誤りはログインの失敗と同じく数え、待ち時間に入ったら
+    /// その人のセッションをすべて消す（盗まれたセッションで試している相手を締め出す）。
+    pub fn change_password(
+        &self,
+        token: &str,
+        read_hash: Option<&str>,
+        verified: bool,
+        new_hash: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<PasswordChange, DbError> {
+        let tx = self.immediate()?;
+        let state = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM sessions AS s JOIN users AS u ON u.id = s.user_id
+                     WHERE s.token = ?1 AND s.expires_at > ?2",
+                    AuthState::COLUMNS
+                ),
+                [token, &timestamp(now)],
+                AuthState::from_row,
+            )
+            .optional()?;
+        let outcome = match state {
+            Some(state) if state.same_hash(read_hash) => {
+                if state.locked(&timestamp(now)) {
+                    PasswordChange::Locked
+                } else if !verified {
+                    if self.record_failure(&state, now)? {
+                        self.conn
+                            .execute("DELETE FROM sessions WHERE user_id = ?1", [state.id])?;
+                    }
+                    PasswordChange::WrongPassword
+                } else {
+                    self.revoke_credentials(state.id)?;
+                    self.conn.execute(
+                        "UPDATE users SET password_hash = ?2 WHERE id = ?1",
+                        rusqlite::params![state.id, new_hash],
+                    )?;
+                    PasswordChange::Changed {
+                        token: self.new_session(state.id, now)?,
+                    }
+                }
+            }
+            _ => PasswordChange::NoSession,
+        };
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// フィードのトークンを作り直す（古い URL は使えなくなる）。セッションが無ければ何も書かない。
+    pub fn rotate_feed_token(
+        &self,
+        session: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<String>, DbError> {
+        let tx = self.immediate()?;
+        let Some(viewer) = self.session_viewer(session, now)? else {
+            return Ok(None);
+        };
+        let token = auth::random_token()?;
+        self.conn.execute(
+            "UPDATE users SET feed_token = ?2 WHERE id = ?1",
+            rusqlite::params![viewer.user_id, token],
+        )?;
+        tx.commit()?;
+        Ok(Some(token))
+    }
+
+    /// フィードのトークンの利用者。
+    pub fn feed_viewer(&self, token: &str) -> Result<Option<i64>, DbError> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM users WHERE feed_token = ?1", [token], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    /// 利用者の今のフィードのトークン（設定画面に購読用の URL を出す）。
+    pub fn feed_token(&self, user_id: i64) -> Result<Option<String>, DbError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT feed_token FROM users WHERE id = ?1",
+                [user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,9 +605,11 @@ mod tests {
     #[test]
     fn disabling_and_resetting_revoke_every_credential() {
         let (db, _) = db_with_user();
-        for n in 0..6 {
+        // 1 回成功してから 6 回失敗させ、待ち時間に入れる
+        for n in 0..7 {
             login(&db, Some("hash-1"), n == 0, NOW);
         }
+        assert_eq!(login(&db, Some("hash-1"), true, NOW), None, "locked");
         let session = db
             .conn()
             .query_row("SELECT token FROM sessions", [], |r| r.get::<_, String>(0))

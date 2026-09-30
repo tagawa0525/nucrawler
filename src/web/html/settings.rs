@@ -50,8 +50,7 @@ pub fn settings_page(
          <h2>パスワード</h2>{notice}\
          <form method=\"post\" action=\"/settings/password\">\
          <p><label>今のパスワード<br><input name=\"current\" type=\"password\" autocomplete=\"current-password\" required></label></p>\
-         <p><label>新しいパスワード（{min} 文字以上）<br><input name=\"new\" type=\"password\" autocomplete=\"new-password\" \
-         minlength=\"{min}\" required></label></p><p><button>変える</button></p></form>\
+         <p><label>新しいパスワード（{min} 文字以上）<br><input name=\"new\" type=\"password\" autocomplete=\"new-password\" required></label></p><p><button>変える</button></p></form>\
          <form method=\"post\" action=\"/logout\"><button>ログアウト</button></form>",
         min = crate::auth::MIN_PASSWORD_CHARS,
     );

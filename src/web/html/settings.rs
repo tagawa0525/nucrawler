@@ -3,13 +3,31 @@
 use super::*;
 
 /// 管理の画面への入口（一覧の ⚙ から入る）。
-pub fn settings_page(glossary_terms: usize, pending_reports: i64, page: &Page) -> String {
+/// 設定。管理の画面への入口と、フィードの購読用の URL（`feed_url`。作っていなければ無い）とログアウト。
+pub fn settings_page(
+    glossary_terms: usize,
+    pending_reports: i64,
+    feed_url: Option<&str>,
+    page: &Page,
+) -> String {
+    let feed = match feed_url {
+        Some(url) => format!(
+            "<p>フィードリーダーにはこの URL を登録してください（URL を知っていれば誰でも読めるので、人に渡さないでください）：\
+             <br><code>{}</code></p>\
+             <form method=\"post\" action=\"/settings/feed-token\"><button>URL を作り直す（今の URL は使えなくなります）</button></form>",
+            escape(url)
+        ),
+        None => "<form method=\"post\" action=\"/settings/feed-token\"><button>フィードの URL を作る</button></form>"
+            .to_string(),
+    };
     let body = format!(
         "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>設定</h1>\
          <ul class=\"menu\"><li><a href=\"/glossary\">訳語集</a> \
          <span class=\"meta\">{glossary_terms} 語</span></li>\
          <li><a href=\"/reports\">受付箱</a> \
-         <span class=\"meta\">受付中 {pending_reports} 件</span></li></ul>"
+         <span class=\"meta\">受付中 {pending_reports} 件</span></li></ul>\
+         <h2>フィード</h2>{feed}\
+         <form method=\"post\" action=\"/logout\"><button>ログアウト</button></form>"
     );
     layout("設定", page, &body)
 }
@@ -79,7 +97,7 @@ mod tests {
 
     #[test]
     fn settings_page_leads_to_the_glossary() {
-        let html = settings_page(15, 3, &Page::default());
+        let html = settings_page(15, 3, None, &Page::default());
         assert!(html.contains(r#"href="/""#), "back to the list: {html}");
         assert!(html.contains(r#"<a href="/glossary">訳語集</a>"#), "{html}");
         assert!(html.contains("15 語"), "{html}");

@@ -9,13 +9,14 @@ pub(super) fn json(body: String) -> Response {
 /// Web の一覧と同じ記事（`min` で最低点を選べ、0 ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_list(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, AppError> {
     let web = state.web.clone();
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
         let now = Utc::now();
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let min = params.min_or(default_min(web.min_score, hash.as_deref()))?;
         let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
@@ -29,13 +30,14 @@ pub(super) async fn api_list(
 /// 検索画面と同じ条件の検索。閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_search(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
     let web = state.web.clone();
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let q = params.to_query(user, hash.as_deref(), web.list_limit)?;
         let items = db.search_articles(&q)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
@@ -60,6 +62,7 @@ const MAX_MARK_IDS: usize = 500;
 /// 閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_marks(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Query(params): Query<MarksParams>,
 ) -> Result<Response, AppError> {
     let ids: Vec<i64> = if params.ids.is_empty() {
@@ -78,7 +81,7 @@ pub(super) async fn api_marks(
         return Err(AppError::BadRequest("too many ids"));
     }
     let body = with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         Ok(serde_json::to_string(&api::MarkList::new(
             db.marks(user, &ids)?,
         ))?)
@@ -90,11 +93,12 @@ pub(super) async fn api_marks(
 /// 記事 1 件の最新の要約と和訳。閲覧ではないので、開いたことを記録しない。
 pub(super) async fn api_detail(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let labels = state.labels.clone();
     let body = with_db(&state, move |db| {
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;

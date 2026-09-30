@@ -30,7 +30,7 @@ url = "2.5.8"
 # テストで時計を止め、同時に終わる呼び出しを確実に作る（tokio::test の start_paused）
 tokio = { version = "1.53.1", features = ["test-util"] }
 
-# パスワードのハッシュ（argon2id）は最適化しないと 1 回に秒単位かかり、ログインのテストが遅くなる
+# パスワードのハッシュ（argon2id）は計算の重い処理なので、テストのビルドでも最適化して、ログインのテストを速くする
 [profile.dev.package.argon2]
 opt-level = 3
 

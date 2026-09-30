@@ -10,11 +10,10 @@ pub(super) struct RatingForm {
 /// 評価を付ける（1〜5）。空の値なら評価なしに戻す。
 pub(super) async fn rating(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<RatingForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let rating = match form.value.as_str() {
         "" => None,
         value => Some(
@@ -26,7 +25,7 @@ pub(super) async fn rating(
         ),
     };
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         find_article(db, user, id)?;
         Ok(db.rate(user, id, rating, Utc::now())?)
     })
@@ -53,14 +52,13 @@ impl MarkForm {
 /// ブックマーク（後で読む）の印を付け外しする。
 pub(super) async fn bookmark(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<MarkForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let on = form.on()?;
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         find_article(db, user, id)?;
         Ok(db.set_bookmark(user, id, on, Utc::now())?)
     })
@@ -71,14 +69,13 @@ pub(super) async fn bookmark(
 /// 既読の印を付け外しする。
 pub(super) async fn read(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<MarkForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let on = form.on()?;
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         find_article(db, user, id)?;
         Ok(db.set_read(user, id, on, Utc::now())?)
     })
@@ -88,12 +85,11 @@ pub(super) async fn read(
 
 pub(super) async fn translation_request(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         let detail = find_article(db, user, id)?;
         if !detail.can_request_translation() {
             return Err(AppError::BadRequest(

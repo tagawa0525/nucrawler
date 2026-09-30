@@ -84,7 +84,15 @@ users.users.<name>.linger = true;
    nucrawler sources check
    ```
 
-4. timer を待たずに一度動かす
+4. Web UI にログインできるようにする。所有者の初期のログイン ID は `owner` でパスワードが無いので、
+   ログイン ID を変えてパスワードを発行する（表示されたパスワードでログインする）
+
+   ```sh
+   nucrawler user rename owner you@example.com
+   nucrawler user reset-password you@example.com
+   ```
+
+5. timer を待たずに一度動かす
 
    ```sh
    systemctl --user start nucrawler-crawl.service
@@ -162,7 +170,7 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
   保存するのは argon2id のハッシュだけ。`reset-password` と `disable` は、パスワード・ログイン中のセッション・フィードの URL・
   ログインの失敗の記録をまとめて失効させる（`disable` はパスワードも無くし、戻すときは `reset-password`）。
   所有者の初期のログイン ID は `owner` なので、`rename owner you@example.com` と `reset-password` で使えるようにする。
-  利用者の削除は無い（評価や既読の記録ごと消えるため）。Web UI のログインは計画 009 で入れる途中で、今の Web UI は所有者として動く
+  利用者の削除は無い（評価や既読の記録ごと消えるため）
 - 訳語集は要約と和訳で訳語と略語を揃えるための一覧で、DB が正本（初期値は DB を作るときに入る）。
   1 つの訳語（略語を添えられる）に原語を複数結び付け、表記の揺れや略語をまとめて同じ訳にする。
   LLM には、渡す記事（切り詰めた後の見出しと本文）に原語が出てくる語だけを載せる。
@@ -253,10 +261,19 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
   - `source`：ソース（繰り返すとどれかのソース）
   - `lang`（`en` / `ja`）、`translated=1`（和訳あり）、`min_rating`（この評価以上。1〜5）、`read=1`・`read=0`（既読だけ・未読だけ。`unread=1` は `read=0` と同じ）、`bookmarked=1`・`bookmarked=0`（ブックマーク中だけ・していない記事だけ）、`unrated=1`（評価なし。`min_rating` とは同時に指定できない）、`min_score`（最低点。未採点は除く。0 は一覧の 00 と同じく絞らない）
   - `sort`：`newest`（既定）か `score`
-- 認証は無いので、Tailscale など信頼できるネットワークのアドレスで待ち受ける
+- ログイン ID とパスワードでログインする（利用者は管理者が `nucrawler user` で発行する）。ログインしていなければ、
+  画面はログイン画面へ移り（ログイン後に元の画面へ戻る）、JSON と書き込みは 401 になる。
+  セッションは 30 日で、⚙️ の設定画面からログアウトできる
+  - HTTP で待ち受けるので、パスワードとセッションの Cookie はネットワークに平文で流れる。社内 LAN や Tailscale など、
+    信頼できるネットワークのアドレスで待ち受ける。いつもの URL 以外（見知らぬ名前やアドレス）ではログインしない
+  - ログインに続けて失敗すると待たされる（ID ごとに 6 回目から 1・2・4・8 分、10 回目以降 15 分。接続元の IP ごとに 21 回目から 15 分）。
+    失敗の表示は、ID が無い・パスワードが違う・待ち時間中のどれでも同じ
+  - 書き込み（GET 以外）は、ブラウザの Origin がこのサーバーでなければ 403
 - 同じサーバーで、既定の一覧と同じ記事（既読の記事は除く）をフィードと JSON でも出す。
   これらを読んでも、開いたことや訪問としては記録しない
-  - `/feed.xml`：Atom フィード（新しい順。和訳タイトル・要約・詳細ページと原文へのリンク）。
+  - `/feed.xml?token=…`：Atom フィード（新しい順。和訳タイトル・要約・詳細ページと原文へのリンク）。
+    フィードリーダーはログインできないので、利用者ごとのトークンを付けた URL で読む。URL は設定画面で作り、
+    作り直すと古い URL は使えなくなる（URL を知っていれば誰でも読めるので、人に渡さない）。
     エントリの ID は元記事の URL から作り、アクセスしたアドレスによらないので、
     別の名前（Tailscale の IP と MagicDNS 名など）で購読しても既読の記事は新着にならない
   - `/api/articles`：記事の一覧（一覧と同じく `?min=N` で最低点を選べ、`?min=0` ですべて）。`score` は推薦点、

@@ -109,6 +109,7 @@ fn bookmark_mark(value: Option<&str>) -> Result<Option<bool>, AppError> {
 
 pub(super) async fn list(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Query(params): Query<ListParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
@@ -126,7 +127,7 @@ pub(super) async fn list(
     };
     // 最低点の既定は、一覧では利用者の既定（プロファイルが無ければ最低点なし）、絞り込みでは 0（点数で絞らない）。
     // 正規の URL がプロファイルの有無で変わるので、利用者を先に引く
-    let (user, hash) = with_db(&state, |db| Ok(viewer(db)?)).await?;
+    let (user, hash) = with_db(&state, move |db| Ok(viewer(db, me)?)).await?;
     let list_min = default_min(state.web.min_score, hash.as_deref());
     let min = params.min_or(if filtering { Some(0) } else { list_min })?;
     // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
@@ -243,32 +244,45 @@ fn filtered(
     Ok(html::filtered_page(&items, view, &page))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct FeedParams {
+    token: Option<String>,
+}
+
 /// Web の既定の一覧と同じ記事の Atom フィード。閲覧ではないので、訪問も開いたことも記録しない。
+/// フィードリーダーはログインできないので、利用者は URL のトークンで決める（無い・違えば 401）。
 pub(super) async fn feed(
     State(state): State<AppState>,
+    Query(params): Query<FeedParams>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     // 記事のリンクは絶対 URL にする。http で待ち受けているので `http://` + Host
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map_or_else(|| state.web.bind.to_string(), str::to_string);
-    let base = format!("http://{host}");
+    let base = format!("http://{}", request_host(&headers, &state.web));
     let web = state.web.clone();
     let labels = state.labels.clone();
     let xml = with_db(&state, move |db| {
         let now = Utc::now();
-        let (user, hash) = viewer(db)?;
+        let Some(me) = feed_viewer(db, params.token.as_deref())? else {
+            return Ok(None);
+        };
+        let (user, hash) = viewer(db, me)?;
         let min = default_min(web.min_score, hash.as_deref());
         let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
-        Ok(feed::atom(
+        // フィード自身の URL はトークン付き（購読し直すリーダーが読めるように）
+        let token = params.token.unwrap_or_default();
+        let self_href = format!("{base}/feed.xml?token={token}");
+        Ok(Some(feed::atom(
             &items,
             &base,
+            &self_href,
             &labels,
             &crate::db::timestamp(now),
-        ))
+        )))
     })
     .await?;
+    let Some(xml) = xml else {
+        return Ok((StatusCode::UNAUTHORIZED, "feed token required").into_response());
+    };
     Ok((
         [(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")],
         xml,
@@ -280,13 +294,14 @@ pub(super) async fn feed(
 /// 条件の誤りは、条件を残したフォームとともに 400 で返す。
 pub(super) async fn search(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
     let web = state.web.clone();
     let labels = state.labels.clone();
     let (status, page) = with_db(&state, move |db| {
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let vocabulary = db.topic_usage()?;
         let warnings = warnings(db)?;
         let page = Page {
@@ -327,6 +342,7 @@ pub(super) struct DetailParams {
 
 pub(super) async fn detail(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     method: Method,
     Path(id): Path<i64>,
     Query(params): Query<DetailParams>,
@@ -343,7 +359,7 @@ pub(super) async fn detail(
     let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
         let now = Utc::now();
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let mut detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
@@ -392,11 +408,12 @@ pub(super) async fn detail(
 /// 原文へ移る。開いたことを記録してから、元の記事の URL へリダイレクトする。
 pub(super) async fn source(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     method: Method,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let url = with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         // 移るだけなので、詳細の中身（要約・和訳・本文）は読まない
         let url = db.article_url(id)?.ok_or(AppError::NotFound)?;
         // HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
@@ -409,11 +426,20 @@ pub(super) async fn source(
     Ok(Redirect::to(&url).into_response())
 }
 
-pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+pub(super) async fn settings(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    headers: HeaderMap,
+) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
     let min_score = state.web.min_score;
+    let base = format!("http://{}", request_host(&headers, &state.web));
     let page = with_db(&state, move |db| {
-        let (_, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
+        // 購読用のフィードの URL（コピーして使うので絶対 URL）
+        let feed_url = db
+            .feed_token(user)?
+            .map(|token| format!("{base}/feed.xml?token={token}"));
         let terms = db.glossary_entries()?.len();
         let pending = db
             .report_counts()?
@@ -426,7 +452,12 @@ pub(super) async fn settings(State(state): State<AppState>) -> Result<Html<Strin
             labels: &labels,
             default_min: default_min(min_score, hash.as_deref()),
         };
-        Ok(html::settings_page(terms, pending, &page))
+        Ok(html::settings_page(
+            terms,
+            pending,
+            feed_url.as_deref(),
+            &page,
+        ))
     })
     .await?;
     Ok(Html(page))

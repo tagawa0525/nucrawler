@@ -24,11 +24,10 @@ pub(super) struct ReportForm {
 /// ほかの種類は内容が必須。
 pub(super) async fn add_report(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<ReportForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let kind = ReportKind::parse(&form.kind).ok_or(AppError::BadRequest(
         "kind must be term, translation, digest, topic, body or other",
     ))?;
@@ -46,7 +45,7 @@ pub(super) async fn add_report(
         return Err(AppError::BadRequest("note must not be empty"));
     }
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         find_article(db, user, id)?;
         let report = match (kind, found.as_deref(), note.as_deref()) {
             (ReportKind::Term, Some(found), note) => NewReport::Term {
@@ -105,14 +104,13 @@ fn back_to_comments(article_id: i64, view: Option<&str>) -> Redirect {
 
 pub(super) async fn add_comment(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<CommentForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let (body, visibility) = (form.body()?, form.visibility()?);
     with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         find_article(db, user, id)?;
         Ok(db.add_comment(user, id, &body, visibility, Utc::now())?)
     })
@@ -123,14 +121,13 @@ pub(super) async fn add_comment(
 /// 自分のコメントを直す。他人のコメントは無いものとして扱う。
 pub(super) async fn update_comment(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<CommentForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let (body, visibility) = (form.body()?, form.visibility()?);
     let article = with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         Ok(db.update_comment(user, id, &body, visibility, Utc::now())?)
     })
     .await?
@@ -146,13 +143,12 @@ pub(super) struct CommentDeleteForm {
 /// 自分のコメントを消す。他人のコメントは無いものとして扱う。
 pub(super) async fn delete_comment(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<CommentDeleteForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let article = with_db(&state, move |db| {
-        let (user, _) = viewer(db)?;
+        let (user, _) = viewer(db, me)?;
         Ok(db.delete_comment(user, id)?)
     })
     .await?
@@ -191,13 +187,14 @@ pub(super) struct ReportsParams {
 
 pub(super) async fn reports(
     State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
     Query(params): Query<ReportsParams>,
 ) -> Result<Html<String>, AppError> {
     let filter = report_filter(params.status.as_deref(), params.kind.as_deref())?;
     let labels = state.labels.clone();
     let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
-        let (user, hash) = viewer(db)?;
+        let (user, hash) = viewer(db, me)?;
         let reports = db.reports(user, &filter)?;
         let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
@@ -234,10 +231,8 @@ pub(super) struct ResolveReportForm {
 pub(super) async fn resolve_report(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<ResolveReportForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let status = ReportStatus::parse(&form.status).ok_or(AppError::BadRequest(
         "status must be pending, added, existing, done or rejected",
     ))?;

@@ -11,6 +11,7 @@ use crate::search::Params;
 
 mod detail;
 mod list;
+mod login;
 mod reports;
 mod search;
 mod settings;
@@ -19,6 +20,7 @@ mod test_support;
 
 pub use detail::*;
 pub use list::*;
+pub use login::*;
 pub use reports::*;
 pub use search::*;
 pub use settings::*;

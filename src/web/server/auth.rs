@@ -3,6 +3,365 @@
 
 use super::*;
 
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
+
+use axum::extract::{ConnectInfo, Request};
+use axum::middleware::Next;
+use tokio::sync::Semaphore;
+
+use crate::auth;
+use crate::db::Viewer;
+
+/// セッションのトークンを入れる Cookie の名前。
+pub(super) const SESSION_COOKIE: &str = "nucrawler_session";
+/// 層がリクエストに入れる、要求元のセッションのトークン（ログアウト・フィードのトークンの作り直しで使う）。
+#[derive(Clone)]
+pub(super) struct SessionToken(pub(super) String);
+
+/// ログインしていなくても通すパス。ログイン画面と、フィード（リーダーはログインできないので、URL のトークンで読む）。
+fn is_public(path: &str) -> bool {
+    matches!(path, "/login" | "/feed.xml")
+}
+
+/// 要求の Cookie から、セッションのトークンを取り出す。
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == SESSION_COOKIE)
+        .map(|(_, value)| value.to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// ルーター全体に掛ける層：ログイン画面とフィードのほかは、セッションの利用者を `Viewer` として要求に入れる。
+/// ログインしていなければ、画面（GET）はログイン画面へ元の画面を `next` に持って移し、JSON と書き込みは 401。
+pub(super) async fn require_session(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    if is_public(req.uri().path()) {
+        return next.run(req).await;
+    }
+    let token = session_cookie(req.headers());
+    let viewer = match token.clone() {
+        None => Ok(None),
+        Some(token) => {
+            with_db(&state, move |db| {
+                Ok(db.session_viewer(&token, chrono::Utc::now())?)
+            })
+            .await
+        }
+    };
+    match (viewer, token) {
+        (Ok(Some(viewer)), Some(token)) => {
+            req.extensions_mut().insert(viewer);
+            req.extensions_mut().insert(SessionToken(token));
+            next.run(req).await
+        }
+        (Err(e), _) => e.into_response(),
+        _ => unauthenticated(&req),
+    }
+}
+
+fn unauthenticated(req: &Request) -> Response {
+    let page = matches!(*req.method(), Method::GET | Method::HEAD)
+        && !req.uri().path().starts_with("/api/");
+    if page {
+        let here = req
+            .uri()
+            .path_and_query()
+            .map_or("/", |p| p.as_str())
+            .to_string();
+        let next: String = url::form_urlencoded::byte_serialize(here.as_bytes()).collect();
+        Redirect::to(&format!("/login?next={next}")).into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, "login required").into_response()
+    }
+}
+
+/// ルーター全体に掛ける層：書き込み（GET・HEAD 以外）は、ブラウザが付ける Origin がこのサーバー自身でなければ断る。
+/// ログイン・ログアウトも含めて、付け忘れる書き込みが無いよう、ハンドラごとではなくここで確かめる。
+pub(super) async fn same_origin(req: Request, next: Next) -> Response {
+    if !matches!(*req.method(), Method::GET | Method::HEAD)
+        && let Err(e) = check_same_origin(req.headers())
+    {
+        return e.into_response();
+    }
+    next.run(req).await
+}
+
+/// IP ごとに、この回数を超えて続けて失敗したら待たせる（ID ごとより多いのは、1 台から複数の人が打ち間違えることもあるため）。
+const IP_FAILURES_MAX: u8 = 20;
+/// IP ごとの待ち時間。最後に数えた失敗からこの時間が過ぎると、数え直す。
+const IP_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// IP ごとの記録の数の上限（IP を変え続ける相手でもメモリが増え続けないよう）。
+pub(super) const IP_ENTRIES_MAX: usize = 4096;
+
+/// 接続元の IP ごとのログインの失敗（メモリに持ち、再起動で消えてよい）。ID ごとの回数は `users` の行にあるので、
+/// 存在しない ID を変えながら試す相手には効かない。その相手をここで止める。
+#[derive(Default)]
+pub(super) struct IpThrottle {
+    entries: std::sync::Mutex<HashMap<IpAddr, IpEntry>>,
+}
+
+struct IpEntry {
+    failures: u8,
+    /// 最後に数えた失敗
+    last: Instant,
+}
+
+impl IpEntry {
+    fn blocked(&self, now: Instant) -> bool {
+        self.failures > IP_FAILURES_MAX && now < self.last + IP_WINDOW
+    }
+}
+
+impl IpThrottle {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<IpAddr, IpEntry>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// この IP が待ち時間中か。待ち時間は送り手自身の失敗だけで決まり、どの ID を送ったかによらない。
+    pub(super) fn blocked(&self, ip: IpAddr, now: Instant) -> bool {
+        self.lock().get(&ip).is_some_and(|e| e.blocked(now))
+    }
+
+    /// 失敗を 1 回数える。待ち時間中の試行は数えない（送り続けても待ち時間は延びない）。ログインの成功では消さない
+    /// （自分の ID での成功を挟めば、ほかの ID を制限なく試せてしまうため）。
+    pub(super) fn record_failure(&self, ip: IpAddr, now: Instant) {
+        let mut entries = self.lock();
+        if entries.get(&ip).is_some_and(|e| e.blocked(now)) {
+            return;
+        }
+        entries.retain(|_, e| now < e.last + IP_WINDOW);
+        let entry = entries.entry(ip).or_insert(IpEntry {
+            failures: 0,
+            last: now,
+        });
+        entry.failures = (entry.failures + 1).min(IP_FAILURES_MAX + 1);
+        entry.last = now;
+        if entries.len() > IP_ENTRIES_MAX
+            && let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, e)| e.last)
+                .map(|(ip, _)| *ip)
+        {
+            entries.remove(&oldest);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
+/// パスワードの計算（argon2id）を同時に走らせる数。
+const HASHING_MAX: usize = 2;
+
+/// Web サーバーのパスワードの計算をすべて通す部品。同時に走らせる数に上限を置き、空きが無ければ待たずに断る
+/// （待たせる数にも上限が要るため）。計算は `spawn_blocking` で行い、取った枠はそのクロージャに持たせるので、
+/// 要求が途中で捨てられても、計算とその後の記録は最後まで走り、終わるまで枠を返さない。
+#[derive(Clone)]
+pub(super) struct PasswordHasher {
+    permits: Arc<Semaphore>,
+}
+
+impl Default for PasswordHasher {
+    fn default() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(HASHING_MAX)),
+        }
+    }
+}
+
+/// 計算の空きが無い。
+#[derive(Debug)]
+pub(super) struct Busy;
+
+impl PasswordHasher {
+    pub(super) async fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, Busy> {
+        let permit = self.permits.clone().try_acquire_owned().map_err(|_| Busy)?;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            f()
+        });
+        match task.await {
+            Ok(value) => Ok(value),
+            // 計算の中の panic は、呼び出し側にそのまま伝える
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("password hashing task failed: {e}"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn available(&self) -> usize {
+        self.permits.available_permits()
+    }
+}
+
+/// セッションの Cookie。HTTP で待ち受けるので `Secure` は付けられない（付けるとブラウザが送らない）。
+/// `SameSite=Lax` は、フィードやチャットのリンクから開いたときにも送られるように（書き込みは `same_origin` で守る）。
+fn session_cookie_header(token: &str, max_age: i64) -> String {
+    format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
+}
+
+/// ログイン後に戻る先。`next` を、ブラウザと同じ規則（WHATWG URL）で `http://{host}/` を基準に解釈し、
+/// 自分のホストを指すときだけ使う。文字列の形で判定すると、`/\evil.example` のような値でブラウザの解釈とずれる。
+/// 返すのは絶対 URL（パスだけを返すと、`//evil.example` のようなパスをブラウザが別のホストとして読む）。
+fn return_to(host: &str, next: Option<&str>) -> String {
+    let Ok(base) = url::Url::parse(&format!("http://{host}/")) else {
+        return "/".to_string();
+    };
+    next.and_then(|n| base.join(n).ok())
+        .filter(|u| u.origin() == base.origin())
+        .unwrap_or_else(|| base.clone())
+        .to_string()
+}
+
+pub(super) fn request_host(headers: &HeaderMap, web: &WebConfig) -> String {
+    headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map_or_else(|| web.bind.to_string(), str::to_string)
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct LoginQuery {
+    next: Option<String>,
+}
+
+pub(super) async fn login_page(
+    State(state): State<AppState>,
+    Query(q): Query<LoginQuery>,
+) -> Html<String> {
+    Html(html::login_page(q.next.as_deref(), false, &state.labels))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct LoginForm {
+    #[serde(default)]
+    login: String,
+    #[serde(default)]
+    password: String,
+    next: Option<String>,
+}
+
+/// 失敗の応答。ID が無い・パスワードが違う・待ち時間中・パスワードが無い・長すぎる、のどれでも同じにする
+/// （応答の違いから ID の有無を調べられないように）。
+fn login_failed(next: Option<&str>, labels: &html::SourceLabels) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(html::login_page(next, true, labels)),
+    )
+        .into_response()
+}
+
+/// ログイン。照合は重いので `PasswordHasher` を通し、1 段目（ハッシュを読む）・2 段目（照合）・3 段目（判定して書く）と
+/// IP ごとの失敗の記録を 1 つのクロージャで行う（途中で接続が切れても、照合したものは必ず数える）。
+/// ID が無いかパスワードが無ければダミーのハッシュで照合して、応答までの時間を揃える。
+pub(super) async fn login(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Result<Response, AppError> {
+    // 転送ヘッダーは使わない（リバースプロキシが無く、送り手が自由に書けるため）。ポートは接続ごとに変わるので除く
+    let ip = peer.ip().to_canonical();
+    let next = form.next.clone();
+    if state.throttle.blocked(ip, Instant::now()) {
+        return Ok(login_failed(next.as_deref(), &state.labels));
+    }
+    if !auth::valid_login(&form.login) || !auth::within_password_limit(&form.password) {
+        // 長さは送り手が決めるもので ID によらないので、計算せずに返しても ID の有無は漏れない
+        state.throttle.record_failure(ip, Instant::now());
+        return Ok(login_failed(next.as_deref(), &state.labels));
+    }
+    let db = state.db.clone();
+    let throttle = state.throttle.clone();
+    let attempt = state
+        .hasher
+        .run(move || -> Result<Option<String>, DbError> {
+            let lock = || db.lock().unwrap_or_else(PoisonError::into_inner);
+            let read = lock().login_hash(&form.login)?;
+            let verified = auth::verify_password(
+                read.as_deref().unwrap_or(auth::dummy_hash()),
+                &form.password,
+            );
+            let token =
+                lock().finish_login(&form.login, read.as_deref(), verified, chrono::Utc::now())?;
+            if token.is_none() {
+                throttle.record_failure(ip, Instant::now());
+            }
+            Ok(token)
+        })
+        .await;
+    match attempt {
+        Err(Busy) => Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "混み合っています。少し待ってから試してください",
+        )
+            .into_response()),
+        Ok(result) => match result? {
+            None => Ok(login_failed(next.as_deref(), &state.labels)),
+            Some(token) => {
+                let to = return_to(&request_host(&headers, &state.web), next.as_deref());
+                let max_age = auth::SESSION_DAYS * 24 * 60 * 60;
+                Ok((
+                    [(header::SET_COOKIE, session_cookie_header(&token, max_age))],
+                    Redirect::to(&to),
+                )
+                    .into_response())
+            }
+        },
+    }
+}
+
+/// ログアウト。セッションを消し、同じ `Path` で期限切れの Cookie を返す。
+pub(super) async fn logout(
+    State(state): State<AppState>,
+    Extension(SessionToken(token)): Extension<SessionToken>,
+) -> Result<Response, AppError> {
+    with_db(&state, move |db| Ok(db.logout(&token)?)).await?;
+    Ok((
+        [(header::SET_COOKIE, session_cookie_header("", 0))],
+        Redirect::to("/login"),
+    )
+        .into_response())
+}
+
+/// フィードのトークンを作り直す（古い購読用の URL は使えなくなる）。
+pub(super) async fn rotate_feed_token(
+    State(state): State<AppState>,
+    Extension(SessionToken(token)): Extension<SessionToken>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        Ok(db.rotate_feed_token(&token, chrono::Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to("/settings"))
+}
+
+/// フィードを読む利用者（URL のトークン）。
+pub(super) fn feed_viewer(db: &Db, token: Option<&str>) -> Result<Option<Viewer>, DbError> {
+    let Some(token) = token.filter(|t| !t.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(db.feed_viewer(token)?.map(|user_id| Viewer {
+        user_id,
+        is_admin: false,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

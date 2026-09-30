@@ -48,10 +48,17 @@ fn entry_id(url: &str) -> String {
     out
 }
 
-/// Atom のフィード。`base` は Web UI の URL（`http://host:port`）でリンクにだけ使い、`updated` は
+/// Atom のフィード。`base` は Web UI の URL（`http://host:port`）でリンクにだけ使い、`self_href` はフィード自身の
+/// 購読用の URL（トークン付き）、`updated` は
 /// 記事が無いときのフィードの更新日時。記事は新しい順に並べる（どの記事を出すかは Web の既定の
 /// 一覧と同じ）。
-pub fn atom(items: &[ListItem], base: &str, labels: &SourceLabels, updated: &str) -> String {
+pub fn atom(
+    items: &[ListItem],
+    base: &str,
+    self_href: &str,
+    labels: &SourceLabels,
+    updated: &str,
+) -> String {
     let mut items: Vec<&ListItem> = items.iter().collect();
     items.sort_by(|a, b| (&b.at, b.article_id).cmp(&(&a.at, a.article_id)));
     // 時刻はどれも同じ書式（`db::timestamp`）なので、文字列の最大が最新
@@ -60,9 +67,10 @@ pub fn atom(items: &[ListItem], base: &str, labels: &SourceLabels, updated: &str
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
          <feed xmlns=\"http://www.w3.org/2005/Atom\">\
          <id>{TAG}feed</id><title>nucrawler</title><updated>{updated}</updated>\
-         <link rel=\"self\" href=\"{base}/feed.xml\"/><link rel=\"alternate\" href=\"{base}/\"/>\
+         <link rel=\"self\" href=\"{self_href}\"/><link rel=\"alternate\" href=\"{base}/\"/>\
          <author><name>nucrawler</name></author>",
         base = escape(base),
+        self_href = escape(self_href),
         updated = escape(updated),
     );
     for i in items {
@@ -132,6 +140,7 @@ mod tests {
         let xml = atom(
             &items,
             "http://h",
+            "http://h/feed.xml?token=t",
             &SourceLabels::new(),
             "2026-09-27T00:00:00Z",
         );

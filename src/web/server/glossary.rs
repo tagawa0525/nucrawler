@@ -2,11 +2,14 @@
 
 use super::*;
 
-pub(super) async fn glossary(State(state): State<AppState>) -> Result<Html<String>, AppError> {
+pub(super) async fn glossary(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
     let min_score = state.web.min_score;
     let page = with_db(&state, move |db| {
-        let (_, hash) = viewer(db)?;
+        let (_, hash) = viewer(db, me)?;
         let entries = db.glossary_entries()?;
         let warnings = warnings(db)?;
         let page = Page {
@@ -68,10 +71,8 @@ fn glossary_error(e: DbError) -> AppError {
 
 pub(super) async fn add_glossary_term(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Form(form): Form<GlossaryForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let term = form.into_term()?;
     let id = with_db(&state, move |db| {
         db.add_glossary_term(&term, Utc::now())
@@ -84,10 +85,8 @@ pub(super) async fn add_glossary_term(
 pub(super) async fn update_glossary_term(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
     Form(form): Form<GlossaryForm>,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let term = form.into_term()?;
     let found = with_db(&state, move |db| {
         db.update_glossary_term(id, &term, Utc::now())
@@ -103,9 +102,7 @@ pub(super) async fn update_glossary_term(
 pub(super) async fn delete_glossary_term(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-    headers: HeaderMap,
 ) -> Result<Redirect, AppError> {
-    check_same_origin(&headers)?;
     let found = with_db(&state, move |db| Ok(db.delete_glossary_term(id)?)).await?;
     if !found {
         return Err(AppError::NotFound);

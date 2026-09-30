@@ -119,14 +119,64 @@ pub(super) struct Server {
     pub(super) client: reqwest::Client,
 }
 
+/// テストで所有者としてログインしているセッションのトークン。
+pub(super) const OWNER_SESSION: &str = "test-owner-session";
+
+/// 利用者のセッションを DB に直接入れる（パスワードの計算を省くため）。
+pub(super) fn insert_session(db: &Db, user_id: i64, token: &str) {
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at)
+             VALUES (?1, ?2, '2026-01-01T00:00:00.000Z', '2999-01-01T00:00:00.000Z')",
+            rusqlite::params![token, user_id],
+        )
+        .unwrap();
+}
+
+/// ほかの利用者を作る（パスワードは無い。ログインはセッションを直接入れて行う）。
+pub(super) fn other_user(db: &Db, login: &str) -> i64 {
+    db.conn()
+        .execute(
+            "INSERT INTO users (login, display_name) VALUES (?1, ?1)",
+            [login],
+        )
+        .unwrap();
+    db.conn().last_insert_rowid()
+}
+
 impl Server {
+    /// 所有者としてログインした状態で起動する。
     pub(super) async fn start(db: Db) -> Self {
+        insert_session(&db, db.owner_id().unwrap(), OWNER_SESSION);
+        Self::start_with(db, Some(OWNER_SESSION)).await
+    }
+
+    /// ログインしていない状態で起動する。
+    pub(super) async fn anonymous(db: Db) -> Self {
+        Self::start_with(db, None).await
+    }
+
+    async fn start_with(db: Db, session: Option<&str>) -> Self {
         let state = AppState::new(db, WebConfig::default(), SourceLabels::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(axum::serve(listener, router(state.clone())).into_future());
+        tokio::spawn(
+            axum::serve(
+                listener,
+                router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(token) = session {
+            headers.insert(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+            );
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .default_headers(headers)
             .build()
             .unwrap();
         Self {
@@ -176,6 +226,19 @@ impl Server {
 
     pub(super) async fn post(&self, path: &str, body: &'static str) -> reqwest::Response {
         self.form(path, body).send().await.unwrap()
+    }
+
+    /// 所有者のフィードの URL のパス（トークンを作る）。
+    pub(super) fn feed_path(&self) -> String {
+        let token = self
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .rotate_feed_token(OWNER_SESSION, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        format!("/feed.xml?token={token}")
     }
 
     pub(super) fn count(&self, sql: &str) -> i64 {

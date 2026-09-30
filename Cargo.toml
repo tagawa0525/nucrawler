@@ -29,3 +29,10 @@ url = "2.5.8"
 [dev-dependencies]
 # テストで時計を止め、同時に終わる呼び出しを確実に作る（tokio::test の start_paused）
 tokio = { version = "1.53.1", features = ["test-util"] }
+
+# パスワードのハッシュ（argon2id）は最適化しないと 1 回に秒単位かかり、ログインのテストが遅くなる
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

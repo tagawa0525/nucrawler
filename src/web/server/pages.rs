@@ -615,7 +615,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let good = seed_recommended_and_hidden(&db);
         let server = Server::start(db).await;
-        let (status, content_type, xml) = server.get_with_type("/feed.xml").await;
+        let (status, content_type, xml) = server.get_with_type(&server.feed_path()).await;
         assert_eq!(status, 200);
         assert!(
             content_type.starts_with("application/atom+xml"),
@@ -661,11 +661,12 @@ mod tests {
         let good = seed_recommended_and_hidden(&db);
         let server = Server::start(db).await;
         let hosts = ["100.64.0.1:8080", "nucrawler.tailnet.ts.net"];
+        let feed = server.feed_path();
         let mut feeds = Vec::new();
         for host in hosts {
             let res = server
                 .client
-                .get(format!("{}/feed.xml", server.base))
+                .get(format!("{}{feed}", server.base))
                 .header(header::HOST, host)
                 .send()
                 .await
@@ -795,7 +796,7 @@ mod tests {
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");
 
-        let (_, xml) = server.get("/feed.xml").await;
+        let (_, xml) = server.get(&server.feed_path()).await;
         assert!(xml.contains("未採点") && !xml.contains("無関係"), "{xml}");
         let (_, json) = server.get_json("/api/articles").await;
         assert_eq!(json["articles"].as_array().unwrap().len(), 1, "{json}");
@@ -824,12 +825,13 @@ mod tests {
         let (id, digest) = seed(&db, "https://e.com/a", "見出しA");
         score(&db, digest, 80);
         let server = Server::start(db).await;
-        for path in ["/feed.xml", "/api/articles"] {
+        let feed = server.feed_path();
+        for path in [feed.as_str(), "/api/articles"] {
             let (_, body) = server.get(path).await;
             assert!(body.contains("見出しA"), "{path}: {body}");
         }
         server.post(&format!("/articles/{id}/read"), "on=1").await;
-        for path in ["/feed.xml", "/api/articles"] {
+        for path in [feed.as_str(), "/api/articles"] {
             let (_, body) = server.get(path).await;
             assert!(!body.contains("見出しA"), "{path}: {body}");
         }

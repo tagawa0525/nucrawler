@@ -26,6 +26,15 @@ pub struct Viewer {
     pub is_admin: bool,
 }
 
+/// セッションの利用者のパスワードの状態（パスワードの変更の 1 段目）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPassword {
+    /// 今のパスワードのハッシュ
+    pub hash: Option<String>,
+    /// ログインの失敗が続いて待ち時間中
+    pub locked: bool,
+}
+
 /// 本人のパスワードの変更の結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasswordChange {
@@ -306,22 +315,30 @@ impl Db {
         Ok(())
     }
 
-    /// パスワードの変更の 1 段目：セッションの利用者の今のパスワードのハッシュ。
-    pub fn session_password_hash(
+    /// パスワードの変更の 1 段目：セッションの利用者の今のパスワードのハッシュと、待ち時間中か。セッションが無ければ `None`。
+    /// 待ち時間中なら、呼び出し側は照合も計算もせずに断る（正しいときだけ新しいハッシュを作ると、その時間の差で正しさが分かるため）。
+    pub fn session_password(
         &self,
         token: &str,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<String>, DbError> {
+    ) -> Result<Option<SessionPassword>, DbError> {
+        let now = timestamp(now);
         Ok(self
             .conn
             .query_row(
-                "SELECT u.password_hash FROM sessions AS s JOIN users AS u ON u.id = s.user_id
-                 WHERE s.token = ?1 AND s.expires_at > ?2",
-                [token, &timestamp(now)],
-                |r| r.get::<_, Option<String>>(0),
+                &format!(
+                    "SELECT {} FROM sessions AS s JOIN users AS u ON u.id = s.user_id
+                     WHERE s.token = ?1 AND s.expires_at > ?2",
+                    AuthState::COLUMNS
+                ),
+                [token, &now],
+                AuthState::from_row,
             )
             .optional()?
-            .flatten())
+            .map(|state| SessionPassword {
+                locked: state.locked(&now),
+                hash: state.password_hash,
+            }))
     }
 
     /// パスワードの変更の 3 段目：照合の結果から判定して書く。セッションがまだあり、照合に使ったハッシュが今も同じで、

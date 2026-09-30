@@ -353,18 +353,19 @@ pub(super) struct PasswordForm {
 /// （Cookie を写し取った相手も同じセッションなので、残すとパスワードを変えても使い続けられる）。
 pub(super) async fn change_password(
     State(state): State<AppState>,
+    Extension(me): Extension<Viewer>,
     Extension(SessionToken(session)): Extension<SessionToken>,
+    headers: HeaderMap,
     Form(form): Form<PasswordForm>,
 ) -> Result<Response, AppError> {
-    if let Err(rule) = auth::check_password(&form.new) {
-        return Ok((StatusCode::BAD_REQUEST, rule.to_string()).into_response());
-    }
-    if !auth::within_password_limit(&form.current) {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            auth::PasswordRule::TooLong.to_string(),
-        )
-            .into_response());
+    let rule = auth::check_password(&form.new).err().or_else(|| {
+        (!auth::within_password_limit(&form.current)).then_some(auth::PasswordRule::TooLong)
+    });
+    if let Some(rule) = rule {
+        // 理由は設定画面に出す
+        let notice = html::PasswordNotice::Invalid(rule.to_string());
+        let page = settings_html(&state, me, &headers, Some(notice)).await?;
+        return Ok((StatusCode::BAD_REQUEST, Html(page)).into_response());
     }
     let db = state.db.clone();
     let outcome = state
@@ -373,7 +374,15 @@ pub(super) async fn change_password(
             let lock = || db.lock().unwrap_or_else(PoisonError::into_inner);
             // 時刻は DB を読み書きする直前にそれぞれ取る。照合と計算の前の時刻で書くと、計算の間に切れたセッションを
             // 有効とみなし、失敗の待ち時間や新しいセッションの期限も古い時刻から数えてしまう
-            let read = lock().session_password_hash(&session, chrono::Utc::now())?;
+            let Some(read) = lock().session_password(&session, chrono::Utc::now())? else {
+                return Ok(crate::db::PasswordChange::NoSession);
+            };
+            // 待ち時間中は照合も計算もせずに断る。照合して、正しいときだけ新しいハッシュを作ると、
+            // その時間の差で、盗んだセッションから待ち時間中も正しさを確かめられてしまう
+            if read.locked {
+                return Ok(crate::db::PasswordChange::Locked);
+            }
+            let read = read.hash;
             let verified =
                 auth::verify_password(read.as_deref().unwrap_or(auth::dummy_hash()), &form.current);
             // 新しいハッシュは、照合が通ったときだけ作る（書かないハッシュのために計算しない）

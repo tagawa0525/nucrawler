@@ -2,27 +2,57 @@
 
 use super::*;
 
+/// パスワードの変更の結果の知らせ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasswordNotice {
+    /// 変えた
+    Changed,
+    /// 今のパスワードが違う
+    Wrong,
+    /// 失敗が続いて待ち時間中
+    Locked,
+    /// 新しいパスワードが条件を満たさない（理由）
+    Invalid(String),
+}
+
+impl PasswordNotice {
+    /// 変更の後に戻る設定画面の `?password=` の値。
+    pub fn from_query(value: &str) -> Option<Self> {
+        match value {
+            "changed" => Some(Self::Changed),
+            "wrong" => Some(Self::Wrong),
+            "locked" => Some(Self::Locked),
+            _ => None,
+        }
+    }
+}
+
 /// 管理の画面への入口（一覧の ⚙ から入る）。
 /// 設定。管理の画面への入口と、フィードの購読用の URL（`feed_url`。作っていなければ無い）とログアウト。
 /// 受付箱（`pending_reports` は受付中の件数）は管理者にだけ出す。
-/// `password` はパスワードの変更の結果（`changed`・`wrong`・`locked`）で、その知らせを出す。
+/// `notice` はパスワードの変更の結果で、その知らせをパスワードの欄に出す。
 pub fn settings_page(
     glossary_terms: usize,
     pending_reports: Option<i64>,
     feed_url: Option<&str>,
-    password: Option<&str>,
+    notice: Option<PasswordNotice>,
     page: &Page,
 ) -> String {
-    let notice = match password {
-        Some("changed") => {
+    let notice = match notice {
+        Some(PasswordNotice::Changed) => {
             "<p class=\"meta\">パスワードを変えました。ほかの端末ではログインし直してください。\
              フィードの URL も使えなくなったので、使っていれば作り直してください。</p>"
+                .to_string()
         }
-        Some("wrong") => "<p class=\"warn\">今のパスワードが違います。</p>",
-        Some("locked") => {
+        Some(PasswordNotice::Wrong) => "<p class=\"warn\">今のパスワードが違います。</p>".to_string(),
+        Some(PasswordNotice::Locked) => {
             "<p class=\"warn\">失敗が続いたため、今はパスワードを変えられません。しばらく待ってください。</p>"
+                .to_string()
         }
-        _ => "",
+        Some(PasswordNotice::Invalid(reason)) => {
+            format!("<p class=\"warn\">{}</p>", escape(&reason))
+        }
+        None => String::new(),
     };
     let feed = match feed_url {
         Some(url) => format!(

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, suggest, tidy, title, translate};
+use super::{digest, extract, fetch, score, story, suggest, tidy, title, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -33,6 +33,8 @@ pub enum RunError {
     Tidy(#[from] tidy::TidyStageError),
     #[error(transparent)]
     Title(#[from] title::TitleStageError),
+    #[error("story stage failed")]
+    Story(#[from] story::StoryStageError),
     #[error(transparent)]
     Suggest(#[from] suggest::SuggestStageError),
 }
@@ -201,7 +203,23 @@ pub async fn crawl<L: LlmSet>(
                 );
                 block(report, env.backend(LlmTask::Title), summary.halted);
             }
-            Stage::Story => todo!("the story stage"),
+            Stage::Story => {
+                let now = (env.clock)();
+                let summary = story::judge_stories(
+                    env.stage(LlmTask::Story),
+                    &config.llm,
+                    &config.pipeline,
+                    now,
+                )
+                .await?;
+                tracing::info!(
+                    judged = summary.judged,
+                    failed = summary.failed,
+                    calls = summary.calls,
+                    "story stage finished"
+                );
+                block(report, env.backend(LlmTask::Story), summary.halted);
+            }
             Stage::Tidy => {
                 let now = (env.clock)();
                 let summary =

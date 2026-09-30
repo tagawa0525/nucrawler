@@ -199,6 +199,7 @@ impl LlmConfig {
             ("timeout_secs", self.timeout_secs == 0),
             ("tidy_interval_days", self.tidy_interval_days == 0),
             ("title_batch_size", self.title_batch_size == 0),
+            ("story_batch_size", self.story_batch_size == 0),
             ("concurrency", self.concurrency == 0),
         ] {
             if is_zero {
@@ -241,8 +242,8 @@ impl Default for LlmConfig {
             tidy_interval_days: 7,
             title_model: "sonnet".into(),
             title_batch_size: 30,
-            story_model: String::new(),
-            story_batch_size: 0,
+            story_model: "sonnet".into(),
+            story_batch_size: 10,
             concurrency: 2,
         }
     }

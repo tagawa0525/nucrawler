@@ -2,13 +2,24 @@
 //! 別の出来事（続報など）かを LLM に判定させ、same の組をつないだグループを作り直す。
 //! 候補の無い記事は LLM を呼ばずに判定済みにする。
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::LlmStage;
+use super::llm_call::{
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
+    permit, record_failures, reserve,
+};
+use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
-use crate::db::DbError;
-use crate::llm::Llm;
+use crate::db::{
+    ArtifactKind, ClaimKey, Db, DbError, NewArtifact, StageKey, StoryLink, StoryRelation,
+};
+use crate::llm::{Llm, LlmRequest};
+use crate::prompt::story as p;
+use crate::story::{Candidate, Doc, Index, WINDOW_DAYS};
+use crate::{errors, prompt};
 
 pub const STAGE: &str = "story";
 
@@ -28,14 +39,302 @@ pub struct StorySummary {
     pub cancelled: bool,
 }
 
+impl StorySummary {
+    /// 作業者ごとの集計を合わせる。
+    fn merge(mut self, other: StorySummary) -> StorySummary {
+        self.judged += other.judged;
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted, other.halted);
+        self.cancelled |= other.cancelled;
+        self
+    }
+}
+
+/// プロンプトに載せる記事。
+fn prompt_article(doc: &Doc) -> p::Article {
+    p::Article {
+        article_id: doc.article_id,
+        source_id: doc.source_id.clone(),
+        date: doc
+            .at
+            .with_timezone(&crate::jst::offset())
+            .format("%Y-%m-%d")
+            .to_string(),
+        text: doc.text.clone(),
+    }
+}
+
+/// 判定と組を保存する。候補の単位への same / related は、その単位の記事すべてへの組にする。
+#[allow(clippy::too_many_arguments)]
+fn save(
+    db: &Db,
+    article_id: i64,
+    candidates: &[Candidate],
+    same: &[i64],
+    related: &[i64],
+    backend: &str,
+    model: &str,
+    now: DateTime<Utc>,
+) -> Result<(), DbError> {
+    let mut links = Vec::new();
+    for (units, relation) in [
+        (same, StoryRelation::Same),
+        (related, StoryRelation::Related),
+    ] {
+        for unit in units {
+            let Some(c) = candidates.iter().find(|c| c.id == *unit) else {
+                continue;
+            };
+            links.extend(c.members.iter().map(|&other_id| StoryLink {
+                other_id,
+                relation,
+                similarity: c.similarity,
+            }));
+        }
+    }
+    let payload = serde_json::json!({
+        "candidates": candidates.iter().map(|c| c.id).collect::<Vec<_>>(),
+        "same": same,
+        "related": related,
+    });
+    db.insert_story(
+        &NewArtifact {
+            article_id,
+            kind: ArtifactKind::Story,
+            backend,
+            model,
+            prompt_version: p::PROMPT_VERSION,
+            payload: &payload,
+            inputs: &[],
+            glossary_at: None,
+        },
+        &links,
+        now,
+    )?;
+    Ok(())
+}
+
+/// グループを作り直し、大きくなりすぎるので捨てた組を知らせる。
+fn rebuild(db: &Db) -> Result<(), DbError> {
+    for e in db.rebuild_stories()? {
+        tracing::warn!(
+            a = e.a,
+            b = e.b,
+            "story link not joined: the story would exceed {} articles",
+            crate::story::MAX_STORY_SIZE
+        );
+    }
+    Ok(())
+}
+
 pub async fn judge_stories<L: Llm>(
-    stage: LlmStage<'_, L>,
+    LlmStage {
+        db,
+        llm,
+        quota,
+        cancel,
+        clock,
+    }: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     now: DateTime<Utc>,
 ) -> Result<StorySummary, StoryStageError> {
-    let _ = (stage.db, llm_cfg, pipeline_cfg, now);
-    todo!()
+    let backend = llm.backend();
+    let model = llm_cfg.story_model.as_str();
+    let schema = p::schema();
+    let system = p::system_prompt();
+    let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
+    let window = chrono::Duration::days(WINDOW_DAYS);
+    let key = |article_id| StageKey {
+        article_id,
+        stage: STAGE,
+        backend,
+        model,
+    };
+    let shared = Shared::new(quota);
+    // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
+    let parts = run_workers(llm_cfg.concurrency, |_| async {
+        let mut summary = StorySummary::default();
+        loop {
+            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+            tokio::task::yield_now().await;
+            if shared.stopped() {
+                break;
+            }
+            if cancel.is_requested() {
+                summary.cancelled = true;
+                break;
+            }
+            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
+            let _slot = match reserve(llm, cancel).await {
+                Reserved::Slot(slot) => slot,
+                Reserved::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Reserved::Failed(message) => {
+                    summary.halted = Some(Halt::LlmFailed(message));
+                    break;
+                }
+            };
+            if shared.stopped() {
+                break;
+            }
+            if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
+                tracing::info!("story stops: {stop}");
+                summary.halted = Some(Halt::Quota(stop));
+                break;
+            }
+            // 予約は処理を終える（この周の終わりで drop する）まで持つ
+            let (batch, claim) = db.claim_selected(
+                ClaimKey {
+                    stage: STAGE,
+                    backend,
+                    model,
+                },
+                clock(),
+                claim_ttl(llm_cfg),
+                |db| db.pending_stories(cutoff, now, backend, model, llm_cfg.story_batch_size),
+                |b| b.article_id,
+            )?;
+            let (Some(first), Some(last)) = (
+                batch.iter().map(|b| b.at).min(),
+                batch.iter().map(|b| b.at).max(),
+            ) else {
+                break;
+            };
+            let pool = db.story_pool(first - window, last + window)?;
+            let docs: HashMap<i64, Doc> = pool.iter().map(|d| (d.article_id, d.clone())).collect();
+            let index = Index::new(pool);
+            let stories = db.story_ids()?;
+            // 候補の無い記事は、LLM を呼ばずに判定済みにする
+            let mut targets: Vec<(i64, Vec<Candidate>)> = Vec::new();
+            for b in &batch {
+                let candidates = index.candidates(b.article_id, &stories);
+                if candidates.is_empty() {
+                    save(db, b.article_id, &[], &[], &[], backend, model, now)?;
+                    db.clear_stage_failure(key(b.article_id))?;
+                    summary.judged += 1;
+                } else {
+                    targets.push((b.article_id, candidates));
+                }
+            }
+            if targets.is_empty() {
+                continue;
+            }
+            let requested: Vec<p::Target> = targets
+                .iter()
+                .filter_map(|(id, candidates)| {
+                    Some(p::Target {
+                        article: prompt_article(docs.get(id)?),
+                        candidates: candidates
+                            .iter()
+                            .map(|c| p::Candidate {
+                                id: c.id,
+                                story: stories.values().any(|s| *s == c.id),
+                                members: c
+                                    .members
+                                    .iter()
+                                    .filter_map(|m| docs.get(m).map(prompt_article))
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                })
+                .collect();
+            let prompt = p::build_prompt(&requested);
+            let outcome = call_recorded(
+                db,
+                llm,
+                &shared,
+                Call {
+                    stage: STAGE,
+                    n_items: requested.len(),
+                    req: LlmRequest {
+                        system: &system,
+                        prompt: &prompt,
+                        schema: &schema,
+                        model,
+                    },
+                },
+                clock,
+                cancel,
+            )
+            .await?;
+            summary.calls += 1;
+            // 結果を書く前に予約を延長する。取り直された記事は、以降は保存も失敗の記録もしない
+            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let judged_ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
+            let response = match outcome {
+                Outcome::Response(response) => response,
+                Outcome::Cancelled => {
+                    summary.cancelled = true;
+                    break;
+                }
+                Outcome::Halted(halt) => {
+                    if let Halt::LlmFailed(message) = &halt {
+                        summary.failed += record_failures(
+                            db,
+                            held_missing(&judged_ids, &held).map(key),
+                            message,
+                            now,
+                        )?;
+                    }
+                    rebuild(db)?;
+                    summary.halted = Some(halt);
+                    break;
+                }
+            };
+            let parsed = match prompt::story::parse(&response.output, &requested) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let message = errors::error_chain(&e);
+                    tracing::warn!("story output rejected: {message}");
+                    summary.failed += record_failures(
+                        db,
+                        held_missing(&judged_ids, &held).map(key),
+                        &message,
+                        now,
+                    )?;
+                    continue;
+                }
+            };
+            for j in &parsed.items {
+                if !held.contains(&j.target) {
+                    tracing::warn!(
+                        article_id = j.target,
+                        "{STAGE} result dropped: the claim was taken over"
+                    );
+                    continue;
+                }
+                let Some((_, candidates)) = targets.iter().find(|(id, _)| *id == j.target) else {
+                    continue;
+                };
+                save(
+                    db, j.target, candidates, &j.same, &j.related, backend, model, now,
+                )?;
+                db.clear_stage_failure(key(j.target))?;
+                summary.judged += 1;
+            }
+            summary.failed += record_failures(
+                db,
+                held_missing(&parsed.missing, &held).map(key),
+                MISSING,
+                now,
+            )?;
+            rebuild(db)?;
+        }
+        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
+        if summary.halted.is_some() || summary.cancelled {
+            shared.stop();
+        }
+        Ok::<_, StoryStageError>(summary)
+    })
+    .await?;
+    Ok(parts
+        .into_iter()
+        .fold(StorySummary::default(), StorySummary::merge))
 }
 
 #[cfg(test)]
@@ -85,7 +384,7 @@ mod tests {
         ]
         .iter()
         .enumerate()
-        .map(|(i, t)| article(db, &format!("f{i}"), 10, t))
+        .map(|(i, t)| article(db, &format!("f{i}"), 20, t))
         .collect()
     }
 

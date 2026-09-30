@@ -128,6 +128,7 @@ impl Stage {
         Stage::Score,
         Stage::Translate,
         Stage::Title,
+        Stage::Story,
         Stage::Tidy,
     ];
 

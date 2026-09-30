@@ -209,6 +209,8 @@ mod tests {
             has_translation: false,
             translation_requested: false,
             locked_by: vec![],
+            story_id: None,
+            story_others: vec![],
         };
         let json = serde_json::to_value(Article::new(&item, &SourceLabels::default())).unwrap();
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));

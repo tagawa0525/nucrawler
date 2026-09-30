@@ -34,6 +34,10 @@ pub struct ListItem {
     pub translation_requested: bool,
     /// 原文を読むのに必要で、利用者が持っていない会員資格の名前（🔒 の表示用）
     pub locked_by: Vec<String>,
+    /// 同じ報道のグループ（`article_stories.story_id`）
+    pub story_id: Option<i64>,
+    /// 同じグループのほかの記事のソース（記事ごと、日時の順）
+    pub story_others: Vec<String>,
 }
 
 impl ListItem {
@@ -771,6 +775,8 @@ impl Db {
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),
+                story_id: None,
+                story_others: Vec::new(),
             };
             Ok((
                 item,
@@ -794,6 +800,129 @@ impl Db {
 mod tests {
     use super::*;
     use crate::db::test_support::*;
+
+    /// 記事を同じ報道のグループにする（グループの ID は最小の記事 ID）。
+    fn group(db: &Db, ids: &[i64]) {
+        let story = *ids.iter().min().unwrap();
+        for id in ids {
+            db.conn()
+                .execute(
+                    "INSERT INTO article_stories (article_id, story_id) VALUES (?1, ?2)",
+                    [*id, story],
+                )
+                .unwrap();
+        }
+    }
+
+    fn set_source(db: &Db, id: i64, source: &str) {
+        db.conn()
+            .execute(
+                "UPDATE articles SET source_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, source],
+            )
+            .unwrap();
+    }
+
+    /// 一覧では、同じ報道のグループを推薦点の最も高い 1 件にまとめ、ほかの記事のソースを添える。
+    /// 件数の上限はまとめた後の件数に掛ける。
+    #[test]
+    fn list_folds_a_story_into_its_best_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-24T00:00:00Z", 80);
+        let other = scored_article(&db, "https://e.com/o", Lang::En, "2026-09-24T00:00:00Z", 65);
+        set_source(&db, a, "wnn");
+        set_source(&db, c, "jaif");
+        group(&db, &[a, b, c]);
+        assert_eq!(list_ids(&db, false), [b, other]);
+        let items = db.list_articles(list_query(&db, false)).unwrap();
+        assert_eq!(items[0].story_id, Some(a));
+        // 日時の順
+        assert_eq!(items[0].story_others, ["jaif", "wnn"]);
+        assert_eq!(items[1].story_id, None);
+        assert!(items[1].story_others.is_empty());
+        let limited: Vec<i64> = db
+            .list_articles(ListQuery {
+                limit: 2,
+                ..list_query(&db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
+        assert_eq!(limited, [b, other]);
+    }
+
+    /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。評価 1〜2 も同じ。
+    #[test]
+    fn list_hides_a_story_read_or_rated_low_anywhere() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 90);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        let user = db.owner_id().unwrap();
+        let unread = |db: &Db| -> Vec<i64> {
+            db.list_articles(ListQuery {
+                read: Some(false),
+                ..list_query(db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect()
+        };
+        assert_eq!(unread(&db), [b, d]);
+        db.set_read(user, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert_eq!(unread(&db), [d]);
+        db.rate(
+            user,
+            c,
+            Some(Rating::new(1).unwrap()),
+            t("2026-09-27T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(unread(&db).is_empty());
+        // 「すべて」では隠さない
+        assert_eq!(list_ids(&db, true).len(), 2);
+    }
+
+    /// 検索ではまとめない（グループの記事を全部出し、ほかの記事のソースは添える）。
+    #[test]
+    fn search_keeps_every_article_of_a_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        group(&db, &[a, b]);
+        let items = db.search_articles(&search_query(&db)).unwrap();
+        let mut ids: Vec<i64> = items.iter().map(|i| i.article_id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [a, b]);
+        assert!(items.iter().all(|i| i.story_others == ["s"]));
+    }
+
+    /// 確認枠でも 1 グループ 1 件にし、読んだグループは選ばない。
+    #[test]
+    fn explore_picks_one_article_per_unread_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 40);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 40);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        let user = db.owner_id().unwrap();
+        db.set_read(user, c, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let picks = db.explore(list_query(&db, false), 5, "2026-09-27").unwrap();
+        let ids: Vec<i64> = picks.iter().map(|i| i.article_id).collect();
+        assert_eq!(ids.len(), 1, "{ids:?}");
+        assert!([a, b].contains(&ids[0]), "{ids:?}");
+    }
 
     /// 一覧を開くたびに区切りが進むと、再読み込みや詳細からの戻りで「前回から」の記事が
     /// 「それ以前」に移ってしまう。間隔の短い閲覧は同じ訪問とみなし、区切りを保つ。

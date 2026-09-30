@@ -499,6 +499,8 @@ mod tests {
             translation_requested: false,
             bookmarked: false,
             locked_by: vec![],
+            story_id: None,
+            story_others: vec![],
         };
         assert_eq!(
             result_line(&item),

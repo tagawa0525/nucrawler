@@ -1115,7 +1115,8 @@ mod tests {
     #[tokio::test]
     async fn list_filters_by_rating_and_bookmark() {
         let db = Db::open_in_memory().unwrap();
-        // どちらも未採点なので、既定の一覧には出ない
+        // プロファイルはあるがどちらも未採点なので、既定の一覧には出ない
+        give_profile(&db);
         let (four, _) = seed(&db, "https://e.com/four", "星四つ");
         let (two, _) = seed(&db, "https://e.com/two", "星二つ");
         let server = Server::start(db).await;

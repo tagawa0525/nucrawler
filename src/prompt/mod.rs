@@ -4,6 +4,7 @@
 
 pub mod digest;
 pub mod score;
+pub mod story;
 pub mod suggest;
 pub mod tidy;
 pub mod title;

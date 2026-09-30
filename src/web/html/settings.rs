@@ -4,9 +4,10 @@ use super::*;
 
 /// 管理の画面への入口（一覧の ⚙ から入る）。
 /// 設定。管理の画面への入口と、フィードの購読用の URL（`feed_url`。作っていなければ無い）とログアウト。
+/// 受付箱（`pending_reports` は受付中の件数）は管理者にだけ出す。
 pub fn settings_page(
     glossary_terms: usize,
-    pending_reports: i64,
+    pending_reports: Option<i64>,
     feed_url: Option<&str>,
     page: &Page,
 ) -> String {
@@ -20,12 +21,18 @@ pub fn settings_page(
         None => "<form method=\"post\" action=\"/settings/feed-token\"><button>フィードの URL を作る</button></form>"
             .to_string(),
     };
+    let inbox = pending_reports
+        .map(|n| {
+            format!(
+                "<li><a href=\"/reports\">受付箱</a> <span class=\"meta\">受付中 {n} 件</span></li>"
+            )
+        })
+        .unwrap_or_default();
     let body = format!(
         "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>設定</h1>\
          <ul class=\"menu\"><li><a href=\"/glossary\">訳語集</a> \
          <span class=\"meta\">{glossary_terms} 語</span></li>\
-         <li><a href=\"/reports\">受付箱</a> \
-         <span class=\"meta\">受付中 {pending_reports} 件</span></li></ul>\
+         {inbox}</ul>\
          <h2>フィード</h2>{feed}\
          <form method=\"post\" action=\"/logout\"><button>ログアウト</button></form>"
     );
@@ -33,16 +40,20 @@ pub fn settings_page(
 }
 
 /// 訳語集。訳語ごとに畳み、開いたときだけ編集のフォームを出す（一覧の密度を上げない）。
-/// 並びは最初の原語の順（大文字小文字を問わない）。
+/// 並びは最初の原語の順（大文字小文字を問わない）。編集は管理者だけなので、ほかの利用者には
+/// フォームの代わりにメモを出す（押すと必ず失敗するフォームは出さない）。
 pub fn glossary_page(entries: &[crate::glossary::Entry], page: &Page) -> String {
     let mut sorted: Vec<&crate::glossary::Entry> = entries.iter().collect();
     sorted.sort_by_cached_key(|e| e.term.sources.first().map(|s| s.to_lowercase()));
-    let mut body = format!(
-        "<p class=\"meta\"><a href=\"/settings\">← 設定</a></p><h1>訳語集</h1>\
-         <details class=\"add\"><summary>＋ 訳語を追加</summary>\
-         <form method=\"post\" action=\"/glossary\">{}<button>追加</button></form></details>",
-        glossary_fields(None)
-    );
+    let mut body =
+        String::from("<p class=\"meta\"><a href=\"/settings\">← 設定</a></p><h1>訳語集</h1>");
+    if page.is_admin {
+        body.push_str(&format!(
+            "<details class=\"add\"><summary>＋ 訳語を追加</summary>\
+             <form method=\"post\" action=\"/glossary\">{}<button>追加</button></form></details>",
+            glossary_fields(None)
+        ));
+    }
     for e in sorted {
         let id = e.id;
         let t = &e.term;
@@ -60,16 +71,24 @@ pub fn glossary_page(entries: &[crate::glossary::Entry], page: &Page) -> String 
                 )
             })
             .unwrap_or_default();
+        let contents = if page.is_admin {
+            format!(
+                "<form method=\"post\" action=\"/glossary/{id}\">{}<button>保存</button></form>\
+                 <form method=\"post\" action=\"/glossary/{id}/delete\" \
+                 onsubmit=\"return confirm('この訳語を削除しますか')\"><button>削除</button></form>",
+                glossary_fields(Some(t)),
+            )
+        } else {
+            t.note
+                .as_ref()
+                .map(|n| format!("<p>{}</p>", escape(n)))
+                .unwrap_or_default()
+        };
         body.push_str(&format!(
             "<details class=\"term\" id=\"term-{id}\"><summary><b>{}{abbr}</b>\
-             <span class=\"meta\">{}</span></summary>\
-             <form method=\"post\" action=\"/glossary/{id}\">{}<button>保存</button></form>\
-             <form method=\"post\" action=\"/glossary/{id}/delete\" \
-             onsubmit=\"return confirm('この訳語を削除しますか')\"><button>削除</button></form>\
-             {changed}</details>",
+             <span class=\"meta\">{}</span></summary>{contents}{changed}</details>",
             escape(&t.target),
             escape(&t.sources.join(" / ")),
-            glossary_fields(Some(t)),
         ));
     }
     layout("訳語集", page, &body)
@@ -97,7 +116,7 @@ mod tests {
 
     #[test]
     fn settings_page_leads_to_the_glossary() {
-        let html = settings_page(15, 3, None, &Page::default());
+        let html = settings_page(15, Some(3), None, &Page::default());
         assert!(html.contains(r#"href="/""#), "back to the list: {html}");
         assert!(html.contains(r#"<a href="/glossary">訳語集</a>"#), "{html}");
         assert!(html.contains("15 語"), "{html}");
@@ -118,7 +137,12 @@ mod tests {
                 Some("ATF"),
             ),
         ];
-        let html = glossary_page(&entries, &Page::default());
+        // 編集のフォームは管理者の画面にだけ出る
+        let admin = Page {
+            is_admin: true,
+            ..Page::default()
+        };
+        let html = glossary_page(&entries, &admin);
         assert!(
             html.contains(r#"href="/settings""#),
             "back to settings: {html}"

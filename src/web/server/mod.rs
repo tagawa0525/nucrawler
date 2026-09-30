@@ -26,6 +26,7 @@ use crate::web::html::{self, DetailView, Page, SourceLabels};
 
 use crate::web::{api, feed};
 
+mod admin;
 mod auth;
 mod feedback;
 mod glossary;
@@ -35,6 +36,7 @@ mod pages;
 #[cfg(test)]
 mod test_support;
 
+use admin::*;
 use auth::*;
 use feedback::*;
 use glossary::*;
@@ -98,11 +100,18 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/comments/{id}", post(update_comment))
         .route("/comments/{id}/delete", post(delete_comment))
         .route("/settings", get(settings))
-        .route("/glossary", get(glossary).post(add_glossary_term))
-        .route("/glossary/{id}", post(update_glossary_term))
-        .route("/glossary/{id}/delete", post(delete_glossary_term))
-        .route("/reports", get(reports))
-        .route("/reports/{id}", post(resolve_report))
+        // 訳語集は全員が見られ、編集は管理者だけ。受付箱は管理者だけ
+        .route(
+            "/glossary",
+            get(glossary).merge(admin_only(post(add_glossary_term))),
+        )
+        .route("/glossary/{id}", admin_only(post(update_glossary_term)))
+        .route(
+            "/glossary/{id}/delete",
+            admin_only(post(delete_glossary_term)),
+        )
+        .route("/reports", admin_only(get(reports)))
+        .route("/reports/{id}", admin_only(post(resolve_report)))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
         .route("/settings/feed-token", post(rotate_feed_token))
@@ -185,6 +194,42 @@ async fn with_db<T: Send + 'static>(
         f(&db)
     })
     .await?
+}
+
+/// 画面の共通の部分（`html::Page`）の材料。どの画面もこれで作る。運用の警告（取得の失敗など。URL や
+/// バックエンドの診断を含む）を管理者にだけ出す判定を、画面ごとに書くとどれかで漏れるので、ここに 1 つだけ置く。
+struct PageParts {
+    warnings: Vec<crate::db::Warning>,
+    default_min: Option<u8>,
+    is_admin: bool,
+}
+
+impl PageParts {
+    fn new(
+        db: &Db,
+        me: crate::db::Viewer,
+        profile_hash: Option<&str>,
+        min_score: u8,
+    ) -> Result<Self, DbError> {
+        Ok(Self {
+            warnings: if me.is_admin {
+                warnings(db)?
+            } else {
+                Vec::new()
+            },
+            default_min: default_min(min_score, profile_hash),
+            is_admin: me.is_admin,
+        })
+    }
+
+    fn page<'a>(&'a self, labels: &'a SourceLabels) -> Page<'a> {
+        Page {
+            warnings: &self.warnings,
+            labels,
+            default_min: self.default_min,
+            is_admin: self.is_admin,
+        }
+    }
 }
 
 /// ログインの確認の層が入れた利用者と、その現在のプロファイルのハッシュ。

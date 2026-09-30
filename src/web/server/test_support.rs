@@ -228,6 +228,38 @@ impl Server {
         self.form(path, body).send().await.unwrap()
     }
 
+    /// 別の利用者のセッションで GET する（`insert_session` で入れたトークン）。
+    pub(super) async fn get_as(&self, session: &str, path: &str) -> (u16, String) {
+        let res = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session}"),
+            )
+            .send()
+            .await
+            .unwrap();
+        (res.status().as_u16(), res.text().await.unwrap())
+    }
+
+    /// 別の利用者のセッションでフォームを送る。
+    pub(super) async fn post_as(&self, session: &str, path: &str, body: &str) -> u16 {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::COOKIE,
+                format!("{SESSION_COOKIE}={session}"),
+            )
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
     /// 所有者のフィードの URL のパス（トークンを作る）。
     pub(super) fn feed_path(&self) -> String {
         let token = self

@@ -53,6 +53,8 @@ pub struct Page<'a> {
     pub labels: &'a SourceLabels,
     /// 利用者の一覧の既定の最低点（プロファイルが無ければ最低点なし）。一覧のほかの画面の上部のバーが、一覧の既定を指すのに使う
     pub default_min: Option<u8>,
+    /// 管理者か（管理用のフォームや入口を出すか）
+    pub is_admin: bool,
 }
 
 impl Default for Page<'_> {
@@ -62,6 +64,7 @@ impl Default for Page<'_> {
             warnings: &[],
             labels: &NONE,
             default_min: Some(crate::config::WebConfig::default().min_score),
+            is_admin: false,
         }
     }
 }

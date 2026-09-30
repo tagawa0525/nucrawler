@@ -176,6 +176,8 @@ fn report_filter(status: Option<&str>, kind: Option<&str>) -> Result<ReportFilte
         status,
         kind,
         article_id: None,
+        // 受付箱は管理者だけなので、全員の指摘
+        reporter: None,
     })
 }
 
@@ -198,12 +200,8 @@ pub(super) async fn reports(
         let reports = db.reports(user, &filter)?;
         let counts = db.report_counts()?;
         let terms = db.glossary_entries()?;
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: default_min(min_score, hash.as_deref()),
-        };
+        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let page = parts.page(&labels);
         Ok(html::reports_page(
             &reports, &counts, &filter, &terms, &page,
         ))

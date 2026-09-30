@@ -3,6 +3,25 @@
 
 use super::*;
 
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::routing::MethodRouter;
+
+/// 管理者だけのルートに掛ける層。ログインの確認の層が入れた利用者が管理者でなければ 403。
+async fn require_admin(req: Request, next: Next) -> Response {
+    match req.extensions().get::<crate::db::Viewer>() {
+        Some(viewer) if viewer.is_admin => next.run(req).await,
+        _ => (StatusCode::FORBIDDEN, "admin only").into_response(),
+    }
+}
+
+/// 管理者だけのルート。ルートの一覧でどれが管理者だけかが分かるよう、定義する所で包む。
+pub(super) fn admin_only<S: Clone + Send + Sync + 'static>(
+    route: MethodRouter<S>,
+) -> MethodRouter<S> {
+    route.route_layer(axum::middleware::from_fn(require_admin))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::{Db, NewReport, ReportKind};

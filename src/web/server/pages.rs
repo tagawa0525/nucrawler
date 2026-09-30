@@ -155,7 +155,7 @@ pub(super) async fn list(
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         if view.filtered() {
-            return filtered(db, &web, &labels, user, hash.as_deref(), view);
+            return filtered(db, &web, &labels, me, hash.as_deref(), view);
         }
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
@@ -191,12 +191,8 @@ pub(super) async fn list(
         } else {
             Vec::new()
         };
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: view.default_min,
-        };
+        let parts = PageParts::new(db, me, hash.as_deref(), web.min_score)?;
+        let page = parts.page(&labels);
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
         ))
@@ -211,10 +207,11 @@ fn filtered(
     db: &Db,
     web: &WebConfig,
     labels: &html::SourceLabels,
-    user: i64,
+    me: crate::db::Viewer,
     hash: Option<&str>,
     view: html::ListView,
 ) -> Result<String, AppError> {
+    let user = me.user_id;
     let params = Params {
         min_rating: view
             .rating
@@ -235,12 +232,8 @@ fn filtered(
         .to_query(user, hash, web.list_limit)
         .map_err(|_| AppError::BadRequest("rating must be 1..=5"))?;
     let items = db.search_articles(&query)?;
-    let warnings = warnings(db)?;
-    let page = Page {
-        warnings: &warnings,
-        labels,
-        default_min: view.default_min,
-    };
+    let parts = PageParts::new(db, me, hash, web.min_score)?;
+    let page = parts.page(labels);
     Ok(html::filtered_page(&items, view, &page))
 }
 
@@ -304,12 +297,8 @@ pub(super) async fn search(
     let (status, page) = with_db(&state, move |db| {
         let (user, hash) = viewer(db, me)?;
         let vocabulary = db.topic_usage()?;
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: default_min(web.min_score, hash.as_deref()),
-        };
+        let parts = PageParts::new(db, me, hash.as_deref(), web.min_score)?;
+        let page = parts.page(&labels);
         // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
         let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
             Ok(_) if params.is_empty() => {
@@ -368,6 +357,8 @@ pub(super) async fn detail(
             user,
             &ReportFilter {
                 article_id: Some(id),
+                // 指摘は管理者に宛てたものなので、一般の利用者には自分の指摘だけを出す
+                reporter: (!me.is_admin).then_some(user),
                 ..ReportFilter::default()
             },
         )?;
@@ -389,12 +380,8 @@ pub(super) async fn detail(
                 .read_at
                 .get_or_insert_with(|| crate::db::timestamp(now));
         }
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: default_min(min_score, hash.as_deref()),
-        };
+        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let page = parts.page(&labels);
         let comments = db.comments(user, id)?;
         let notes = html::Notes {
             reports: &reports,
@@ -442,17 +429,19 @@ pub(super) async fn settings(
             .feed_token(user)?
             .map(|token| format!("{base}/feed.xml?token={token}"));
         let terms = db.glossary_entries()?.len();
-        let pending = db
-            .report_counts()?
-            .into_iter()
-            .find_map(|(status, n)| (status == ReportStatus::Pending).then_some(n))
-            .unwrap_or(0);
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: default_min(min_score, hash.as_deref()),
+        // 受付箱は管理者だけ
+        let pending = if me.is_admin {
+            Some(
+                db.report_counts()?
+                    .into_iter()
+                    .find_map(|(status, n)| (status == ReportStatus::Pending).then_some(n))
+                    .unwrap_or(0),
+            )
+        } else {
+            None
         };
+        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let page = parts.page(&labels);
         Ok(html::settings_page(
             terms,
             pending,

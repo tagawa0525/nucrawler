@@ -30,6 +30,7 @@ pub fn login_page(next: Option<&str>, failed: bool, labels: &SourceLabels) -> St
         warnings: &[],
         labels,
         default_min: None,
+        is_admin: false,
     };
     layout("ログイン", &page, &body)
 }

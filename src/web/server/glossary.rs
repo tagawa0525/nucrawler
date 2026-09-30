@@ -11,12 +11,8 @@ pub(super) async fn glossary(
     let page = with_db(&state, move |db| {
         let (_, hash) = viewer(db, me)?;
         let entries = db.glossary_entries()?;
-        let warnings = warnings(db)?;
-        let page = Page {
-            warnings: &warnings,
-            labels: &labels,
-            default_min: default_min(min_score, hash.as_deref()),
-        };
+        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let page = parts.page(&labels);
         Ok(html::glossary_page(&entries, &page))
     })
     .await?;

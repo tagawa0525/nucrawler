@@ -135,6 +135,8 @@ pub struct ReportFilter {
     pub status: Option<ReportStatus>,
     pub kind: Option<ReportKind>,
     pub article_id: Option<i64>,
+    /// この利用者が出した指摘だけ（一般の利用者には自分の指摘だけを見せる）
+    pub reporter: Option<i64>,
 }
 
 /// コメントの公開範囲。公開はほかの利用者にも見せ、非公開は書いた本人だけが見る。
@@ -319,6 +321,7 @@ impl Db {
              WHERE (:status IS NULL OR r.status = :status)
                AND (:kind IS NULL OR r.kind = :kind)
                AND (:article IS NULL OR r.article_id = :article)
+               AND (:reporter IS NULL OR r.user_id = :reporter)
              ORDER BY r.reported_at DESC, r.id DESC",
             viewable = viewable("d")
         ))?;
@@ -327,6 +330,7 @@ impl Db {
             ":status": filter.status.map(ReportStatus::as_str),
             ":kind": filter.kind.map(ReportKind::as_str),
             ":article": filter.article_id,
+            ":reporter": filter.reporter,
         })?;
         let mut reports = Vec::new();
         while let Some(r) = rows.next()? {

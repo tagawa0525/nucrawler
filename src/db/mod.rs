@@ -16,6 +16,7 @@ mod score;
 mod signals;
 mod sources;
 mod stages;
+mod stories;
 #[cfg(test)]
 mod test_support;
 mod translate;
@@ -33,6 +34,7 @@ pub use score::*;
 pub use signals::*;
 pub use sources::*;
 pub use stages::*;
+pub use stories::*;
 pub use translate::*;
 pub use vocab::*;
 pub use warnings::*;

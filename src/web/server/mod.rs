@@ -26,6 +26,7 @@ use crate::web::html::{self, DetailView, Page, SourceLabels};
 
 use crate::web::{api, feed};
 
+mod admin;
 mod auth;
 mod feedback;
 mod glossary;
@@ -35,6 +36,7 @@ mod pages;
 #[cfg(test)]
 mod test_support;
 
+use admin::*;
 use auth::*;
 use feedback::*;
 use glossary::*;

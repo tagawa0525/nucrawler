@@ -215,7 +215,7 @@ pub(super) fn write_artifact(
                 article_id: a.article_id,
             });
         }
-        (ArtifactKind::Title, true) | (_, false) => {}
+        (ArtifactKind::Title | ArtifactKind::Story, true) | (_, false) => {}
         (_, true) => {
             return Err(DbError::NoArtifactInputs {
                 article_id: a.article_id,

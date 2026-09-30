@@ -211,6 +211,8 @@ mod tests {
             locked_by: vec![],
             story_id: None,
             story_others: vec![],
+            story_read: false,
+            story_rated: false,
         };
         let json = serde_json::to_value(Article::new(&item, &SourceLabels::default())).unwrap();
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));

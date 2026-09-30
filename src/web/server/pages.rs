@@ -530,6 +530,23 @@ mod tests {
         assert!(!html.contains("二十点"), "{html}");
     }
 
+    /// 確認枠に選んだ後で、同じグループのほかの記事を読んだら、既読の記事と同じく出さない。
+    #[tokio::test]
+    async fn explore_hides_picks_whose_story_was_read() {
+        let db = Db::open_in_memory().unwrap();
+        let (low, digest) = seed(&db, "https://e.com/low", "低い点");
+        score(&db, digest, 10);
+        let (high, digest) = seed(&db, "https://e.com/high", "高い点");
+        score(&db, digest, 90);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/").await;
+        assert!(html.contains("低い点"), "{html}");
+        group(&server.state.db.lock().unwrap(), &[low, high]);
+        server.post(&format!("/articles/{high}/read"), "on=1").await;
+        let (_, html) = server.get("/").await;
+        assert!(!html.contains("低い点"), "{html}");
+    }
+
     /// 詳細には、同じ報道のほかの記事と関連記事を出す。
     #[tokio::test]
     async fn detail_shows_the_story_and_related_articles() {

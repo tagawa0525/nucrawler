@@ -38,6 +38,10 @@ pub struct ListItem {
     pub story_id: Option<i64>,
     /// 同じグループのほかの記事のソース（記事ごと、日時の順）
     pub story_others: Vec<String>,
+    /// 同じグループのどれか（この記事を含む）を読んだ
+    pub story_read: bool,
+    /// 同じグループのどれか（この記事を含む）に評価を付けた
+    pub story_rated: bool,
 }
 
 impl ListItem {
@@ -832,6 +836,8 @@ impl Db {
                 locked_by: Vec::new(),
                 story_id: r.get(21)?,
                 story_others: Vec::new(),
+                story_read: false,
+                story_rated: false,
             };
             Ok((
                 item,
@@ -960,6 +966,38 @@ mod tests {
         ids.sort_unstable();
         assert_eq!(ids, [a, b]);
         assert!(items.iter().all(|i| i.story_others == ["s"]));
+    }
+
+    /// 選んだ後にグループのほかの記事を評価したら、その日の確認枠からも外す（記事自身の評価と同じ）。
+    /// 読んだことは印として返し、一覧と同じく画面で絞る。
+    #[test]
+    fn explore_drops_picks_whose_story_was_rated_later() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 30);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let user = db.owner_id().unwrap();
+        let picks = |db: &Db| -> Vec<(i64, bool)> {
+            db.explore(list_query(db, false), 5, "2026-09-27")
+                .unwrap()
+                .into_iter()
+                .map(|i| (i.article_id, i.story_read))
+                .collect()
+        };
+        assert_eq!(picks(&db).len(), 2);
+        group(&db, &[a, b]);
+        group(&db, &[c, d]);
+        db.set_read(user, d, true, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        db.rate(
+            user,
+            b,
+            Some(Rating::new(4).unwrap()),
+            t("2026-09-27T01:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(picks(&db), [(c, true)]);
     }
 
     /// 確認枠でも 1 グループ 1 件にし、読んだグループは選ばない。

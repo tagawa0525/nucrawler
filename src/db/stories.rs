@@ -42,11 +42,12 @@ pub struct StoryPending {
     pub at: chrono::DateTime<chrono::Utc>,
 }
 
-/// 記事（別名 `a`）の比べる文。最新の要約の見出しと要約、無ければ最新の見出しの和訳、
-/// 無ければ日本語の原題（どれも無ければ NULL）。
+/// 記事（別名 `a`）の比べる文。最新の公開の要約の見出しと要約、無ければ最新の見出しの和訳、
+/// 無ければ日本語の原題（どれも無ければ NULL）。判定は入力の無い公開の成果物として残すので、
+/// 会員限定の本文から作った要約は使わない。
 const STORY_TEXT: &str = "coalesce(
        (SELECT concat_ws(char(10), r.title_ja, r.summary_ja) FROM artifacts AS r
-        WHERE r.article_id = a.id AND r.kind = 'digest'
+        WHERE r.article_id = a.id AND r.kind = 'digest' AND r.input_scope = 'public'
         ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
        (SELECT r.title_ja FROM artifacts AS r
         WHERE r.article_id = a.id AND r.kind = 'title'
@@ -81,7 +82,7 @@ fn parse_at(at: String) -> Result<chrono::DateTime<chrono::Utc>, DbError> {
 
 impl Db {
     /// 同じ報道を判定する記事（新しい順）：`cutoff` 以降の記事で、story がまだ無く、比べる文があるもの。
-    /// 比べる文は要約か、要約されない記事（公開の本文が無い）の見出しの和訳か日本語の原題。
+    /// 比べる文は公開の要約か、要約されない記事（公開の本文が無い）の見出しの和訳か日本語の原題。
     /// 要約を待っている記事は、要約ができてから判定する。
     /// `backend`/`model` の story の失敗で再試行待ち・断念済みの記事と、予約済みの記事は含めない。
     pub fn pending_stories(
@@ -99,7 +100,8 @@ impl Db {
                  SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'story')
                AND (
                  EXISTS (
-                   SELECT 1 FROM artifacts AS r WHERE r.article_id = a.id AND r.kind = 'digest')
+                   SELECT 1 FROM artifacts AS r
+                   WHERE r.article_id = a.id AND r.kind = 'digest' AND r.input_scope = 'public')
                  OR (
                    NOT EXISTS (
                      SELECT 1 FROM contents AS c

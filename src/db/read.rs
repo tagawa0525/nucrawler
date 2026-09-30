@@ -161,11 +161,12 @@ enum ItemScope<'a> {
 
 /// 既読・ブックマークの印で絞る条件（組み立てた行 `rows` の条件、`AND` で始まる）。
 /// `Some(true)` は印のある記事だけ、`Some(false)` は印の無い記事だけ、`None` は絞らない。
-fn mark_filter(read: Option<bool>, bookmarked: Option<bool>) -> String {
+/// 既読（`read_at` の列の式）とブックマークの条件。
+fn mark_filter(read_at: &str, read: Option<bool>, bookmarked: Option<bool>) -> String {
     let read = match read {
-        Some(true) => " AND rows.read_at IS NOT NULL",
-        Some(false) => " AND rows.read_at IS NULL",
-        None => "",
+        Some(true) => format!(" AND {read_at} IS NOT NULL"),
+        Some(false) => format!(" AND {read_at} IS NULL"),
+        None => String::new(),
     };
     let bookmarked = match bookmarked {
         Some(true) => " AND rows.bookmarked = 1",
@@ -234,7 +235,8 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.rating >= :min_rating");
             f.params.push((":min_rating".into(), Box::new(min)));
         }
-        f.rows.push_str(&mark_filter(q.read, q.bookmarked));
+        f.rows
+            .push_str(&mark_filter("rows.read_at", q.read, q.bookmarked));
         if q.unrated {
             f.rows.push_str(" AND rows.rating IS NULL");
         }
@@ -600,16 +602,31 @@ impl Db {
         const BY_SCORE: &str = "rows.rec IS NULL, rows.rec DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
         let list_filter = match scope {
+            // 同じ報道のグループは、どれかを読んだ・評価したらグループごと選ばない
             ItemScope::Explore { .. } => "AND rows.relevant = 1 AND rows.rec < :min
                  AND rows.rating IS NULL AND rows.read_at IS NULL
+                 AND rows.story_read_at IS NULL AND rows.story_rated = 0
                  AND NOT EXISTS (
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
                 .to_string(),
+            // 同じ報道のグループは、どれかを読んだら既読、どれかの評価が 1〜2 なら隠す
             ItemScope::List {
                 read, bookmarked, ..
-            } => mark_filter(read, bookmarked),
+            } => format!(
+                "{} AND (:all = 1 OR rows.story_low = 0)",
+                mark_filter(
+                    "coalesce(rows.read_at, rows.story_read_at)",
+                    read,
+                    bookmarked
+                )
+            ),
             _ => String::new(),
+        };
+        // 一覧と確認枠では、同じ報道のグループを並びの先頭の 1 件にまとめる
+        let fold = match scope {
+            ItemScope::List { .. } | ItemScope::Explore { .. } => "rows.story_rank = 1",
+            _ => "1",
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, 0, 1, BY_SCORE),
@@ -698,7 +715,33 @@ impl Db {
                          WHERE aa.article_id = i.id
                            AND aa.membership_id NOT IN (
                              SELECT membership_id FROM user_memberships WHERE user_id = :user)
-                         ORDER BY m.name)) AS locked_by
+                         ORDER BY m.name)) AS locked_by,
+                      (SELECT st.story_id FROM article_stories AS st
+                       WHERE st.article_id = i.id) AS story_id,
+                      -- 同じ報道のグループのほかの記事のソース（日時の順）
+                      (SELECT json_group_array(source_id) FROM (
+                         SELECT a2.source_id FROM article_stories AS s1
+                         JOIN article_stories AS s2
+                           ON s2.story_id = s1.story_id AND s2.article_id <> s1.article_id
+                         JOIN articles AS a2 ON a2.id = s2.article_id
+                         WHERE s1.article_id = i.id
+                         ORDER BY coalesce(a2.published_at, a2.fetched_at), a2.id))
+                        AS story_others,
+                      -- グループのどれかを読んだ時刻、どれかに付けた評価
+                      (SELECT max(rd.read_at) FROM article_stories AS s1
+                       JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                       JOIN reads AS rd ON rd.article_id = s2.article_id AND rd.user_id = :user
+                       WHERE s1.article_id = i.id) AS story_read_at,
+                      EXISTS (
+                        SELECT 1 FROM article_stories AS s1
+                        JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                        JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
+                        WHERE s1.article_id = i.id) AS story_rated,
+                      EXISTS (
+                        SELECT 1 FROM article_stories AS s1
+                        JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+                        JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
+                        WHERE s1.article_id = i.id AND rt.value <= 2) AS story_low
                FROM items AS i
                LEFT JOIN artifacts AS d ON d.id = i.digest_id
              ),
@@ -707,6 +750,7 @@ impl Db {
                FROM rows
                LEFT JOIN scores AS s ON s.id = rows.score_id
              )
+             SELECT * FROM (
              SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
@@ -717,7 +761,10 @@ impl Db {
                     (SELECT json_group_array(topic) FROM (
                        SELECT topic FROM score_matches
                        WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded,
-                    s.score
+                    s.score, rows.story_id, rows.story_others,
+                    row_number() OVER (
+                      PARTITION BY coalesce(rows.story_id, -rows.id) ORDER BY {order})
+                      AS story_rank
              FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
              -- 既定では評価 1〜2、非軽水炉、未採点、閾値未満を隠す
@@ -726,6 +773,8 @@ impl Db {
                     AND rows.relevant = 1 AND rows.rec >= :min))
                {rows_filter}
                {list_filter}
+             ) AS rows
+             WHERE {fold}
              ORDER BY {order}
              LIMIT :limit",
             viewable_r = viewable("r"),
@@ -775,7 +824,7 @@ impl Db {
                 has_translation: r.get(14)?,
                 translation_requested: r.get(15)?,
                 locked_by: Vec::new(),
-                story_id: None,
+                story_id: r.get(21)?,
                 story_others: Vec::new(),
             };
             Ok((
@@ -783,13 +832,15 @@ impl Db {
                 r.get::<_, String>(16)?,
                 r.get::<_, String>(18)?,
                 r.get::<_, String>(19)?,
+                r.get::<_, String>(22)?,
             ))
         })?;
         rows.map(|row| {
-            let (mut item, locked_by, matched, excluded) = row?;
+            let (mut item, locked_by, matched, excluded, story_others) = row?;
             item.locked_by = serde_json::from_str(&locked_by)?;
             item.matched = serde_json::from_str(&matched)?;
             item.excluded = serde_json::from_str(&excluded)?;
+            item.story_others = serde_json::from_str(&story_others)?;
             Ok(item)
         })
         .collect()
@@ -861,7 +912,7 @@ mod tests {
         let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
         let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
         let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 70);
-        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 85);
         group(&db, &[a, b]);
         group(&db, &[c, d]);
         let user = db.owner_id().unwrap();

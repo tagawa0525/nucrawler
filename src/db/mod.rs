@@ -583,6 +583,38 @@ mod tests {
         assert_eq!(count("SELECT count(*) FROM article_stories"), 0);
     }
 
+    /// 既存の記事を、自分の ID のグループに入れる（グループに入っている記事はそのまま）。
+    #[test]
+    fn migration_puts_every_article_in_a_story() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("article_stories_on_insert"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/1', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (2, 's', 'https://e.example/2', 't', 'en', '2026-09-27T00:00:00.000Z'),
+                      (3, 's', 'https://e.example/3', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO article_stories (article_id, story_id) VALUES (1, 1), (2, 1);",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings(
+                "SELECT article_id || '|' || story_id FROM article_stories ORDER BY article_id"
+            )
+            .unwrap(),
+            ["1|1", "2|1", "3|3"]
+        );
+    }
+
     #[test]
     fn migration_adds_prompt_version_to_scores() {
         let conn = Connection::open_in_memory().unwrap();

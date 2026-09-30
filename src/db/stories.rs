@@ -556,6 +556,64 @@ mod tests {
         assert_eq!(pool[0].at, t("2026-09-26T00:00:00Z"));
     }
 
+    /// 記事は追加したときから自分の ID のグループに入っている。記事からグループへの対応には、
+    /// 2 件以上のグループの記事だけを載せる（ほかは自分のグループ）。
+    #[test]
+    fn every_article_starts_in_its_own_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = ja_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z");
+        assert_eq!(
+            db.query_strings("SELECT article_id || '|' || story_id FROM article_stories")
+                .unwrap(),
+            [format!("{a}|{a}")]
+        );
+        assert!(db.story_ids().unwrap().is_empty());
+    }
+
+    /// 作り直しは変わった行だけを書き、グループから外れた記事は自分の ID に戻す。
+    #[test]
+    fn rebuild_stories_writes_only_what_changed() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..10)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let (a, b) = (ids[0], ids[1]);
+        story(&db, a, &[same(b)], "2026-09-27T00:00:00Z");
+        story(&db, b, &[same(a)], "2026-09-27T00:00:00Z");
+        db.rebuild_stories().unwrap();
+        let before = db.conn().total_changes();
+        db.rebuild_stories().unwrap();
+        assert_eq!(db.conn().total_changes(), before, "nothing changed");
+        // b の新しい判定で割れたので、a と b はそれぞれ自分のグループに戻る
+        story_version(
+            &db,
+            b,
+            &[StoryLink {
+                relation: StoryRelation::Related,
+                ..same(a)
+            }],
+            "2026-09-28T00:00:00Z",
+            2,
+        );
+        let before = db.conn().total_changes();
+        db.rebuild_stories().unwrap();
+        assert_eq!(db.conn().total_changes() - before, 1, "only b moves");
+        assert_eq!(
+            db.query_strings(&format!(
+                "SELECT article_id || '|' || story_id FROM article_stories
+                 WHERE article_id IN ({a}, {b}) ORDER BY article_id"
+            ))
+            .unwrap(),
+            [format!("{a}|{a}"), format!("{b}|{b}")]
+        );
+    }
+
     /// 会員限定の本文から作った要約は、比べる文にも判定の条件にも使わない（判定は公開の成果物として
     /// 残すので）。
     #[test]

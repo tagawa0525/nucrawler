@@ -51,34 +51,202 @@ pub struct Edge {
 
 /// 全角の英数・記号を半角にし、小文字にして、空白と記号を除く。
 pub fn normalize(text: &str) -> String {
-    todo!("{text}")
+    text.chars()
+        .map(|c| match c {
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        })
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
-/// プールの記事の TF-IDF ベクトル。IDF はプールの中で数える。
+type Vector = HashMap<(char, char), f64>;
+
+/// 文字 bigram の出現回数。
+fn bigrams(text: &str) -> HashMap<(char, char), usize> {
+    let chars: Vec<char> = normalize(text).chars().collect();
+    let mut counts = HashMap::new();
+    for pair in chars.windows(2) {
+        *counts.entry((pair[0], pair[1])).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// プールの記事の TF-IDF ベクトル（長さ 1 に揃える）。IDF はプールの中で数える。
 #[derive(Debug)]
-pub struct Index {}
+pub struct Index {
+    docs: Vec<(Doc, Vector)>,
+    by_id: HashMap<i64, usize>,
+}
 
 impl Index {
     pub fn new(docs: Vec<Doc>) -> Index {
-        todo!("{docs:?}")
+        let counts: Vec<_> = docs.iter().map(|d| bigrams(&d.text)).collect();
+        let mut df: HashMap<(char, char), usize> = HashMap::new();
+        for c in &counts {
+            for &g in c.keys() {
+                *df.entry(g).or_insert(0) += 1;
+            }
+        }
+        let n = docs.len() as f64;
+        let docs: Vec<(Doc, Vector)> = docs
+            .into_iter()
+            .zip(counts)
+            .map(|(doc, counts)| {
+                let mut v: Vector = counts
+                    .into_iter()
+                    .map(|(g, tf)| (g, tf as f64 * (n / df[&g] as f64).ln()))
+                    .collect();
+                let norm = v.values().map(|x| x * x).sum::<f64>().sqrt();
+                if norm > 0.0 {
+                    v.values_mut().for_each(|x| *x /= norm);
+                }
+                (doc, v)
+            })
+            .collect();
+        let by_id = docs
+            .iter()
+            .enumerate()
+            .map(|(i, (d, _))| (d.article_id, i))
+            .collect();
+        Index { docs, by_id }
     }
 
     /// 2 件の記事の類似度（どちらかがプールに無ければ `None`）。
     pub fn similarity(&self, a: i64, b: i64) -> Option<f64> {
-        todo!("{a} {b}")
+        let (_, va) = &self.docs[*self.by_id.get(&a)?];
+        let (_, vb) = &self.docs[*self.by_id.get(&b)?];
+        Some(cosine(va, vb))
     }
 
     /// `target` の候補を、類似度の高い順に返す。`stories` は記事からグループの ID への対応。
     /// 対象と同じグループの記事は候補にしない。
     pub fn candidates(&self, target: i64, stories: &HashMap<i64, i64>) -> Vec<Candidate> {
-        todo!("{target} {stories:?}")
+        let Some(&t) = self.by_id.get(&target) else {
+            return Vec::new();
+        };
+        let (target_doc, target_vec) = &self.docs[t];
+        let own_story = stories.get(&target);
+        let window = chrono::Duration::days(WINDOW_DAYS);
+        // 候補の単位ごとに、類似度の最大値と、対象と別のソースの記事があるか
+        let mut units: BTreeMap<i64, (f64, bool)> = BTreeMap::new();
+        for (doc, v) in &self.docs {
+            if doc.article_id == target
+                || (doc.at - target_doc.at).abs() > window
+                || (own_story.is_some() && stories.get(&doc.article_id) == own_story)
+            {
+                continue;
+            }
+            let similarity = cosine(target_vec, v);
+            if similarity < MIN_SIMILARITY {
+                continue;
+            }
+            let unit = stories
+                .get(&doc.article_id)
+                .copied()
+                .unwrap_or(doc.article_id);
+            let entry = units.entry(unit).or_insert((similarity, false));
+            entry.0 = entry.0.max(similarity);
+            entry.1 |= doc.source_id != target_doc.source_id;
+        }
+        let mut units: Vec<(i64, f64, bool)> = units
+            .into_iter()
+            .map(|(id, (s, other))| (id, s, other))
+            .collect();
+        units.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let (mut other, mut same) = (0, 0);
+        units
+            .into_iter()
+            .filter(|&(_, _, other_source)| {
+                let count = if other_source { &mut other } else { &mut same };
+                let cap = if other_source {
+                    MAX_OTHER_SOURCE
+                } else {
+                    MAX_SAME_SOURCE
+                };
+                *count += 1;
+                *count <= cap
+            })
+            .map(|(id, similarity, _)| Candidate {
+                id,
+                members: self.members(id, stories),
+                similarity,
+            })
+            .collect()
     }
+
+    /// 候補の単位の記事（ID の順）。グループでなければその記事だけ。
+    fn members(&self, unit: i64, stories: &HashMap<i64, i64>) -> Vec<i64> {
+        let mut members: Vec<i64> = self
+            .docs
+            .iter()
+            .map(|(d, _)| d.article_id)
+            .filter(|id| stories.get(id) == Some(&unit))
+            .collect();
+        if members.is_empty() {
+            members.push(unit);
+        }
+        members.sort_unstable();
+        members
+    }
+}
+
+fn cosine(a: &Vector, b: &Vector) -> f64 {
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    small
+        .iter()
+        .filter_map(|(g, x)| large.get(g).map(|y| x * y))
+        .sum()
 }
 
 /// same の組をつないだグループ（2 件以上）の、記事とグループの ID（最小の記事 ID）の対応と、
 /// つなぐとグループが `max_size` を超えるので捨てた組。組は類似度の高い順につなぐ。
 pub fn components(edges: &[Edge], max_size: usize) -> (BTreeMap<i64, i64>, Vec<Edge>) {
-    todo!("{edges:?} {max_size}")
+    let mut sorted = edges.to_vec();
+    sorted.sort_by(|x, y| {
+        y.similarity
+            .total_cmp(&x.similarity)
+            .then((x.a, x.b).cmp(&(y.a, y.b)))
+    });
+    // 素集合：親と、根ならその集合の大きさ
+    let mut parent: HashMap<i64, i64> = HashMap::new();
+    let mut size: HashMap<i64, usize> = HashMap::new();
+    fn root(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
+        let p = *parent.entry(x).or_insert(x);
+        if p == x {
+            return x;
+        }
+        let r = root(parent, p);
+        parent.insert(x, r);
+        r
+    }
+    let mut rejected = Vec::new();
+    for e in sorted {
+        let (ra, rb) = (root(&mut parent, e.a), root(&mut parent, e.b));
+        if ra == rb {
+            continue;
+        }
+        let (sa, sb) = (*size.get(&ra).unwrap_or(&1), *size.get(&rb).unwrap_or(&1));
+        if sa + sb > max_size {
+            rejected.push(e);
+            continue;
+        }
+        parent.insert(rb, ra);
+        size.insert(ra, sa + sb);
+    }
+    let ids: Vec<i64> = parent.keys().copied().collect();
+    let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for id in ids {
+        let r = root(&mut parent, id);
+        groups.entry(r).or_default().push(id);
+    }
+    let mut stories = BTreeMap::new();
+    for members in groups.into_values().filter(|m| m.len() >= 2) {
+        let story_id = *members.iter().min().unwrap_or(&0);
+        stories.extend(members.into_iter().map(|m| (m, story_id)));
+    }
+    (stories, rejected)
 }
 
 #[cfg(test)]

@@ -700,6 +700,150 @@ mod tests {
         assert!(!feed_id(&mine).contains("token"), "{mine}");
     }
 
+    /// パスワードの変更のフォームを、所有者のセッションで送る。
+    async fn change(server: &Server, current: &str, new: &str) -> reqwest::Response {
+        server
+            .client
+            .post(format!("{}/settings/password", server.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form(&[("current", current), ("new", new)]))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    const NEW_PASSWORD: &str = "a brand new passphrase";
+
+    /// 変えると、要求元のものも含めてセッションとフィードのトークンがすべて失効し、要求元には新しいセッションの
+    /// Cookie を返す。新しいパスワードで照合が通る。
+    #[tokio::test]
+    async fn changing_the_password_rotates_sessions_and_the_feed() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings").await;
+        assert!(html.contains(r#"action="/settings/password""#), "{html}");
+        let feed = server.feed_path();
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(res.headers()["location"], "/settings?password=changed");
+        let cookie = cookie_of(&res);
+        for attr in ["HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=2592000"] {
+            assert!(cookie.contains(attr), "{attr}: {cookie}");
+        }
+        assert!(!cookie.contains("Secure"), "{cookie}");
+        let token = cookie
+            .strip_prefix(&format!("{SESSION_COOKIE}="))
+            .and_then(|c| c.split(';').next())
+            .unwrap()
+            .to_string();
+        // 変更前の Cookie（要求元のもの）とフィードの URL は使えない
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 303);
+        assert_eq!(server.get_raw(&feed).await.status().as_u16(), 401);
+        let res = server
+            .client
+            .get(format!("{}/settings", server.base))
+            .header(reqwest::header::COOKIE, format!("{SESSION_COOKIE}={token}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 200);
+        let hash = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .login_hash("owner")
+            .unwrap()
+            .unwrap();
+        assert!(crate::auth::verify_password(&hash, NEW_PASSWORD));
+    }
+
+    /// 今のパスワードの誤りはログインの失敗と同じく数え、6 回目でその人のセッションがすべて消える。
+    #[tokio::test]
+    async fn wrong_current_passwords_are_counted() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        for _ in 0..5 {
+            let res = change(&server, "not my password", NEW_PASSWORD).await;
+            assert_eq!(res.status().as_u16(), 303);
+            assert_eq!(res.headers()["location"], "/settings?password=wrong");
+        }
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+        change(&server, "not my password", NEW_PASSWORD).await;
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 303);
+        let (_, html) = server.get("/login").await;
+        assert!(html.contains("ログイン"), "{html}");
+    }
+
+    /// 新しいパスワードが条件を満たさない、または今のパスワードが長すぎるときは 400 で、何も変わらない。
+    #[tokio::test]
+    async fn invalid_passwords_are_rejected_before_hashing() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let long = "a".repeat(1025);
+        for (current, new) in [
+            (PASSWORD, "short"),
+            (PASSWORD, long.as_str()),
+            (long.as_str(), NEW_PASSWORD),
+        ] {
+            let res = change(&server, current, new).await;
+            assert_eq!(res.status().as_u16(), 400, "{current:.10} / {new:.10}");
+        }
+        assert_eq!(
+            server.count("SELECT failed_logins FROM users WHERE login = 'owner'"),
+            0
+        );
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+    }
+
+    /// 他サイトからの変更は 403 で、パスワードもセッションも変わらない。
+    #[tokio::test]
+    async fn cross_site_password_changes_are_refused() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let res = server
+            .client
+            .post(format!("{}/settings/password", server.base))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("origin", "https://evil.example")
+            .body(form(&[("current", PASSWORD), ("new", NEW_PASSWORD)]))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        assert_eq!(server.get_raw("/").await.status().as_u16(), 200);
+    }
+
+    /// パスワードの変更の計算も、ログインと同じ枠を使う（空きが無ければ 503）。
+    #[tokio::test]
+    async fn password_changes_share_the_hashing_limit() {
+        let db = Db::open_in_memory().unwrap();
+        with_password(&db);
+        let server = Server::start(db).await;
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Arc::new(std::sync::Mutex::new(gate));
+        let mut busy = Vec::new();
+        for _ in 0..2 {
+            let gate = gate.clone();
+            let mut task = Box::pin(server.state.hasher.run(move || {
+                gate.lock().unwrap().recv().unwrap();
+            }));
+            assert!(futures_poll_once(&mut task).await);
+            busy.push(task);
+        }
+        let res = change(&server, PASSWORD, NEW_PASSWORD).await;
+        assert_eq!(res.status().as_u16(), 503);
+        release.send(()).unwrap();
+        release.send(()).unwrap();
+        for task in busy {
+            task.await.unwrap();
+        }
+    }
+
     /// IP ごとの失敗は、ポートを除いたアドレスで数え、15 分途切れたら数え直す。記録の数には上限がある。
     #[test]
     fn ip_throttle_counts_by_address() {

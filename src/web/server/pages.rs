@@ -414,9 +414,16 @@ pub(super) async fn source(
     Ok(Redirect::to(&url).into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct SettingsParams {
+    /// パスワードの変更の結果（`changed`・`wrong`・`locked`）
+    password: Option<String>,
+}
+
 pub(super) async fn settings(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
+    Query(params): Query<SettingsParams>,
     headers: HeaderMap,
 ) -> Result<Html<String>, AppError> {
     let labels = state.labels.clone();
@@ -446,6 +453,7 @@ pub(super) async fn settings(
             terms,
             pending,
             feed_url.as_deref(),
+            params.password.as_deref(),
             &page,
         ))
     })

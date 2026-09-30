@@ -339,6 +339,81 @@ pub(super) async fn logout(
         .into_response())
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct PasswordForm {
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    new: String,
+}
+
+/// 本人のパスワードの変更。新しいパスワードの条件と今のパスワードの長さは、計算の前に確かめる（満たさなければ 400）。
+/// 照合・新しいハッシュの作成・判定と書き込みは、ログインと同じく `PasswordHasher` の 1 つのクロージャで行う。
+/// 変えたら、要求元のものも含めてセッションとフィードのトークンをすべて失効させ、要求元には新しいセッションを出す
+/// （Cookie を写し取った相手も同じセッションなので、残すとパスワードを変えても使い続けられる）。
+pub(super) async fn change_password(
+    State(state): State<AppState>,
+    Extension(SessionToken(session)): Extension<SessionToken>,
+    Form(form): Form<PasswordForm>,
+) -> Result<Response, AppError> {
+    if let Err(rule) = auth::check_password(&form.new) {
+        return Ok((StatusCode::BAD_REQUEST, rule.to_string()).into_response());
+    }
+    if !auth::within_password_limit(&form.current) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            auth::PasswordRule::TooLong.to_string(),
+        )
+            .into_response());
+    }
+    let db = state.db.clone();
+    let outcome = state
+        .hasher
+        .run(move || -> Result<crate::db::PasswordChange, DbError> {
+            let lock = || db.lock().unwrap_or_else(PoisonError::into_inner);
+            let now = chrono::Utc::now();
+            let read = lock().session_password_hash(&session, now)?;
+            let verified =
+                auth::verify_password(read.as_deref().unwrap_or(auth::dummy_hash()), &form.current);
+            // 新しいハッシュは、照合が通ったときだけ作る（書かないハッシュのために計算しない）
+            let new_hash = if verified {
+                auth::hash_password(&form.new)?
+            } else {
+                String::new()
+            };
+            lock().change_password(&session, read.as_deref(), verified, &new_hash, now)
+        })
+        .await;
+    use crate::db::PasswordChange;
+    Ok(match outcome {
+        Err(Busy) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "混み合っています。少し待ってから試してください",
+        )
+            .into_response(),
+        Ok(result) => match result? {
+            PasswordChange::Changed { token } => {
+                let max_age = auth::SESSION_DAYS * 24 * 60 * 60;
+                (
+                    [(header::SET_COOKIE, session_cookie_header(&token, max_age))],
+                    Redirect::to("/settings?password=changed"),
+                )
+                    .into_response()
+            }
+            PasswordChange::WrongPassword => {
+                Redirect::to("/settings?password=wrong").into_response()
+            }
+            PasswordChange::Locked => Redirect::to("/settings?password=locked").into_response(),
+            // セッションが無い（失効した・照合の間に変わった）ので、ログインし直してもらう
+            PasswordChange::NoSession => (
+                [(header::SET_COOKIE, session_cookie_header("", 0))],
+                Redirect::to("/login"),
+            )
+                .into_response(),
+        },
+    })
+}
+
 /// フィードのトークンを作り直す（古い購読用の URL は使えなくなる）。
 pub(super) async fn rotate_feed_token(
     State(state): State<AppState>,

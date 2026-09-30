@@ -5,12 +5,25 @@ use super::*;
 /// 管理の画面への入口（一覧の ⚙ から入る）。
 /// 設定。管理の画面への入口と、フィードの購読用の URL（`feed_url`。作っていなければ無い）とログアウト。
 /// 受付箱（`pending_reports` は受付中の件数）は管理者にだけ出す。
+/// `password` はパスワードの変更の結果（`changed`・`wrong`・`locked`）で、その知らせを出す。
 pub fn settings_page(
     glossary_terms: usize,
     pending_reports: Option<i64>,
     feed_url: Option<&str>,
+    password: Option<&str>,
     page: &Page,
 ) -> String {
+    let notice = match password {
+        Some("changed") => {
+            "<p class=\"meta\">パスワードを変えました。ほかの端末ではログインし直してください。\
+             フィードの URL も使えなくなったので、使っていれば作り直してください。</p>"
+        }
+        Some("wrong") => "<p class=\"warn\">今のパスワードが違います。</p>",
+        Some("locked") => {
+            "<p class=\"warn\">失敗が続いたため、今はパスワードを変えられません。しばらく待ってください。</p>"
+        }
+        _ => "",
+    };
     let feed = match feed_url {
         Some(url) => format!(
             "<p>フィードリーダーにはこの URL を登録してください（URL を知っていれば誰でも読めるので、人に渡さないでください）：\
@@ -34,7 +47,13 @@ pub fn settings_page(
          <span class=\"meta\">{glossary_terms} 語</span></li>\
          {inbox}</ul>\
          <h2>フィード</h2>{feed}\
-         <form method=\"post\" action=\"/logout\"><button>ログアウト</button></form>"
+         <h2>パスワード</h2>{notice}\
+         <form method=\"post\" action=\"/settings/password\">\
+         <p><label>今のパスワード<br><input name=\"current\" type=\"password\" autocomplete=\"current-password\" required></label></p>\
+         <p><label>新しいパスワード（{min} 文字以上）<br><input name=\"new\" type=\"password\" autocomplete=\"new-password\" \
+         minlength=\"{min}\" required></label></p><p><button>変える</button></p></form>\
+         <form method=\"post\" action=\"/logout\"><button>ログアウト</button></form>",
+        min = crate::auth::MIN_PASSWORD_CHARS,
     );
     layout("設定", page, &body)
 }
@@ -116,7 +135,7 @@ mod tests {
 
     #[test]
     fn settings_page_leads_to_the_glossary() {
-        let html = settings_page(15, Some(3), None, &Page::default());
+        let html = settings_page(15, Some(3), None, None, &Page::default());
         assert!(html.contains(r#"href="/""#), "back to the list: {html}");
         assert!(html.contains(r#"<a href="/glossary">訳語集</a>"#), "{html}");
         assert!(html.contains("15 語"), "{html}");

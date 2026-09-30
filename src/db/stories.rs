@@ -214,7 +214,7 @@ impl Db {
 
     /// 記事の関連記事（新しい順）：記事のグループの誰かの最新の判定が same か related とした記事と、
     /// その逆向きのもの。同じグループの記事は除く。関連の記事がグループに入っていれば、グループごとに
-    /// 新しい 1 件にまとめる。
+    /// そのグループで最も新しい 1 件にまとめる（判定に出た記事でなくてもよい）。
     pub fn related_articles(
         &self,
         user_id: i64,
@@ -241,8 +241,15 @@ impl Db {
                UNION
                SELECT x.article_id FROM latest AS x
                JOIN story_links AS l ON l.artifact_id = x.id
-               WHERE l.other_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related'))
-             SELECT id FROM linked WHERE id NOT IN (SELECT id FROM mine)",
+               WHERE l.other_id IN (SELECT id FROM mine) AND l.relation IN ('same', 'related')),
+             -- 関連の記事がグループに入っていれば、代表を選べるようグループ全員に広げる
+             expanded AS (
+               SELECT id FROM linked
+               UNION
+               SELECT s2.article_id FROM linked
+               JOIN article_stories AS s1 ON s1.article_id = linked.id
+               JOIN article_stories AS s2 ON s2.story_id = s1.story_id)
+             SELECT id FROM expanded WHERE id NOT IN (SELECT id FROM mine)",
             "at DESC, id DESC",
         )?;
         // 関連の記事がグループに入っていれば、グループごとに新しい 1 件にまとめる
@@ -697,7 +704,8 @@ mod tests {
             ids_of(&db.related_articles(user, a).unwrap()),
             [(v, 0), (w, 0), (z, 0), (y, 1)]
         );
-        assert_eq!(ids_of(&db.related_articles(user, x).unwrap()), [(a, 1)]);
+        // a と b は同じ日時なので、ID の大きい b が代表
+        assert_eq!(ids_of(&db.related_articles(user, x).unwrap()), [(b, 1)]);
     }
 
     /// same の組を推移的につなぐ。記事ごとに最新の判定だけを使い、related はつながない。

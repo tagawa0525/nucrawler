@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use axum::extract::{Form, Path, Query, RawQuery, State};
+use axum::extract::{Extension, Form, Path, Query, RawQuery, State};
 
 use axum::http::{HeaderMap, Method, StatusCode, header};
 
@@ -26,6 +26,7 @@ use crate::web::html::{self, DetailView, Page, SourceLabels};
 
 use crate::web::{api, feed};
 
+mod auth;
 mod feedback;
 mod glossary;
 mod json;
@@ -34,6 +35,7 @@ mod pages;
 #[cfg(test)]
 mod test_support;
 
+use auth::*;
 use feedback::*;
 use glossary::*;
 use json::*;
@@ -57,6 +59,8 @@ pub struct AppState {
     db: Arc<Mutex<Db>>,
     web: Arc<WebConfig>,
     labels: Arc<SourceLabels>,
+    hasher: PasswordHasher,
+    throttle: Arc<IpThrottle>,
 }
 
 impl AppState {
@@ -65,6 +69,8 @@ impl AppState {
             db: Arc::new(Mutex::new(db)),
             web: Arc::new(web),
             labels: Arc::new(labels),
+            hasher: PasswordHasher::default(),
+            throttle: Arc::new(IpThrottle::default()),
         }
     }
 }
@@ -97,6 +103,15 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/glossary/{id}/delete", post(delete_glossary_term))
         .route("/reports", get(reports))
         .route("/reports/{id}", post(resolve_report))
+        .route("/login", get(login_page).post(login))
+        .route("/logout", post(logout))
+        .route("/settings/feed-token", post(rotate_feed_token))
+        // 外側の層から順に掛かる：Origin の確認（ログインを含むすべての書き込み）→ ログインの確認
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ))
+        .layer(axum::middleware::from_fn(same_origin))
         .with_state(state)
 }
 
@@ -110,10 +125,14 @@ pub async fn run(
         .await
         .map_err(|source| ServeError::Bind { addr, source })?;
     tracing::info!(%addr, "serving the web ui");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(ServeError::Io)
+    // ログインの失敗を接続元の IP ごとに数えるので、接続元のアドレスをハンドラに渡す
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .map_err(ServeError::Io)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -168,11 +187,10 @@ async fn with_db<T: Send + 'static>(
     .await?
 }
 
-/// 利用者（今は所有者だけ）と、現在のプロファイルのハッシュ。
-fn viewer(db: &Db) -> Result<(i64, Option<String>), DbError> {
-    let user = db.owner_id()?;
-    let hash = db.profile_hash(user)?;
-    Ok((user, hash))
+/// ログインの確認の層が入れた利用者と、その現在のプロファイルのハッシュ。
+fn viewer(db: &Db, viewer: crate::db::Viewer) -> Result<(i64, Option<String>), DbError> {
+    let hash = db.profile_hash(viewer.user_id)?;
+    Ok((viewer.user_id, hash))
 }
 
 fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail, AppError> {
@@ -187,9 +205,9 @@ fn back_to_detail(id: i64, translation: bool, extra: &str, fragment: &str) -> Re
     Redirect::to(&format!("/articles/{id}?{view}{extra}back=1{fragment}"))
 }
 
-/// 認証の無いサーバーなので、別のサイトのページから利用者のブラウザ経由で書き込まれないよう、
+/// 別のサイトのページから利用者のブラウザ経由で書き込まれないよう（ログインさせられることも含めて）、
 /// ブラウザが付ける Origin がこのサーバー自身（http で待ち受けているので `http://` + Host）で
-/// なければ拒否する（Origin の無い curl などは通す）。
+/// なければ拒否する（Origin の無い curl などは通す）。書き込みのすべてに `auth::same_origin` の層で掛ける。
 fn check_same_origin(headers: &HeaderMap) -> Result<(), AppError> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Ok(());

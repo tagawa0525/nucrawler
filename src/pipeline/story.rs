@@ -523,6 +523,65 @@ mod tests {
         );
     }
 
+    /// 期間の外に広がったグループも、全員を候補の記事として見せ、全員への組にする。
+    #[tokio::test]
+    async fn shows_story_members_outside_the_window() {
+        let db = Db::open_in_memory().unwrap();
+        fillers(&db);
+        let old = db
+            .insert_article(&NewArticle {
+                source_id: "ans",
+                url: "https://e.com/old",
+                title: EIB_ANS,
+                lang: Lang::Ja,
+                published_at: Some("2026-08-01T00:00:00.000Z"),
+            })
+            .unwrap()
+            .unwrap();
+        let wnn = article(&db, "wnn", 15, EIB_WNN);
+        // old と wnn は、前に同じ報道と判定したグループ（old は期間の外）
+        for (a, b) in [(old, wnn), (wnn, old)] {
+            db.insert_story(
+                &crate::db::NewArtifact {
+                    article_id: a,
+                    kind: crate::db::ArtifactKind::Story,
+                    backend: "fake",
+                    model: "sonnet",
+                    prompt_version: 1,
+                    payload: &serde_json::json!({"candidates": [], "same": [], "related": []}),
+                    inputs: &[],
+                    glossary_at: None,
+                },
+                &[crate::db::StoryLink {
+                    other_id: b,
+                    relation: crate::db::StoryRelation::Same,
+                    similarity: 0.5,
+                }],
+                now(),
+            )
+            .unwrap();
+        }
+        db.rebuild_stories().unwrap();
+        let jaif = article(&db, "jaif", 27, EIB_JAIF);
+        let llm = FakeLlm::new([judgments(&[(jaif, &[old], &[])])]);
+        run(&db, &llm, &mut quota(10)).await;
+        let prompt = &llm.requests()[0].prompt;
+        assert!(
+            prompt.contains(&format!("<article id=\"{old}\"")),
+            "{prompt}"
+        );
+        assert_eq!(stories(&db), [(old, old), (wnn, old), (jaif, old)]);
+        assert_eq!(
+            db.query_i64(&format!(
+                "SELECT count(*) FROM story_links AS l
+                 JOIN artifacts AS r ON r.id = l.artifact_id
+                 WHERE r.article_id = {jaif} AND l.relation = 'same'"
+            ))
+            .unwrap(),
+            2
+        );
+    }
+
     /// 1 件の記事が複数の候補と same なら、それらが 1 つのグループにまとまる。
     #[tokio::test]
     async fn one_article_can_join_several_candidates() {

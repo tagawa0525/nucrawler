@@ -158,6 +158,11 @@ impl Db {
         .collect()
     }
 
+    /// 指定した記事の比べる文（[`Db::story_pool`] と同じ文。文の無い記事は含めない）。
+    pub fn story_docs(&self, ids: &[i64]) -> Result<Vec<Doc>, DbError> {
+        todo!("{ids:?}")
+    }
+
     /// 記事からグループの ID への対応。
     pub fn story_ids(&self) -> Result<HashMap<i64, i64>, DbError> {
         let mut stmt = self
@@ -405,6 +410,21 @@ mod tests {
             ]
         );
         assert_eq!(pool[0].at, t("2026-09-26T00:00:00Z"));
+    }
+
+    /// 指定した記事の比べる文（プールと同じ文。文の無い記事は含めない）。
+    #[test]
+    fn story_docs_reads_the_given_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let a = ja_article(&db, "https://e.com/a", "2026-08-01T00:00:00.000Z");
+        let none = page_article(&db, "https://e.com/none", "2026-08-01T00:00:00.000Z");
+        let _other = ja_article(&db, "https://e.com/other", "2026-08-01T00:00:00.000Z");
+        let docs = db.story_docs(&[a, none]).unwrap();
+        let got: Vec<(i64, &str)> = docs
+            .iter()
+            .map(|d| (d.article_id, d.text.as_str()))
+            .collect();
+        assert_eq!(got, [(a, "日本語の原題")]);
     }
 
     /// same の組を推移的につなぐ。記事ごとに最新の判定だけを使い、related はつながない。

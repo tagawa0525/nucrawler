@@ -361,6 +361,20 @@ mod tests {
         assert_eq!(ids(&cs), [7, 8], "{cs:?}");
     }
 
+    /// グループの記事は、類似度の期間やプールの外にいても候補の記事に並べる（グループの全員と比べる）。
+    #[test]
+    fn story_candidates_list_members_outside_the_pool() {
+        let text = "カメコ、グローバル・レーザー・エンリッチメントと全量引取契約を締結";
+        let mut docs = vec![doc(1, "a", 20, text), doc(2, "b", 20, text)];
+        docs.extend(filler(100));
+        let index = Index::new(docs);
+        // 記事 50 はプールに無いが、記事 1 と同じグループ
+        let stories: HashMap<i64, i64> = [(1, 1), (50, 1)].into();
+        let cs = index.candidates(2, &stories);
+        assert_eq!(ids(&cs), [1]);
+        assert_eq!(cs[0].members, [1, 50]);
+    }
+
     #[test]
     fn components_join_edges_transitively() {
         let e = |a, b| Edge {

@@ -579,4 +579,42 @@ mod tests {
             .unwrap();
         assert_eq!(ids.len(), 1);
     }
+
+    /// 依頼は誰のものでも拾い、記事ごとに最も古い未完了の依頼の時刻で並べる（和訳は全員で共有するので）。
+    #[test]
+    fn pending_translate_serves_requests_from_every_user() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, login, display_name) VALUES (2, 'other', 'other')",
+                [],
+            )
+            .unwrap();
+        let theirs = scored_article(
+            &db,
+            "https://e.com/theirs",
+            Lang::En,
+            "2026-08-01T00:00:00.000Z",
+            10,
+        );
+        let both = scored_article(
+            &db,
+            "https://e.com/both",
+            Lang::En,
+            "2026-08-01T00:00:00.000Z",
+            10,
+        );
+        db.request_translation(2, theirs, t("2026-09-26T02:00:00Z"))
+            .unwrap();
+        // 所有者の依頼は後でも、ほかの人がそれより前に依頼していれば、その時刻で並ぶ
+        db.request_translation(owner, both, t("2026-09-26T03:00:00Z"))
+            .unwrap();
+        db.request_translation(2, both, t("2026-09-26T01:00:00Z"))
+            .unwrap();
+
+        let now = "2026-09-27T00:00:00Z";
+        assert_eq!(translate_ids(&db, true, now), [both, theirs]);
+        assert_eq!(translate_ids(&db, false, now), [both, theirs]);
+    }
 }

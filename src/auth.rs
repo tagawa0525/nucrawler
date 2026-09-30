@@ -1,8 +1,6 @@
 //! 認証の部品：パスワードのハッシュと照合、トークンと初期パスワードの生成、ログインの失敗の待ち時間。
 //! 乱数は OS から取る。DB と Web には依存しない（計画 009）。
 
-use std::sync::LazyLock;
-
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 
@@ -88,13 +86,13 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
 }
 
 /// ID が無いときやパスワードが無いときに照合する相手。どのパスワードでも通らないが、照合には同じ時間がかかる。
+/// 要求の処理中に計算すると、起動後の初めての照合だけ遅くなって ID の有無が漏れるので、作っておいたものを埋め込む。
+/// 元の値は上限（`MAX_PASSWORD_BYTES`）を超える 1025 バイトの `x` で、ログインの入力は計算の前に上限で断るので一致しえない。
+/// 強さのパラメータは `hash_password` と同じ（テストで確かめる）。
+const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$j7PXRp5XgVPKU8QDs/WGdg$00KbEY5pBtQGqFWScBevj+DJ36LV+UsE6rGQAkdhXTk";
+
 pub fn dummy_hash() -> &'static str {
-    // 元の値は上限を超える長さにする。ログインの入力は計算の前に上限で断るので、この値とは一致しえない
-    static DUMMY: LazyLock<String> = LazyLock::new(|| {
-        hash_password(&"x".repeat(MAX_PASSWORD_BYTES + 1))
-            .expect("argon2id with default params hashes any input")
-    });
-    &DUMMY
+    DUMMY_HASH
 }
 
 /// 256 bit の乱数を 16 進の 64 文字で返す（セッション・フィードのトークン）。

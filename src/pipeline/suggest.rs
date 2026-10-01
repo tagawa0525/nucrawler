@@ -1,10 +1,7 @@
 //! プロファイルの更新案（`profile suggest`）：反応を根拠に、LLM にプロファイルの更新案を 1 回で作らせる。
 //! 案は保存しない（人が差分を読み、`eval --profile` で比べてから取り込む）。
 
-use super::Halt;
-use super::llm_call::{
-    Call, LlmStage, Outcome, Reserved, Shared, Tally, call_recorded, permit, reserve,
-};
+use super::llm_call::{Call, LlmStage, Tally, Workers};
 use crate::config::LlmConfig;
 use crate::db::{DbError, Evidence};
 use crate::llm::{Llm, LlmRequest};
@@ -31,43 +28,22 @@ pub struct SuggestSummary {
 
 /// モデルは採点と同じ `llm.score_model`（点数の付け方を知っているモデルに、その元を見直させる）。
 pub async fn suggest_profile<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     cfg: &LlmConfig,
     profile: &Profile,
     evidence: &[Evidence],
 ) -> Result<SuggestSummary, SuggestStageError> {
-    let shared = Shared::new(quota);
+    let workers = Workers::new(env);
+    let clock = workers.clock;
     let mut summary = SuggestSummary::default();
     // 呼び出しの枠を先に取り、判定と呼び出しをその中で行う
-    let _slot = match reserve(llm, cancel).await {
-        Reserved::Slot(slot) => slot,
-        Reserved::Cancelled => {
-            summary.tally.cancelled = true;
-            return Ok(summary);
-        }
-        Reserved::Failed(message) => {
-            summary.tally.halted = Some(Halt::LlmFailed(message));
-            return Ok(summary);
-        }
-    };
-    if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
-        tracing::info!("suggest stops: {stop}");
-        summary.tally.halted = Some(Halt::Quota(stop));
+    let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
         return Ok(summary);
-    }
+    };
     let prompt = prompt::suggest::build_prompt(profile, evidence);
     let schema = prompt::suggest::schema();
-    let outcome = call_recorded(
-        db,
-        llm,
-        &shared,
-        Call {
+    let outcome = workers
+        .call(Call {
             stage: STAGE,
             n_items: evidence.len(),
             req: LlmRequest {
@@ -76,24 +52,13 @@ pub async fn suggest_profile<L: Llm>(
                 schema: &schema,
                 model: &cfg.score_model,
             },
-        },
-        clock,
-        cancel,
-    )
-    .await?;
-    let response = match outcome {
-        Outcome::Response(response) => response,
-        Outcome::Cancelled => {
-            summary.tally.cancelled = true;
-            return Ok(summary);
-        }
-        Outcome::Halted(halt) => {
-            summary.tally.calls += 1;
-            summary.tally.halted = Some(halt);
-            return Ok(summary);
-        }
+        })
+        .await?;
+    let Some(response) =
+        workers.settle(outcome, &mut summary.tally, std::iter::empty(), clock())?
+    else {
+        return Ok(summary);
     };
-    summary.tally.calls += 1;
     summary.suggestion = Some(prompt::suggest::parse(&response.output)?);
     Ok(summary)
 }
@@ -105,6 +70,7 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
     use crate::pipeline::Cancel;
+    use crate::pipeline::Halt;
     use crate::quota::{Quota, QuotaConfig};
     use chrono::{DateTime, Utc};
 

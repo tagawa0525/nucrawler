@@ -3,10 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::Halt;
-use super::llm_call::{
-    Call, LlmStage, Outcome, Reserved, Shared, Tally, call_recorded, permit, reserve,
-};
+use super::llm_call::{Call, LlmStage, Tally, Workers};
 use crate::config::LlmConfig;
 use crate::db::DbError;
 use crate::errors;
@@ -29,18 +26,13 @@ pub struct TidySummary {
 
 /// `force` なら前回の整理からの間隔によらず整理する（`crawl --only tidy`）。
 pub async fn tidy_topics<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     cfg: &LlmConfig,
     force: bool,
     now: DateTime<Utc>,
 ) -> Result<TidySummary, TidyStageError> {
-    let shared = Shared::new(quota);
+    let workers = Workers::new(env);
+    let (db, llm, clock) = (workers.db, workers.llm, workers.clock);
     let mut summary = TidySummary::default();
     let interval = chrono::Duration::days(i64::from(cfg.tidy_interval_days));
     if !force && db.llm_succeeded_since(STAGE, now - interval)? {
@@ -53,29 +45,13 @@ pub async fn tidy_topics<L: Llm>(
         return Ok(summary);
     }
     // 呼び出しの枠を先に取り、判定と呼び出しをその中で行う
-    let _slot = match reserve(llm, cancel).await {
-        Reserved::Slot(slot) => slot,
-        Reserved::Cancelled => {
-            summary.tally.cancelled = true;
-            return Ok(summary);
-        }
-        Reserved::Failed(message) => {
-            summary.tally.halted = Some(Halt::LlmFailed(message));
-            return Ok(summary);
-        }
-    };
-    if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
-        tracing::info!("tidy stops: {stop}");
-        summary.tally.halted = Some(Halt::Quota(stop));
+    let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
         return Ok(summary);
-    }
+    };
     let prompt = prompt::tidy::build_prompt(&usage);
     let schema = prompt::tidy::schema(&usage);
-    let outcome = call_recorded(
-        db,
-        llm,
-        &shared,
-        Call {
+    let outcome = workers
+        .call(Call {
             stage: STAGE,
             n_items: proposed,
             req: LlmRequest {
@@ -84,24 +60,13 @@ pub async fn tidy_topics<L: Llm>(
                 schema: &schema,
                 model: &cfg.tidy_model,
             },
-        },
-        clock,
-        cancel,
-    )
-    .await?;
-    let response = match outcome {
-        Outcome::Response(response) => response,
-        Outcome::Cancelled => {
-            summary.tally.cancelled = true;
-            return Ok(summary);
-        }
-        Outcome::Halted(halt) => {
-            summary.tally.calls += 1;
-            summary.tally.halted = Some(halt);
-            return Ok(summary);
-        }
+        })
+        .await?;
+    let Some(response) =
+        workers.settle(outcome, &mut summary.tally, std::iter::empty(), clock())?
+    else {
+        return Ok(summary);
     };
-    summary.tally.calls += 1;
     // 形の崩れた応答は捨てて、次の整理の機会を待つ（統合しなくても要約や検索は困らない）
     let merges = match prompt::tidy::parse(&response.output, &usage) {
         Ok(merges) => merges,
@@ -122,6 +87,7 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmResponse};
     use crate::pipeline::Cancel;
+    use crate::pipeline::Halt;
     use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {

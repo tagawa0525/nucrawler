@@ -47,17 +47,15 @@ struct ProfileTexts<'a> {
 }
 
 impl<'a> ProfileTexts<'a> {
-    fn new(cfg: &EmbeddingConfig, profile: &'a ScoringProfile) -> Self {
+    fn new(cfg: &EmbeddingConfig, profile: &'a crate::profile::Profile) -> Self {
         Self {
             interests: profile
-                .profile
                 .interests
                 .iter()
                 .filter(|i| i.weight > 0.0)
                 .map(|i| (i, input(cfg, Role::Query, &interest_text(i))))
                 .collect(),
             excludes: profile
-                .profile
                 .exclude
                 .iter()
                 .map(|e| (e.as_str(), input(cfg, Role::Query, e)))
@@ -109,7 +107,17 @@ pub async fn preference_of(
     profile: &crate::profile::Profile,
     cancel: &Cancel,
 ) -> Result<Option<Preference>, EmbedStageError> {
-    todo!()
+    let Some(space) = db.embedding_space()? else {
+        return Ok(None);
+    };
+    check_space(&space, cfg)?;
+    let texts = ProfileTexts::new(cfg, profile);
+    let all: Vec<String> = texts.all().cloned().collect();
+    let mut summary = ProfileSummary::default();
+    if !embed_texts(db, embedder, cfg, &space, &all, cancel, &mut summary).await? {
+        return Ok(None);
+    }
+    Ok(texts.preference(&db.text_embeddings(space.id, &all)?))
 }
 
 /// 好みの文のベクトルを作り、プロファイルのある全員を採点する。好みの文の呼び出しが失敗したら、残りの文は
@@ -129,7 +137,10 @@ pub async fn embed_profiles(
     };
     check_space(&space, cfg)?;
     let profiles = db.scoring_profiles()?;
-    let texts: Vec<ProfileTexts> = profiles.iter().map(|p| ProfileTexts::new(cfg, p)).collect();
+    let texts: Vec<ProfileTexts> = profiles
+        .iter()
+        .map(|p| ProfileTexts::new(cfg, &p.profile))
+        .collect();
     let mut seen = HashSet::new();
     let all: Vec<String> = texts
         .iter()

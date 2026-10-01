@@ -426,6 +426,59 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
     }
 
+    /// 止める指示で終わった呼び出しも、始めたので数える。どのステージ（1 回だけ呼ぶ `profile suggest`・
+    /// 語彙の整理を含む）も `Workers::settle` で数える。
+    #[tokio::test]
+    async fn a_call_ended_by_the_stop_is_counted() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([Err(crate::llm::LlmError::Exit {
+            status: "signal: 2 (SIGINT)".into(),
+            stderr: String::new(),
+            interrupted: true,
+        })]);
+        let cancel = Cancel::default();
+        let requester = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            requester.request();
+        });
+        let mut quota = Quota::new(QuotaConfig::default(), None, None);
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &Utc::now,
+        });
+        let schema = serde_json::json!({});
+        let outcome = workers
+            .call(Call {
+                stage: "suggest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            })
+            .await
+            .unwrap();
+        let mut tally = Tally::default();
+        let response = workers
+            .settle(outcome, &mut tally, std::iter::empty(), Utc::now())
+            .unwrap();
+        assert!(response.is_none());
+        assert_eq!(
+            tally,
+            Tally {
+                calls: 1,
+                cancelled: true,
+                ..Tally::default()
+            }
+        );
+    }
+
     /// クレジットで判定するときは、DB にある今月の消費（ほかの実行の分も含む）で判定する。
     #[test]
     fn permit_counts_this_months_credits() {

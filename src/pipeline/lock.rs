@@ -1,13 +1,10 @@
 //! 同時実行の制御。
 //!
 //! - 取得（fetch・extract）は 1 つずつ（`fetch.lock` を排他）。同じホストへの間隔を守るため
-//! - LLM を呼ぶ処理は並行してよい（`llm.lock` を共有）。同じ記事の二重処理は作業の予約
+//! - LLM を呼ぶ処理は並行してよい（ファイルのロックは取らない）。同じ記事の二重処理は作業の予約
 //!   （`work_claims`）で、ほかの実行の呼び出しはクォータの判定のたびに DB の使用率を読むことで防ぐ
 //! - 同時に動く claude の数は、呼び出しの枠（`llm-slot-N.lock`）でプロセスをまたいで数える
 //! - 語彙の整理は 1 つずつ（`tidy.lock` を排他）
-//!
-//! 更新の前後で古い版の実行が残っていても重ならないよう、古い版が排他で取っていたロックは共有で取る。
-//! ロックを分ける前の版は `crawl.lock` を、LLM を並行にする前の版は `llm.lock` を排他で取っていた。
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -31,7 +28,7 @@ pub enum LockError {
 pub enum LockKind {
     /// fetch・extract（1 つずつ）
     Fetch,
-    /// LLM を呼ぶステージと redo・suggest・eval の採点（並行してよい）
+    /// LLM を呼ぶステージ（並行してよいので、ファイルのロックは取らない）
     Llm,
     /// 語彙の整理（1 つずつ。LLM を呼ぶほかの実行とは並行する）
     Tidy,
@@ -40,35 +37,19 @@ pub enum LockKind {
 /// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
 #[derive(Debug)]
 pub struct Lock {
-    /// 取った順。取った順の逆に放す（古い版のためのロックを最後に放す）
-    files: Vec<File>,
+    _file: Option<File>,
 }
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        while self.files.pop().is_some() {}
-    }
-}
-
-/// ロックを分ける前の版が排他で取っていたロック。
-const LEGACY: &str = "crawl.lock";
-/// LLM を並行にする前の版が排他で取っていたロック。今は LLM を呼ぶ実行どうしが共有で取る。
-const LLM: &str = "llm.lock";
 
 /// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。
 pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
-    let shared = |name| try_lock(dir, name, File::try_lock_shared);
-    let exclusive = |name| try_lock(dir, name, File::try_lock);
-    let mut files = vec![shared(LEGACY)?];
-    match kind {
-        LockKind::Fetch => files.push(exclusive("fetch.lock")?),
-        LockKind::Llm => files.push(shared(LLM)?),
-        LockKind::Tidy => {
-            files.push(shared(LLM)?);
-            files.push(exclusive("tidy.lock")?);
-        }
-    }
-    Ok(Lock { files })
+    let name = match kind {
+        LockKind::Fetch => "fetch.lock",
+        LockKind::Llm => return Ok(Lock { _file: None }),
+        LockKind::Tidy => "tidy.lock",
+    };
+    Ok(Lock {
+        _file: Some(try_lock(dir, name, File::try_lock)?),
+    })
 }
 
 /// 呼び出しの枠。drop すると空く。
@@ -219,18 +200,6 @@ mod tests {
         assert!(matches!(err, LockError::Held { .. }), "{err}");
     }
 
-    /// 更新前の版の実行（`crawl.lock` を排他で取る）とは、どちらのロックも重ならない。
-    #[test]
-    fn waits_for_a_run_of_the_previous_version() {
-        let dir = temp_dir("lock-legacy");
-        let legacy = File::create(dir.join("crawl.lock")).unwrap();
-        legacy.try_lock().unwrap();
-        for kind in [LockKind::Fetch, LockKind::Llm, LockKind::Tidy] {
-            let err = acquire(&dir, kind).unwrap_err();
-            assert!(matches!(err, LockError::Held { .. }), "{err}");
-        }
-    }
-
     #[test]
     fn missing_dir_is_io_error() {
         let dir = temp_dir("lock-missing").join("nope");
@@ -238,18 +207,12 @@ mod tests {
         assert!(matches!(err, LockError::Io { .. }), "{err}");
     }
 
-    /// LLM を呼ぶ実行どうしは待たない（同じ記事は作業の予約で分ける）。ロックを分ける前の版の
-    /// 実行（llm.lock を排他で取る）とは重ならない。
+    /// LLM を呼ぶ実行どうしは待たない（同じ記事は作業の予約で分ける）。
     #[test]
-    fn llm_runs_share_the_lock_but_not_with_the_previous_version() {
-        let dir = temp_dir("lock-llm-shared");
-        let first = acquire(&dir, LockKind::Llm).unwrap();
-        let second = acquire(&dir, LockKind::Llm).unwrap();
-        drop((first, second));
-        let previous = File::create(dir.join("llm.lock")).unwrap();
-        previous.try_lock().unwrap();
-        let err = acquire(&dir, LockKind::Llm).unwrap_err();
-        assert!(matches!(err, LockError::Held { .. }), "{err}");
+    fn llm_runs_do_not_block_each_other() {
+        let dir = temp_dir("lock-llm");
+        let _first = acquire(&dir, LockKind::Llm).unwrap();
+        let _second = acquire(&dir, LockKind::Llm).unwrap();
     }
 
     /// 語彙の整理は同時に 1 つだけ。LLM を呼ぶほかの実行とは並行する。

@@ -43,7 +43,29 @@ pub struct EmbeddingScore {
 impl Db {
     /// プロファイルのある利用者（利用者の id 順）。
     pub fn scoring_profiles(&self) -> Result<Vec<ScoringProfile>, DbError> {
-        todo!()
+        let mut stmt = self
+            .conn
+            .prepare("SELECT user_id, interests, excludes, hash FROM profiles ORDER BY user_id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (user_id, interests, excludes, hash) = row?;
+            Ok(ScoringProfile {
+                user_id,
+                profile: Profile {
+                    interests: serde_json::from_str(&interests)?,
+                    exclude: serde_json::from_str(&excludes)?,
+                },
+                hash,
+            })
+        })
+        .collect()
     }
 
     /// `texts` のうち、`space_id` の空間にベクトルがある文のベクトル。
@@ -52,7 +74,21 @@ impl Db {
         space_id: i64,
         texts: &[String],
     ) -> Result<HashMap<String, Vec<f32>>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT e.text, e.vector FROM text_embeddings AS e
+             WHERE e.space_id = ?1 AND e.text IN (SELECT value FROM json_each(?2))",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![space_id, serde_json::to_string(texts)?],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (text, bytes) = row?;
+            let vector = crate::embedding::decode(&bytes)
+                .ok_or_else(|| DbError::UnexpectedValue(format!("text vector of {text:?}")))?;
+            Ok((text, vector))
+        })
+        .collect()
     }
 
     /// 文のベクトルを保存する。`space_id` の空間がもう無ければ何も保存せず `false`。すでにある文は変えない。
@@ -61,12 +97,36 @@ impl Db {
         space_id: i64,
         vectors: &[(String, Vec<f32>)],
     ) -> Result<bool, DbError> {
-        todo!()
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !self.has_embedding_space(space_id)? {
+            return Ok(false);
+        }
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO text_embeddings (text, space_id, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT (text) DO NOTHING",
+        )?;
+        for (text, vector) in vectors {
+            stmt.execute(rusqlite::params![
+                text,
+                space_id,
+                crate::embedding::encode(vector)
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(true)
     }
 
     /// `keep` に無い文のベクトルを消す（今のどのプロファイルにも使われなくなったもの）。
     pub fn prune_text_embeddings(&self, keep: &[String]) -> Result<(), DbError> {
-        todo!()
+        self.conn.execute(
+            "DELETE FROM text_embeddings WHERE text NOT IN (SELECT value FROM json_each(?1))",
+            [serde_json::to_string(keep)?],
+        )?;
+        Ok(())
     }
 
     /// 利用者の採点の対象を、記事の新しい順に、`offset` 件を飛ばして最大 `limit` 件返す。
@@ -78,7 +138,72 @@ impl Db {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<Candidate>, DbError> {
-        todo!()
+        let unscored = filter.unscored;
+        let mut stmt = self.conn.prepare(
+            "WITH viewable AS (
+               -- 利用者が持っていない会員資格を必要とする digest は見せない（LLM の採点と同じ条件）
+               SELECT r.id, r.article_id, r.created_at, r.payload
+               FROM artifacts AS r
+               WHERE r.kind = 'digest'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifact_access AS aa
+                   WHERE aa.artifact_id = r.id
+                     AND aa.membership_id NOT IN (
+                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+             ),
+             latest AS (
+               SELECT v.* FROM viewable AS v
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewable AS w
+                 WHERE w.article_id = v.article_id
+                   AND (w.created_at > v.created_at
+                        OR (w.created_at = v.created_at AND w.id > v.id)))
+             )
+             SELECT l.article_id, l.id, e.vector
+             FROM latest AS l
+             JOIN articles AS a ON a.id = l.article_id
+             JOIN article_embeddings AS e ON e.artifact_id = l.id AND e.space_id = ?2
+             WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+               AND (?3 IS NULL OR coalesce(a.published_at, a.fetched_at) >= ?3)
+               AND (?4 IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM scores AS s
+                 WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?4
+                   AND s.backend = ?5 AND s.model = ?6 AND s.prompt_version = ?7))
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
+             LIMIT ?8 OFFSET ?9",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                user_id,
+                space_id,
+                filter.since.map(timestamp),
+                unscored.map(|k| k.profile_hash),
+                unscored.map(|k| k.backend),
+                unscored.map(|k| k.model),
+                unscored.map(|k| k.prompt_version),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX),
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (article_id, artifact_id, bytes) = row?;
+            let vector = crate::embedding::decode(&bytes).ok_or_else(|| {
+                DbError::UnexpectedValue(format!("vector of artifact {artifact_id}"))
+            })?;
+            Ok(Candidate {
+                article_id,
+                artifact_id,
+                vector,
+            })
+        })
+        .collect()
     }
 
     /// 利用者の embedding の点数をまとめて保存し、その利用者の今のプロファイル以外の embedding の点数を消す
@@ -91,7 +216,65 @@ impl Db {
         scores: &[EmbeddingScore],
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        todo!()
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !self.has_embedding_space(space_id)?
+            || self.profile_hash(key.user_id)?.as_deref() != Some(key.profile_hash)
+        {
+            return Ok(false);
+        }
+        // プロファイルを変えるたびに全期間の点数が増え続けないよう、今のプロファイル以外の分を消す
+        // （score_matches は外部キーで一緒に消える）
+        self.conn.execute(
+            "DELETE FROM scores WHERE user_id = ?1 AND backend = ?2 AND profile_hash <> ?3",
+            rusqlite::params![key.user_id, key.backend, key.profile_hash],
+        )?;
+        let mut insert = self.conn.prepare(
+            "INSERT INTO scores
+               (user_id, artifact_id, profile_hash, backend, model, prompt_version, score, reason,
+                created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)
+             ON CONFLICT DO NOTHING",
+        )?;
+        let mut matched = self
+            .conn
+            .prepare("INSERT INTO score_matches (score_id, kind, topic) VALUES (?1, ?2, ?3)")?;
+        let created_at = timestamp(now);
+        for s in scores {
+            let inserted = insert.execute(rusqlite::params![
+                key.user_id,
+                s.artifact_id,
+                key.profile_hash,
+                key.backend,
+                key.model,
+                key.prompt_version,
+                s.score,
+                created_at,
+            ])?;
+            if inserted == 0 {
+                continue;
+            }
+            let score_id = self.conn.last_insert_rowid();
+            for (kind, topic) in [("interest", &s.interest), ("exclude", &s.exclude)] {
+                if let Some(topic) = topic {
+                    matched.execute(rusqlite::params![score_id, kind, topic])?;
+                }
+            }
+        }
+        drop((insert, matched));
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// `space_id` の空間（世代）がまだあるか。
+    pub(super) fn has_embedding_space(&self, space_id: i64) -> Result<bool, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM embedding_space WHERE id = ?1",
+            [space_id],
+            |r| r.get::<_, i64>(0),
+        )? == 1)
     }
 }
 

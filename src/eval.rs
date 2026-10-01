@@ -386,6 +386,48 @@ mod tests {
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
+    /// embedding の点数は、embedding の式の今の版のキーを現行として、LLM の現行のキーと並べる。その場で計算するので
+    /// いつも評価の後になるが、反応の見出しは入力に無いので注記しない。
+    #[test]
+    fn shows_embedding_scores_as_current_without_the_late_note() {
+        let labels = [label(1, 4), label(2, 2)];
+        let llm = key("h", 3);
+        let embedding = EvalKey {
+            backend: crate::db::EMBED_BACKEND.into(),
+            model: "ruri".into(),
+            prompt_version: crate::embed_score::SCORE_VERSION,
+            ..key("h", 0)
+        };
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [
+            scored(&llm, 1, 80, after),
+            scored(&llm, 2, 20, after),
+            scored(&embedding, 1, 70, after),
+            scored(&embedding, 2, 30, after),
+        ];
+        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        assert!(
+            out.contains(&format!(
+                "embedding/ruri  prompt v{}  (current)",
+                crate::embed_score::SCORE_VERSION
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("claude-cli/sonnet  prompt v3  (current)"),
+            "{out}"
+        );
+        assert!(!out.contains("after the reaction"), "{out}");
+        // LLM の版 1 の注記は、embedding の版が 1 でも出さない
+        let v1 = EvalKey {
+            prompt_version: 1,
+            ..embedding
+        };
+        let scores = [scored(&v1, 1, 70, after), scored(&v1, 2, 30, after)];
+        let out = render(&labels, &scores, Some("h"), None, 3, true, 1.0);
+        assert!(!out.contains("after the reaction"), "{out}");
+    }
+
     #[test]
     fn shows_the_candidate_next_to_the_current_key() {
         let labels = [label(1, 4), label(2, 2)];

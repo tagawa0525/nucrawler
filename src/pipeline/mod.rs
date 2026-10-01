@@ -170,11 +170,11 @@ impl Stage {
     }
 
     /// 実行中に取っておくロック。取得は LLM を使わないので、LLM のステージと並行して動ける。
+    /// LLM のステージ（`LockKind::Llm`）はファイルのロックを取らず、続けて実行する単位にだけ使う。
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            // embed は LLM を呼ばないが、要約と採点の間で続けて動けるよう、LLM のステージと同じロックで動かす
-            // （共有のロックなので、ほかの LLM の実行とは並行する）
+            // embed は LLM を呼ばないが、要約と採点の間で続けて動けるよう、LLM のステージと同じ単位で動かす
             Stage::Digest
             | Stage::Embed
             | Stage::Score

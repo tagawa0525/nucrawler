@@ -106,7 +106,8 @@ pub async fn crawl<L: LlmSet>(
         if env.cancel.is_requested() {
             break;
         }
-        if let Some(task) = stage.llm_task()
+        let task = stage.llm_task();
+        if let Some(task) = task
             && report.llm_blocked.contains(&env.backend(task))
         {
             tracing::warn!(
@@ -115,7 +116,8 @@ pub async fn crawl<L: LlmSet>(
             );
             continue;
         }
-        match stage {
+        // LLM のステージは止めた理由を返し、使えなくなったバックエンドを上の判定と同じ工程（`task`）で記録する
+        let halted = match stage {
             Stage::Fetch => {
                 let summary =
                     fetch::fetch_sources(db, fetcher, sources, env.cancel, (env.clock)()).await?;
@@ -125,6 +127,7 @@ pub async fn crawl<L: LlmSet>(
                     "fetch stage finished"
                 );
                 report.failed_sources += summary.failed_sources.len();
+                None
             }
             Stage::Digest => {
                 // 採点が計画に無ければ、採点のための予約はしない
@@ -153,7 +156,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "digest stage finished"
                 );
-                block(report, env.backend(LlmTask::Digest), summary.tally.halted);
+                summary.tally.halted
             }
             Stage::Score => {
                 let now = (env.clock)();
@@ -172,7 +175,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "score stage finished"
                 );
-                block(report, env.backend(LlmTask::Score), summary.tally.halted);
+                summary.tally.halted
             }
             Stage::Translate => {
                 let now = (env.clock)();
@@ -193,11 +196,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "translate stage finished"
                 );
-                block(
-                    report,
-                    env.backend(LlmTask::Translate),
-                    summary.tally.halted,
-                );
+                summary.tally.halted
             }
             Stage::Title => {
                 let now = (env.clock)();
@@ -209,7 +208,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "title stage finished"
                 );
-                block(report, env.backend(LlmTask::Title), summary.tally.halted);
+                summary.tally.halted
             }
             Stage::Story => {
                 let now = (env.clock)();
@@ -226,7 +225,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "story stage finished"
                 );
-                block(report, env.backend(LlmTask::Story), summary.tally.halted);
+                summary.tally.halted
             }
             Stage::Tidy => {
                 let now = (env.clock)();
@@ -238,7 +237,7 @@ pub async fn crawl<L: LlmSet>(
                     calls = summary.tally.calls,
                     "tidy stage finished"
                 );
-                block(report, env.backend(LlmTask::Tidy), summary.tally.halted);
+                summary.tally.halted
             }
             Stage::Embed => {
                 let Some(cfg) = &config.embedding else {
@@ -262,6 +261,7 @@ pub async fn crawl<L: LlmSet>(
                         report.embedding_failure = Some(message);
                     }
                 }
+                None
             }
             Stage::Extract => {
                 let summary = extract::extract_pages(
@@ -279,7 +279,11 @@ pub async fn crawl<L: LlmSet>(
                     gave_up = summary.gave_up,
                     "extract stage finished"
                 );
+                None
             }
+        };
+        if let Some(task) = task {
+            block(report, env.backend(task), halted);
         }
     }
     report.cancelled = env.cancel.is_requested();

@@ -468,7 +468,10 @@ pub enum EmbedArgs {
 }
 
 pub fn parse_embed_args(args: &[String]) -> Result<EmbedArgs, ParseError> {
-    todo!()
+    match args {
+        [cmd] if cmd == "rebuild" => Ok(EmbedArgs::Rebuild),
+        _ => Err(ParseError::EmbedUsage),
+    }
 }
 
 /// `user` サブコマンドの引数。パスワードは引数で受け取らず、CLI が作って表示する（シェルの履歴に残さないため）。

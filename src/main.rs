@@ -290,8 +290,16 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
     Ok(())
 }
 
+/// 実行中の crawl が古い空間に保存しようとしても、空間の世代が変わっているので保存されない。
 fn embed(data: Option<PathBuf>, args: cli::EmbedArgs) -> Result<(), Error> {
-    todo!()
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    match args {
+        cli::EmbedArgs::Rebuild => {
+            db.rebuild_embeddings()?;
+            tracing::info!("embeddings cleared; the next crawl embeds every digest again");
+        }
+    }
+    Ok(())
 }
 
 /// プロファイルはオーナー（このマシンの利用者）のものを扱う。

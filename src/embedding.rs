@@ -45,7 +45,13 @@ impl EmbedError {
     /// 送った文のせいの失敗か（長すぎるなど）。そうでなければ、サービスの側の失敗（止まっている・認証・
     /// 上限）なので、記事の失敗としては数えず、そのステージを止める。
     pub fn is_input_error(&self) -> bool {
-        todo!()
+        matches!(
+            self,
+            EmbedError::Status {
+                status: 400 | 413 | 422,
+                ..
+            }
+        )
     }
 }
 
@@ -68,12 +74,24 @@ pub enum Role {
 
 /// 設定から作る空間の名前。設定が変われば名前も変わる（中身の違いは指紋で見分ける）。
 pub fn space_name(cfg: &EmbeddingConfig) -> String {
-    todo!()
+    // 区切り文字を含む値でも取り違えないよう、JSON の配列にする
+    serde_json::json!([
+        cfg.url,
+        cfg.model,
+        cfg.dimensions,
+        cfg.query_prefix,
+        cfg.document_prefix
+    ])
+    .to_string()
 }
 
 /// 接頭辞を付けた入力の文。
 pub fn input(cfg: &EmbeddingConfig, role: Role, text: &str) -> String {
-    todo!()
+    let prefix = match role {
+        Role::Query => &cfg.query_prefix,
+        Role::Document => &cfg.document_prefix,
+    };
+    format!("{prefix}{text}")
 }
 
 /// 指紋の試験文（接頭辞を付けたもの）。
@@ -91,23 +109,70 @@ pub struct Fingerprint {
 impl Fingerprint {
     /// 試験文を、クエリと文書でそれぞれ 1 回ずつ呼んで作る。
     pub async fn make(embedder: &impl Embedder, cfg: &EmbeddingConfig) -> Result<Self, EmbedError> {
-        todo!()
+        Ok(Self {
+            query: embedder
+                .embed(&fingerprint_inputs(cfg, Role::Query))
+                .await?,
+            document: embedder
+                .embed(&fingerprint_inputs(cfg, Role::Document))
+                .await?,
+        })
     }
 
     /// `role` の経路で返った試験文のベクトルが、この指紋と同じ空間のものか。
     pub fn matches(&self, role: Role, vectors: &[Vec<f32>]) -> bool {
-        todo!()
+        let saved = match role {
+            Role::Query => &self.query,
+            Role::Document => &self.document,
+        };
+        saved.len() == vectors.len()
+            && saved.iter().zip(vectors).all(|(a, b)| {
+                // どちらも正規化してあるので、内積がコサイン類似度
+                a.len() == b.len() && dot(a, b) >= SAME_SPACE_MIN_COSINE
+            })
     }
 }
 
 /// ベクトルを保存する形（f32 のリトルエンディアン）。
 pub fn encode(vector: &[f32]) -> Vec<u8> {
-    todo!()
+    vector.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
 /// `encode` の逆。長さが 4 の倍数でなければ `None`。
 pub fn decode(bytes: &[u8]) -> Option<Vec<f32>> {
-    todo!()
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    rest.is_empty()
+        .then(|| chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
+}
+
+/// 内積。正規化したベクトルどうしならコサイン類似度。
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// L2 正規化する。値に NaN・無限大があるか、0 ベクトルなら `None`。
+fn normalize(mut v: Vec<f32>) -> Option<Vec<f32>> {
+    if !v.iter().all(|x| x.is_finite()) {
+        return None;
+    }
+    let norm = v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return None;
+    }
+    v.iter_mut()
+        .for_each(|x| *x = (f64::from(*x) / norm) as f32);
+    Some(v)
+}
+
+#[derive(Deserialize)]
+struct Response {
+    data: Vec<Datum>,
+}
+
+#[derive(Deserialize)]
+struct Datum {
+    index: usize,
+    embedding: Vec<f32>,
 }
 
 /// OpenAI 互換の embeddings API のクライアント。
@@ -126,13 +191,100 @@ impl Client {
         cfg: &EmbeddingConfig,
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, EmbedError> {
-        todo!()
+        let header = match cfg.auth {
+            EmbeddingAuth::None => None,
+            EmbeddingAuth::Bearer => Some("authorization"),
+            EmbeddingAuth::ApiKey => Some("api-key"),
+        };
+        let auth = match (header, &cfg.api_key_env) {
+            (Some(header), Some(name)) => {
+                let key = env(name).ok_or_else(|| EmbedError::MissingKey { env: name.clone() })?;
+                let value = match cfg.auth {
+                    EmbeddingAuth::Bearer => format!("Bearer {key}"),
+                    _ => key,
+                };
+                Some((header, value))
+            }
+            // 設定の検証で、認証には鍵の環境変数を求めている
+            _ => None,
+        };
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(cfg.timeout_secs))
+            .build()
+            .map_err(EmbedError::Build)?;
+        Ok(Self {
+            http,
+            url: cfg.url.clone(),
+            model: cfg.model.clone(),
+            auth,
+            dimensions: cfg.dimensions,
+        })
+    }
+}
+
+impl Client {
+    /// 応答を確かめ、入力の順に並べて正規化する。
+    fn check(&self, sent: usize, resp: Response) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let invalid = |reason: String| Err(EmbedError::Invalid(reason));
+        if resp.data.len() != sent {
+            return invalid(format!(
+                "sent {sent} inputs, got {} vectors",
+                resp.data.len()
+            ));
+        }
+        let mut slots: Vec<Option<Vec<f32>>> = vec![None; sent];
+        for d in resp.data {
+            match slots.get_mut(d.index) {
+                Some(slot @ None) => *slot = Some(d.embedding),
+                _ => return invalid(format!("unexpected or repeated index {}", d.index)),
+            }
+        }
+        let vectors: Vec<Vec<f32>> = slots.into_iter().map(|v| v.expect("all filled")).collect();
+        let dim = vectors.first().map_or(0, Vec::len);
+        if vectors.iter().any(|v| v.len() != dim) {
+            return invalid("vectors differ in dimension".into());
+        }
+        if let Some(want) = self.dimensions
+            && usize::try_from(want).ok() != Some(dim)
+        {
+            return invalid(format!("asked for {want} dimensions, got {dim}"));
+        }
+        vectors
+            .into_iter()
+            .map(|v| {
+                normalize(v).ok_or_else(|| EmbedError::Invalid("zero or non-finite vector".into()))
+            })
+            .collect()
     }
 }
 
 impl Embedder for Client {
     async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
-        todo!()
+        let mut body = serde_json::json!({"model": self.model, "input": inputs});
+        if let Some(d) = self.dimensions {
+            body["dimensions"] = d.into();
+        }
+        let mut req = self
+            .http
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .body(body.to_string());
+        if let Some((name, value)) = &self.auth {
+            req = req.header(*name, value);
+        }
+        let resp = req.send().await.map_err(EmbedError::Request)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(EmbedError::Status {
+                status: status.as_u16(),
+                body: body.chars().take(500).collect(),
+            });
+        }
+        let bytes = resp.bytes().await.map_err(EmbedError::Request)?;
+        let resp: Response = serde_json::from_slice(&bytes)
+            .map_err(|e| EmbedError::Invalid(format!("not an embeddings response: {e}")))?;
+        self.check(inputs.len(), resp)
     }
 }
 

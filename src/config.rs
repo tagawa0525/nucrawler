@@ -94,7 +94,29 @@ pub enum EmbeddingAuth {
 impl EmbeddingConfig {
     /// 呼び出しが成り立たない値を拒否する。
     pub fn validate(&self) -> Result<(), String> {
-        todo!()
+        if url::Url::parse(&self.url).is_err() {
+            return Err(format!("embedding.url is not a url: {:?}", self.url));
+        }
+        if self.model.trim().is_empty() {
+            return Err("embedding.model must not be empty".into());
+        }
+        if self.auth != EmbeddingAuth::None && self.api_key_env.is_none() {
+            return Err("embedding.auth needs embedding.api_key_env".into());
+        }
+        if self.dimensions == Some(0) {
+            return Err("embedding.dimensions must be at least 1".into());
+        }
+        if self.batch_size <= crate::embedding::FINGERPRINT_TEXTS {
+            return Err(format!(
+                "embedding.batch_size must be more than {} (the fingerprint texts sent with every call), got {}",
+                crate::embedding::FINGERPRINT_TEXTS,
+                self.batch_size
+            ));
+        }
+        if self.timeout_secs == 0 {
+            return Err("embedding.timeout_secs must be at least 1".into());
+        }
+        Ok(())
     }
 }
 

@@ -7,6 +7,7 @@
 
 let
   cfg = config.services.nucrawler;
+  emb = cfg.embeddingServer;
   toml = pkgs.formats.toml { };
   bin = lib.getExe cfg.package;
 
@@ -23,6 +24,9 @@ let
   crawlService = description: args: {
     Unit = {
       Description = description;
+      # embed ステージが呼ぶ。止まっていても crawl は続き、embed の失敗として報告する
+      Wants = lib.optional emb.enable "nucrawler-embedding.service";
+      After = lib.optional emb.enable "nucrawler-embedding.service";
       # 設定の反映（home-manager switch）で止めたり起動したりしない。oneshot なので起動すると
       # 巡回が終わるまで反映が待たされ（LLM を使うと数十分）、実行中の巡回も中断される。
       # 新しい定義は次に timer で起動したときから使われる
@@ -104,6 +108,51 @@ in
       description = "Web UI（nucrawler serve）を常駐させる。";
     };
 
+    embeddingServer = {
+      enable = lib.mkEnableOption ''
+        記事と好みの embedding を作るローカルのサーバー（Hugging Face の text-embeddings-inference を
+        Podman で動かす）。config.toml の [embedding] も、このサーバーを呼ぶよう既定で設定する
+      '';
+
+      image = lib.mkOption {
+        type = lib.types.str;
+        default = "ghcr.io/huggingface/text-embeddings-inference:cpu-1.8";
+        description = "text-embeddings-inference のイメージ。";
+      };
+
+      model = lib.mkOption {
+        type = lib.types.str;
+        default = "cl-nagoya/ruri-v3-310m";
+        description = ''
+          Hugging Face のモデル。替えたら `nucrawler embed rebuild` で作り直す（替えたまま crawl すると embed が止まる）。
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 8090;
+        description = "127.0.0.1 で待ち受けるポート。";
+      };
+
+      queryPrefix = lib.mkOption {
+        type = lib.types.str;
+        default = "検索クエリ: ";
+        description = "好み（クエリ）の文の前に付ける接頭辞（ruri の作法）。";
+      };
+
+      documentPrefix = lib.mkOption {
+        type = lib.types.str;
+        default = "検索文書: ";
+        description = "記事（文書）の文の前に付ける接頭辞（ruri の作法）。";
+      };
+
+      podman = lib.mkOption {
+        type = lib.types.str;
+        default = "/run/current-system/sw/bin/podman";
+        description = "podman のパス（rootless で動かす）。";
+      };
+    };
+
     schedule = {
       crawl = lib.mkOption {
         type = lib.types.listOf lib.types.str;
@@ -135,6 +184,15 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
+    services.nucrawler.settings = lib.mkIf emb.enable {
+      embedding = lib.mapAttrs (_: lib.mkDefault) {
+        url = "http://127.0.0.1:${toString emb.port}/v1/embeddings";
+        inherit (emb) model;
+        query_prefix = emb.queryPrefix;
+        document_prefix = emb.documentPrefix;
+      };
+    };
+
     xdg.configFile = {
       "nucrawler/config.toml".source = toml.generate "nucrawler-config.toml" cfg.settings;
       "nucrawler/sources.toml".source = cfg.sourcesFile;
@@ -147,6 +205,29 @@ in
         "extract"
       ];
       nucrawler-requests = crawlService "nucrawler: translate requested articles" [ "--requests-only" ];
+    }
+    // lib.optionalAttrs emb.enable {
+      nucrawler-embedding = {
+        Unit.Description = "nucrawler embedding server (text-embeddings-inference)";
+        Service = {
+          # モデルは ~/.cache/huggingface に置き、起動のたびに取得し直さない
+          ExecStartPre = "-${emb.podman} rm -f nucrawler-embedding";
+          ExecStart = lib.concatStringsSep " " [
+            emb.podman
+            "run --rm --name nucrawler-embedding"
+            "-p 127.0.0.1:${toString emb.port}:80"
+            "-v %h/.cache/huggingface:/data"
+            emb.image
+            "--model-id ${emb.model}"
+          ];
+          ExecStop = "${emb.podman} stop nucrawler-embedding";
+          # rootless の podman は newuidmap（/run/wrappers/bin）を使う
+          Environment = [ "PATH=/run/wrappers/bin:/run/current-system/sw/bin" ];
+          Restart = "on-failure";
+          RestartSec = 30;
+        };
+        Install.WantedBy = [ "default.target" ];
+      };
     }
     // lib.optionalAttrs cfg.serve.enable {
       nucrawler-serve = {

@@ -58,14 +58,17 @@ pub struct StoryPending {
 /// 記事（別名 `a`）の比べる文。最新の公開の要約の見出しと要約、無ければ最新の見出しの和訳、
 /// 無ければ日本語の原題（どれも無ければ NULL）。判定は入力の無い公開の成果物として残すので、
 /// 会員限定の本文から作った要約は使わない。
-const STORY_TEXT: &str = "coalesce(
-       (SELECT concat_ws(char(10), r.title_ja, r.summary_ja) FROM artifacts AS r
-        WHERE r.article_id = a.id AND r.kind = 'digest' AND r.input_scope = 'public'
-        ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
-       (SELECT r.title_ja FROM artifacts AS r
-        WHERE r.article_id = a.id AND r.kind = 'title'
-        ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
-       CASE WHEN a.lang = 'ja' THEN a.title END)";
+fn story_text() -> String {
+    format!(
+        "coalesce(
+           (SELECT concat_ws(char(10), r.title_ja, r.summary_ja) FROM artifacts AS r
+            WHERE r.article_id = a.id AND r.kind = 'digest' AND r.input_scope = 'public'
+            ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
+           {translation},
+           CASE WHEN a.lang = 'ja' THEN a.title END)",
+        translation = super::read::latest_title_translation("a.id"),
+    )
+}
 
 /// `id, source_id, at, text` の行。
 struct DocRow(i64, String, String, String);
@@ -166,11 +169,12 @@ impl Db {
         let sql = format!(
             "SELECT id, source_id, at, text FROM (
                SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at,
-                      {STORY_TEXT} AS text
+                      {text} AS text
                FROM articles AS a
                WHERE coalesce(a.published_at, a.fetched_at) BETWEEN ?1 AND ?2)
              WHERE text IS NOT NULL
-             ORDER BY at DESC, id DESC"
+             ORDER BY at DESC, id DESC",
+            text = story_text(),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([timestamp(from), timestamp(to)], doc_row)?;
@@ -182,11 +186,12 @@ impl Db {
         let sql = format!(
             "SELECT id, source_id, at, text FROM (
                SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at,
-                      {STORY_TEXT} AS text
+                      {text} AS text
                FROM articles AS a
                WHERE a.id IN (SELECT value FROM json_each(?1)))
              WHERE text IS NOT NULL
-             ORDER BY at DESC, id DESC"
+             ORDER BY at DESC, id DESC",
+            text = story_text(),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([serde_json::to_string(ids)?], doc_row)?;
@@ -274,17 +279,14 @@ impl Db {
         let sql = format!(
             "SELECT id, source_id, at, title, title_ja FROM (
                SELECT a.id, a.source_id, coalesce(a.published_at, a.fetched_at) AS at, a.title,
-                      coalesce(
-                        nullif(trim((SELECT r.title_ja FROM artifacts AS r
-                                     WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable}
-                                     ORDER BY r.created_at DESC, r.id DESC LIMIT 1)), ''),
-                        (SELECT r.title_ja FROM artifacts AS r
-                         WHERE r.article_id = a.id AND r.kind = 'title'
-                         ORDER BY r.created_at DESC, r.id DESC LIMIT 1)) AS title_ja
+                      {title_ja} AS title_ja
                FROM articles AS a
                WHERE a.id IN ({ids_sql}))
              ORDER BY {order}",
-            viewable = super::read::viewable("r", ":user"),
+            title_ja = super::read::title_ja(
+                &super::read::latest_digest("title_ja", "a.id", ":user"),
+                "a.id",
+            ),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(

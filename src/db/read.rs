@@ -309,6 +309,45 @@ fn fts_phrase(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
+/// 記事（式 `article`）の、利用者（パラメータ `user`）が閲覧できる最新の要約の列 `column`（要約が無ければ
+/// NULL）。記事ごとにまとめて選ぶ `latest_digests` の CTE と同じ規則（同じ時刻なら id の大きい方）。
+pub(super) fn latest_digest(column: &str, article: &str, user: &str) -> String {
+    format!(
+        "(SELECT ld.{column} FROM artifacts AS ld
+          WHERE ld.article_id = {article} AND ld.kind = 'digest' AND {viewable}
+          ORDER BY ld.created_at DESC, ld.id DESC LIMIT 1)",
+        viewable = viewable("ld", user),
+    )
+}
+
+/// 記事（式 `article`）の最新の見出しの和訳（無ければ NULL）。見出しは公開なので閲覧の制限は掛けない。
+pub(super) fn latest_title_translation(article: &str) -> String {
+    format!(
+        "(SELECT lt.title_ja FROM artifacts AS lt
+          WHERE lt.article_id = {article} AND lt.kind = 'title'
+          ORDER BY lt.created_at DESC, lt.id DESC LIMIT 1)"
+    )
+}
+
+/// 和文の見出し：要約の見出し（式 `digest_title`）、空か無ければ記事（式 `article`）の最新の見出しの和訳
+/// （本文が取れず要約できない記事）。どちらも無ければ NULL。
+pub(super) fn title_ja(digest_title: &str, article: &str) -> String {
+    format!(
+        "coalesce(nullif(trim({digest_title}), ''), {translation})",
+        translation = latest_title_translation(article),
+    )
+}
+
+/// 点数（式 `score_id`）で当たった語（`kind` は `interest` か `exclude`）の名前の JSON 配列（名前の順）。
+/// 推薦の補正の特徴になるので、一覧・学習・`eval` で同じ値を読む。
+pub(super) fn matched_topics(score_id: &str, kind: &str) -> String {
+    format!(
+        "(SELECT json_group_array(topic) FROM (
+           SELECT sm.topic FROM score_matches AS sm
+           WHERE sm.score_id = {score_id} AND sm.kind = '{kind}' ORDER BY sm.topic))"
+    )
+}
+
 /// 別名 `alias` の要約に付いている語の名前（語彙の登録順の JSON 配列）。統合を反映するので、
 /// payload の `topics`（LLM が出した名前のまま）ではなくこちらを見せる。
 pub(super) fn linked_topics(alias: &str) -> String {
@@ -322,7 +361,8 @@ pub(super) fn linked_topics(alias: &str) -> String {
 }
 
 /// 利用者（パラメータ `user`）が閲覧できる要約（`viewable`）と、そのうち記事ごとに最新のもの（`latest`）の
-/// CTE（`WITH` の後に置く）。採点の対象を選ぶ処理で、LLM と embedding の条件をそろえる。
+/// CTE（`WITH` の後に置く）。採点の対象を選ぶ処理で、LLM と embedding の条件をそろえる。記事ごとに選ぶ
+/// `latest_digest` と同じ規則（まとめて選ぶ場面の実行計画を変えないよう、別に持つ）。
 pub(super) fn latest_digests(user: &str) -> String {
     format!(
         "viewable AS (
@@ -704,9 +744,7 @@ impl Db {
             "WITH items AS (
                SELECT a.id, a.source_id, a.url, a.title, a.lang,
                       coalesce(a.published_at, a.fetched_at) AS at, a.fetched_at,
-                      (SELECT r.id FROM artifacts AS r
-                       WHERE r.article_id = a.id AND r.kind = 'digest' AND {viewable_r}
-                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+                      {digest_id} AS digest_id
                FROM articles AS a
                WHERE (:id IS NULL OR a.id = :id)
                  AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
@@ -716,10 +754,7 @@ impl Db {
                -- 要約が無ければ見出しの和訳を使う（本文が取れず要約できない記事。見出しは公開なので
                -- 本文の閲覧の制限は掛からない）
                SELECT i.*,
-                      coalesce(nullif(trim(d.title_ja), ''),
-                               (SELECT tt.title_ja FROM artifacts AS tt
-                                WHERE tt.article_id = i.id AND tt.kind = 'title'
-                                ORDER BY tt.created_at DESC, tt.id DESC LIMIT 1)) AS title_ja,
+                      {title_ja} AS title_ja,
                       d.summary_ja,
                       json_extract(d.payload, '$.lwr_relevant') AS relevant,
                       (SELECT s.id FROM scores AS s
@@ -793,12 +828,8 @@ impl Db {
                     rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
                     rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
                     rows.requested, rows.locked_by, rows.bookmarked,
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = s.id AND kind = 'interest' ORDER BY topic)) AS matched,
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic)) AS excluded,
+                    {matched} AS matched,
+                    {excluded} AS excluded,
                     s.score, rows.story_id, rows.story_others,
                     coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
                     rows.rating IS NOT NULL OR rows.story_rated AS story_rated,
@@ -817,7 +848,10 @@ impl Db {
              WHERE {fold}
              ORDER BY {order}
              LIMIT :limit",
-            viewable_r = viewable("r", ":user"),
+            digest_id = latest_digest("id", "a.id", ":user"),
+            title_ja = title_ja("d.title_ja", "i.id"),
+            matched = matched_topics("s.id", "interest"),
+            excluded = matched_topics("s.id", "exclude"),
             viewable_t = viewable("t", ":user"),
             rec = super::recommend::recommend_score_sql(),
         );

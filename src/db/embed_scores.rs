@@ -189,8 +189,9 @@ impl Db {
     /// `space_id` の空間の、`keep` に無い文のベクトルを消す（今のどのプロファイルにも使われなくなったもの）。
     pub fn prune_text_embeddings(&self, space_id: i64, keep: &[String]) -> Result<(), DbError> {
         self.conn.execute(
-            "DELETE FROM text_embeddings WHERE text NOT IN (SELECT value FROM json_each(?1))",
-            [serde_json::to_string(keep)?],
+            "DELETE FROM text_embeddings
+             WHERE space_id = ?1 AND text NOT IN (SELECT value FROM json_each(?2))",
+            rusqlite::params![space_id, serde_json::to_string(keep)?],
         )?;
         Ok(())
     }

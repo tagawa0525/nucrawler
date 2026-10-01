@@ -49,6 +49,10 @@ pub(crate) async fn eval(
         scores
             .extend(embedding_trials(&config, cfg, &db, owner, candidate.as_ref(), &cancel).await?);
     }
+    // 中断されたら、途中までの結果を出さずに、候補の採点の中断と同じく中断として終える
+    if cancel.is_requested() {
+        return Err(Error::Interrupted);
+    }
     let candidate = candidate.as_ref().map(profile::hash);
     let current = db.profile_hash(owner)?;
     print!(

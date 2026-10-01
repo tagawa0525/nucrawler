@@ -12,15 +12,13 @@ pub(super) async fn api_list(
     Extension(me): Extension<crate::db::Viewer>,
     Query(params): Query<ListParams>,
 ) -> Result<Response, AppError> {
-    let web = state.web.clone();
-    let labels = state.labels.clone();
-    let body = with_db(&state, move |db| {
+    let body = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
         let min = params.min_or(web.default_min(hash.as_deref()))?;
-        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
+        let items = list_items(db, web, user, hash.as_deref(), now, min)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
-            &items, &labels,
+            &items, labels,
         ))?)
     })
     .await?;
@@ -34,14 +32,12 @@ pub(super) async fn api_search(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
-    let web = state.web.clone();
-    let labels = state.labels.clone();
-    let body = with_db(&state, move |db| {
+    let body = with_db_and_config(&state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         let q = params.to_query(user, hash.as_deref(), web.list_limit)?;
         let items = db.search_articles(&q)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
-            &items, &labels,
+            &items, labels,
         ))?)
     })
     .await?;
@@ -96,14 +92,13 @@ pub(super) async fn api_detail(
     Extension(me): Extension<crate::db::Viewer>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let labels = state.labels.clone();
-    let body = with_db(&state, move |db| {
+    let body = with_db_and_config(&state, move |db, _, labels| {
         let (user, hash) = viewer(db, me)?;
         let detail = db
             .article_detail(user, hash.as_deref(), id)?
             .ok_or(AppError::NotFound)?;
         Ok(serde_json::to_string(&api::ArticleBody::new(
-            &detail, &labels,
+            &detail, labels,
         ))?)
     })
     .await?;

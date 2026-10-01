@@ -5,10 +5,13 @@ use std::path::PathBuf;
 
 use nucrawler::cli::EvalArgs;
 use nucrawler::config;
-use nucrawler::db::Db;
+use nucrawler::db::{self, CandidateFilter, Db, EvalKey, LabeledScore};
+use nucrawler::embed_score;
+use nucrawler::embedding::Client;
 use nucrawler::eval;
 use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
+use nucrawler::pipeline::embed_profiles::preference_of;
 use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::profile;
@@ -38,13 +41,17 @@ pub(crate) async fn eval(
     if let Some(candidate) = &candidate {
         score_candidate(&config, &data, &db, candidate, args.max_llm_calls).await?;
     }
+    let mut scores = db.eval_scores(owner)?;
+    if let Some(cfg) = &config.embedding {
+        scores.extend(embedding_trials(&config, cfg, &db, owner, candidate.as_ref()).await?);
+    }
     let candidate = candidate.as_ref().map(profile::hash);
     let current = db.profile_hash(owner)?;
     print!(
         "{}",
         eval::render(
             &db.eval_labels(owner)?,
-            &db.eval_scores(owner)?,
+            &scores,
             current.as_deref(),
             candidate.as_deref(),
             prompt::score::PROMPT_VERSION,
@@ -54,6 +61,69 @@ pub(crate) async fn eval(
     );
     print!("{}", eval::render_explore(db.explore_stats(owner)?));
     Ok(())
+}
+
+/// 評価した記事を、今のプロファイルでは式の候補ごとに、候補のプロファイルでは今の式で、その場で採点する
+/// （保存しない）。百分位の基準は、どれも今の時点の一覧の期間の要約。好みの文のベクトルが無ければ作る。
+async fn embedding_trials(
+    config: &config::Config,
+    cfg: &config::EmbeddingConfig,
+    db: &Db,
+    owner: i64,
+    candidate: Option<&profile::Profile>,
+) -> Result<Vec<LabeledScore>, Error> {
+    let Some(space) = db.embedding_space()? else {
+        return Ok(Vec::new());
+    };
+    let client = Client::from_config(cfg, |name| std::env::var(name).ok())?;
+    let cancel = Cancel::default();
+    let now = chrono::Utc::now();
+    let labeled = db.eval_embedding_inputs(owner, space.id)?;
+    let recent = CandidateFilter {
+        since: Some(now - chrono::Duration::days(config.web.list_days.into())),
+        unscored: None,
+    };
+    let reference: Vec<Vec<f32>> = db
+        .embedding_candidates(owner, space.id, recent, 0, embed_score::REFERENCE_LIMIT)?
+        .into_iter()
+        .map(|c| c.vector)
+        .collect();
+    let scored_at = db::timestamp(now);
+    let key = |hash: &str, name: &str| EvalKey {
+        profile_hash: hash.to_string(),
+        backend: eval::TRIAL_BACKEND.into(),
+        model: format!("{} {name}", cfg.model),
+        prompt_version: embed_score::SCORE_VERSION,
+    };
+    let mut trials = Vec::new();
+    if let Some((current, hash)) = db.load_profile(owner)?
+        && let Some(preference) = preference_of(db, &client, cfg, &current, &cancel).await?
+    {
+        for (name, formula) in eval::TRIAL_FORMULAS {
+            trials.extend(eval::embedding_trial(
+                &labeled,
+                &reference,
+                &preference,
+                formula,
+                &key(&hash, name),
+                &scored_at,
+            ));
+        }
+    }
+    if let Some(candidate) = candidate
+        && let Some(preference) = preference_of(db, &client, cfg, candidate, &cancel).await?
+    {
+        let (name, formula) = eval::TRIAL_FORMULAS[0];
+        trials.extend(eval::embedding_trial(
+            &labeled,
+            &reference,
+            &preference,
+            formula,
+            &key(&profile::hash(candidate), name),
+            &scored_at,
+        ));
+    }
+    Ok(trials)
 }
 
 fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {

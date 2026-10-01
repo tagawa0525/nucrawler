@@ -128,6 +128,47 @@ pub fn render(
 /// `eval` がその場で計算する embedding の点数（式やプロファイルの候補）のバックエンド。保存はしない。
 pub const TRIAL_BACKEND: &str = "embedding-trial";
 
+/// `eval` で比べる式（名前と式）。最初は今の式を同じ時点・同じ基準で計算し直したもので、ほかの候補と比べる基準にする
+/// （保存した点数は採点した時点の基準で固まっているので、そのままでは候補と比べられない）。
+pub const TRIAL_FORMULAS: [(&str, crate::embed_score::Formula); 5] = {
+    use crate::embed_score::{Aggregate, Formula, LAMBDA};
+    let current = Formula {
+        lambda: LAMBDA,
+        aggregate: Aggregate::WeightedMax,
+    };
+    [
+        ("now", current),
+        (
+            "λ=0.5",
+            Formula {
+                lambda: 0.5,
+                ..current
+            },
+        ),
+        (
+            "λ=0",
+            Formula {
+                lambda: 0.0,
+                ..current
+            },
+        ),
+        (
+            "mean",
+            Formula {
+                aggregate: Aggregate::WeightedMean,
+                ..current
+            },
+        ),
+        (
+            "top3",
+            Formula {
+                aggregate: Aggregate::TopK(3),
+                ..current
+            },
+        ),
+    ]
+};
+
 /// 評価した記事を、`preference` と `formula` で採点した点数（`key` のキーで）。百分位の基準は `reference`
 /// （直近の要約のベクトル）を同じ式で計算した値。保存した点数（採点した時点の基準で固まっている）とは別に、
 /// 式どうしを同じ時点・同じ基準で比べるために使う。

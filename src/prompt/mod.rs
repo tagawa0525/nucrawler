@@ -82,7 +82,7 @@ pub fn breaks_line(c: char) -> bool {
 /// 名前（語彙の語、関心分野の名前、推薦しない話題）に入れない文字：`breaks_line` に加えて全角の空白。名前は
 /// 照合のキーなので、見た目の同じ別の名前を作らない。
 pub fn breaks_name(c: char) -> bool {
-    c.is_control() || (c.is_whitespace() && c != ' ')
+    breaks_line(c) || c == '\u{3000}'
 }
 
 #[cfg(test)]

@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
-    permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
+    held_missing, permit, record_failures, reserve,
 };
 use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
@@ -41,10 +41,7 @@ pub enum ScoreTarget<'a> {
 #[derive(Debug, Default, PartialEq)]
 pub struct ScoreSummary {
     pub scored: usize,
-    pub failed: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
     /// プロファイルが未登録で、採点しなかった
     pub no_profile: bool,
 }
@@ -53,10 +50,7 @@ impl ScoreSummary {
     /// 作業者ごとの集計を合わせる。
     fn merge(mut self, other: ScoreSummary) -> ScoreSummary {
         self.scored += other.scored;
-        self.failed += other.failed;
-        self.calls += other.calls;
-        self.halted = Halt::most_severe(self.halted, other.halted);
-        self.cancelled |= other.cancelled;
+        self.tally.merge(other.tally);
         self.no_profile |= other.no_profile;
         self
     }
@@ -125,18 +119,18 @@ pub async fn score_articles<L: Llm>(
                 break;
             }
             if cancel.is_requested() {
-                summary.cancelled = true;
+                summary.tally.cancelled = true;
                 break;
             }
             // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
             let _slot = match reserve(llm, cancel).await {
                 Reserved::Slot(slot) => slot,
                 Reserved::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Reserved::Failed(message) => {
-                    summary.halted = Some(Halt::LlmFailed(message));
+                    summary.tally.halted = Some(Halt::LlmFailed(message));
                     break;
                 }
             };
@@ -146,7 +140,7 @@ pub async fn score_articles<L: Llm>(
             }
             if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
                 tracing::info!("score stops: {stop}");
-                summary.halted = Some(Halt::Quota(stop));
+                summary.tally.halted = Some(Halt::Quota(stop));
                 break;
             }
             // 予約は処理を終える（この周の終わりで drop する）まで持つ
@@ -184,26 +178,26 @@ pub async fn score_articles<L: Llm>(
                 cancel,
             )
             .await?;
-            summary.calls += 1;
+            summary.tally.calls += 1;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let response = match outcome {
                 Outcome::Response(response) => response,
                 Outcome::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Outcome::Halted(halt) => {
                     if let Halt::LlmFailed(message) = &halt {
-                        summary.failed += record_failures(
+                        summary.tally.failed += record_failures(
                             db,
                             held.iter().map(|&id| failure_key(id)),
                             message,
                             now,
                         )?;
                     }
-                    summary.halted = Some(halt);
+                    summary.tally.halted = Some(halt);
                     break;
                 }
             };
@@ -212,7 +206,7 @@ pub async fn score_articles<L: Llm>(
                 Err(e) => {
                     let message = errors::error_chain(&e);
                     tracing::warn!("score output rejected: {message}");
-                    summary.failed +=
+                    summary.tally.failed +=
                         record_failures(db, held.iter().map(|&id| failure_key(id)), &message, now)?;
                     continue;
                 }
@@ -242,7 +236,7 @@ pub async fn score_articles<L: Llm>(
                 db.clear_stage_failure(failure_key(item.id))?;
                 summary.scored += 1;
             }
-            summary.failed += record_failures(
+            summary.tally.failed += record_failures(
                 db,
                 held_missing(&parsed.missing, &held).map(failure_key),
                 MISSING,
@@ -250,7 +244,7 @@ pub async fn score_articles<L: Llm>(
             )?;
         }
         // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.halted.is_some() || summary.cancelled {
+        if summary.tally.halted.is_some() || summary.tally.cancelled {
             shared.stop();
         }
         Ok::<_, ScoreStageError>(summary)
@@ -378,7 +372,10 @@ mod tests {
         db.rate(owner, ids[2], Rating::new(2), now()).unwrap();
         let llm = FakeLlm::new([ok(&[(ids[0], 90), (ids[1], 40)]), ok(&[(ids[2], 5)])]);
         let summary = run(&db, owner, &llm, &mut quota(10), 2).await;
-        assert_eq!((summary.scored, summary.failed, summary.calls), (3, 0, 2));
+        assert_eq!(
+            (summary.scored, summary.tally.failed, summary.tally.calls),
+            (3, 0, 2)
+        );
         let reqs = llm.requests();
         assert_eq!(reqs[0].model, "sonnet");
         assert_eq!(
@@ -449,7 +446,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert_eq!((summary.scored, summary.tally.calls), (1, 1));
         assert!(llm.requests()[0].system.contains("候補の分野"));
         assert_eq!(
             db.query_strings("SELECT profile_hash || ':' || score FROM scores")
@@ -467,7 +464,7 @@ mod tests {
         let owner = db.owner_id().unwrap();
         let summary = run(&db, owner, &FakeLlm::new([]), &mut quota(10), 5).await;
         assert!(summary.no_profile);
-        assert_eq!(summary.calls, 0);
+        assert_eq!(summary.tally.calls, 0);
     }
 
     #[tokio::test]
@@ -475,9 +472,9 @@ mod tests {
         let (db, owner, ids) = setup(2);
         let llm = FakeLlm::new([ok(&[(ids[0], 70)])]);
         let summary = run(&db, owner, &llm, &mut quota(10), 5).await;
-        assert_eq!((summary.scored, summary.failed), (1, 1));
+        assert_eq!((summary.scored, summary.tally.failed), (1, 1));
         let again = run(&db, owner, &FakeLlm::new([]), &mut quota(10), 5).await;
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
         let (_, hash) = db.load_profile(owner).unwrap().unwrap();
         let stage = crate::db::score_stage(ScoreKey {
             user_id: owner,
@@ -497,7 +494,7 @@ mod tests {
         let (db, owner, _) = setup(2);
         let summary = run(&db, owner, &FakeLlm::new([ok(&[])]), &mut quota(1), 1).await;
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::MaxCalls { limit: 1 }))
         );
 
@@ -505,10 +502,10 @@ mod tests {
         let llm = FakeLlm::new([Err(LlmError::RateLimited { resets_at: Some(1) })]);
         let summary = run(&db, owner, &llm, &mut quota(10), 1).await;
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::UsageLimit { resets_at: Some(1) })
         );
-        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.tally.failed, 0);
 
         let (db, owner, _) = setup(1);
         let llm = FakeLlm::new([Err(LlmError::Reported {
@@ -516,8 +513,8 @@ mod tests {
             message: "Not logged in".into(),
         })]);
         let summary = run(&db, owner, &llm, &mut quota(10), 1).await;
-        assert!(matches!(summary.halted, Some(Halt::LlmFailed(_))));
-        assert_eq!(summary.failed, 1);
+        assert!(matches!(summary.tally.halted, Some(Halt::LlmFailed(_))));
+        assert_eq!(summary.tally.failed, 1);
     }
 
     /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
@@ -542,7 +539,7 @@ mod tests {
             .unwrap();
         let llm = FakeLlm::new([ok(&[(ids[1], 50)])]);
         let summary = run(&db, owner, &llm, &mut quota(10), 5).await;
-        assert_eq!((summary.scored, summary.calls), (1, 1));
+        assert_eq!((summary.scored, summary.tally.calls), (1, 1));
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 1);
         drop(other);
     }

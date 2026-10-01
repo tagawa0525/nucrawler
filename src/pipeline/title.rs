@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
-    permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
+    held_missing, permit, record_failures, reserve,
 };
 use super::workers::run_workers;
 use crate::config::LlmConfig;
@@ -25,20 +25,14 @@ pub enum TitleStageError {
 #[derive(Debug, Default, PartialEq)]
 pub struct TitleSummary {
     pub translated: usize,
-    pub failed: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 impl TitleSummary {
     /// 作業者ごとの集計を合わせる。
     fn merge(mut self, other: TitleSummary) -> TitleSummary {
         self.translated += other.translated;
-        self.failed += other.failed;
-        self.calls += other.calls;
-        self.halted = Halt::most_severe(self.halted, other.halted);
-        self.cancelled |= other.cancelled;
+        self.tally.merge(other.tally);
         self
     }
 }
@@ -75,18 +69,18 @@ pub async fn translate_titles<L: Llm>(
                 break;
             }
             if cancel.is_requested() {
-                summary.cancelled = true;
+                summary.tally.cancelled = true;
                 break;
             }
             // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
             let _slot = match reserve(llm, cancel).await {
                 Reserved::Slot(slot) => slot,
                 Reserved::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Reserved::Failed(message) => {
-                    summary.halted = Some(Halt::LlmFailed(message));
+                    summary.tally.halted = Some(Halt::LlmFailed(message));
                     break;
                 }
             };
@@ -96,7 +90,7 @@ pub async fn translate_titles<L: Llm>(
             }
             if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
                 tracing::info!("title stops: {stop}");
-                summary.halted = Some(Halt::Quota(stop));
+                summary.tally.halted = Some(Halt::Quota(stop));
                 break;
             }
             // 予約は処理を終える（この周の終わりで drop する）まで持つ
@@ -136,22 +130,22 @@ pub async fn translate_titles<L: Llm>(
                 cancel,
             )
             .await?;
-            summary.calls += 1;
+            summary.tally.calls += 1;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let response = match outcome {
                 Outcome::Response(response) => response,
                 Outcome::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Outcome::Halted(halt) => {
                     if let Halt::LlmFailed(message) = &halt {
-                        summary.failed +=
+                        summary.tally.failed +=
                             record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
                     }
-                    summary.halted = Some(halt);
+                    summary.tally.halted = Some(halt);
                     break;
                 }
             };
@@ -160,7 +154,7 @@ pub async fn translate_titles<L: Llm>(
                 Err(e) => {
                     let message = errors::error_chain(&e);
                     tracing::warn!("title output rejected: {message}");
-                    summary.failed +=
+                    summary.tally.failed +=
                         record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
                     continue;
                 }
@@ -194,7 +188,7 @@ pub async fn translate_titles<L: Llm>(
                 db.clear_stage_failure(key(*id))?;
                 summary.translated += 1;
             }
-            summary.failed += record_failures(
+            summary.tally.failed += record_failures(
                 db,
                 held_missing(&parsed.missing, &held).map(key),
                 MISSING,
@@ -202,7 +196,7 @@ pub async fn translate_titles<L: Llm>(
             )?;
         }
         // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.halted.is_some() || summary.cancelled {
+        if summary.tally.halted.is_some() || summary.tally.cancelled {
             shared.stop();
         }
         Ok::<_, TitleStageError>(summary)
@@ -292,8 +286,10 @@ mod tests {
             summary,
             TitleSummary {
                 translated: 3,
-                calls: 2,
-                ..TitleSummary::default()
+                tally: Tally {
+                    calls: 2,
+                    ..Tally::default()
+                },
             }
         );
         let requests = llm.requests();
@@ -333,7 +329,7 @@ mod tests {
         let ids = articles(&db, 2);
         let llm = FakeLlm::new([ok(&ids[..1])]);
         let summary = run(&db, &llm, &mut quota(10), 5).await;
-        assert_eq!((summary.translated, summary.failed), (1, 1));
+        assert_eq!((summary.translated, summary.tally.failed), (1, 1));
         assert_eq!(
             db.query_i64(&format!(
                 "SELECT count(*) FROM stage_errors WHERE stage = 'title' AND article_id = {}",
@@ -350,9 +346,9 @@ mod tests {
         let ids = articles(&db, 3);
         let llm = FakeLlm::new([ok(&ids[..2])]);
         let summary = run(&db, &llm, &mut quota(1), 2).await;
-        assert_eq!((summary.translated, summary.calls), (2, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (2, 1));
         assert!(
-            matches!(summary.halted, Some(Halt::Quota(_))),
+            matches!(summary.tally.halted, Some(Halt::Quota(_))),
             "{summary:?}"
         );
     }
@@ -366,8 +362,10 @@ mod tests {
             message: "Not logged in".into(),
         })]);
         let summary = run(&db, &llm, &mut quota(10), 2).await;
-        assert_eq!((summary.calls, summary.failed), (1, 2));
-        assert!(matches!(&summary.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in")));
+        assert_eq!((summary.tally.calls, summary.tally.failed), (1, 2));
+        assert!(
+            matches!(&summary.tally.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in"))
+        );
     }
 
     /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
@@ -433,9 +431,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(summary.calls, 0);
+        assert_eq!(summary.tally.calls, 0);
         assert!(
-            matches!(summary.halted, Some(Halt::Quota(_))),
+            matches!(summary.tally.halted, Some(Halt::Quota(_))),
             "{summary:?}"
         );
     }
@@ -473,7 +471,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.translated, summary.calls), (4, 4));
+        assert_eq!((summary.translated, summary.tally.calls), (4, 4));
         assert_eq!(llm.max_in_flight(), 2);
         assert_eq!(
             db.query_i64("SELECT count(DISTINCT article_id) FROM artifacts WHERE kind = 'title'")

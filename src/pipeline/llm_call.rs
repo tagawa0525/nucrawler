@@ -21,6 +21,28 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// LLM ステージの集計のうち、どのステージにもある項目。
+#[derive(Debug, Default, PartialEq)]
+pub struct Tally {
+    /// 失敗を記録した（再試行に回した）記事の数
+    pub failed: usize,
+    pub calls: usize,
+    /// 止めた理由（クォータ・LLM の失敗）
+    pub halted: Option<Halt>,
+    /// 止める指示で止まった
+    pub cancelled: bool,
+}
+
+impl Tally {
+    /// 作業者ごとの集計を合わせる。
+    pub fn merge(&mut self, other: Tally) {
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted.take(), other.halted);
+        self.cancelled |= other.cancelled;
+    }
+}
+
 /// LLM ステージが共有する実行環境。クォータは実行全体で 1 つなので、ステージ間で引き継ぐ。
 pub struct LlmStage<'a, L> {
     pub db: &'a Db,

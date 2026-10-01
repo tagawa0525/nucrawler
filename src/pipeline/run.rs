@@ -149,11 +149,11 @@ pub async fn crawl<L: LlmSet>(
                 .await?;
                 tracing::info!(
                     digested = summary.digested,
-                    failed = summary.failed,
-                    calls = summary.calls,
+                    failed = summary.tally.failed,
+                    calls = summary.tally.calls,
                     "digest stage finished"
                 );
-                block(report, env.backend(LlmTask::Digest), summary.halted);
+                block(report, env.backend(LlmTask::Digest), summary.tally.halted);
             }
             Stage::Score => {
                 let now = (env.clock)();
@@ -168,11 +168,11 @@ pub async fn crawl<L: LlmSet>(
                 .await?;
                 tracing::info!(
                     scored = summary.scored,
-                    failed = summary.failed,
-                    calls = summary.calls,
+                    failed = summary.tally.failed,
+                    calls = summary.tally.calls,
                     "score stage finished"
                 );
-                block(report, env.backend(LlmTask::Score), summary.halted);
+                block(report, env.backend(LlmTask::Score), summary.tally.halted);
             }
             Stage::Translate => {
                 let now = (env.clock)();
@@ -189,11 +189,15 @@ pub async fn crawl<L: LlmSet>(
                 .await?;
                 tracing::info!(
                     translated = summary.translated,
-                    failed = summary.failed,
-                    calls = summary.calls,
+                    failed = summary.tally.failed,
+                    calls = summary.tally.calls,
                     "translate stage finished"
                 );
-                block(report, env.backend(LlmTask::Translate), summary.halted);
+                block(
+                    report,
+                    env.backend(LlmTask::Translate),
+                    summary.tally.halted,
+                );
             }
             Stage::Title => {
                 let now = (env.clock)();
@@ -201,11 +205,11 @@ pub async fn crawl<L: LlmSet>(
                     title::translate_titles(env.stage(LlmTask::Title), &config.llm, now).await?;
                 tracing::info!(
                     translated = summary.translated,
-                    failed = summary.failed,
-                    calls = summary.calls,
+                    failed = summary.tally.failed,
+                    calls = summary.tally.calls,
                     "title stage finished"
                 );
-                block(report, env.backend(LlmTask::Title), summary.halted);
+                block(report, env.backend(LlmTask::Title), summary.tally.halted);
             }
             Stage::Story => {
                 let now = (env.clock)();
@@ -218,11 +222,11 @@ pub async fn crawl<L: LlmSet>(
                 .await?;
                 tracing::info!(
                     judged = summary.judged,
-                    failed = summary.failed,
-                    calls = summary.calls,
+                    failed = summary.tally.failed,
+                    calls = summary.tally.calls,
                     "story stage finished"
                 );
-                block(report, env.backend(LlmTask::Story), summary.halted);
+                block(report, env.backend(LlmTask::Story), summary.tally.halted);
             }
             Stage::Tidy => {
                 let now = (env.clock)();
@@ -231,10 +235,10 @@ pub async fn crawl<L: LlmSet>(
                         .await?;
                 tracing::info!(
                     merged = summary.merged,
-                    calls = summary.calls,
+                    calls = summary.tally.calls,
                     "tidy stage finished"
                 );
-                block(report, env.backend(LlmTask::Tidy), summary.halted);
+                block(report, env.backend(LlmTask::Tidy), summary.tally.halted);
             }
             Stage::Embed => {
                 let Some(cfg) = &config.embedding else {
@@ -345,11 +349,11 @@ pub async fn redo<L: LlmSet>(
             .await?;
             tracing::info!(
                 digested = summary.digested,
-                failed = summary.failed,
-                calls = summary.calls,
+                failed = summary.tally.failed,
+                calls = summary.tally.calls,
                 "redo digest finished"
             );
-            report_halt(summary.halted, &mut report.llm_failure);
+            report_halt(summary.tally.halted, &mut report.llm_failure);
         }
         RedoKind::Translate => {
             let cfg = LlmConfig {
@@ -367,11 +371,11 @@ pub async fn redo<L: LlmSet>(
             .await?;
             tracing::info!(
                 translated = summary.translated,
-                failed = summary.failed,
-                calls = summary.calls,
+                failed = summary.tally.failed,
+                calls = summary.tally.calls,
                 "redo translate finished"
             );
-            report_halt(summary.halted, &mut report.llm_failure);
+            report_halt(summary.tally.halted, &mut report.llm_failure);
         }
     }
     report.cancelled = env.cancel.is_requested();
@@ -390,14 +394,14 @@ pub async fn suggest_profile<L: LlmSet>(
     let summary =
         suggest::suggest_profile(env.stage(LlmTask::Score), &config.llm, profile, evidence).await?;
     // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
-    let reason = match &summary.halted {
+    let reason = match &summary.tally.halted {
         Some(Halt::Quota(stop)) => stop.to_string(),
         Some(Halt::UsageLimit { .. }) => "the subscription usage limit was reached".into(),
         Some(Halt::LlmFailed(message)) => message.clone(),
         None => "interrupted".into(),
     };
-    report_halt(summary.halted, &mut report.llm_failure);
-    report.cancelled = summary.cancelled || env.cancel.is_requested();
+    report_halt(summary.tally.halted, &mut report.llm_failure);
+    report.cancelled = summary.tally.cancelled || env.cancel.is_requested();
     let suggested = match summary.suggestion {
         Some(s) => Suggested::Profile(s),
         None => Suggested::NotAsked(reason),
@@ -435,11 +439,11 @@ pub async fn eval_profile<L: LlmSet>(
     .await?;
     tracing::info!(
         scored = summary.scored,
-        failed = summary.failed,
-        calls = summary.calls,
+        failed = summary.tally.failed,
+        calls = summary.tally.calls,
         "candidate profile scored"
     );
-    report_halt(summary.halted, &mut report.llm_failure);
+    report_halt(summary.tally.halted, &mut report.llm_failure);
     report.cancelled = env.cancel.is_requested();
     Ok(report)
 }

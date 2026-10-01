@@ -2,7 +2,9 @@
 //! 案は保存しない（人が差分を読み、`eval --profile` で比べてから取り込む）。
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, Reserved, Shared, call_recorded, permit, reserve};
+use super::llm_call::{
+    Call, LlmStage, Outcome, Reserved, Shared, Tally, call_recorded, permit, reserve,
+};
 use crate::config::LlmConfig;
 use crate::db::{DbError, Evidence};
 use crate::llm::{Llm, LlmRequest};
@@ -24,9 +26,7 @@ pub enum SuggestStageError {
 #[derive(Debug, Default)]
 pub struct SuggestSummary {
     pub suggestion: Option<Suggestion>,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 /// モデルは採点と同じ `llm.score_model`（点数の付け方を知っているモデルに、その元を見直させる）。
@@ -48,17 +48,17 @@ pub async fn suggest_profile<L: Llm>(
     let _slot = match reserve(llm, cancel).await {
         Reserved::Slot(slot) => slot,
         Reserved::Cancelled => {
-            summary.cancelled = true;
+            summary.tally.cancelled = true;
             return Ok(summary);
         }
         Reserved::Failed(message) => {
-            summary.halted = Some(Halt::LlmFailed(message));
+            summary.tally.halted = Some(Halt::LlmFailed(message));
             return Ok(summary);
         }
     };
     if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
         tracing::info!("suggest stops: {stop}");
-        summary.halted = Some(Halt::Quota(stop));
+        summary.tally.halted = Some(Halt::Quota(stop));
         return Ok(summary);
     }
     let prompt = prompt::suggest::build_prompt(profile, evidence);
@@ -84,16 +84,16 @@ pub async fn suggest_profile<L: Llm>(
     let response = match outcome {
         Outcome::Response(response) => response,
         Outcome::Cancelled => {
-            summary.cancelled = true;
+            summary.tally.cancelled = true;
             return Ok(summary);
         }
         Outcome::Halted(halt) => {
-            summary.calls += 1;
-            summary.halted = Some(halt);
+            summary.tally.calls += 1;
+            summary.tally.halted = Some(halt);
             return Ok(summary);
         }
     };
-    summary.calls += 1;
+    summary.tally.calls += 1;
     summary.suggestion = Some(prompt::suggest::parse(&response.output)?);
     Ok(summary)
 }
@@ -170,7 +170,7 @@ mod tests {
         let summary = run(&db, &llm, &mut quota(10)).await.unwrap();
         let suggestion = summary.suggestion.unwrap();
         assert_eq!(suggestion.profile.interests[0].weight, 0.8);
-        assert_eq!(summary.calls, 1);
+        assert_eq!(summary.tally.calls, 1);
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].model, LlmConfig::default().score_model);
@@ -202,7 +202,7 @@ mod tests {
         let llm = FakeLlm::new([]);
         let summary = run(&db, &llm, &mut quota(0)).await.unwrap();
         assert!(summary.suggestion.is_none());
-        assert!(matches!(summary.halted, Some(Halt::Quota(_))));
+        assert!(matches!(summary.tally.halted, Some(Halt::Quota(_))));
         assert!(llm.requests().is_empty());
     }
 }

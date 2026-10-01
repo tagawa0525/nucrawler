@@ -6,8 +6,8 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{
-    Call, LlmStage, Outcome, Reserved, Shared, call_recorded, claim_ttl, permit, record_failures,
-    reserve,
+    Call, LlmStage, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl, permit,
+    record_failures, reserve,
 };
 use super::workers::run_workers;
 use super::{Halt, Target};
@@ -31,20 +31,14 @@ pub enum TranslateStageError {
 #[derive(Debug, Default, PartialEq)]
 pub struct TranslateSummary {
     pub translated: usize,
-    pub failed: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 impl TranslateSummary {
     /// 作業者ごとの集計を合わせる。
     fn merge(mut self, other: TranslateSummary) -> TranslateSummary {
         self.translated += other.translated;
-        self.failed += other.failed;
-        self.calls += other.calls;
-        self.halted = Halt::most_severe(self.halted, other.halted);
-        self.cancelled |= other.cancelled;
+        self.tally.merge(other.tally);
         self
     }
 }
@@ -112,18 +106,18 @@ pub async fn translate_articles<L: Llm>(
                 break;
             }
             if cancel.is_requested() {
-                summary.cancelled = true;
+                summary.tally.cancelled = true;
                 break;
             }
             // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
             let _slot = match reserve(llm, cancel).await {
                 Reserved::Slot(slot) => slot,
                 Reserved::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Reserved::Failed(message) => {
-                    summary.halted = Some(Halt::LlmFailed(message));
+                    summary.tally.halted = Some(Halt::LlmFailed(message));
                     break;
                 }
             };
@@ -133,7 +127,7 @@ pub async fn translate_articles<L: Llm>(
             }
             if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
                 tracing::info!("translate stops: {stop}");
-                summary.halted = Some(Halt::Quota(stop));
+                summary.tally.halted = Some(Halt::Quota(stop));
                 break;
             }
             let claim_key = ClaimKey {
@@ -203,7 +197,7 @@ pub async fn translate_articles<L: Llm>(
                 cancel,
             )
             .await?;
-            summary.calls += 1;
+            summary.tally.calls += 1;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim
@@ -212,16 +206,17 @@ pub async fn translate_articles<L: Llm>(
             let response = match outcome {
                 Outcome::Response(response) => response,
                 Outcome::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Outcome::Halted(halt) => {
                     if let Halt::LlmFailed(message) = &halt
                         && held
                     {
-                        summary.failed += record_failures(db, std::iter::once(key), message, now)?;
+                        summary.tally.failed +=
+                            record_failures(db, std::iter::once(key), message, now)?;
                     }
-                    summary.halted = Some(halt);
+                    summary.tally.halted = Some(halt);
                     break;
                 }
             };
@@ -240,7 +235,8 @@ pub async fn translate_articles<L: Llm>(
                         article_id = input.article_id,
                         "translation rejected: {message}"
                     );
-                    summary.failed += record_failures(db, std::iter::once(key), &message, now)?;
+                    summary.tally.failed +=
+                        record_failures(db, std::iter::once(key), &message, now)?;
                     continue;
                 }
             };
@@ -263,7 +259,7 @@ pub async fn translate_articles<L: Llm>(
             summary.translated += 1;
         }
         // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.halted.is_some() || summary.cancelled {
+        if summary.tally.halted.is_some() || summary.tally.cancelled {
             shared.stop();
         }
         Ok::<_, TranslateStageError>(summary)
@@ -510,7 +506,11 @@ mod tests {
         let llm = FakeLlm::new([ok("依頼の和訳"), ok("高得点の和訳")]);
         let summary = run(&db, owner, &llm, &mut quota(10), false).await;
         assert_eq!(
-            (summary.translated, summary.failed, summary.calls),
+            (
+                summary.translated,
+                summary.tally.failed,
+                summary.tally.calls
+            ),
             (2, 0, 2)
         );
         let reqs = llm.requests();
@@ -549,7 +549,7 @@ mod tests {
         db.request_translation(owner, requested, now()).unwrap();
         let llm = FakeLlm::new([ok("依頼の和訳")]);
         let summary = run(&db, owner, &llm, &mut quota(10), true).await;
-        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (1, 1));
         assert!(llm.requests()[0].prompt.contains("Body 1"));
     }
 
@@ -558,7 +558,7 @@ mod tests {
         let (db, owner) = setup();
         article(&db, 0, 99);
         let summary = run(&db, owner, &FakeLlm::new([]), &mut quota(10), true).await;
-        assert_eq!(summary.calls, 0);
+        assert_eq!(summary.tally.calls, 0);
     }
 
     #[tokio::test]
@@ -567,11 +567,15 @@ mod tests {
         article(&db, 0, 90);
         let summary = run(&db, owner, &FakeLlm::new([ok("  ")]), &mut quota(10), false).await;
         assert_eq!(
-            (summary.translated, summary.failed, summary.calls),
+            (
+                summary.translated,
+                summary.tally.failed,
+                summary.tally.calls
+            ),
             (0, 1, 1)
         );
         let again = run(&db, owner, &FakeLlm::new([]), &mut quota(10), false).await;
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
     }
 
     #[tokio::test]
@@ -581,7 +585,7 @@ mod tests {
         article(&db, 1, 90);
         let summary = run(&db, owner, &FakeLlm::new([ok("訳")]), &mut quota(1), false).await;
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::MaxCalls { limit: 1 }))
         );
 
@@ -589,15 +593,18 @@ mod tests {
         article(&db, 0, 90);
         let llm = FakeLlm::new([Err(LlmError::RateLimited { resets_at: None })]);
         let summary = run(&db, owner, &llm, &mut quota(10), false).await;
-        assert_eq!(summary.halted, Some(Halt::UsageLimit { resets_at: None }));
-        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.tally.halted,
+            Some(Halt::UsageLimit { resets_at: None })
+        );
+        assert_eq!(summary.tally.failed, 0);
 
         let (db, owner) = setup();
         article(&db, 0, 90);
         let llm = FakeLlm::new([Err(LlmError::Timeout { secs: 300 })]);
         let summary = run(&db, owner, &llm, &mut quota(10), false).await;
-        assert!(matches!(summary.halted, Some(Halt::LlmFailed(_))));
-        assert_eq!(summary.failed, 1);
+        assert!(matches!(summary.tally.halted, Some(Halt::LlmFailed(_))));
+        assert_eq!(summary.tally.failed, 1);
     }
 
     /// 訳語集が変わった後に作られていない和訳だけを、同じモデルで新しい版として作り直す。
@@ -626,7 +633,7 @@ mod tests {
         db.add_glossary_term(&term, later).unwrap();
         let llm = FakeLlm::new([ok("再訳")]);
         let summary = redo_glossary(&db, owner, &llm, later).await;
-        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (1, 1));
         assert!(llm.requests()[0].system.contains("非常用ディーゼル発電機"));
         assert_eq!(
             db.query_strings(
@@ -642,7 +649,7 @@ mod tests {
             ]
         );
         let again = redo_glossary(&db, owner, &FakeLlm::new([]), later).await;
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
     }
 
     async fn redo_glossary(
@@ -714,7 +721,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (1, 1));
         assert_eq!(llm.requests()[0].model, "opus");
         assert_eq!(
             db.query_strings(&format!(
@@ -749,7 +756,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(summary.cancelled);
+        assert!(summary.tally.cancelled);
     }
 
     /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
@@ -843,7 +850,7 @@ mod tests {
             .unwrap();
         });
         let summary = redo_glossary(&db, owner, &llm, later).await;
-        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (1, 1));
     }
 
     /// 同時に `llm.concurrency` 本まで訳す。同じ記事は取り合わない。
@@ -875,7 +882,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.translated, summary.calls), (4, 4));
+        assert_eq!((summary.translated, summary.tally.calls), (4, 4));
         assert_eq!(llm.max_in_flight(), 2);
         assert_eq!(
             db.query_i64(
@@ -915,7 +922,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.translated, summary.calls), (1, 1));
+        assert_eq!((summary.translated, summary.tally.calls), (1, 1));
         assert_eq!(llm.requests().len(), 1);
     }
 
@@ -960,7 +967,7 @@ mod tests {
         .unwrap();
         assert_eq!(llm.requests().len(), 2);
         assert!(
-            matches!(summary.halted, Some(Halt::LlmFailed(_))),
+            matches!(summary.tally.halted, Some(Halt::LlmFailed(_))),
             "{summary:?}"
         );
     }

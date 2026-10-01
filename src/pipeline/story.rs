@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 
 use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
-    permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
+    held_missing, permit, record_failures, reserve,
 };
 use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
@@ -33,20 +33,14 @@ pub enum StoryStageError {
 pub struct StorySummary {
     /// 判定を保存した記事（候補が無く LLM を呼ばなかった記事を含む）
     pub judged: usize,
-    pub failed: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 impl StorySummary {
     /// 作業者ごとの集計を合わせる。
     fn merge(mut self, other: StorySummary) -> StorySummary {
         self.judged += other.judged;
-        self.failed += other.failed;
-        self.calls += other.calls;
-        self.halted = Halt::most_severe(self.halted, other.halted);
-        self.cancelled |= other.cancelled;
+        self.tally.merge(other.tally);
         self
     }
 }
@@ -165,18 +159,18 @@ pub async fn judge_stories<L: Llm>(
                 break;
             }
             if cancel.is_requested() {
-                summary.cancelled = true;
+                summary.tally.cancelled = true;
                 break;
             }
             // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
             let _slot = match reserve(llm, cancel).await {
                 Reserved::Slot(slot) => slot,
                 Reserved::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Reserved::Failed(message) => {
-                    summary.halted = Some(Halt::LlmFailed(message));
+                    summary.tally.halted = Some(Halt::LlmFailed(message));
                     break;
                 }
             };
@@ -185,7 +179,7 @@ pub async fn judge_stories<L: Llm>(
             }
             if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
                 tracing::info!("story stops: {stop}");
-                summary.halted = Some(Halt::Quota(stop));
+                summary.tally.halted = Some(Halt::Quota(stop));
                 break;
             }
             // 予約は処理を終える（この周の終わりで drop する）まで持つ
@@ -275,19 +269,19 @@ pub async fn judge_stories<L: Llm>(
                 cancel,
             )
             .await?;
-            summary.calls += 1;
+            summary.tally.calls += 1;
             // 結果を書く前に予約を延長する。取り直された記事は、以降は保存も失敗の記録もしない
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let judged_ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
             let response = match outcome {
                 Outcome::Response(response) => response,
                 Outcome::Cancelled => {
-                    summary.cancelled = true;
+                    summary.tally.cancelled = true;
                     break;
                 }
                 Outcome::Halted(halt) => {
                     if let Halt::LlmFailed(message) = &halt {
-                        summary.failed += record_failures(
+                        summary.tally.failed += record_failures(
                             db,
                             held_missing(&judged_ids, &held).map(key),
                             message,
@@ -295,7 +289,7 @@ pub async fn judge_stories<L: Llm>(
                         )?;
                     }
                     rebuild(db)?;
-                    summary.halted = Some(halt);
+                    summary.tally.halted = Some(halt);
                     break;
                 }
             };
@@ -304,7 +298,7 @@ pub async fn judge_stories<L: Llm>(
                 Err(e) => {
                     let message = errors::error_chain(&e);
                     tracing::warn!("story output rejected: {message}");
-                    summary.failed += record_failures(
+                    summary.tally.failed += record_failures(
                         db,
                         held_missing(&judged_ids, &held).map(key),
                         &message,
@@ -330,7 +324,7 @@ pub async fn judge_stories<L: Llm>(
                 db.clear_stage_failure(key(j.target))?;
                 summary.judged += 1;
             }
-            summary.failed += record_failures(
+            summary.tally.failed += record_failures(
                 db,
                 held_missing(&parsed.missing, &held).map(key),
                 MISSING,
@@ -339,7 +333,7 @@ pub async fn judge_stories<L: Llm>(
             rebuild(db)?;
         }
         // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.halted.is_some() || summary.cancelled {
+        if summary.tally.halted.is_some() || summary.tally.cancelled {
             shared.stop();
         }
         Ok::<_, StoryStageError>(summary)
@@ -470,7 +464,7 @@ mod tests {
         let jaif = article(&db, "jaif", 27, EIB_JAIF);
         let llm = FakeLlm::new([judgments(&[(jaif, &[wnn], &[]), (wnn, &[jaif], &[])])]);
         let summary = run(&db, &llm, &mut quota(10)).await;
-        assert_eq!((summary.judged, summary.calls), (7, 1), "{summary:?}");
+        assert_eq!((summary.judged, summary.tally.calls), (7, 1), "{summary:?}");
         let requests = llm.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "sonnet");
@@ -516,7 +510,7 @@ mod tests {
         let ans = article(&db, "ans", 27, EIB_ANS);
         let llm = FakeLlm::new([judgments(&[(ans, &[wnn], &[])])]);
         let summary = run(&db, &llm, &mut quota(10)).await;
-        assert_eq!((summary.judged, summary.calls), (1, 1), "{summary:?}");
+        assert_eq!((summary.judged, summary.tally.calls), (1, 1), "{summary:?}");
         let prompt = &llm.requests()[0].prompt;
         assert!(
             prompt.contains(&format!("<story id=\"{wnn}\">")),
@@ -674,7 +668,11 @@ mod tests {
         let jaif = article(&db, "jaif", 27, EIB_JAIF);
         let llm = FakeLlm::new([judgments(&[(jaif, &[wnn], &[])])]);
         let summary = run(&db, &llm, &mut quota(10)).await;
-        assert_eq!((summary.judged, summary.failed), (6, 1), "{summary:?}");
+        assert_eq!(
+            (summary.judged, summary.tally.failed),
+            (6, 1),
+            "{summary:?}"
+        );
         assert_eq!(
             db.query_i64(&format!(
                 "SELECT count(*) FROM stage_errors WHERE stage = 'story' AND article_id = {wnn}"
@@ -696,11 +694,13 @@ mod tests {
         })]);
         let summary = run(&db, &llm, &mut quota(10)).await;
         assert_eq!(
-            (summary.calls, summary.failed, summary.judged),
+            (summary.tally.calls, summary.tally.failed, summary.judged),
             (1, 2, 5),
             "{summary:?}"
         );
-        assert!(matches!(&summary.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in")));
+        assert!(
+            matches!(&summary.tally.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in"))
+        );
     }
 
     #[tokio::test]
@@ -709,9 +709,9 @@ mod tests {
         article(&db, "wnn", 15, EIB_WNN);
         let llm = FakeLlm::new([]);
         let summary = run(&db, &llm, &mut quota(0)).await;
-        assert_eq!((summary.judged, summary.calls), (0, 0));
+        assert_eq!((summary.judged, summary.tally.calls), (0, 0));
         assert!(
-            matches!(summary.halted, Some(Halt::Quota(_))),
+            matches!(summary.tally.halted, Some(Halt::Quota(_))),
             "{summary:?}"
         );
     }

@@ -4,7 +4,9 @@
 use chrono::{DateTime, Utc};
 
 use super::Halt;
-use super::llm_call::{Call, LlmStage, Outcome, Reserved, Shared, call_recorded, permit, reserve};
+use super::llm_call::{
+    Call, LlmStage, Outcome, Reserved, Shared, Tally, call_recorded, permit, reserve,
+};
 use crate::config::LlmConfig;
 use crate::db::DbError;
 use crate::errors;
@@ -22,9 +24,7 @@ pub enum TidyStageError {
 #[derive(Debug, Default, PartialEq)]
 pub struct TidySummary {
     pub merged: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 /// `force` なら前回の整理からの間隔によらず整理する（`crawl --only tidy`）。
@@ -56,17 +56,17 @@ pub async fn tidy_topics<L: Llm>(
     let _slot = match reserve(llm, cancel).await {
         Reserved::Slot(slot) => slot,
         Reserved::Cancelled => {
-            summary.cancelled = true;
+            summary.tally.cancelled = true;
             return Ok(summary);
         }
         Reserved::Failed(message) => {
-            summary.halted = Some(Halt::LlmFailed(message));
+            summary.tally.halted = Some(Halt::LlmFailed(message));
             return Ok(summary);
         }
     };
     if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
         tracing::info!("tidy stops: {stop}");
-        summary.halted = Some(Halt::Quota(stop));
+        summary.tally.halted = Some(Halt::Quota(stop));
         return Ok(summary);
     }
     let prompt = prompt::tidy::build_prompt(&usage);
@@ -92,16 +92,16 @@ pub async fn tidy_topics<L: Llm>(
     let response = match outcome {
         Outcome::Response(response) => response,
         Outcome::Cancelled => {
-            summary.cancelled = true;
+            summary.tally.cancelled = true;
             return Ok(summary);
         }
         Outcome::Halted(halt) => {
-            summary.calls += 1;
-            summary.halted = Some(halt);
+            summary.tally.calls += 1;
+            summary.tally.halted = Some(halt);
             return Ok(summary);
         }
     };
-    summary.calls += 1;
+    summary.tally.calls += 1;
     // 形の崩れた応答は捨てて、次の整理の機会を待つ（統合しなくても要約や検索は困らない）
     let merges = match prompt::tidy::parse(&response.output, &usage) {
         Ok(merges) => merges,
@@ -213,9 +213,10 @@ mod tests {
             summary,
             TidySummary {
                 merged: 1,
-                calls: 1,
-                halted: None,
-                cancelled: false
+                tally: Tally {
+                    calls: 1,
+                    ..Tally::default()
+                },
             }
         );
         let reqs = llm.requests();
@@ -273,7 +274,7 @@ mod tests {
         let llm = FakeLlm::new([]);
         let summary = run(&db, &llm, &mut quota(0), true).await;
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::MaxCalls { limit: 0 }))
         );
         assert!(llm.requests().is_empty());
@@ -290,7 +291,7 @@ mod tests {
         })]);
         let summary = run(&db, &llm, &mut quota(10), true).await;
         assert_eq!(summary.merged, 0);
-        assert_eq!(summary.calls, 1);
+        assert_eq!(summary.tally.calls, 1);
         assert!(topic_names(&db).contains(&"新設炉".to_string()));
     }
 }

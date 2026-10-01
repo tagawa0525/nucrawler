@@ -69,7 +69,7 @@ pub struct Raw {
     pub value: f32,
     /// 関心の強さが正のとき、「重み × 類似度」が最も大きい関心分野
     pub interest: Option<usize>,
-    /// 減点が関心を上回ったとき（λb ≥ a かつ b > 0）、最も近い推薦しない話題
+    /// 減点が正で、関心を上回ったとき（λb > 0 かつ λb ≥ a）、最も近い推薦しない話題
     pub exclude: Option<usize>,
 }
 
@@ -113,7 +113,10 @@ pub fn raw(preference: &Preference, article: &[f32], formula: Formula) -> Raw {
     Raw {
         value: a - formula.lambda * b,
         interest: strongest.filter(|_| a > 0.0),
-        exclude: closest.filter(|_| b > 0.0 && formula.lambda * b >= a),
+        exclude: closest.filter(|_| {
+            let penalty = formula.lambda * b;
+            penalty > 0.0 && penalty >= a
+        }),
     }
 }
 

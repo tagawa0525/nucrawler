@@ -309,11 +309,12 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
 stdio で起動できるのはこのマシンの利用者だけなので、オーナーとして閲覧判定する。
 ツールは読み取り専用で、LLM を呼んだり DB に書いたり（和訳の依頼、評価、既読の記録）はしない。
 
-- `search_articles`：記事の検索。引数はどれも省略できる
+- `search_articles`：記事の検索。引数はどれも省略できる。一覧と違い、既読の記事も返し、同じ報道の記事をまとめない
   - `keyword`：原題・本文・要約・和訳に含む語（全文検索）。空白で区切ると、すべてを含む記事に絞る
   - `since` / `until`：日本時間の日付・月・年（`YYYY-MM-DD` / `YYYY-MM` / `YYYY`、`until` はその日・月・年を含む）。既定は Web UI と同じ直近 `web.list_days` 日
   - `source`：ソースの ID
-  - `min_score`：最低点（既定は `web.min_score`）。点数は推薦点で、結果には補正の前の `llm_score` も付く
+  - `min_score`：最低点（0〜100。既定は Web UI の一覧と同じく `web.min_score` で、プロファイルが無ければ点数で絞らない）。点数は推薦点で、
+    結果には補正の前の `llm_score` も付く
   - `include_hidden`：Web UI の「すべて表示」と同じく、評価 1〜2・閾値未満・未採点・軽水炉と無関係の記事も含める
   - `limit`：最大件数（既定は `web.list_limit`）
 - `get_article`：記事 1 件（`id`）の元記事の URL、最新の要約、全文和訳があればその本文

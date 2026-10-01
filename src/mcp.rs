@@ -2,8 +2,8 @@
 //! 読み取り専用のツールだけを持つ（LLM の呼び出しや DB への書き込みはしない）。
 //! stdout は JSON-RPC に使うので、ログは stderr（tracing）にだけ出す。
 //!
-//! 閲覧判定と「記事ごとに見える最も詳しい版」は、Web UI と同じ `Db::list_articles` と
-//! `Db::article_detail` に任せる。stdio で起動できるのはこのマシンの利用者だけなので、
+//! 閲覧判定と記事ごとに見せる版は、Web UI と同じ `Db::search_articles`（検索）と
+//! `Db::article_detail`（記事）に任せる。stdio で起動できるのはこのマシンの利用者だけなので、
 //! オーナーとして判定する。
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -66,7 +66,7 @@ pub struct SearchParams {
     pub until: Option<String>,
     /// ソースの ID（sources.toml の id）
     pub source: Option<String>,
-    /// この点数以上の記事だけ。既定は Web UI の一覧と同じ（設定の web.min_score）。指定すると include_hidden でも未採点の記事は除く
+    /// この点数以上の記事だけ（0〜100）。既定は Web UI の一覧と同じ（設定の web.min_score。プロファイルが無ければ採点が無いので絞らない）。指定すると include_hidden でも未採点の記事は除く
     pub min_score: Option<u8>,
     /// Web UI の「すべて表示」と同じく、評価 1〜2・閾値未満・未採点・軽水炉に関係しない記事も含める
     #[serde(default)]
@@ -168,7 +168,7 @@ impl Server {
     }
 
     #[tool(
-        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（評価 1〜2 を付けた記事を除く）を点数の高い順に返す。"
+        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（評価 1〜2 を付けた記事を除く。プロファイルが無ければ点数で絞らない）を点数の高い順に返す。一覧と違い、既読の記事も返し、同じ報道の記事をまとめない。"
     )]
     pub async fn search_articles(
         &self,

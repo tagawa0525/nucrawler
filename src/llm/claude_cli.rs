@@ -16,7 +16,7 @@ pub struct ClaudeCli {
     pub cwd: PathBuf,
     pub timeout: Duration,
     /// 呼び出しの枠（`llm-slot-N.lock`）を置くディレクトリ。同じディレクトリを使う実行の間で、
-    /// 同時に動く claude の数を `concurrency` までにする
+    /// 同時に動く LLM の CLI の数を `concurrency` までにする（枠は copilot と共有する）
     pub slots: PathBuf,
     pub concurrency: usize,
 }

@@ -246,8 +246,8 @@ pub async fn embed_articles(
         backend: EMBED_BACKEND,
         model: "",
     };
-    // 予約は、まとめた呼び出し・指紋だけの確かめ・1 件ずつの送り直し（最大 batch_size + 2 回）がすべて
-    // タイムアウトしても切れない長さにする
+    // 予約は、まとめた呼び出し・指紋だけの確かめ・1 件ずつの送り直し（合わせて最大 batch_size 回。余裕を見て
+    // 2 回足す）がすべてタイムアウトしても切れない長さにする
     // （設定の検証で、どちらも上限があり、積は i64 に収まる）
     let calls = cfg.batch_size as i64 + 2;
     let ttl = chrono::Duration::seconds(cfg.timeout_secs as i64 * calls);

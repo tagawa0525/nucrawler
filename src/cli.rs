@@ -146,7 +146,8 @@ pub struct CrawlArgs {
     pub max_llm_calls: Option<u32>,
     /// 和訳の依頼だけを処理する（15 分ごとの timer 用）
     pub requests_only: bool,
-    /// 別の crawl が実行中なら、終わるのを待ってから始める（timer 用。指定しなければ終了コード 75 で終わる）
+    /// 取得（fetch・extract）や語彙の整理を別の実行が行っていれば、終わるのを待ってから始める（timer 用。指定しなければ
+    /// 終了コード 75 で終わる）。LLM のステージはロックを取らないので待たない
     pub wait_lock: bool,
 }
 
@@ -387,7 +388,6 @@ pub struct SearchArgs {
     pub limit: Option<usize>,
 }
 
-/// オプション以外の引数は検索語として空白でつなぐ。
 /// 印で絞る条件を付ける。逆の指定が既にあれば誤り（`--read` と `--unread` など）。
 fn set_mark(mark: &mut Option<bool>, on: bool) -> Result<(), ParseError> {
     if *mark == Some(!on) {
@@ -397,6 +397,7 @@ fn set_mark(mark: &mut Option<bool>, on: bool) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// オプション以外の引数は検索語として空白でつなぐ。
 pub fn parse_search_args(args: &[String]) -> Result<SearchArgs, ParseError> {
     fn value<'a>(it: &mut impl Iterator<Item = &'a String>) -> Result<String, ParseError> {
         option_value(it).cloned().ok_or(ParseError::SearchUsage)

@@ -331,9 +331,9 @@ async fn call_recorded<L: Llm>(
         result = llm.call(req) => result,
         () = cancel.requested() => return Ok(Outcome::Cancelled),
     };
-    // 止める指示と同時に claude が終了させられたとき（端末の Ctrl-C は claude にも届く）は、
-    // LLM の失敗ではない。シグナルの受け取りは非同期で、claude が落ちたことの方が先に分かることが
-    // あるので、claude が SIGINT・SIGTERM で終わったときだけ止める指示を少し待つ。利用上限などの
+    // 止める指示と同時に LLM の CLI（claude・copilot）が終了させられたとき（端末の Ctrl-C は CLI にも届く）は、
+    // LLM の失敗ではない。シグナルの受け取りは非同期で、CLI が落ちたことの方が先に分かることが
+    // あるので、CLI が SIGINT・SIGTERM で終わったときだけ止める指示を少し待つ。利用上限などの
     // ほかの失敗は、止める指示と重なってもそのまま記録する
     if matches!(
         result,

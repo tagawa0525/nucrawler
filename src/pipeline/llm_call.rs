@@ -19,6 +19,8 @@ pub enum Outcome {
     Halted(Halt),
     /// 止める指示で呼び出しをやめた。記事の失敗にも LLM の失敗にも数えず、次回続きから処理する
     Cancelled,
+    /// 止める指示が先に出ていたので呼ばなかった（呼び出しにも数えない）
+    NotStarted,
 }
 
 /// LLM ステージの集計のうち、どのステージにもある項目。
@@ -187,7 +189,7 @@ impl<'a, L: Llm> Workers<'a, L> {
         .await
     }
 
-    /// 呼び出しを数え（止める指示で終わった呼び出しも、始めたので数える）、結果を振り分ける。応答なら返す。
+    /// 始めた呼び出しを数え（止める指示で終わった呼び出しも数える）、結果を振り分ける。応答なら返す。
     /// 止める指示・止める理由なら `tally` に記録して `None`（作業者は止まる）。LLM の失敗は認証切れなど記事に
     /// よらない原因かもしれないので、そのバッチの記事（`batch`。予約を持っているものだけを渡す）だけを失敗にする。
     pub fn settle<'k>(
@@ -197,10 +199,12 @@ impl<'a, L: Llm> Workers<'a, L> {
         batch: impl IntoIterator<Item = StageKey<'k>>,
         now: DateTime<Utc>,
     ) -> Result<Option<LlmResponse>, DbError> {
-        tally.calls += 1;
+        if !matches!(outcome, Outcome::NotStarted) {
+            tally.calls += 1;
+        }
         match outcome {
             Outcome::Response(response) => Ok(Some(response)),
-            Outcome::Cancelled => {
+            Outcome::Cancelled | Outcome::NotStarted => {
                 tally.cancelled = true;
                 Ok(None)
             }
@@ -313,7 +317,7 @@ async fn call_recorded<L: Llm>(
 ) -> Result<Outcome, DbError> {
     // 既に止める指示が出ていれば呼ばない（応答を優先する下の select は、先に呼び出しを始めてしまう）
     if cancel.is_requested() {
-        return Ok(Outcome::Cancelled);
+        return Ok(Outcome::NotStarted);
     }
     shared.quota.borrow_mut().start_call();
     // 記録する時刻は呼び出しを始めた時刻（ステージを始めた時刻では、長いステージの呼び出しがすべて
@@ -670,7 +674,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, Outcome::Cancelled));
+        assert!(matches!(outcome, Outcome::NotStarted));
         assert!(llm.requests().is_empty());
     }
 }

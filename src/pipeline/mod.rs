@@ -3,6 +3,7 @@
 
 pub mod digest;
 pub mod embed;
+pub mod embed_profiles;
 pub mod extract;
 pub mod fetch;
 pub mod llm_call;

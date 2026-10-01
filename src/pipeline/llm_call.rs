@@ -96,6 +96,132 @@ impl<'q> Shared<'q> {
     }
 }
 
+/// ステージの作業者が共有する実行環境と、周の進め方。各ステージは「対象を選ぶ・プロンプトを作る・応答を解釈して
+/// 保存する」だけを書き、周の始めの判定（`begin_round`）・呼び出し（`call`）・結果の振り分け（`settle`）・
+/// 終わり（`finish`）はここで行う。
+pub struct Workers<'a, L> {
+    pub db: &'a Db,
+    pub llm: &'a L,
+    pub cancel: &'a Cancel,
+    pub clock: &'a dyn Fn() -> DateTime<Utc>,
+    shared: Shared<'a>,
+}
+
+impl<'a, L: Llm> Workers<'a, L> {
+    pub fn new(
+        LlmStage {
+            db,
+            llm,
+            quota,
+            cancel,
+            clock,
+        }: LlmStage<'a, L>,
+    ) -> Self {
+        Self {
+            db,
+            llm,
+            cancel,
+            clock,
+            shared: Shared::new(quota),
+        }
+    }
+
+    /// 周の始め。ほかの作業者に譲り、止まっていないか・止める指示が無いかを見て、呼び出しの枠を取り、クォータで
+    /// 判定する。呼んでよければ枠を返す（判定・作業の予約・呼び出しをその中で行い、周の終わりまで持つ）。止まる
+    /// なら理由を `tally` に記録して `None`。`reserve_calls` は残す呼び出し回数（`permit` を参照）。
+    pub async fn begin_round(
+        &self,
+        stage: &str,
+        reserve_calls: u32,
+        tally: &mut Tally,
+    ) -> Result<Option<L::Slot>, DbError> {
+        // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+        // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+        tokio::task::yield_now().await;
+        if self.shared.stopped() {
+            return Ok(None);
+        }
+        if self.cancel.is_requested() {
+            tally.cancelled = true;
+            return Ok(None);
+        }
+        let slot = match reserve(self.llm, self.cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                tally.cancelled = true;
+                return Ok(None);
+            }
+            Reserved::Failed(message) => {
+                tally.halted = Some(Halt::LlmFailed(message));
+                return Ok(None);
+            }
+        };
+        // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+        if self.shared.stopped() {
+            return Ok(None);
+        }
+        if let Err(stop) = permit(
+            self.db,
+            &self.shared,
+            self.llm.backend(),
+            (self.clock)(),
+            reserve_calls,
+        )? {
+            tracing::info!("{stage} stops: {stop}");
+            tally.halted = Some(Halt::Quota(stop));
+            return Ok(None);
+        }
+        Ok(Some(slot))
+    }
+
+    /// 呼び出す（`call_recorded`）。`begin_round` の判定からここまでの間に `await` を挟まないこと。
+    pub async fn call(&self, call: Call<'_>) -> Result<Outcome, DbError> {
+        call_recorded(
+            self.db,
+            self.llm,
+            &self.shared,
+            call,
+            self.clock,
+            self.cancel,
+        )
+        .await
+    }
+
+    /// 呼び出しを数え（止める指示で終わった呼び出しも、始めたので数える）、結果を振り分ける。応答なら返す。
+    /// 止める指示・止める理由なら `tally` に記録して `None`（作業者は止まる）。LLM の失敗は認証切れなど記事に
+    /// よらない原因かもしれないので、そのバッチの記事（`batch`。予約を持っているものだけを渡す）だけを失敗にする。
+    pub fn settle<'k>(
+        &self,
+        outcome: Outcome,
+        tally: &mut Tally,
+        batch: impl IntoIterator<Item = StageKey<'k>>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<LlmResponse>, DbError> {
+        tally.calls += 1;
+        match outcome {
+            Outcome::Response(response) => Ok(Some(response)),
+            Outcome::Cancelled => {
+                tally.cancelled = true;
+                Ok(None)
+            }
+            Outcome::Halted(halt) => {
+                if let Halt::LlmFailed(message) = &halt {
+                    tally.failed += record_failures(self.db, batch, message, now)?;
+                }
+                tally.halted = Some(halt);
+                Ok(None)
+            }
+        }
+    }
+
+    /// 作業者を終える。止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）。
+    pub fn finish(&self, tally: &Tally) {
+        if tally.halted.is_some() || tally.cancelled {
+            self.shared.stop();
+        }
+    }
+}
+
 /// 呼び出しの枠を取った結果。
 pub enum Reserved<S> {
     Slot(S),

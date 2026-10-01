@@ -3,10 +3,8 @@
 
 use chrono::{DateTime, Utc};
 
-use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
-    held_missing, permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
 };
 use super::workers::run_workers;
 use crate::config::LlmConfig;
@@ -38,16 +36,12 @@ impl TitleSummary {
 }
 
 pub async fn translate_titles<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     now: DateTime<Utc>,
 ) -> Result<TitleSummary, TitleStageError> {
+    let workers = Workers::new(env);
+    let (db, llm, clock) = (workers.db, workers.llm, workers.clock);
     let backend = llm.backend();
     let model = llm_cfg.title_model.as_str();
     let schema = prompt::title::schema();
@@ -57,42 +51,13 @@ pub async fn translate_titles<L: Llm>(
         backend,
         model,
     };
-    let shared = Shared::new(quota);
     // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = TitleSummary::default();
         loop {
-            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
-            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
-            tokio::task::yield_now().await;
-            if shared.stopped() {
+            let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
                 break;
-            }
-            if cancel.is_requested() {
-                summary.tally.cancelled = true;
-                break;
-            }
-            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-            let _slot = match reserve(llm, cancel).await {
-                Reserved::Slot(slot) => slot,
-                Reserved::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Reserved::Failed(message) => {
-                    summary.tally.halted = Some(Halt::LlmFailed(message));
-                    break;
-                }
             };
-            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
-            if shared.stopped() {
-                break;
-            }
-            if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
-                tracing::info!("title stops: {stop}");
-                summary.tally.halted = Some(Halt::Quota(stop));
-                break;
-            }
             // 予約は処理を終える（この周の終わりで drop する）まで持つ
             let (batch, claim) = db.claim_selected(
                 ClaimKey {
@@ -112,11 +77,8 @@ pub async fn translate_titles<L: Llm>(
             let prompt = prompt::title::build_prompt(&batch);
             let entries = db.glossary_entries()?;
             let system = prompt::title::system_prompt(&glossary::relevant(&entries, &prompt).terms);
-            let outcome = call_recorded(
-                db,
-                llm,
-                &shared,
-                Call {
+            let outcome = workers
+                .call(Call {
                     stage: STAGE,
                     n_items: batch.len(),
                     req: LlmRequest {
@@ -125,29 +87,19 @@ pub async fn translate_titles<L: Llm>(
                         schema: &schema,
                         model,
                     },
-                },
-                clock,
-                cancel,
-            )
-            .await?;
-            summary.tally.calls += 1;
+                })
+                .await?;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
-            let response = match outcome {
-                Outcome::Response(response) => response,
-                Outcome::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Outcome::Halted(halt) => {
-                    if let Halt::LlmFailed(message) = &halt {
-                        summary.tally.failed +=
-                            record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
-                    }
-                    summary.tally.halted = Some(halt);
-                    break;
-                }
+            let Some(response) = workers.settle(
+                outcome,
+                &mut summary.tally,
+                held.iter().map(|&id| key(id)),
+                now,
+            )?
+            else {
+                break;
             };
             let parsed = match prompt::title::parse(&response.output, &ids) {
                 Ok(parsed) => parsed,
@@ -195,10 +147,7 @@ pub async fn translate_titles<L: Llm>(
                 now,
             )?;
         }
-        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.tally.halted.is_some() || summary.tally.cancelled {
-            shared.stop();
-        }
+        workers.finish(&summary.tally);
         Ok::<_, TitleStageError>(summary)
     })
     .await?;

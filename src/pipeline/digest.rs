@@ -6,12 +6,11 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
+use super::Target;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
-    held_missing, permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
 };
 use super::workers::run_workers;
-use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
     ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoFilter, RedoKey, StageKey,
@@ -44,18 +43,14 @@ impl DigestSummary {
 }
 
 pub async fn digest_articles<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     target: &Target,
     now: DateTime<Utc>,
 ) -> Result<DigestSummary, DigestStageError> {
+    let workers = Workers::new(env);
+    let (db, llm, clock) = (workers.db, workers.llm, workers.clock);
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
@@ -76,50 +71,18 @@ pub async fn digest_articles<L: Llm>(
         .collect(),
         _ => VecDeque::new(),
     };
-    let shared = Shared::new(quota);
     let outdated = RefCell::new(outdated);
     // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = DigestSummary::default();
         loop {
-            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
-            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
-            tokio::task::yield_now().await;
-            if shared.stopped() {
-                break;
-            }
-            if cancel.is_requested() {
-                summary.tally.cancelled = true;
-                break;
-            }
             // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-            let _slot = match reserve(llm, cancel).await {
-                Reserved::Slot(slot) => slot,
-                Reserved::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Reserved::Failed(message) => {
-                    summary.tally.halted = Some(Halt::LlmFailed(message));
-                    break;
-                }
+            let Some(_slot) = workers
+                .begin_round(STAGE, llm_cfg.score_reserved_calls, &mut summary.tally)
+                .await?
+            else {
+                break;
             };
-            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
-            if shared.stopped() {
-                break;
-            }
-            if let Err(stop) = permit(
-                db,
-                &shared,
-                llm.backend(),
-                clock(),
-                llm_cfg.score_reserved_calls,
-            )? {
-                tracing::info!("digest stops: {stop}");
-                summary.tally.halted = Some(Halt::Quota(stop));
-                break;
-            }
             let claim_key = ClaimKey {
                 stage: STAGE,
                 backend,
@@ -168,11 +131,8 @@ pub async fn digest_articles<L: Llm>(
             let system =
                 prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
             let schema = prompt::digest::schema(&vocab);
-            let outcome = call_recorded(
-                db,
-                llm,
-                &shared,
-                Call {
+            let outcome = workers
+                .call(Call {
                     stage: STAGE,
                     n_items: batch.len(),
                     req: LlmRequest {
@@ -181,12 +141,8 @@ pub async fn digest_articles<L: Llm>(
                         schema: &schema,
                         model,
                     },
-                },
-                clock,
-                cancel,
-            )
-            .await?;
-            summary.tally.calls += 1;
+                })
+                .await?;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
@@ -196,20 +152,14 @@ pub async fn digest_articles<L: Llm>(
                 backend,
                 model,
             };
-            let response = match outcome {
-                Outcome::Response(response) => response,
-                Outcome::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Outcome::Halted(halt) => {
-                    if let Halt::LlmFailed(message) = &halt {
-                        summary.tally.failed +=
-                            record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
-                    }
-                    summary.tally.halted = Some(halt);
-                    break;
-                }
+            let Some(response) = workers.settle(
+                outcome,
+                &mut summary.tally,
+                held.iter().map(|&id| key(id)),
+                now,
+            )?
+            else {
+                break;
             };
             let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
                 Ok(parsed) => parsed,
@@ -264,10 +214,7 @@ pub async fn digest_articles<L: Llm>(
                 now,
             )?;
         }
-        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.tally.halted.is_some() || summary.tally.cancelled {
-            shared.stop();
-        }
+        workers.finish(&summary.tally);
         Ok::<_, DigestStageError>(summary)
     })
     .await?;
@@ -317,6 +264,7 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmFailure, LlmResponse, RateLimit, Usage, Window};
     use crate::pipeline::Cancel;
+    use crate::pipeline::Halt;
     use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {

@@ -6,10 +6,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use super::Halt;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, Tally, call_recorded, claim_ttl,
-    held_missing, permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
 };
 use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
@@ -123,17 +121,13 @@ fn rebuild(db: &Db) -> Result<(), DbError> {
 }
 
 pub async fn judge_stories<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     now: DateTime<Utc>,
 ) -> Result<StorySummary, StoryStageError> {
+    let workers = Workers::new(env);
+    let (db, llm, clock) = (workers.db, workers.llm, workers.clock);
     let backend = llm.backend();
     let model = llm_cfg.story_model.as_str();
     let schema = p::schema();
@@ -148,40 +142,13 @@ pub async fn judge_stories<L: Llm>(
     };
     // 前の実行が判定を保存してからグループを作り直す前に落ちていても、候補を選ぶ前に直しておく
     rebuild(db)?;
-    let shared = Shared::new(quota);
     // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = StorySummary::default();
         loop {
-            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
-            tokio::task::yield_now().await;
-            if shared.stopped() {
+            let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
                 break;
-            }
-            if cancel.is_requested() {
-                summary.tally.cancelled = true;
-                break;
-            }
-            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-            let _slot = match reserve(llm, cancel).await {
-                Reserved::Slot(slot) => slot,
-                Reserved::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Reserved::Failed(message) => {
-                    summary.tally.halted = Some(Halt::LlmFailed(message));
-                    break;
-                }
             };
-            if shared.stopped() {
-                break;
-            }
-            if let Err(stop) = permit(db, &shared, llm.backend(), clock(), 0)? {
-                tracing::info!("story stops: {stop}");
-                summary.tally.halted = Some(Halt::Quota(stop));
-                break;
-            }
             // 予約は処理を終える（この周の終わりで drop する）まで持つ
             let (batch, claim) = db.claim_selected(
                 ClaimKey {
@@ -251,11 +218,8 @@ pub async fn judge_stories<L: Llm>(
                 })
                 .collect();
             let prompt = p::build_prompt(&requested);
-            let outcome = call_recorded(
-                db,
-                llm,
-                &shared,
-                Call {
+            let outcome = workers
+                .call(Call {
                     stage: STAGE,
                     n_items: requested.len(),
                     req: LlmRequest {
@@ -264,34 +228,22 @@ pub async fn judge_stories<L: Llm>(
                         schema: &schema,
                         model,
                     },
-                },
-                clock,
-                cancel,
-            )
-            .await?;
-            summary.tally.calls += 1;
+                })
+                .await?;
             // 結果を書く前に予約を延長する。取り直された記事は、以降は保存も失敗の記録もしない
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let judged_ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
-            let response = match outcome {
-                Outcome::Response(response) => response,
-                Outcome::Cancelled => {
-                    summary.tally.cancelled = true;
-                    break;
-                }
-                Outcome::Halted(halt) => {
-                    if let Halt::LlmFailed(message) = &halt {
-                        summary.tally.failed += record_failures(
-                            db,
-                            held_missing(&judged_ids, &held).map(key),
-                            message,
-                            now,
-                        )?;
-                    }
+            let Some(response) = workers.settle(
+                outcome,
+                &mut summary.tally,
+                held_missing(&judged_ids, &held).map(key),
+                now,
+            )?
+            else {
+                if summary.tally.halted.is_some() {
                     rebuild(db)?;
-                    summary.tally.halted = Some(halt);
-                    break;
                 }
+                break;
             };
             let parsed = match prompt::story::parse(&response.output, &requested) {
                 Ok(parsed) => parsed,
@@ -332,10 +284,7 @@ pub async fn judge_stories<L: Llm>(
             )?;
             rebuild(db)?;
         }
-        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.tally.halted.is_some() || summary.tally.cancelled {
-            shared.stop();
-        }
+        workers.finish(&summary.tally);
         Ok::<_, StoryStageError>(summary)
     })
     .await?;

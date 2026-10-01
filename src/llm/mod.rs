@@ -329,6 +329,15 @@ pub mod fake {
             }
         }
 
+        /// 呼ばれたとき（応答を返す前）に、何回目の呼び出しか（0 から）を渡して `hook` を実行する。
+        /// `responding` と組み合わせて、応答を依頼から作りつつ途中で止める指示を出すのに使う。
+        pub fn hooked(self, hook: impl FnMut(usize) + Send + 'static) -> Self {
+            Self {
+                hook: Mutex::new(Some(Box::new(hook))),
+                ..self
+            }
+        }
+
         /// `backend()` の名前を変える。
         pub fn named(self, name: &'static str) -> Self {
             Self {

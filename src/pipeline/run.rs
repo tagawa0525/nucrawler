@@ -871,6 +871,186 @@ mod tests {
         assert_eq!(report, RunReport::default());
     }
 
+    /// プロンプトの `<{tag} id="N"` の N を順に返す。
+    fn tagged_ids(text: &str, tag: &str) -> Vec<i64> {
+        let open = format!("<{tag} id=\"");
+        text.split(&open)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next()?.parse().ok())
+            .collect()
+    }
+
+    /// 依頼の内容だけから決まる応答。止めて再開しても、同じ依頼には同じ応答を返す。
+    fn deterministic(req: &crate::llm::LlmRequest<'_>) -> Result<LlmResponse, LlmError> {
+        let item = &req.schema["properties"]["items"]["items"]["properties"];
+        let output = if req.schema["properties"].get("body_ja").is_some() {
+            serde_json::json!({"body_ja": "訳文"})
+        } else if item.get("summary_ja").is_some() {
+            let items: Vec<_> = tagged_ids(req.prompt, "article")
+                .into_iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "id": id, "title_ja": format!("規制の見出し {}", id % 3),
+                        "summary_ja": "原子力規制の要約", "points_ja": ["点"],
+                        "implications_ja": "", "lwr_relevant": true,
+                        "topics": ["規制・審査"], "new_topics": [],
+                    })
+                })
+                .collect();
+            serde_json::json!({ "items": items })
+        } else if item.get("score").is_some() {
+            let items: Vec<_> = tagged_ids(req.prompt, "article")
+                .into_iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "id": id, "score": 60 + id * 13 % 40, "reason": "理由",
+                        "matched": [], "excluded": [],
+                    })
+                })
+                .collect();
+            serde_json::json!({ "items": items })
+        } else if item.get("same").is_some() {
+            // 対象ごとの候補：既存のグループ（story）とその外の記事。関係は ID の和で決める
+            let items: Vec<_> = req
+                .prompt
+                .split("<candidates for=\"")
+                .skip(1)
+                .map(|block| {
+                    let target: i64 = block.split('"').next().unwrap().parse().unwrap();
+                    let block = block.split("</candidates>").next().unwrap();
+                    let mut candidates = tagged_ids(block, "story");
+                    let mut rest = block.to_string();
+                    while let (Some(i), Some(j)) = (rest.find("<story id="), rest.find("</story>"))
+                    {
+                        rest.replace_range(i..j + "</story>".len(), "");
+                    }
+                    candidates.extend(tagged_ids(&rest, "article"));
+                    let pick = |r| -> Vec<i64> {
+                        candidates
+                            .iter()
+                            .copied()
+                            .filter(|c| (target + c) % 3 == r)
+                            .collect()
+                    };
+                    serde_json::json!({"id": target, "same": pick(0), "related": pick(1)})
+                })
+                .collect();
+            serde_json::json!({ "items": items })
+        } else if item.get("title_ja").is_some() {
+            let items: Vec<_> = tagged_ids(req.prompt, "article")
+                .into_iter()
+                .map(|id| serde_json::json!({"id": id, "title_ja": format!("見出し {id}")}))
+                .collect();
+            serde_json::json!({ "items": items })
+        } else {
+            panic!("unexpected request: {}", req.schema);
+        };
+        Ok(LlmResponse {
+            output,
+            usage: None,
+        })
+    }
+
+    /// 処理の結果として残るもの（ID と時刻を除く）。止めて再開した結果と比べる。
+    fn outcome(db: &Db) -> Vec<String> {
+        let mut rows = Vec::new();
+        for (name, sql) in [
+            (
+                "artifact",
+                "SELECT article_id || ' ' || kind || ' ' || model || ' ' || prompt_version || ' '
+                        || payload FROM artifacts",
+            ),
+            (
+                "score",
+                "SELECT r.article_id || ' ' || s.score || ' ' || s.reason FROM scores AS s
+                 JOIN artifacts AS r ON r.id = s.artifact_id",
+            ),
+            (
+                "story_link",
+                "SELECT r.article_id || ' ' || l.other_id || ' ' || l.relation FROM story_links AS l
+                 JOIN artifacts AS r ON r.id = l.artifact_id",
+            ),
+            (
+                "story",
+                "SELECT article_id || ' ' || story_id FROM article_stories",
+            ),
+            (
+                "stage_error",
+                "SELECT article_id || ' ' || stage || ' ' || attempts || ' ' || last_error
+                 FROM stage_errors",
+            ),
+            ("claim", "SELECT article_id || ' ' || stage FROM work_claims"),
+        ] {
+            let mut got = db.query_strings(sql).unwrap();
+            got.sort();
+            rows.extend(got.into_iter().map(|r| format!("{name} {r}")));
+        }
+        rows
+    }
+
+    /// 要約から同じ報道の判定までを止めずに走らせた結果と、k 回目の LLM の呼び出しで止める指示を
+    /// 出してから次の実行で再開した結果が、どの k でも、応答の前後どちらで止まっても同じになる。
+    #[tokio::test]
+    async fn resuming_after_a_stop_matches_an_uninterrupted_run() {
+        const STAGES: &[Stage] = &[
+            Stage::Digest,
+            Stage::Score,
+            Stage::Translate,
+            Stage::Title,
+            Stage::Story,
+        ];
+        let setup = || {
+            let db = Db::open_in_memory().unwrap();
+            save_profile(&db);
+            for n in 0..8 {
+                article(&db, n);
+            }
+            // 本文の無い英語の記事は、見出しだけ訳す
+            for n in 8..10 {
+                db.insert_article(&NewArticle {
+                    source_id: "ans",
+                    url: &format!("https://e.com/{n}"),
+                    title: &format!("Title {n}"),
+                    lang: Lang::En,
+                    published_at: Some(&format!("2026-09-27T{:02}:00:00.000Z", 20 - n)),
+                })
+                .unwrap()
+                .unwrap();
+            }
+            db
+        };
+
+        let db = setup();
+        let llm = FakeLlm::responding(std::time::Duration::ZERO, deterministic);
+        let report = crawl_with(&db, &llm, 100, &Cancel::default(), STAGES).await;
+        assert!(!report.cancelled, "{report:?}");
+        let calls = llm.requests().len();
+        assert!(calls >= STAGES.len(), "{calls} calls");
+        let expected = outcome(&db);
+
+        // 応答が届いてから止める指示に気づく場合（遅延なし）と、応答を待つ間に止めて呼び出しを捨てる場合
+        for (delay, when) in [
+            (std::time::Duration::ZERO, "after the response"),
+            (std::time::Duration::from_millis(5), "during the call"),
+        ] {
+            for k in 0..calls {
+                let db = setup();
+                let cancel = Cancel::default();
+                let stop = cancel.clone();
+                let llm = FakeLlm::responding(delay, deterministic).hooked(move |n| {
+                    if n == k {
+                        stop.request();
+                    }
+                });
+                let report = crawl_with(&db, &llm, 100, &cancel, STAGES).await;
+                assert!(report.cancelled, "stop at call {k} {when}: {report:?}");
+                let llm = FakeLlm::responding(std::time::Duration::ZERO, deterministic);
+                crawl_with(&db, &llm, 100, &Cancel::default(), STAGES).await;
+                assert_eq!(outcome(&db), expected, "stop at call {k} {when}");
+            }
+        }
+    }
+
     /// 止める指示が出ていれば、ステージを始めずに中断として報告する。
     #[tokio::test]
     async fn cancel_stops_before_any_stage() {

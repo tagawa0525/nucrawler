@@ -197,6 +197,16 @@ async fn with_db<T: Send + 'static>(
     .await?
 }
 
+/// `with_db` に、Web の設定と取得元の表示名も渡す。画面を組み立てる処理の多くはこの 3 つを使う。
+async fn with_db_and_config<T: Send + 'static>(
+    state: &AppState,
+    f: impl FnOnce(&Db, &WebConfig, &SourceLabels) -> Result<T, AppError> + Send + 'static,
+) -> Result<T, AppError> {
+    let web = Arc::clone(&state.web);
+    let labels = Arc::clone(&state.labels);
+    with_db(state, move |db| f(db, &web, &labels)).await
+}
+
 /// 画面の共通の部分（`html::Page`）の材料。どの画面もこれで作る。運用の警告（取得の失敗など。URL や
 /// バックエンドの診断を含む）を管理者にだけ出す判定を、画面ごとに書くとどれかで漏れるので、ここに 1 つだけ置く。
 struct PageParts {

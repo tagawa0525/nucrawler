@@ -6,13 +6,11 @@ pub(super) async fn glossary(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
 ) -> Result<Html<String>, AppError> {
-    let labels = state.labels.clone();
-    let web = state.web.clone();
-    let page = with_db(&state, move |db| {
+    let page = with_db_and_config(&state, move |db, web, labels| {
         let (_, hash) = viewer(db, me)?;
         let entries = db.glossary_entries()?;
-        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
-        let page = parts.page(&labels);
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
         Ok(html::glossary_page(&entries, &page))
     })
     .await?;

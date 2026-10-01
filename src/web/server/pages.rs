@@ -141,12 +141,10 @@ pub(super) async fn list(
     if requested != canonical {
         return Ok(Redirect::to(&canonical).into_response());
     }
-    let web = state.web.clone();
-    let labels = state.labels.clone();
-    let page = with_db(&state, move |db| {
+    let page = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         if view.filtered() {
-            return filtered(db, &web, &labels, me, hash.as_deref(), view);
+            return filtered(db, web, labels, me, hash.as_deref(), view);
         }
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
@@ -154,7 +152,7 @@ pub(super) async fn list(
         let items = db.list_articles(ListQuery {
             read: view.read,
             bookmarked: view.bookmarked,
-            ..list_query(&web, user, hash.as_deref(), now, view.min)
+            ..list_query(web, user, hash.as_deref(), now, view.min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、
@@ -163,7 +161,7 @@ pub(super) async fn list(
             // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく既定の最低点
             let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
             let picks = db.explore(
-                list_query(&web, user, hash.as_deref(), now, Some(floor)),
+                list_query(web, user, hash.as_deref(), now, Some(floor)),
                 web.explore_per_day as usize,
                 &today.to_string(),
             )?;
@@ -182,8 +180,8 @@ pub(super) async fn list(
         } else {
             Vec::new()
         };
-        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
-        let page = parts.page(&labels);
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
         ))
@@ -242,16 +240,14 @@ pub(super) async fn feed(
 ) -> Result<Response, AppError> {
     // 記事のリンクは絶対 URL にする。http で待ち受けているので `http://` + Host
     let base = format!("http://{}", request_host(&headers, &state.web));
-    let web = state.web.clone();
-    let labels = state.labels.clone();
-    let xml = with_db(&state, move |db| {
+    let xml = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         let Some(me) = feed_viewer(db, params.token.as_deref())? else {
             return Ok(None);
         };
         let (user, hash) = viewer(db, me)?;
         let min = web.default_min(hash.as_deref());
-        let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
+        let items = list_items(db, web, user, hash.as_deref(), now, min)?;
         // フィード自身の URL はトークン付き（購読し直すリーダーが読めるように）
         let token = params.token.unwrap_or_default();
         let self_href = format!("{base}/feed.xml?token={token}");
@@ -260,7 +256,7 @@ pub(super) async fn feed(
             &base,
             &self_href,
             user,
-            &labels,
+            labels,
             &crate::db::timestamp(now),
         )))
     })
@@ -283,13 +279,11 @@ pub(super) async fn search(
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
     let params = Params::from_query(raw.as_deref().unwrap_or(""));
-    let web = state.web.clone();
-    let labels = state.labels.clone();
-    let (status, page) = with_db(&state, move |db| {
+    let (status, page) = with_db_and_config(&state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         let vocabulary = db.topic_usage()?;
-        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
-        let page = parts.page(&labels);
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
         // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
         let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
             Ok(_) if params.is_empty() => {
@@ -336,9 +330,7 @@ pub(super) async fn detail(
     };
     // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
     let returned = params.back.is_some() || method == Method::HEAD;
-    let labels = state.labels.clone();
-    let web = state.web.clone();
-    let page = with_db(&state, move |db| {
+    let page = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
         let mut detail = db
@@ -371,8 +363,8 @@ pub(super) async fn detail(
                 .read_at
                 .get_or_insert_with(|| crate::db::timestamp(now));
         }
-        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
-        let page = parts.page(&labels);
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
         let comments = db.comments(user, id)?;
         let notes = html::Notes {
             reports: &reports,
@@ -432,10 +424,8 @@ pub(super) async fn settings_html(
     headers: &HeaderMap,
     notice: Option<html::PasswordNotice>,
 ) -> Result<String, AppError> {
-    let labels = state.labels.clone();
-    let web = state.web.clone();
     let base = format!("http://{}", request_host(headers, &state.web));
-    with_db(state, move |db| {
+    with_db_and_config(state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         // 購読用のフィードの URL（コピーして使うので絶対 URL）
         let feed_url = db
@@ -453,8 +443,8 @@ pub(super) async fn settings_html(
         } else {
             None
         };
-        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
-        let page = parts.page(&labels);
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
         Ok(html::settings_page(
             terms,
             pending,

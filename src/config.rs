@@ -1125,6 +1125,7 @@ mod tests {
             ("timeout_secs = 0\n", "timeout_secs"),
             ("dimensions = 0\n", "dimensions"),
             ("auth = \"bearer\"\n", "api_key_env"),
+            ("auth = \"bearer\"\napi_key_env = \"\"\n", "api_key_env"),
             // 予約の期限（呼び出しの回数 × タイムアウト）を表せない値
             ("batch_size = 2049\n", "batch_size"),
             ("timeout_secs = 3601\n", "timeout_secs"),
@@ -1136,7 +1137,12 @@ mod tests {
                 "{text}: {err}"
             );
         }
-        for (url, model) in [("", "m"), ("not a url", "m"), ("http://127.0.0.1/v1", "")] {
+        for (url, model) in [
+            ("", "m"),
+            ("not a url", "m"),
+            ("ftp://127.0.0.1/v1", "m"),
+            ("http://127.0.0.1/v1", ""),
+        ] {
             let text = format!("[embedding]\nurl = \"{url}\"\nmodel = \"{model}\"\n");
             assert!(
                 matches!(parse_config(&text, p()), Err(ConfigError::Invalid { .. })),

@@ -87,6 +87,7 @@ pub fn render(
         k.prompt_version == current_version(k, version)
             && candidate.is_some_and(|hash| k.profile_hash == hash)
             && !is_current(k)
+            && !is_trial(k)
     };
     let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
     keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), !is_trial(k), *k));

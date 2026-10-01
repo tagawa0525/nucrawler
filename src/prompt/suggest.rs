@@ -203,7 +203,7 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
             .any(super::breaks_line)
     }) {
         return Err(SuggestError::Malformed(format!(
-            "reason {:?} contains control characters or line-breaking spaces",
+            "reason {:?} contains control characters or disallowed whitespace",
             r.change
         )));
     }

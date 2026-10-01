@@ -2,6 +2,7 @@
 //! 結果をすぐ DB に書く。途中で止まっても、次回は残りから再開する。
 
 pub mod digest;
+pub mod embed;
 pub mod extract;
 pub mod fetch;
 pub mod llm_call;
@@ -110,6 +111,8 @@ pub enum Stage {
     Fetch,
     Extract,
     Digest,
+    /// 要約の embedding（LLM を使わない）
+    Embed,
     Score,
     Translate,
     /// 本文が無く要約できない英語記事の見出しの和訳
@@ -125,6 +128,7 @@ impl Stage {
         Stage::Fetch,
         Stage::Extract,
         Stage::Digest,
+        Stage::Embed,
         Stage::Score,
         Stage::Translate,
         Stage::Title,
@@ -136,7 +140,7 @@ impl Stage {
     pub fn llm_task(self) -> Option<crate::config::LlmTask> {
         use crate::config::LlmTask;
         match self {
-            Stage::Fetch | Stage::Extract => None,
+            Stage::Fetch | Stage::Extract | Stage::Embed => None,
             Stage::Digest => Some(LlmTask::Digest),
             Stage::Score => Some(LlmTask::Score),
             Stage::Translate => Some(LlmTask::Translate),
@@ -151,6 +155,7 @@ impl Stage {
             Stage::Fetch => "fetch",
             Stage::Extract => "extract",
             Stage::Digest => "digest",
+            Stage::Embed => "embed",
             Stage::Score => "score",
             Stage::Translate => "translate",
             Stage::Title => "title",
@@ -167,9 +172,14 @@ impl Stage {
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            Stage::Digest | Stage::Score | Stage::Translate | Stage::Title | Stage::Story => {
-                LockKind::Llm
-            }
+            // embed は LLM を呼ばないが、要約と採点の間で続けて動けるよう、LLM のステージと同じロックで動かす
+            // （共有のロックなので、ほかの LLM の実行とは並行する）
+            Stage::Digest
+            | Stage::Embed
+            | Stage::Score
+            | Stage::Translate
+            | Stage::Title
+            | Stage::Story => LockKind::Llm,
             Stage::Tidy => LockKind::Tidy,
         }
     }
@@ -280,6 +290,16 @@ mod tests {
         }
     }
 
+    /// embed は LLM を使わないので、LLM が使えない実行でも飛ばされない。
+    #[test]
+    fn embed_does_not_use_the_llm() {
+        assert_eq!(Stage::Embed.llm_task(), None);
+        assert_eq!(
+            plan(Some(Stage::Embed), None),
+            [Stage::Fetch, Stage::Extract, Stage::Digest, Stage::Embed]
+        );
+    }
+
     /// 取得のステージと LLM のステージは、それぞれのロックを取って順に実行する。
     #[test]
     fn groups_stages_by_lock() {
@@ -291,6 +311,7 @@ mod tests {
                     LockKind::Llm,
                     vec![
                         Stage::Digest,
+                        Stage::Embed,
                         Stage::Score,
                         Stage::Translate,
                         Stage::Title,

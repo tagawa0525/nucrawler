@@ -38,6 +38,8 @@ enum Error {
     Run(#[from] RunError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
+    #[error("embedding failed: {0}")]
+    EmbeddingFailed(String),
     #[error(transparent)]
     Profile(#[from] ProfileError),
     #[error(transparent)]
@@ -155,6 +157,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
         Command::User => user(inv.data_dir, cli::parse_user_args(&inv.args)?),
+        Command::Embed => embed(inv.data_dir, cli::parse_embed_args(&inv.args)?),
         Command::Search => search(
             inv.config_dir,
             inv.data_dir,
@@ -283,6 +286,18 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
             tracing::info!(topics = parsed.len(), "topics imported");
         }
         TopicsArgs::Export => print!("{}", topics::to_toml(&db.vocabulary()?)),
+    }
+    Ok(())
+}
+
+/// 実行中の crawl が古い空間に保存しようとしても、空間の世代が変わっているので保存されない。
+fn embed(data: Option<PathBuf>, args: cli::EmbedArgs) -> Result<(), Error> {
+    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    match args {
+        cli::EmbedArgs::Rebuild => {
+            db.rebuild_embeddings()?;
+            tracing::info!("embeddings cleared; the next crawl embeds every digest again");
+        }
     }
     Ok(())
 }

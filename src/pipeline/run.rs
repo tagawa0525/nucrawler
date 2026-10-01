@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, story, suggest, tidy, title, translate};
+use super::{digest, embed, extract, fetch, score, story, suggest, tidy, title, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -78,6 +78,8 @@ pub struct RunReport {
     /// 利用上限や LLM の失敗で止まったバックエンド。この実行では、そのバックエンドを使う後続の
     /// LLM ステージを呼ばない（crawl をロックの単位に分けて呼んでも引き継ぐ）
     pub llm_blocked: Vec<&'static str>,
+    /// embedding を作れなかった理由（サービスの失敗や、モデルが替わって作り直しが要るとき）
+    pub embedding_failure: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -232,6 +234,26 @@ pub async fn crawl<L: LlmSet>(
                 );
                 block(report, env.backend(LlmTask::Tidy), summary.halted);
             }
+            Stage::Embed => {
+                let Some(cfg) = &config.embedding else {
+                    tracing::debug!("embed stage skipped: no [embedding] settings");
+                    continue;
+                };
+                match embed_stage(db, cfg, env.cancel, env.clock).await {
+                    Ok(summary) => tracing::info!(
+                        embedded = summary.embedded,
+                        failed = summary.failed,
+                        calls = summary.calls,
+                        "embed stage finished"
+                    ),
+                    // 記事の embedding が作れなくても、ほかのステージは続ける（最後に報告する）
+                    Err(e) => {
+                        let message = crate::errors::error_chain(&e);
+                        tracing::error!("embed stage stopped: {message}");
+                        report.embedding_failure = Some(message);
+                    }
+                }
+            }
             Stage::Extract => {
                 let summary = extract::extract_pages(
                     db,
@@ -253,6 +275,25 @@ pub async fn crawl<L: LlmSet>(
     }
     report.cancelled = env.cancel.is_requested();
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum EmbedRunError {
+    #[error(transparent)]
+    Client(#[from] crate::embedding::EmbedError),
+    #[error(transparent)]
+    Stage(#[from] embed::EmbedStageError),
+}
+
+/// 設定の API で embed ステージを流す。鍵は環境変数から読む。
+async fn embed_stage(
+    db: &Db,
+    cfg: &crate::config::EmbeddingConfig,
+    cancel: &Cancel,
+    clock: &dyn Fn() -> DateTime<Utc>,
+) -> Result<embed::EmbedSummary, EmbedRunError> {
+    let client = crate::embedding::Client::from_config(cfg, |name| std::env::var(name).ok())?;
+    Ok(embed::embed_articles(db, &client, cfg, cancel, clock).await?)
 }
 
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の
@@ -605,6 +646,84 @@ mod tests {
                 &self.others
             }
         }
+    }
+
+    /// `config` で `stages` を流す。
+    async fn crawl_config(db: &Db, llm: &FakeLlm, stages: &[Stage], config: &Config) -> RunReport {
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(10));
+        let mut report = RunReport::default();
+        crawl(
+            RunEnv {
+                db,
+                llm,
+                quota: &mut quota,
+                cancel: &Cancel::default(),
+                clock: &now,
+            },
+            stages,
+            CrawlOptions::default(),
+            config,
+            &[],
+            &Fetcher::from_config(&HttpConfig::default()).unwrap(),
+            &mut report,
+        )
+        .await
+        .unwrap();
+        report
+    }
+
+    fn embedding_config(url: &str) -> Config {
+        Config {
+            embedding: Some(crate::embedding::fake::cfg(url)),
+            ..Config::default()
+        }
+    }
+
+    fn embedded(db: &Db) -> i64 {
+        db.query_i64("SELECT count(*) FROM article_embeddings")
+            .unwrap()
+    }
+
+    /// embed は LLM を使わないので、LLM が失敗して後続の LLM ステージを飛ばす実行でも、要約のベクトルを作る。
+    #[tokio::test]
+    async fn embed_runs_even_when_the_llm_is_blocked() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        let server = crate::embedding::fake::echo_server();
+        let llm = FakeLlm::new([not_logged_in()]);
+        let report = crawl_config(
+            &db,
+            &llm,
+            &[Stage::Digest, Stage::Embed],
+            &embedding_config(&server.url("/v1/embeddings")),
+        )
+        .await;
+        assert!(report.llm_failure.is_some());
+        assert_eq!(report.embedding_failure, None);
+        assert_eq!(embedded(&db), 1);
+    }
+
+    /// 設定が無ければ embed は何もしない。embedding の失敗は報告し、後続のステージは続ける。
+    #[tokio::test]
+    async fn reports_embedding_failures_and_continues() {
+        let db = Db::open_in_memory().unwrap();
+        let digested = digested_and_pending(&db).await;
+        let report =
+            crawl_config(&db, &FakeLlm::new([]), &[Stage::Embed], &Config::default()).await;
+        assert_eq!(report, RunReport::default());
+        let server = crate::testutil::Server::start_with(|_| crate::testutil::Route::status(503));
+        let llm = FakeLlm::new([score_ok(digested)]);
+        let report = crawl_config(
+            &db,
+            &llm,
+            &[Stage::Embed, Stage::Score],
+            &embedding_config(&server.url("/v1/embeddings")),
+        )
+        .await;
+        let failure = report.embedding_failure.expect("the failure is reported");
+        assert!(failure.contains("503"), "{failure}");
+        assert_eq!(llm.requests().len(), 1, "score still runs");
+        assert_eq!(embedded(&db), 0);
     }
 
     /// 工程ごとにバックエンドを変えるとき、あるバックエンドが失敗しても、ほかのバックエンドの工程は続ける。

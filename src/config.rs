@@ -37,6 +37,122 @@ pub struct Config {
     pub copilot_quota: Option<crate::quota::CreditsConfig>,
     pub web: WebConfig,
     pub recommend: RecommendConfig,
+    /// 記事と好みの embedding を作る API。無ければ embedding を使わない
+    pub embedding: Option<EmbeddingConfig>,
+}
+
+/// OpenAI 互換の embeddings API（`POST .../v1/embeddings`）の設定。r995 ではローカルのサーバー、
+/// 社内では Azure OpenAI を呼ぶ。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfig {
+    /// embeddings API の URL（例 `http://127.0.0.1:8080/v1/embeddings`）
+    pub url: String,
+    /// 送る `model`（Azure ではデプロイ名）
+    pub model: String,
+    /// 認証の形。`none` 以外では、鍵を `api_key_env` の環境変数から読む（設定ファイルには書かない）
+    #[serde(default)]
+    pub auth: EmbeddingAuth,
+    pub api_key_env: Option<String>,
+    /// 返すベクトルの次元（`dimensions` で切り詰められるモデルだけ）。無ければモデルの既定
+    pub dimensions: Option<u32>,
+    /// 好み（クエリ）の文の前に付ける接頭辞（ruri なら「検索クエリ: 」）
+    #[serde(default)]
+    pub query_prefix: String,
+    /// 記事（文書）の文の前に付ける接頭辞（ruri なら「検索文書: 」）
+    #[serde(default)]
+    pub document_prefix: String,
+    /// 1 回の呼び出しで送る文の数。モデルの指紋の試験文（`embedding::FINGERPRINT_TEXTS` 件）を含めて数える
+    #[serde(default = "default_embedding_batch_size")]
+    pub batch_size: usize,
+    /// 1 回の呼び出しのタイムアウト（秒）
+    #[serde(default = "default_embedding_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+/// 1 回に送る文の数の上限。
+pub const MAX_EMBEDDING_BATCH_SIZE: usize = 2048;
+/// 1 回の呼び出しのタイムアウトの上限（秒）。
+pub const MAX_EMBEDDING_TIMEOUT_SECS: u64 = 3600;
+
+fn default_embedding_batch_size() -> usize {
+    32
+}
+
+fn default_embedding_timeout_secs() -> u64 {
+    30
+}
+
+/// embeddings API の認証の形。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EmbeddingAuth {
+    /// 認証しない（ローカルのサーバー）
+    #[default]
+    None,
+    /// `Authorization: Bearer <鍵>`（OpenAI）
+    Bearer,
+    /// `api-key: <鍵>`（Azure OpenAI）
+    ApiKey,
+}
+
+impl EmbeddingConfig {
+    /// 呼び出しが成り立たない値を拒否する。
+    pub fn validate(&self) -> Result<(), String> {
+        if !url::Url::parse(&self.url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+            return Err(format!(
+                "embedding.url is not an http(s) url: {:?}",
+                self.url
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err("embedding.model must not be empty".into());
+        }
+        if self.auth != EmbeddingAuth::None
+            && self
+                .api_key_env
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
+            return Err("embedding.auth needs embedding.api_key_env".into());
+        }
+        // 鍵を平文で送らない
+        if self.auth != EmbeddingAuth::None
+            && !url::Url::parse(&self.url).is_ok_and(|u| u.scheme() == "https")
+        {
+            return Err(format!(
+                "embedding.url must be https when embedding.auth sends a key, got {:?}",
+                self.url
+            ));
+        }
+        if self.dimensions == Some(0) {
+            return Err("embedding.dimensions must be at least 1".into());
+        }
+        // 予約の期限は「呼び出しの回数 × タイムアウト」なので、どちらにも上限を置く
+        if self.batch_size > MAX_EMBEDDING_BATCH_SIZE {
+            return Err(format!(
+                "embedding.batch_size must be at most {MAX_EMBEDDING_BATCH_SIZE}, got {}",
+                self.batch_size
+            ));
+        }
+        if self.timeout_secs > MAX_EMBEDDING_TIMEOUT_SECS {
+            return Err(format!(
+                "embedding.timeout_secs must be at most {MAX_EMBEDDING_TIMEOUT_SECS}, got {}",
+                self.timeout_secs
+            ));
+        }
+        if self.batch_size <= crate::embedding::FINGERPRINT_TEXTS {
+            return Err(format!(
+                "embedding.batch_size must be more than {} (the fingerprint texts sent with every call), got {}",
+                crate::embedding::FINGERPRINT_TEXTS,
+                self.batch_size
+            ));
+        }
+        if self.timeout_secs == 0 {
+            return Err("embedding.timeout_secs must be at least 1".into());
+        }
+        Ok(())
+    }
 }
 
 /// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）の設定。
@@ -470,6 +586,12 @@ pub fn parse_config(text: &str, path: &Path) -> Result<Config, ConfigError> {
         .and_then(|()| config.llm.validate())
         .and_then(|()| config.web.validate())
         .and_then(|()| config.recommend.validate())
+        .and_then(|()| {
+            config
+                .embedding
+                .as_ref()
+                .map_or(Ok(()), EmbeddingConfig::validate)
+        })
         .and_then(|()| {
             config
                 .copilot_quota
@@ -978,6 +1100,72 @@ mod tests {
             assert!(
                 matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains("recommend.prior_strength")),
                 "{text}: {err}"
+            );
+        }
+    }
+
+    /// embedding は設定が無ければ使わない。あれば既定（認証なし・32 件・30 秒）を補って読む。
+    #[test]
+    fn reads_the_embedding_settings() {
+        assert_eq!(parse_config("", p()).unwrap().embedding, None);
+        let c = parse_config(
+            "[embedding]\nurl = \"http://127.0.0.1:8080/v1/embeddings\"\nmodel = \"ruri\"\n\
+             query_prefix = \"検索クエリ: \"\ndocument_prefix = \"検索文書: \"\n",
+            p(),
+        )
+        .unwrap();
+        let e = c.embedding.unwrap();
+        assert_eq!(e.auth, EmbeddingAuth::None);
+        assert_eq!((e.batch_size, e.timeout_secs), (32, 30));
+        assert_eq!(e.dimensions, None);
+        assert_eq!(e.query_prefix, "検索クエリ: ");
+        let azure = parse_config(
+            "[embedding]\nurl = \"https://x.openai.azure.com/openai/v1/embeddings\"\n\
+             model = \"emb\"\nauth = \"api-key\"\napi_key_env = \"AZURE_KEY\"\ndimensions = 1024\n",
+            p(),
+        )
+        .unwrap()
+        .embedding
+        .unwrap();
+        assert_eq!(azure.auth, EmbeddingAuth::ApiKey);
+        assert_eq!(azure.dimensions, Some(1024));
+    }
+
+    /// 呼び出しが成り立たない値は、設定の誤りにする。1 回に送る件数は、指紋の試験文（2 件）より多くないと
+    /// 記事を 1 件も載せられない。
+    #[test]
+    fn rejects_unusable_embedding_settings() {
+        let base = "[embedding]\nurl = \"http://127.0.0.1:8080/v1/embeddings\"\nmodel = \"m\"\n";
+        assert!(parse_config(&format!("{base}batch_size = 3\n"), p()).is_ok());
+        for (extra, word) in [
+            ("batch_size = 2\n", "batch_size"),
+            ("timeout_secs = 0\n", "timeout_secs"),
+            ("dimensions = 0\n", "dimensions"),
+            ("auth = \"bearer\"\n", "api_key_env"),
+            ("auth = \"bearer\"\napi_key_env = \"\"\n", "api_key_env"),
+            // 鍵を平文で送らない
+            ("auth = \"api-key\"\napi_key_env = \"K\"\n", "https"),
+            // 予約の期限（呼び出しの回数 × タイムアウト）を表せない値
+            ("batch_size = 2049\n", "batch_size"),
+            ("timeout_secs = 3601\n", "timeout_secs"),
+        ] {
+            let text = format!("{base}{extra}");
+            let err = parse_config(&text, p()).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Invalid { reason, .. } if reason.contains(word)),
+                "{text}: {err}"
+            );
+        }
+        for (url, model) in [
+            ("", "m"),
+            ("not a url", "m"),
+            ("ftp://127.0.0.1/v1", "m"),
+            ("http://127.0.0.1/v1", ""),
+        ] {
+            let text = format!("[embedding]\nurl = \"{url}\"\nmodel = \"{model}\"\n");
+            assert!(
+                matches!(parse_config(&text, p()), Err(ConfigError::Invalid { .. })),
+                "{text}"
             );
         }
     }

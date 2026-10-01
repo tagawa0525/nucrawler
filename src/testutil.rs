@@ -52,10 +52,17 @@ impl Route {
 
 #[derive(Debug, Clone)]
 pub struct Request {
+    pub method: String,
     pub path: String,
     pub user_agent: Option<String>,
+    /// ヘッダー（名前は小文字）
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
     pub at: Instant,
 }
+
+/// 要求ごとに応答を決める関数。
+type Handler = dyn Fn(&Request) -> Route + Send + Sync;
 
 pub struct Server {
     pub base: String,
@@ -65,22 +72,26 @@ pub struct Server {
 impl Server {
     /// 未登録のパスには 404 を返す。
     pub fn start(routes: HashMap<&str, Route>) -> Self {
+        let routes: HashMap<String, Route> = routes
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        Self::start_with(move |req| routes.get(&req.path).cloned().unwrap_or(Route::status(404)))
+    }
+
+    /// 要求（本文を含む）から応答を決めるサーバー。
+    pub fn start_with(handler: impl Fn(&Request) -> Route + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes: Arc<HashMap<String, Route>> = Arc::new(
-            routes
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        );
+        let handler: Arc<Handler> = Arc::new(handler);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
-                let routes = routes.clone();
+                let handler = handler.clone();
                 let recorded = recorded.clone();
-                std::thread::spawn(move || handle(stream, &routes, &recorded));
+                std::thread::spawn(move || handle(stream, handler.as_ref(), &recorded));
             }
         });
         Self { base, requests }
@@ -95,36 +106,44 @@ impl Server {
     }
 }
 
-fn handle(stream: TcpStream, routes: &HashMap<String, Route>, recorded: &Mutex<Vec<Request>>) {
+fn handle(stream: TcpStream, handler: &Handler, recorded: &Mutex<Vec<Request>>) {
     let at = Instant::now();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
         return;
     }
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/")
-        .to_string();
-    let mut user_agent = None;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    let mut headers = HashMap::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
             break;
         }
-        if let Some((k, v)) = line.split_once(':')
-            && k.eq_ignore_ascii_case("user-agent")
-        {
-            user_agent = Some(v.trim().to_string());
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
         }
     }
-    recorded.lock().unwrap().push(Request {
-        path: path.clone(),
-        user_agent,
+    let length = headers
+        .get("content-length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    if std::io::Read::read_exact(&mut reader, &mut body).is_err() {
+        return;
+    }
+    let request = Request {
+        method,
+        path,
+        user_agent: headers.get("user-agent").cloned(),
+        headers,
+        body,
         at,
-    });
-    let route = routes.get(&path).cloned().unwrap_or(Route::status(404));
+    };
+    let route = handler(&request);
+    recorded.lock().unwrap().push(request);
     std::thread::sleep(route.delay);
     let mut stream = stream;
     let location = route

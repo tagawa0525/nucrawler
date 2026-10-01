@@ -34,6 +34,8 @@ pub enum ParseError {
     CrawlUsage { stages: String },
     #[error("usage: nucrawler serve [--addr IP:PORT]")]
     ServeUsage,
+    #[error("usage: nucrawler embed rebuild")]
+    EmbedUsage,
     #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
     EvalUsage,
     #[error(
@@ -70,6 +72,7 @@ pub enum Command {
     Search,
     Eval,
     User,
+    Embed,
     Help,
 }
 
@@ -92,6 +95,7 @@ commands:
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
+  embed     embedding を作り直す（embed rebuild：モデルや設定を替えた後、次の crawl で全件を作り直す）
   user      Web UI の利用者の管理（user add LOGIN NAME / reset-password LOGIN / disable LOGIN / rename LOGIN NEW_LOGIN / list）
   help      このヘルプを表示
 ";
@@ -125,6 +129,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("search") => Command::Search,
         Some("eval") => Command::Eval,
         Some("user") => Command::User,
+        Some("embed") => Command::Embed,
         Some(other) => return Err(ParseError::UnknownCommand(other.to_string())),
     };
     Ok(Invocation {
@@ -452,6 +457,20 @@ pub fn parse_topics_args(args: &[String]) -> Result<TopicsArgs, ParseError> {
         }),
         [cmd] if cmd == "export" => Ok(TopicsArgs::Export),
         _ => Err(ParseError::TopicsUsage),
+    }
+}
+
+/// `embed` サブコマンドの引数。
+#[derive(Debug, PartialEq, Eq)]
+pub enum EmbedArgs {
+    /// `embed rebuild`：ベクトルの空間とベクトルをすべて消す（次の crawl が今の設定とモデルで作り直す）
+    Rebuild,
+}
+
+pub fn parse_embed_args(args: &[String]) -> Result<EmbedArgs, ParseError> {
+    match args {
+        [cmd] if cmd == "rebuild" => Ok(EmbedArgs::Rebuild),
+        _ => Err(ParseError::EmbedUsage),
     }
 }
 
@@ -857,6 +876,22 @@ mod tests {
         ] {
             let err = parse_profile_args(&args(bad)).unwrap_err();
             assert!(matches!(err, ParseError::ProfileUsage), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn parses_embed_args() {
+        assert_eq!(
+            parse(args(&["embed", "rebuild"])).unwrap().command,
+            Command::Embed
+        );
+        assert_eq!(
+            parse_embed_args(&args(&["rebuild"])).unwrap(),
+            EmbedArgs::Rebuild
+        );
+        for bad in [&[][..], &["rebuild", "x"][..], &["status"][..]] {
+            let err = parse_embed_args(&args(bad)).unwrap_err();
+            assert!(matches!(err, ParseError::EmbedUsage), "{bad:?}");
         }
     }
 

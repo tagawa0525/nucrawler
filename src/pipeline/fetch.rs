@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 
 use super::Cancel;
 use super::workers::{group_by_host, run_workers};
-use crate::check;
 use crate::config::Source;
 use crate::db::{self, ContentKind, ContentOrigin, Db, DbError, FetchCounts, NewArticle};
 use crate::errors;
@@ -83,7 +82,7 @@ async fn fetch_host(
             summary.cancelled = true;
             break;
         }
-        match check::fetch_source(fetcher, s).await {
+        match crate::source::fetch::fetch_source(fetcher, s).await {
             Ok(stats) => {
                 let Stored { new, duplicate } = store(db, s, &stats.matched)?;
                 let counts = FetchCounts {

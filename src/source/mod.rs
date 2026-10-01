@@ -1,11 +1,12 @@
 //! ソースから取得したバイト列を、記事の候補（`Candidate`）の一覧に変換する。
-//! ネットワークには触れない。
+//! ネットワークに触れるのは、取得して変換までを行う `fetch` だけ。
 
 use chrono::{DateTime, Utc};
 use url::Url;
 
 use crate::config::{Filter, SourceKind};
 
+pub mod fetch;
 pub mod html_list;
 
 #[derive(Debug, thiserror::Error)]

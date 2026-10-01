@@ -26,7 +26,7 @@ mod tests {
     fn error_chain_does_not_repeat_causes() {
         let cause = url::ParseError::RelativeUrlWithoutBase.to_string();
         let errors: Vec<Box<dyn std::error::Error>> = vec![
-            Box::new(crate::check::SourceFailure::InvalidUrl {
+            Box::new(crate::source::fetch::SourceFailure::InvalidUrl {
                 url: "::".into(),
                 source: url::ParseError::RelativeUrlWithoutBase,
             }),

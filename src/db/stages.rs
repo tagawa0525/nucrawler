@@ -40,8 +40,8 @@ pub struct StageFailures {
     pub stage: String,
     pub backend: String,
     pub model: String,
-    /// 再試行する記事（次に試してよい時刻を待っているか、次の実行を待っている）
-    pub retrying: usize,
+    /// 失敗が上限の回数に達していない記事。そのステージが対象にする範囲（期間など）にあれば再試行する
+    pub failing: usize,
     /// 再試行を諦めた記事
     pub gave_up: usize,
     /// 諦めた記事のうち、最後に失敗したものの理由
@@ -49,22 +49,18 @@ pub struct StageFailures {
 }
 
 impl Db {
-    /// `cutoff` 以降に公開（無ければ取得）された記事の失敗の記録を、ステージ・バックエンド・モデルごとに
-    /// 数える（ステージの名前の順）。
-    pub fn stage_failures(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<StageFailures>, DbError> {
+    /// 失敗の記録（成功すると消える）を、ステージ・バックエンド・モデルごとに数える（ステージの名前の順）。
+    /// 記事の期間では絞らない：見出しの和訳や embedding のように期間を区切らずに処理するステージもあり、
+    /// どのステージがどの範囲を対象にするかの規則をここに書き写さないため。
+    pub fn stage_failures(&self) -> Result<Vec<StageFailures>, DbError> {
         // 断念した行の次の時刻は、どれも最後の失敗から同じだけ先（`backoff(MAX_ATTEMPTS)`）なので、
         // その降順は最後に失敗した順になる
         let mut stmt = self.conn.prepare(
-            "SELECT e.stage, e.backend, e.model, e.attempts >= ?2, e.last_error
-             FROM stage_errors AS e
-             JOIN articles AS a ON a.id = e.article_id
-             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
-             ORDER BY e.next_retry_at DESC",
+            "SELECT stage, backend, model, attempts >= ?1, last_error
+             FROM stage_errors
+             ORDER BY next_retry_at DESC",
         )?;
-        let mut rows = stmt.query(rusqlite::params![timestamp(cutoff), MAX_ATTEMPTS])?;
+        let mut rows = stmt.query([MAX_ATTEMPTS])?;
         let mut by_key: std::collections::BTreeMap<(String, String, String), StageFailures> =
             std::collections::BTreeMap::new();
         while let Some(r) = rows.next()? {
@@ -76,7 +72,7 @@ impl Db {
                     stage,
                     backend,
                     model,
-                    retrying: 0,
+                    failing: 0,
                     gave_up: 0,
                     last_gave_up_error: None,
                 });
@@ -86,7 +82,7 @@ impl Db {
                     f.last_gave_up_error = Some(r.get(4)?);
                 }
             } else {
-                f.retrying += 1;
+                f.failing += 1;
             }
         }
         Ok(by_key.into_values().collect())
@@ -373,12 +369,12 @@ mod tests {
         assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [a]);
     }
 
-    /// 期間内の記事の失敗を、ステージ・バックエンド・モデルごとに再試行と断念に分けて数える。
+    /// 失敗を、ステージ・バックエンド・モデルごとに上限に達していないものと断念に分けて数える。記事の期間では
+    /// 絞らない（期間を区切らずに処理するステージがある）。
     /// embedding の失敗は要約ごとの名前なので、空間ごとにまとめる。断念の理由は最後に断念したもの。
     #[test]
     fn counts_stage_failures_by_key() {
         let db = Db::open_in_memory().unwrap();
-        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
         let ids: Vec<i64> = (0..4)
             .map(|n| {
                 page_article(
@@ -397,7 +393,7 @@ mod tests {
         let fail = |k, error: &str, at: &str, permanent| {
             db.record_stage_failure(k, error, t(at), permanent).unwrap();
         };
-        // 要約：1 件は再試行、2 件は断念（後に断念した方の理由を出す）。期間外の記事は数えない
+        // 要約：1 件は失敗中、3 件は断念（最後に断念したものの理由を出す）。古い記事も数える
         fail(
             key(ids[0], "digest", "sonnet"),
             "timeout",
@@ -416,10 +412,11 @@ mod tests {
             "2026-09-27T00:00:00Z",
             true,
         );
+        let old = page_article(&db, "https://e.com/old", "2025-01-01T00:00:00.000Z");
         fail(
             key(old, "digest", "sonnet"),
             "old",
-            "2026-09-28T00:00:00Z",
+            "2026-09-25T00:00:00Z",
             true,
         );
         // 別のモデルは別に数える
@@ -448,14 +445,14 @@ mod tests {
         embed(ids[0], 100);
         embed(ids[1], 101);
 
-        let got = db.stage_failures(t("2026-09-10T00:00:00Z")).unwrap();
+        let got = db.stage_failures().unwrap();
         let row =
-            |stage: &str, backend: &str, model: &str, retrying, gave_up, error: Option<&str>| {
+            |stage: &str, backend: &str, model: &str, failing, gave_up, error: Option<&str>| {
                 StageFailures {
                     stage: stage.into(),
                     backend: backend.into(),
                     model: model.into(),
-                    retrying,
+                    failing,
                     gave_up,
                     last_gave_up_error: error.map(Into::into),
                 }
@@ -464,14 +461,9 @@ mod tests {
             got,
             [
                 row("digest", "claude-cli", "opus", 1, 0, None),
-                row("digest", "claude-cli", "sonnet", 1, 2, Some("refused")),
+                row("digest", "claude-cli", "sonnet", 1, 3, Some("refused")),
                 row("embed:7", "openai", "", 2, 0, None),
             ]
-        );
-        assert!(
-            db.stage_failures(t("2026-09-30T00:00:00Z"))
-                .unwrap()
-                .is_empty()
         );
     }
 

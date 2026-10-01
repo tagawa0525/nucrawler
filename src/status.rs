@@ -53,11 +53,10 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
     out
 }
 
-/// ステージごとの失敗の記録（`since` は数えた記事の期間の始まりの日付）。断念した記事があれば、最後に
-/// 断念した理由を添える。
-pub fn render_failures(failures: &[StageFailures], since: &str) -> String {
+/// ステージごとの失敗の記録。断念した記事があれば、最後に断念した理由を添える。
+pub fn render_failures(failures: &[StageFailures]) -> String {
     if failures.is_empty() {
-        return format!("\nno stage failures (articles since {since})\n");
+        return "\nno stage failures\n".to_string();
     }
     let key = |f: &StageFailures| match (f.backend.is_empty(), f.model.is_empty()) {
         (true, true) => "-".to_string(),
@@ -66,14 +65,14 @@ pub fn render_failures(failures: &[StageFailures], since: &str) -> String {
     };
     let stage_width = failures.iter().map(|f| f.stage.len()).max().unwrap_or(0);
     let key_width = failures.iter().map(|f| key(f).len()).max().unwrap_or(0);
-    let mut out = format!("\nstage failures (articles since {since}):\n");
+    let mut out = "\nstage failures:\n".to_string();
     for f in failures {
         let _ = write!(
             out,
-            "{:stage_width$}  {:key_width$}  retrying {}  gave up {}",
+            "{:stage_width$}  {:key_width$}  failing {}  gave up {}",
             f.stage,
             key(f),
-            f.retrying,
+            f.failing,
             f.gave_up
         );
         if let Some(error) = &f.last_gave_up_error {
@@ -93,33 +92,27 @@ mod tests {
     #[test]
     fn renders_stage_failures() {
         let row =
-            |stage: &str, backend: &str, model: &str, retrying, gave_up, error: Option<&str>| {
+            |stage: &str, backend: &str, model: &str, failing, gave_up, error: Option<&str>| {
                 StageFailures {
                     stage: stage.into(),
                     backend: backend.into(),
                     model: model.into(),
-                    retrying,
+                    failing,
                     gave_up,
                     last_gave_up_error: error.map(Into::into),
                 }
             };
-        let out = render_failures(
-            &[
-                row("digest", "claude-cli", "sonnet", 1, 2, Some("bad json")),
-                row("extract", "", "", 3, 0, None),
-            ],
-            "2026-09-18",
-        );
+        let out = render_failures(&[
+            row("digest", "claude-cli", "sonnet", 1, 2, Some("bad json")),
+            row("extract", "", "", 3, 0, None),
+        ]);
         assert_eq!(
             out,
-            "\nstage failures (articles since 2026-09-18):\n\
-             digest   claude-cli/sonnet  retrying 1  gave up 2  last given up: bad json\n\
-             extract  -                  retrying 3  gave up 0\n"
+            "\nstage failures:\n\
+             digest   claude-cli/sonnet  failing 1  gave up 2  last given up: bad json\n\
+             extract  -                  failing 3  gave up 0\n"
         );
-        assert_eq!(
-            render_failures(&[], "2026-09-18"),
-            "\nno stage failures (articles since 2026-09-18)\n"
-        );
+        assert_eq!(render_failures(&[]), "\nno stage failures\n");
     }
 
     fn src(id: &str, enabled: bool) -> Source {

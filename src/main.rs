@@ -12,9 +12,9 @@ use nucrawler::mcp::{self, McpError};
 use nucrawler::pipeline::lock::LockError;
 use nucrawler::pipeline::run::RunError;
 use nucrawler::profile::{self, ProfileError};
+use nucrawler::status;
 use nucrawler::topics::{self, TopicsError};
 use nucrawler::web::server::{self, ServeError};
-use nucrawler::{jst, status};
 
 mod cmd;
 
@@ -396,20 +396,13 @@ async fn mcp(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error
 }
 
 fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
-    let (config, sources) = config::load(&config_dir(config)?)?;
+    let (_, sources) = config::load(&config_dir(config)?)?;
     let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
     print!(
         "{}",
         status::render(&sources.sources, &db.source_overview()?)
     );
-    // crawl が処理する範囲（`pipeline.backlog_days`）の記事の失敗を数える
-    let cutoff =
-        chrono::Utc::now() - chrono::Duration::days(i64::from(config.pipeline.backlog_days));
-    let since = cutoff.with_timezone(&jst::offset()).format("%Y-%m-%d");
-    print!(
-        "{}",
-        status::render_failures(&db.stage_failures(cutoff)?, &since.to_string())
-    );
+    print!("{}", status::render_failures(&db.stage_failures()?));
     Ok(())
 }
 

@@ -274,53 +274,23 @@ pub fn parse(
     requested: &[i64],
     vocab: &[Topic],
 ) -> Result<Parsed, DigestError> {
-    let top = output
-        .as_object()
-        .ok_or_else(|| DigestError::Malformed("the output is not an object".into()))?;
-    if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(DigestError::Malformed(format!(
-            "unexpected property `{extra}`"
-        )));
-    }
-    let items = top
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| DigestError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<(i64, serde_json::Value)> = Vec::new();
-    for item in items {
-        let id = item["id"]
-            .as_i64()
-            .ok_or_else(|| DigestError::Malformed("an item has no integer `id`".into()))?;
-        if !requested.contains(&id) {
-            tracing::warn!(id, "ignoring digest for an article that was not requested");
-            continue;
-        }
+    let collected = super::collect_items(output, requested, "digest", |id, item| {
         // スキーマ（型、必須、余計な項目の禁止）に合わない項目は採らず、欠けたものとして扱う。
-        let payload = match serde_json::from_value::<Item>(item.clone())
+        match serde_json::from_value::<Item>(item.clone())
             .map_err(|e| e.to_string())
             .and_then(|i| i.into_payload(vocab))
         {
-            Ok(payload) => payload,
+            Ok(payload) => Some(serde_json::to_value(payload).expect("plain data serializes")),
             Err(e) => {
                 tracing::warn!(id, "ignoring digest that violates the schema: {e}");
-                continue;
+                None
             }
-        };
-        if found.iter().all(|(seen, _)| *seen != id) {
-            found.push((
-                id,
-                serde_json::to_value(payload).expect("plain data serializes"),
-            ));
         }
-    }
-    let missing = requested
-        .iter()
-        .copied()
-        .filter(|id| found.iter().all(|(seen, _)| seen != id))
-        .collect();
+    })
+    .map_err(DigestError::Malformed)?;
     Ok(Parsed {
-        items: found,
-        missing,
+        items: collected.items,
+        missing: collected.missing,
     })
 }
 
@@ -679,9 +649,18 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::json!({"items": "x"}),
-            serde_json::json!({"items": [{"title_ja": "no id"}]}),
         ] {
             assert!(parse(&bad, &[1], &vocab()).is_err(), "{bad}");
         }
+    }
+
+    /// id の無い項目は、その項目だけを捨てる（ほかの記事の結果は残し、捨てた記事は欠けとして再試行に回す）。
+    #[test]
+    fn parse_drops_items_without_an_id() {
+        let output = serde_json::json!({"items": [{"title_ja": "no id"}, item(1)]});
+        let parsed = parse(&output, &[1, 2], &vocab()).unwrap();
+        let ids: Vec<i64> = parsed.items.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [1]);
+        assert_eq!(parsed.missing, [2]);
     }
 }

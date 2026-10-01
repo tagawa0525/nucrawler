@@ -26,6 +26,10 @@ pub struct Parsed {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Item {
+    #[expect(
+        dead_code,
+        reason = "id は検証前に JSON から読むので、ここでは受け付けるだけ"
+    )]
     id: i64,
     title_ja: String,
 }
@@ -91,45 +95,22 @@ fn breaks_line(c: char) -> bool {
 /// 応答から、依頼した記事の見出しを取り出す。依頼していない id は無視し、欠けた id を報告する。
 /// 空の見出し・改行を含む見出し・スキーマに合わない項目は採らず、欠けたものとして扱う。
 pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, TitleError> {
-    let top = output
-        .as_object()
-        .ok_or_else(|| TitleError::Malformed("the output is not an object".into()))?;
-    if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(TitleError::Malformed(format!(
-            "unexpected property `{extra}`"
-        )));
-    }
-    let items = top
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| TitleError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<(i64, String)> = Vec::new();
-    for item in items {
-        let Ok(Item { id, title_ja }) = serde_json::from_value::<Item>(item.clone()) else {
-            tracing::warn!("ignoring a title that violates the schema: {item}");
-            continue;
+    let collected = super::collect_items(output, requested, "title", |id, item| {
+        let Ok(Item { title_ja, .. }) = serde_json::from_value::<Item>(item.clone()) else {
+            tracing::warn!(id, "ignoring a title that violates the schema: {item}");
+            return None;
         };
-        if !requested.contains(&id) {
-            tracing::warn!(id, "ignoring a title for an article that was not requested");
-            continue;
-        }
         let title = title_ja.trim();
         if title.is_empty() || title.chars().any(breaks_line) {
             tracing::warn!(id, "ignoring an invalid title {title_ja:?}");
-            continue;
+            return None;
         }
-        if found.iter().all(|(seen, _)| *seen != id) {
-            found.push((id, title.to_string()));
-        }
-    }
-    let missing = requested
-        .iter()
-        .copied()
-        .filter(|id| found.iter().all(|(seen, _)| seen != id))
-        .collect();
+        Some(title.to_string())
+    })
+    .map_err(TitleError::Malformed)?;
     Ok(Parsed {
-        items: found,
-        missing,
+        items: collected.items,
+        missing: collected.missing,
     })
 }
 

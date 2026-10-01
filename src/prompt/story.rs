@@ -145,6 +145,10 @@ pub fn build_prompt(targets: &[Target]) -> String {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Item {
+    #[expect(
+        dead_code,
+        reason = "id は検証前に JSON から読むので、ここでは受け付けるだけ"
+    )]
     id: i64,
     same: Vec<i64>,
     related: Vec<i64>,
@@ -175,56 +179,37 @@ fn to_units(ids: &[i64], target: &Target) -> Vec<i64> {
 /// 応答から、依頼した対象の判定を取り出す。依頼していない対象は無視し、欠けた対象を報告する。
 /// 同じ候補を same と related の両方に入れた対象や、スキーマに合わない項目は採らず、欠けたものとして扱う。
 pub fn parse(output: &serde_json::Value, requested: &[Target]) -> Result<Parsed, StoryError> {
-    let top = output
-        .as_object()
-        .ok_or_else(|| StoryError::Malformed("the output is not an object".into()))?;
-    if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(StoryError::Malformed(format!(
-            "unexpected property `{extra}`"
-        )));
-    }
-    let items = top
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| StoryError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<Judgment> = Vec::new();
-    for item in items {
-        let Ok(Item { id, same, related }) = serde_json::from_value::<Item>(item.clone()) else {
-            tracing::warn!("ignoring a story judgment that violates the schema: {item}");
-            continue;
-        };
-        let Some(target) = requested.iter().find(|t| t.article.article_id == id) else {
+    let ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
+    let collected = super::collect_items(output, &ids, "story judgment", |id, item| {
+        let Ok(Item { same, related, .. }) = serde_json::from_value::<Item>(item.clone()) else {
             tracing::warn!(
                 id,
-                "ignoring a story judgment for an article that was not requested"
+                "ignoring a story judgment that violates the schema: {item}"
             );
-            continue;
+            return None;
         };
-        if found.iter().any(|j| j.target == id) {
-            continue;
-        }
+        let target = requested
+            .iter()
+            .find(|t| t.article.article_id == id)
+            .expect("collect_items passes only requested ids");
         let (same, related) = (to_units(&same, target), to_units(&related, target));
         if same.iter().any(|u| related.contains(u)) {
             tracing::warn!(
                 id,
                 "ignoring a story judgment with a candidate both same and related"
             );
-            continue;
+            return None;
         }
-        found.push(Judgment {
+        Some(Judgment {
             target: id,
             same,
             related,
-        });
-    }
-    let missing = requested
-        .iter()
-        .map(|t| t.article.article_id)
-        .filter(|id| found.iter().all(|j| j.target != *id))
-        .collect();
+        })
+    })
+    .map_err(StoryError::Malformed)?;
     Ok(Parsed {
-        items: found,
-        missing,
+        items: collected.items.into_iter().map(|(_, j)| j).collect(),
+        missing: collected.missing,
     })
 }
 

@@ -556,6 +556,10 @@ mod tests {
         assert!(out.contains("(trial)"), "{out}");
         assert!(!out.contains("profile old"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
+        // 候補が今のプロファイルと同じでも、今のプロファイルの式の候補は trial のまま
+        let same = render(&labels, &scores, Some("h"), Some("h"), 3, false, 1.0);
+        assert!(same.contains("(trial)"), "{same}");
+        assert!(!same.contains("(candidate)"), "{same}");
     }
 
     /// 評価した記事を、基準と同じ式で計算した百分位で採点し、補正の特徴（ソース・トピック・関心分野）も付ける。

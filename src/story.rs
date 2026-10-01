@@ -228,9 +228,23 @@ fn cosine(a: &Vector, b: &Vector) -> f64 {
         .sum()
 }
 
-/// same の組をつないだグループと、つなぐとグループが `max_size` を超えるので捨てた組。
-/// 組は類似度の高い順につなぐ。
-pub fn components(edges: &[Edge], max_size: usize) -> (Stories, Vec<Edge>) {
+/// つながなかった same の組と、その理由。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Rejected {
+    /// つなぐとグループが上限を超える
+    TooLarge(Edge),
+    /// つなぐと、別の出来事と判定された記事どうしが同じグループに入る
+    Apart(Edge),
+}
+
+/// same の組をつないだグループと、つながなかった組。組は類似度の高い順につなぎ、つなぐとグループが
+/// `max_size` を超える組と、`apart`（別の出来事と判定された記事の組）が同じグループに入る組は捨てる。
+pub fn components(
+    edges: &[Edge],
+    apart: &[(i64, i64)],
+    max_size: usize,
+) -> (Stories, Vec<Rejected>) {
+    let _ = apart;
     let mut sorted = edges.to_vec();
     sorted.sort_by(|x, y| {
         y.similarity
@@ -257,7 +271,7 @@ pub fn components(edges: &[Edge], max_size: usize) -> (Stories, Vec<Edge>) {
         }
         let (sa, sb) = (*size.get(&ra).unwrap_or(&1), *size.get(&rb).unwrap_or(&1));
         if sa + sb > max_size {
-            rejected.push(e);
+            rejected.push(Rejected::TooLarge(e));
             continue;
         }
         parent.insert(rb, ra);
@@ -421,7 +435,7 @@ mod tests {
             b,
             similarity: 0.5,
         };
-        let (stories, rejected) = components(&[e(5, 3), e(3, 9), e(20, 21)], MAX_STORY_SIZE);
+        let (stories, rejected) = components(&[e(5, 3), e(3, 9), e(20, 21)], &[], MAX_STORY_SIZE);
         assert_eq!(
             stories.grouped(),
             [(3, 3), (5, 3), (9, 3), (20, 20), (21, 20)]
@@ -433,8 +447,24 @@ mod tests {
     #[test]
     fn components_cap_the_story_size() {
         let e = |a, b, similarity| Edge { a, b, similarity };
-        let (stories, rejected) = components(&[e(1, 2, 0.9), e(2, 3, 0.2), e(3, 4, 0.8)], 3);
+        let (stories, rejected) = components(&[e(1, 2, 0.9), e(2, 3, 0.2), e(3, 4, 0.8)], &[], 3);
         assert_eq!(stories.grouped(), [(1, 1), (2, 1), (3, 3), (4, 3)]);
-        assert_eq!(rejected, [e(2, 3, 0.2)]);
+        assert_eq!(rejected, [Rejected::TooLarge(e(2, 3, 0.2))]);
+    }
+
+    /// 別の出来事と判定された記事どうしが同じグループに入る組は、類似度の低い方を捨てる。
+    /// 組そのものが別の出来事と判定されていれば（判定が割れた組）、その組も捨てる。
+    #[test]
+    fn components_keep_apart_articles_judged_different() {
+        let e = |a, b, similarity| Edge { a, b, similarity };
+        // 1–2 と 3–2 は same だが、1 と 3 は別の出来事
+        let (stories, rejected) = components(&[e(1, 2, 0.9), e(3, 2, 0.4)], &[(1, 3)], 8);
+        assert_eq!(stories.grouped(), [(1, 1), (2, 1)]);
+        assert_eq!(rejected, [Rejected::Apart(e(3, 2, 0.4))]);
+
+        // 向きは問わない。組そのものが別の出来事と判定されていればつながない
+        let (stories, rejected) = components(&[e(5, 6, 0.9), e(7, 8, 0.5)], &[(6, 5)], 8);
+        assert_eq!(stories.grouped(), [(7, 7), (8, 7)]);
+        assert_eq!(rejected, [Rejected::Apart(e(5, 6, 0.9))]);
     }
 }

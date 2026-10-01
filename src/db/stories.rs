@@ -340,7 +340,7 @@ impl Db {
     /// 今のグループと比べ、グループの ID が変わる記事の行だけを書く（外れた記事は自分の ID に戻す）。
     /// 相手の最新の判定が同じ組を same 以外（related・unrelated）にしていれば、判定が割れたので
     /// つながない。グループが大きくなりすぎるので捨てた組を返す。
-    pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
+    pub fn rebuild_stories(&self) -> Result<Vec<crate::story::Rejected>, DbError> {
         let tx = self.conn.unchecked_transaction()?;
         let edges: Vec<Edge> = {
             let mut stmt = tx.prepare(
@@ -368,7 +368,8 @@ impl Db {
             })?;
             rows.collect::<Result<_, _>>()?
         };
-        let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
+        let (stories, rejected) =
+            crate::story::components(&edges, &[], crate::story::MAX_STORY_SIZE);
         let current = self.stories()?;
         let touched: std::collections::BTreeSet<i64> = current
             .grouped()
@@ -891,6 +892,58 @@ mod tests {
         story(&db, f, &[same(e)], "2026-09-27T00:00:00Z");
         db.rebuild_stories().unwrap();
         assert_eq!(stories(&db), [(e, e), (f, e)]);
+    }
+
+    /// 別の出来事（related・unrelated）と判定された記事どうしは、ほかの記事を介しても同じグループに
+    /// しない。同じバッチで単独の記事を候補にした判定どうしや、1 件の記事が複数の候補を same にした
+    /// 判定で、この食い違いが起きる。
+    #[test]
+    fn rebuild_stories_keeps_apart_articles_judged_different() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..6)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let [a, b, c, d, e, f] = ids[..] else {
+            unreachable!()
+        };
+        let link = |other_id, relation, similarity| StoryLink {
+            other_id,
+            relation,
+            similarity,
+        };
+        use StoryRelation::{Related, Same, Unrelated};
+        // a は b と同じで c とは別の出来事、c は b と同じと判定した（同じバッチで b を単独の候補にした）
+        story(
+            &db,
+            a,
+            &[link(b, Same, 0.9), link(c, Related, 0.3)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, c, &[link(b, Same, 0.4)], "2026-09-27T00:00:00Z");
+        // d は e とも f とも同じと判定したが、e は f を無関係と判定した
+        story(
+            &db,
+            d,
+            &[link(e, Same, 0.8), link(f, Same, 0.6)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, e, &[link(f, Unrelated, 0.6)], "2026-09-27T00:00:00Z");
+        let rejected = db.rebuild_stories().unwrap();
+        assert_eq!(stories(&db), [(a, a), (b, a), (d, d), (e, d)]);
+        let apart: Vec<(i64, i64)> = rejected
+            .iter()
+            .filter_map(|r| match r {
+                crate::story::Rejected::Apart(x) => Some((x.a, x.b)),
+                crate::story::Rejected::TooLarge(_) => None,
+            })
+            .collect();
+        assert_eq!(apart, [(d, f), (c, b)]);
     }
 
     #[test]

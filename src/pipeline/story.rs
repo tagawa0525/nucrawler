@@ -109,13 +109,15 @@ fn save(
 
 /// グループを作り直し、大きくなりすぎるので捨てた組を知らせる。
 fn rebuild(db: &Db) -> Result<(), DbError> {
-    for e in db.rebuild_stories()? {
-        tracing::warn!(
-            a = e.a,
-            b = e.b,
-            "story link not joined: the story would exceed {} articles",
-            crate::story::MAX_STORY_SIZE
-        );
+    for r in db.rebuild_stories()? {
+        if let crate::story::Rejected::TooLarge(e) = r {
+            tracing::warn!(
+                a = e.a,
+                b = e.b,
+                "story link not joined: the story would exceed {} articles",
+                crate::story::MAX_STORY_SIZE
+            );
+        }
     }
     Ok(())
 }

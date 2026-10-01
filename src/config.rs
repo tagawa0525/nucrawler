@@ -70,6 +70,11 @@ pub struct EmbeddingConfig {
     pub timeout_secs: u64,
 }
 
+/// 1 回に送る文の数の上限。
+pub const MAX_EMBEDDING_BATCH_SIZE: usize = 2048;
+/// 1 回の呼び出しのタイムアウトの上限（秒）。
+pub const MAX_EMBEDDING_TIMEOUT_SECS: u64 = 3600;
+
 fn default_embedding_batch_size() -> usize {
     32
 }
@@ -105,6 +110,19 @@ impl EmbeddingConfig {
         }
         if self.dimensions == Some(0) {
             return Err("embedding.dimensions must be at least 1".into());
+        }
+        // 予約の期限は「呼び出しの回数 × タイムアウト」なので、どちらにも上限を置く
+        if self.batch_size > MAX_EMBEDDING_BATCH_SIZE {
+            return Err(format!(
+                "embedding.batch_size must be at most {MAX_EMBEDDING_BATCH_SIZE}, got {}",
+                self.batch_size
+            ));
+        }
+        if self.timeout_secs > MAX_EMBEDDING_TIMEOUT_SECS {
+            return Err(format!(
+                "embedding.timeout_secs must be at most {MAX_EMBEDDING_TIMEOUT_SECS}, got {}",
+                self.timeout_secs
+            ));
         }
         if self.batch_size <= crate::embedding::FINGERPRINT_TEXTS {
             return Err(format!(

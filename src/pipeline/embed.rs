@@ -109,6 +109,17 @@ impl<E: Embedder> Run<'_, E> {
         Ok(Outcome::Saved)
     }
 
+    /// 指紋の試験文だけで呼び、失敗すればサービスの側の失敗にする。
+    async fn probe(&mut self) -> Result<(), EmbedStageError> {
+        let inputs = fingerprint_inputs(self.cfg, Role::Document);
+        self.summary.calls += 1;
+        self.embedder
+            .embed(&inputs)
+            .await
+            .map(drop)
+            .map_err(EmbedStageError::Api)
+    }
+
     fn failure_key<'k>(&self, digest: &EmbedInput, stage: &'k str) -> StageKey<'k> {
         StageKey {
             article_id: digest.article_id,
@@ -177,10 +188,11 @@ pub async fn embed_articles(
         backend: EMBED_BACKEND,
         model: "",
     };
-    // 予約は、まとめた呼び出しと 1 件ずつの送り直し（最大 batch_size + 1 回）がすべてタイムアウトしても切れない長さにする
-    let calls = u32::try_from(cfg.batch_size + 1).unwrap_or(u32::MAX);
-    let ttl = chrono::Duration::from_std(std::time::Duration::from_secs(cfg.timeout_secs) * calls)
-        .unwrap_or(chrono::Duration::MAX);
+    // 予約は、まとめた呼び出し・指紋だけの確かめ・1 件ずつの送り直し（最大 batch_size + 2 回）がすべて
+    // タイムアウトしても切れない長さにする
+    // （設定の検証で、どちらも上限があり、積は i64 に収まる）
+    let calls = cfg.batch_size as i64 + 2;
+    let ttl = chrono::Duration::seconds(cfg.timeout_secs as i64 * calls);
     let mut run = Run {
         db,
         embedder,
@@ -212,6 +224,9 @@ pub async fn embed_articles(
             }
             Outcome::InputError(e) if digests.len() == 1 => run.record_failure(&digests[0], &e)?,
             Outcome::InputError(_) => {
+                // 400 などは、文のせいでなく設定の誤り（モデル名・次元）でも返る。指紋の試験文だけでも失敗するなら、
+                // どの要約でも失敗するので、要約の失敗として記録せずに止める
+                run.probe().await?;
                 for digest in &digests {
                     match run.embed(std::slice::from_ref(digest)).await? {
                         Outcome::Saved => {}

@@ -120,6 +120,23 @@ pub fn render(
     out
 }
 
+/// `eval` がその場で計算する embedding の点数（式やプロファイルの候補）のバックエンド。保存はしない。
+pub const TRIAL_BACKEND: &str = "embedding-trial";
+
+/// 評価した記事を、`preference` と `formula` で採点した点数（`key` のキーで）。百分位の基準は `reference`
+/// （直近の要約のベクトル）を同じ式で計算した値。保存した点数（採点した時点の基準で固まっている）とは別に、
+/// 式どうしを同じ時点・同じ基準で比べるために使う。
+pub fn embedding_trial(
+    labeled: &[crate::db::LabeledVector],
+    reference: &[Vec<f32>],
+    preference: &crate::embed_score::Preference,
+    formula: crate::embed_score::Formula,
+    key: &EvalKey,
+    scored_at: &str,
+) -> Vec<LabeledScore> {
+    todo!()
+}
+
 /// キーの採点器の今の版：embedding なら式の版、LLM ならプロンプトの版（`llm_version`）。
 fn current_version(key: &EvalKey, llm_version: i64) -> i64 {
     if key.backend == crate::db::EMBED_BACKEND {
@@ -438,6 +455,73 @@ mod tests {
         let scores = [scored(&v1, 1, 70, after), scored(&v1, 2, 30, after)];
         let out = render(&labels, &scores, Some("h"), None, 3, true, 1.0);
         assert!(!out.contains("after the reaction"), "{out}");
+    }
+
+    /// その場で計算した式の候補（trial）は、現行のプロファイルのものなら --all でなくても並べる。
+    #[test]
+    fn shows_trials_of_the_current_profile() {
+        let labels = [label(1, 4), label(2, 2)];
+        let trial = EvalKey {
+            backend: TRIAL_BACKEND.into(),
+            model: "ruri λ=0.5".into(),
+            prompt_version: crate::embed_score::SCORE_VERSION,
+            ..key("h", 0)
+        };
+        let other = EvalKey {
+            profile_hash: "old".into(),
+            ..trial.clone()
+        };
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [
+            scored(&trial, 1, 70, after),
+            scored(&trial, 2, 30, after),
+            scored(&other, 1, 70, after),
+        ];
+        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        assert!(out.contains("embedding-trial/ruri λ=0.5"), "{out}");
+        assert!(out.contains("(trial)"), "{out}");
+        assert!(!out.contains("profile old"), "{out}");
+        assert!(!out.contains("after the reaction"), "{out}");
+    }
+
+    /// 評価した記事を、基準と同じ式で計算した百分位で採点し、補正の特徴（ソース・トピック・関心分野）も付ける。
+    #[test]
+    fn scores_labeled_articles_with_a_formula() {
+        use crate::embed_score::{Formula, Interest, Preference};
+        let preference = Preference {
+            interests: vec![Interest {
+                topic: "燃料".into(),
+                weight: 1.0,
+                vector: vec![1.0, 0.0],
+            }],
+            excludes: vec![],
+        };
+        let labeled = [crate::db::LabeledVector {
+            article_id: 7,
+            source_id: "wnn".into(),
+            topics: vec!["燃料".into()],
+            vector: vec![1.0, 0.0],
+        }];
+        let reference = [vec![0.6, 0.8], vec![0.0, 1.0]];
+        let trial = EvalKey {
+            backend: TRIAL_BACKEND.into(),
+            ..key("h", 1)
+        };
+        let got = embedding_trial(
+            &labeled,
+            &reference,
+            &preference,
+            Formula::default(),
+            &trial,
+            "2026-10-01T00:00:00.000Z",
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].article_id, got[0].score), (7, 100));
+        assert_eq!(got[0].key, trial);
+        assert_eq!(
+            got[0].features,
+            crate::recommend::features("wnn", &["燃料".into()], &["燃料".into()], &[])
+        );
     }
 
     #[test]

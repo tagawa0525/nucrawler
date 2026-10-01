@@ -270,8 +270,8 @@ pub fn components(
         if ra == rb {
             continue;
         }
-        let ma = members.remove(&ra).unwrap_or_else(|| vec![ra]);
-        let mb = members.remove(&rb).unwrap_or_else(|| vec![rb]);
+        let ma = members.get(&ra).cloned().unwrap_or_else(|| vec![ra]);
+        let mb = members.get(&rb).cloned().unwrap_or_else(|| vec![rb]);
         let reject = if ma.len() + mb.len() > max_size {
             Some(Rejected::TooLarge(e))
         } else if ma
@@ -284,15 +284,14 @@ pub fn components(
         };
         if let Some(r) = reject {
             rejected.push(r);
-            members.insert(ra, ma);
-            members.insert(rb, mb);
             continue;
         }
         parent.insert(rb, ra);
+        members.remove(&rb);
         members.insert(ra, [ma, mb].concat());
     }
     let mut grouped = Vec::new();
-    for group in members.into_values().filter(|m| m.len() >= 2) {
+    for group in members.into_values() {
         let story_id = *group.iter().min().unwrap_or(&0);
         grouped.extend(group.into_iter().map(|m| (m, story_id)));
     }

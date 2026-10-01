@@ -30,6 +30,15 @@ pub struct Interest {
     pub note: Option<String>,
 }
 
+/// 関心分野の数の上限。
+pub const MAX_INTERESTS: usize = 50;
+/// 推薦しない話題の数の上限。
+pub const MAX_EXCLUDES: usize = 50;
+/// 関心分野の名前と推薦しない話題の長さの上限（文字数）。
+pub const MAX_TEXT_CHARS: usize = 50;
+/// 関心分野の補足（note）の長さの上限（文字数）。
+pub const MAX_NOTE_CHARS: usize = 500;
+
 /// TOML を読み、値を検証する（`validate`）。
 pub fn parse(text: &str) -> Result<Profile, ProfileError> {
     let profile: Profile = toml::from_str(text)?;
@@ -345,6 +354,76 @@ mod tests {
             parse("bogus = 1").unwrap_err(),
             ProfileError::Parse(_)
         ));
+    }
+
+    /// 好みのベクトルを作る量を抑えるため、件数と長さに上限を置く。重みが正の関心分野が 1 つも無ければ、
+    /// どの記事にも関心の点が付かないので誤りにする。
+    #[test]
+    fn limits_sizes_and_needs_a_positive_interest() {
+        let interests = |n: usize, weight: f64| {
+            (0..n)
+                .map(|i| format!("[[interest]]\ntopic = \"t{i}\"\nweight = {weight}\n"))
+                .collect::<String>()
+        };
+        let excludes = |n: usize| {
+            let list: Vec<String> = (0..n).map(|i| format!("\"x{i}\"")).collect();
+            format!("exclude = [{}]\n", list.join(", "))
+        };
+        let topic = |len: usize| {
+            format!(
+                "[[interest]]\ntopic = \"{}\"\nweight = 1.0\n",
+                "あ".repeat(len)
+            )
+        };
+        let note = |len: usize| {
+            format!(
+                "[[interest]]\ntopic = \"t\"\nweight = 1.0\nnote = \"{}\"\n",
+                "あ".repeat(len)
+            )
+        };
+        let exclude_len = |len: usize| {
+            format!(
+                "{}exclude = [\"{}\"]\n",
+                interests(1, 1.0),
+                "あ".repeat(len)
+            )
+        };
+        for ok in [
+            format!(
+                "{}{}",
+                interests(MAX_INTERESTS, 1.0),
+                excludes(MAX_EXCLUDES)
+            ),
+            topic(MAX_TEXT_CHARS),
+            note(MAX_NOTE_CHARS),
+            exclude_len(MAX_TEXT_CHARS),
+            format!(
+                "{}{}",
+                interests(1, 0.0),
+                interests(1, 0.4).replace("t0", "u0")
+            ),
+        ] {
+            assert!(parse(&ok).is_ok(), "{ok}");
+        }
+        for (bad, needle) in [
+            (interests(MAX_INTERESTS + 1, 1.0), "interests"),
+            (
+                format!("{}{}", interests(1, 1.0), excludes(MAX_EXCLUDES + 1)),
+                "excludes",
+            ),
+            (topic(MAX_TEXT_CHARS + 1), "characters"),
+            (note(MAX_NOTE_CHARS + 1), "characters"),
+            (exclude_len(MAX_TEXT_CHARS + 1), "characters"),
+            (interests(2, 0.0), "positive weight"),
+            (excludes(1), "positive weight"),
+            (String::new(), "positive weight"),
+        ] {
+            let err = parse(&bad).unwrap_err();
+            assert!(
+                matches!(&err, ProfileError::Invalid(m) if m.contains(needle)),
+                "{bad}: {err}"
+            );
+        }
     }
 
     #[test]

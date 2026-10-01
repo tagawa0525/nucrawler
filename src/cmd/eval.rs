@@ -38,12 +38,16 @@ pub(crate) async fn eval(
         .transpose()?;
     let db = Db::open(&data.join("nucrawler.db"))?;
     let owner = db.owner_id()?;
+    // 候補の採点と embedding の計算で、中断の要求を 1 つに共有する
+    let cancel = Cancel::default();
+    spawn_signal_handler(cancel.clone());
     if let Some(candidate) = &candidate {
-        score_candidate(&config, &data, &db, candidate, args.max_llm_calls).await?;
+        score_candidate(&config, &data, &db, candidate, args.max_llm_calls, &cancel).await?;
     }
     let mut scores = db.eval_scores(owner)?;
     if let Some(cfg) = &config.embedding {
-        scores.extend(embedding_trials(&config, cfg, &db, owner, candidate.as_ref()).await?);
+        scores
+            .extend(embedding_trials(&config, cfg, &db, owner, candidate.as_ref(), &cancel).await?);
     }
     let candidate = candidate.as_ref().map(profile::hash);
     let current = db.profile_hash(owner)?;
@@ -71,12 +75,12 @@ async fn embedding_trials(
     db: &Db,
     owner: i64,
     candidate: Option<&profile::Profile>,
+    cancel: &Cancel,
 ) -> Result<Vec<LabeledScore>, Error> {
     let Some(space) = db.embedding_space()? else {
         return Ok(Vec::new());
     };
     let client = Client::from_config(cfg, |name| std::env::var(name).ok())?;
-    let cancel = Cancel::default();
     let now = chrono::Utc::now();
     let labeled = db.eval_embedding_inputs(owner, space.id)?;
     let recent = CandidateFilter {
@@ -96,8 +100,16 @@ async fn embedding_trials(
         prompt_version: embed_score::SCORE_VERSION,
     };
     let mut trials = Vec::new();
-    if let Some((current, hash)) = db.load_profile(owner)?
-        && let Some(preference) = preference_of(db, &client, cfg, &current, &cancel).await?
+    // 前の版で取り込んだプロファイルは、今の条件を満たさないことがある（embed ステージも採点しない）
+    let current = db.load_profile(owner)?.filter(|(current, _)| {
+        profile::validate(current)
+            .inspect_err(|e| {
+                tracing::warn!("no embedding trials for the current profile: {e}; import it again")
+            })
+            .is_ok()
+    });
+    if let Some((current, hash)) = current
+        && let Some(preference) = preference_of(db, &client, cfg, &current, cancel).await?
     {
         for (name, formula) in eval::TRIAL_FORMULAS {
             trials.extend(eval::embedding_trial(
@@ -113,7 +125,7 @@ async fn embedding_trials(
     // 候補が今のプロファイルと同じなら、今のプロファイルの `now` と同じキーになるので並べない
     if let Some(candidate) = candidate
         && db.profile_hash(owner)?.as_deref() != Some(profile::hash(candidate).as_str())
-        && let Some(preference) = preference_of(db, &client, cfg, candidate, &cancel).await?
+        && let Some(preference) = preference_of(db, &client, cfg, candidate, cancel).await?
     {
         let (name, formula) = eval::TRIAL_FORMULAS[0];
         trials.extend(eval::embedding_trial(
@@ -124,6 +136,11 @@ async fn embedding_trials(
             &key(&profile::hash(candidate), name),
             &scored_at,
         ));
+    }
+    // 途中で `embed rebuild` されると、要約のベクトル（始めの世代）と好みのベクトル（新しい世代）が混ざる
+    if db.embedding_space()?.map(|s| s.id) != Some(space.id) {
+        tracing::warn!("the embedding space was rebuilt during eval; showing no embedding trials");
+        return Ok(Vec::new());
     }
     Ok(trials)
 }
@@ -144,9 +161,8 @@ async fn score_candidate(
     db: &Db,
     candidate: &profile::Profile,
     max_llm_calls: Option<u32>,
+    cancel: &Cancel,
 ) -> Result<(), Error> {
-    let cancel = Cancel::default();
-    spawn_signal_handler(cancel.clone());
     let llm = Backends::from_config(&config.llm, data);
     let mut quota = Quota::from_config(config, max_llm_calls);
     let articles: Vec<i64> = db
@@ -159,7 +175,7 @@ async fn score_candidate(
             db,
             llm: &llm,
             quota: &mut quota,
-            cancel: &cancel,
+            cancel,
             clock: &chrono::Utc::now,
         },
         config,

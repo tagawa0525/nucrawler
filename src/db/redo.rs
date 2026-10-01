@@ -232,6 +232,8 @@ const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
     AND (:min_score IS NULL OR (
       SELECT s.score FROM scores AS s
       WHERE s.user_id = :user AND s.profile_hash = :profile
+        -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+        AND s.backend <> 'embedding'
         AND s.artifact_id = (
           SELECT r.id FROM artifacts AS r
           WHERE r.article_id = a.id AND r.kind = 'digest'

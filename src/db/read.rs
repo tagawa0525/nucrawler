@@ -703,6 +703,8 @@ impl Db {
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile
                          AND s.artifact_id = i.digest_id
+                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+                         AND s.backend <> 'embedding'
                        -- 採点のプロンプトの最新の版を使い、その版で複数のモデルの採点があれば、
                        -- 先回り和訳と同じく最高点を使う
                        ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC

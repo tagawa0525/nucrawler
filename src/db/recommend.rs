@@ -93,6 +93,8 @@ impl Db {
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile
                          AND s.artifact_id = rated.digest_id
+                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+                         AND s.backend <> 'embedding'
                        ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
                        LIMIT 1) AS score_id
                FROM rated)

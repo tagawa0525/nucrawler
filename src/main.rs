@@ -87,8 +87,6 @@ enum Error {
     SourcesFailed(usize),
     #[error("interrupted; the next run resumes from where this one stopped")]
     Interrupted,
-    #[error("{0:?} is not implemented yet")]
-    NotImplemented(Command),
 }
 
 #[tokio::main]
@@ -187,7 +185,6 @@ async fn run() -> Result<(), Error> {
         Command::Sources => match cli::parse_sources_args(&inv.args)? {
             SourcesArgs::Check { id } => sources_check(inv.config_dir, id.as_deref()).await,
         },
-        cmd => Err(Error::NotImplemented(cmd)),
     }
 }
 

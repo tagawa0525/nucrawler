@@ -66,7 +66,6 @@ pub enum Command {
     Sources,
     Serve,
     Mcp,
-    Rescore,
     Profile,
     Topics,
     Search,
@@ -90,7 +89,6 @@ commands:
   sources   ソースの取得確認（sources check [ID]）
   serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
-  rescore   記事を再採点
   profile   関心プロファイルの取り込み・書き出し・更新案（profile import FILE / profile export / profile suggest --out FILE）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
@@ -123,7 +121,6 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Invocation, Parse
         Some("sources") => Command::Sources,
         Some("serve") => Command::Serve,
         Some("mcp") => Command::Mcp,
-        Some("rescore") => Command::Rescore,
         Some("profile") => Command::Profile,
         Some("topics") => Command::Topics,
         Some("search") => Command::Search,
@@ -598,7 +595,6 @@ mod tests {
             ("sources", Command::Sources),
             ("serve", Command::Serve),
             ("mcp", Command::Mcp),
-            ("rescore", Command::Rescore),
             ("profile", Command::Profile),
             ("topics", Command::Topics),
             ("search", Command::Search),

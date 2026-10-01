@@ -40,7 +40,25 @@ pub struct EmbeddingScore {
     pub exclude: Option<String>,
 }
 
+/// 評価した記事の、`eval` でその場で採点するための材料（利用者が閲覧できる最新の要約のベクトルと特徴）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabeledVector {
+    pub article_id: i64,
+    pub source_id: String,
+    pub topics: Vec<String>,
+    pub vector: Vec<f32>,
+}
+
 impl Db {
+    /// 利用者が評価した記事のうち、採点の対象（`embedding_candidates` と同じ条件）のもの（記事の id 順）。
+    pub fn eval_embedding_inputs(
+        &self,
+        user_id: i64,
+        space_id: i64,
+    ) -> Result<Vec<LabeledVector>, DbError> {
+        todo!()
+    }
+
     /// プロファイルのある利用者（利用者の id 順）。
     pub fn scoring_profiles(&self) -> Result<Vec<ScoringProfile>, DbError> {
         let mut stmt = self
@@ -465,6 +483,29 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(ids(unscored, 0, 10), [d_new, d_redo]);
+    }
+
+    /// `eval` の材料は、評価した記事のうち採点の対象になるもの。ソースとトピックも返す。
+    #[test]
+    fn lists_rated_articles_for_eval() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let s = space(&db);
+        let (rated, _) = embedded(&db, s, "https://e.com/a", "2026-09-30T00:00:00.000Z", true);
+        embedded(&db, s, "https://e.com/b", "2026-09-30T00:00:00.000Z", true);
+        let (unrelated, _) = embedded(&db, s, "https://e.com/c", "2026-09-30T00:00:00.000Z", false);
+        for a in [rated, unrelated] {
+            db.rate(owner, a, Rating::new(4), now()).unwrap();
+        }
+        assert_eq!(
+            db.eval_embedding_inputs(owner, s).unwrap(),
+            [LabeledVector {
+                article_id: rated,
+                source_id: "s".into(),
+                topics: vec!["規制・審査".into()],
+                vector: vec![1.0, 0.0],
+            }]
+        );
     }
 
     /// 会員限定の本文から作った要約は、資格の無い利用者の対象にしない。

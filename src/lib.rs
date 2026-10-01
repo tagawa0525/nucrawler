@@ -3,6 +3,7 @@ pub mod check;
 pub mod cli;
 pub mod config;
 pub mod db;
+pub mod embedding;
 pub mod errors;
 pub mod eval;
 pub mod extract;

@@ -3,6 +3,7 @@
 //! 同じ出来事の報道（same）か、同じ案件の別の出来事（related）かを判定させる。
 
 use crate::prompt::escape_data;
+use serde::Deserialize;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
 pub const PROMPT_VERSION: i64 = 1;
@@ -181,7 +182,7 @@ fn to_units(ids: &[i64], target: &Target) -> Vec<i64> {
 pub fn parse(output: &serde_json::Value, requested: &[Target]) -> Result<Parsed, StoryError> {
     let ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
     let collected = super::collect_items(output, &ids, "story judgment", |id, item| {
-        let Ok(Item { same, related, .. }) = serde_json::from_value::<Item>(item.clone()) else {
+        let Ok(Item { same, related, .. }) = Item::deserialize(item) else {
             tracing::warn!(
                 id,
                 "ignoring a story judgment that violates the schema: {item}"

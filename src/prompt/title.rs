@@ -4,6 +4,7 @@
 use crate::db::TitleInput;
 use crate::glossary::Term;
 use crate::prompt::escape_data;
+use serde::Deserialize;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
 pub const PROMPT_VERSION: i64 = 1;
@@ -90,7 +91,7 @@ pub fn build_prompt(inputs: &[TitleInput]) -> String {
 /// 空の見出し・改行を含む見出し・スキーマに合わない項目は採らず、欠けたものとして扱う。
 pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, TitleError> {
     let collected = super::collect_items(output, requested, "title", |id, item| {
-        let Ok(Item { title_ja, .. }) = serde_json::from_value::<Item>(item.clone()) else {
+        let Ok(Item { title_ja, .. }) = Item::deserialize(item) else {
             tracing::warn!(id, "ignoring a title that violates the schema: {item}");
             return None;
         };

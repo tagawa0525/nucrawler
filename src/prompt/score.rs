@@ -4,6 +4,7 @@
 use crate::db::ScoreInput;
 use crate::profile::Profile;
 use crate::prompt::escape_data;
+use serde::Deserialize;
 
 /// プロンプトや出力の形を変えたら上げる。採点はこの版ごとに別の行として残り、版を上げると
 /// `pipeline.backlog_days` の範囲の記事が採点し直しになる。
@@ -141,7 +142,7 @@ pub fn parse(
     profile: &Profile,
 ) -> Result<Parsed, ScoreError> {
     let collected = super::collect_items(output, requested, "score", |id, item| {
-        let checked = match serde_json::from_value::<Item>(item.clone()) {
+        let checked = match Item::deserialize(item) {
             Ok(checked) => checked,
             Err(e) => {
                 tracing::warn!(id, "ignoring score that violates the schema: {e}");

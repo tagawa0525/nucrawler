@@ -1,15 +1,11 @@
 //! `sources check`：各ソースを実際に取得して解析し、件数と先頭の数件を表示する。DB には書かない。
 
-use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use url::Url;
-
-use crate::config::{HtmlList, Source, SourceKind};
+use crate::config::Source;
 use crate::errors::error_chain;
-use crate::http::{Fetcher, HttpError};
-use crate::source::{self, Candidate, SourceError, html_list};
-use crate::text;
+use crate::http::Fetcher;
+use crate::source::fetch::{SourceFailure, Stats, fetch_source};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckError {
@@ -17,32 +13,10 @@ pub enum CheckError {
     UnknownSource(String),
 }
 
-/// 1 つのソースの取得失敗。他のソースの確認は続ける。
-#[derive(Debug, thiserror::Error)]
-pub enum SourceFailure {
-    #[error("invalid source url {url:?}")]
-    InvalidUrl {
-        url: String,
-        source: url::ParseError,
-    },
-    #[error(transparent)]
-    Http(#[from] HttpError),
-    #[error(transparent)]
-    Parse(#[from] SourceError),
-}
-
 #[derive(Debug)]
 pub struct Report {
     pub id: String,
     pub outcome: Result<Stats, SourceFailure>,
-}
-
-#[derive(Debug)]
-pub struct Stats {
-    /// フィードに含まれていた件数
-    pub total: usize,
-    /// 絞り込み条件に一致したもの（フィードの順）
-    pub matched: Vec<Candidate>,
 }
 
 /// `only` を指定したときは、無効化されたソースでもそれだけを確認する。
@@ -73,56 +47,6 @@ pub async fn check(
         });
     }
     Ok(reports)
-}
-
-/// 1 つのソースを取得・解析し、絞り込み条件に一致した候補を返す。
-pub async fn fetch_source(fetcher: &Fetcher, s: &Source) -> Result<Stats, SourceFailure> {
-    let url = Url::parse(&s.url).map_err(|source| SourceFailure::InvalidUrl {
-        url: s.url.clone(),
-        source,
-    })?;
-    let candidates = match (s.kind, &s.list) {
-        (SourceKind::HtmlList, Some(list)) => fetch_html_list(fetcher, &url, list).await?,
-        _ => {
-            let fetched = fetcher.get(&url).await?;
-            source::parse(s.kind, &fetched.body, &fetched.url)?
-        }
-    };
-    let total = candidates.len();
-    let matched = candidates
-        .into_iter()
-        .filter(|c| source::matches(&s.filter, c))
-        .collect();
-    Ok(Stats { total, matched })
-}
-
-/// 一覧ページは記事ページと同じく robots.txt に従って取得する。`also` のページは一覧に続けて
-/// 同じ読み方で読み、同じ URL の記事は最初の 1 件だけにする。
-async fn fetch_html_list(
-    fetcher: &Fetcher,
-    url: &Url,
-    list: &HtmlList,
-) -> Result<Vec<Candidate>, SourceFailure> {
-    let mut page = fetcher.get_page(url).await?;
-    if let Some(follow) = &list.follow {
-        let html = text::decode_html(&page.body, page.content_type.as_deref());
-        let next = html_list::follow(follow, &html, &page.url)?;
-        page = fetcher.get_page(&next).await?;
-    }
-    let html = text::decode_html(&page.body, page.content_type.as_deref());
-    let mut items = html_list::parse(list, &html, &page.url)?;
-    for also in &list.also {
-        let url = Url::parse(also).map_err(|source| SourceFailure::InvalidUrl {
-            url: also.clone(),
-            source,
-        })?;
-        let page = fetcher.get_page(&url).await?;
-        let html = text::decode_html(&page.body, page.content_type.as_deref());
-        items.extend(html_list::parse(list, &html, &page.url)?);
-    }
-    let mut seen = HashSet::new();
-    items.retain(|c| seen.insert(c.url.clone()));
-    Ok(items)
 }
 
 /// 各ソースの結果と、一致した記事の先頭 `samples` 件を表示用に整形する。
@@ -164,7 +88,9 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{Category, Filter, Lang, SourceKind};
+    use crate::config::{Category, Filter, HtmlList, Lang, SourceKind};
+    use crate::http::HttpError;
+    use crate::source::{Candidate, SourceError};
     use crate::testutil::{Route, Server, fixture};
 
     fn src(id: &str, kind: SourceKind, url: String, enabled: bool, filter: Filter) -> Source {

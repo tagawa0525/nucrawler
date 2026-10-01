@@ -3,7 +3,7 @@
 //! - 取得（fetch・extract）は 1 つずつ（`fetch.lock` を排他）。同じホストへの間隔を守るため
 //! - LLM を呼ぶ処理は並行してよい（ファイルのロックは取らない）。同じ記事の二重処理は作業の予約
 //!   （`work_claims`）で、ほかの実行の呼び出しはクォータの判定のたびに DB の使用率を読むことで防ぐ
-//! - 同時に動く claude の数は、呼び出しの枠（`llm-slot-N.lock`）でプロセスをまたいで数える
+//! - 同時に動く LLM の CLI（claude・copilot）の数は、呼び出しの枠（`llm-slot-N.lock`）でプロセスをまたいで数える
 //! - 語彙の整理は 1 つずつ（`tidy.lock` を排他）
 
 use std::fs::File;
@@ -49,7 +49,7 @@ pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
         LockKind::Tidy => "tidy.lock",
     };
     Ok(Lock {
-        _file: Some(try_lock(dir, name, File::try_lock)?),
+        _file: Some(try_lock(dir, name)?),
     })
 }
 
@@ -64,7 +64,7 @@ pub struct Slot {
 pub async fn acquire_slot(dir: &Path, n: usize) -> Result<Slot, LockError> {
     loop {
         for i in 0..n {
-            match try_lock(dir, &format!("llm-slot-{i}.lock"), File::try_lock) {
+            match try_lock(dir, &format!("llm-slot-{i}.lock")) {
                 Ok(file) => return Ok(Slot { _file: file }),
                 Err(LockError::Held { .. }) => {}
                 Err(e) => return Err(e),
@@ -74,13 +74,10 @@ pub async fn acquire_slot(dir: &Path, n: usize) -> Result<Slot, LockError> {
     }
 }
 
-fn try_lock(
-    dir: &Path,
-    name: &str,
-    lock: fn(&File) -> Result<(), std::fs::TryLockError>,
-) -> Result<File, LockError> {
+/// `dir` の `name` のロックを、待たずに排他で取る。
+fn try_lock(dir: &Path, name: &str) -> Result<File, LockError> {
     let (path, file) = open(dir, name)?;
-    match lock(&file) {
+    match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
         Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),

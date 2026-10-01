@@ -1,4 +1,5 @@
-//! 取得（fetch・extract）と LLM のステージは別のロックを取り、互いを待たずに並行して動ける。
+//! 取得（fetch・extract）は `fetch.lock`、語彙の整理は `tidy.lock` で 1 つずつ動く。LLM のステージはロックを
+//! 取らないので、取得の最中でも動ける。
 
 use std::fs::File;
 use std::path::{Path, PathBuf};

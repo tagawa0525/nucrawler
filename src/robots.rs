@@ -25,16 +25,6 @@ impl Rules {
         Self { rules: Vec::new() }
     }
 
-    /// すべて拒否（robots.txt が 5xx や通信エラーのとき）。
-    pub fn disallow_all() -> Self {
-        Self {
-            rules: vec![Rule {
-                allow: false,
-                pattern: "/".into(),
-            }],
-        }
-    }
-
     /// `product` は UA の製品名（例 "nucrawler"）。大文字小文字は区別しない。
     pub fn parse(txt: &str, product: &str) -> Self {
         let mut groups: Vec<Group> = Vec::new();
@@ -214,8 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_all_and_disallow_all() {
+    fn allow_all() {
         assert!(Rules::allow_all().allows("/a"));
-        assert!(!Rules::disallow_all().allows("/a"));
     }
 }

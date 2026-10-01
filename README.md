@@ -112,7 +112,7 @@ users.users.<name>.linger = true;
 
 ```text
 nucrawler crawl [--until STAGE | --only STAGE | --requests-only] [--max-llm-calls N] [--wait-lock]
-nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--min-score N] [--ids 1,2,3] [--glossary]
+nucrawler redo digest|translate --model M [--source ID] [--since YYYY-MM-DD] [--min-score N] [--ids 1,2,3] [--glossary] [--max-llm-calls N]
 nucrawler status
 nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
@@ -121,6 +121,7 @@ nucrawler profile import FILE | nucrawler profile export | nucrawler profile sug
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
+nucrawler embed rebuild
 nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler user disable LOGIN | nucrawler user rename LOGIN NEW_LOGIN | nucrawler user list
 ```
 
@@ -163,7 +164,7 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
 - `eval --profile FILE` は、候補のプロファイル（`profile import` と同じ形式）で、正解の付いた記事を採点してから、
   今のプロファイルと並べて表示する。候補は取り込まず、その採点は候補のプロファイルのものとして残るので、一覧には
   影響しない（候補を取り込めばそのまま使われ、同じ候補で再実行しても採点済みの記事では LLM を呼ばない）。
-  ロックと LLM の呼び出しの上限は `redo` と同じ。`[embedding]` があれば、候補の embedding の点数も今の式でその場で
+  LLM の呼び出しの上限は `redo` と同じ。`[embedding]` があれば、候補の embedding の点数も今の式でその場で
   計算して並べる（候補の好みの文のベクトルは作って残すが、次の `embed` で使われなければ消える）
 - `search` は Web の検索画面（下記）と同じ条件で記事を探し、1 行 1 件（公開日時・点数・見出し・URL）で出す。
   閲覧としては記録しない

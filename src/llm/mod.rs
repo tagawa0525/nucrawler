@@ -1,6 +1,6 @@
 //! LLM の呼び出し口。Claude Code の headless モード（`claude -p`、サブスクリプションの枠）と
-//! GitHub Copilot CLI（`copilot`、AI Credits の月の予算）を `Llm` トレイトで抽象化し、設定
-//! （`llm.backend`）で選ぶ（`Backend`）。
+//! GitHub Copilot CLI（`copilot`、AI Credits の月の予算）を `Llm` トレイトで抽象化し、設定（既定の
+//! `llm.backend` と、工程ごとに上書きする `llm.*_backend`）で選ぶ（`Backends`）。
 
 pub mod claude_cli;
 pub mod copilot_cli;

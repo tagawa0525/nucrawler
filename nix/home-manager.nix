@@ -9,11 +9,20 @@ let
   cfg = config.services.nucrawler;
   emb = cfg.embeddingServer;
 
-  # 起動後、API が応答するまで待つ（初回はモデルの取得で数分かかる）。待つ間は unit が起動中のままなので、
-  # After= で並べた crawl は、API が使えるようになってから動く
+  # crawl の前に、embedding の API が応答するまで待つ（モデルの読み込みに数分、初回は取得も加わる）。
+  # embedding の unit 自身の起動処理（ExecStartPost）では待たない。home-manager の切り替え（sd-switch）は
+  # unit の起動完了を 120 秒しか待たず、それを超えると切り替え全体が失敗するため。
+  # unit が止まっている（失敗した）ときは待たずに諦め、crawl は embed の失敗として報告して続ける
   waitForEmbedding = pkgs.writeShellScript "nucrawler-wait-embedding" ''
     for _ in $(seq 1 900); do
       ${lib.getExe pkgs.curl} --silent --fail --output /dev/null http://127.0.0.1:${toString emb.port}/health && exit 0
+      case "$(${lib.getExe' pkgs.systemd "systemctl"} --user show --property=ActiveState --value nucrawler-embedding.service)" in
+        active | activating | reloading) ;;
+        *)
+          echo "the embedding server is not running" >&2
+          exit 1
+          ;;
+      esac
       sleep 1
     done
     echo "the embedding server did not become ready" >&2
@@ -216,6 +225,8 @@ in
               Wants = [ "nucrawler-embedding.service" ];
               After = [ "nucrawler-embedding.service" ];
             };
+            # 失敗しても（- を付けて）crawl は続ける
+            Service = lib.optionalAttrs emb.enable { ExecStartPre = "-${waitForEmbedding}"; };
           };
       nucrawler-fetch = crawlService "nucrawler: fetch and extract only" [
         "--until"
@@ -237,9 +248,6 @@ in
             emb.image
             "--model-id ${emb.model}"
           ];
-          ExecStartPost = "${waitForEmbedding}";
-          # 初回のモデルの取得を待てるように（waitForEmbedding の 900 秒より長く）
-          TimeoutStartSec = "16min";
           ExecStop = "${emb.podman} stop nucrawler-embedding";
           # rootless の podman は newuidmap（/run/wrappers/bin）を使う
           Environment = [ "PATH=/run/wrappers/bin:/run/current-system/sw/bin" ];

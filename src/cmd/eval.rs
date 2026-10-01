@@ -84,7 +84,6 @@ fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {
 }
 
 /// ラベルの付いた記事を候補のプロファイルで採点する。クォータ・シグナルは `redo` と同じ。
-/// ロックは呼び出し側が取る。
 async fn score_candidate(
     config: &config::Config,
     data: &std::path::Path,

@@ -32,6 +32,7 @@ pub(crate) async fn crawl(
     spawn_signal_handler(cancel.clone());
     let fetcher = Fetcher::from_config(&config.http)?;
     let llm = Backends::from_config(&config.llm, &data);
+    let db = Db::open(&data.join("nucrawler.db"))?;
     // クォータと報告（LLM が使えないことを含む）は実行全体で 1 つにし、ロックの単位をまたいで
     // 引き継ぐ（呼び出し回数の上限と、LLM の失敗の後に後続の LLM ステージを呼ばないことが効くように）。
     // 使用率は判定のたびに DB から読むので、ここでは読まない
@@ -44,8 +45,6 @@ pub(crate) async fn crawl(
             report.cancelled = true;
             break;
         };
-        // DB はロックを取ってから開く。更新前の版の実行が使っている間にマイグレーションを当てないため
-        let db = Db::open(&data.join("nucrawler.db"))?;
         run::crawl(
             RunEnv {
                 db: &db,

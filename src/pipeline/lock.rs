@@ -34,13 +34,14 @@ pub enum LockKind {
     Tidy,
 }
 
-/// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。
+/// 取得したロック。drop すると解放される（プロセスが落ちても OS が解放する）。`Llm` はファイルを持たない。
 #[derive(Debug)]
 pub struct Lock {
     _file: Option<File>,
 }
 
-/// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。
+/// `dir` にある `kind` のロックを待たずに取る。既に取られていれば `Held`。`Llm` は何も取らず、
+/// ほかの実行とは作業の予約と呼び出しの枠で分ける。
 pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
     let name = match kind {
         LockKind::Fetch => "fetch.lock",

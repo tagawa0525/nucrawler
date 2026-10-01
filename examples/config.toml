@@ -101,3 +101,23 @@ explore_per_day = 2
 # 20 では、評価 1 件で特徴を共有する記事が動くのは数点で、同じ傾向の評価が数十件そろうとはっきり効く。
 # 正の有限値（0 以下・inf・nan は設定の誤り）
 prior_strength = 20.0
+
+# 記事の embedding（文章を意味のベクトルにしたもの）を作る API。OpenAI 互換の embeddings API なら何でもよい。
+# 無ければ embedding を使わない。モデルや接頭辞・次元を替えたら `nucrawler embed rebuild` で作り直す
+# （替えたまま crawl すると、違うモデルのベクトルを混ぜないよう embed ステージが止まる）
+# [embedding]
+# ローカルのサーバー（home-manager の services.nucrawler.embeddingServer。text-embeddings-inference で ruri を動かす）
+# url = "http://127.0.0.1:8090/v1/embeddings"
+# model = "cl-nagoya/ruri-v3-310m"
+# ruri はクエリ（好み）と文書（記事）で接頭辞を変える
+# query_prefix = "検索クエリ: "
+# document_prefix = "検索文書: "
+# Azure OpenAI なら、URL は https://<resource>.openai.azure.com/openai/v1/embeddings、model はデプロイ名、
+# 鍵は api_key_env の環境変数から読む（設定ファイルには書かない）。OpenAI は auth = "bearer"
+# auth = "api-key"
+# api_key_env = "AZURE_OPENAI_API_KEY"
+# 返すベクトルの次元を減らす（text-embedding-3 など対応するモデルだけ）
+# dimensions = 1024
+# 1 回に送る文の数（モデルの指紋の試験文 2 件を含む）と、1 回の呼び出しのタイムアウト（秒）
+# batch_size = 32
+# timeout_secs = 30

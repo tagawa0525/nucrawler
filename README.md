@@ -8,7 +8,9 @@
   `llm.score_backend` などで工程ごとに選べ、採点だけ Claude のまま、ほかを Copilot にするといった使い分けもできる）
 - 5 時間枠と週次枠の使用率を見て、時間帯ごとの上限を超えないように止まる（`config.toml` の `[quota]`）。
   Copilot では、今月の消費クレジットを月の経過に合わせた上限までに抑える（`[copilot_quota]`）
-- 処理はステージ（取得 → 本文抽出 → 要約 → 採点 → 和訳 → 見出しの和訳 → 同じ報道の判定）ごとに成果物の有無で進み、中断しても次回は続きから再開する
+- 処理はステージ（取得 → 本文抽出 → 要約 → embedding → 採点 → 和訳 → 見出しの和訳 → 同じ報道の判定）ごとに成果物の有無で進み、中断しても次回は続きから再開する
+- 要約は embedding（意味のベクトル）にもする（`embed` ステージ。LLM を使わず、OpenAI 互換の embeddings API を
+  `config.toml` の `[embedding]` で呼ぶ。設定が無ければ何もしない）。モデルを替えたら `nucrawler embed rebuild` で作り直す
 - 本文が取れず要約できない英語記事（記事ページがボット対策で開けない IAEA など）は、見出しだけを和訳して
   一覧・検索・受付箱に日本語の見出しを出す（`title` ステージ。`llm.title_batch_size` 件ずつまとめて訳す）。
   期間（`backlog_days`）では絞らず、後から本文が取れて要約ができれば要約の見出しを使う
@@ -52,6 +54,10 @@ services.nucrawler = {
 | `nucrawler-fetch.timer`    | 取得と本文抽出だけ（`crawl --until extract`）        | 22:00             |
 | `nucrawler-requests.timer` | Web UI から依頼された和訳（`crawl --requests-only`） | 15 分ごと         |
 | `nucrawler-serve.service`  | Web UI（`serve`）                                    | 常駐              |
+
+`services.nucrawler.embeddingServer.enable = true;` にすると、embedding のサーバー（text-embeddings-inference で
+`cl-nagoya/ruri-v3-310m` を動かす。Podman を使う）を `nucrawler-embedding.service` として常駐させ、`[embedding]` も
+それを呼ぶよう設定する。
 
 時刻は `services.nucrawler.schedule` で変えられる（systemd の OnCalendar）。
 LLM をどれだけ使うかは時刻ではなく `[quota]` の時間帯ごとの上限で決まる。

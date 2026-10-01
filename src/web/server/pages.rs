@@ -108,33 +108,29 @@ pub(super) async fn list(
     Query(params): Query<ListParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, AppError> {
-    let rating = params.rating()?;
-    let bookmarked = bookmark_mark(params.bookmarked.as_deref())?;
-    let filtering = rating.is_some() || bookmarked == Some(true);
+    // 既定の規則（一覧か絞り込みか、それぞれの最低点と既読の既定）は `ListView` にだけ置き、正規の URL と
+    // そろえる。絞り込みの条件を先に入れ、最低点と既読は既定を受け取ってから決める
+    let mut view = html::ListView {
+        min: None,
+        default_min: None,
+        read: None,
+        rating: params.rating()?,
+        bookmarked: bookmark_mark(params.bookmarked.as_deref())?,
+    };
     // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
     // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
-    let leaving = params.rating.as_deref() == Some("") && !filtering;
+    let leaving = params.rating.as_deref() == Some("") && !view.filtered();
     let carried = |value: Option<&str>| value.filter(|_| !leaving).map(str::to_string);
     let params = ListParams {
         min: carried(params.min.as_deref()),
         read: carried(params.read.as_deref()),
         ..params
     };
-    // 最低点の既定は、一覧では利用者の既定（プロファイルが無ければ最低点なし）、絞り込みでは 0（点数で絞らない）。
-    // 正規の URL がプロファイルの有無で変わるので、利用者を先に引く
+    // 正規の URL がプロファイルの有無で変わる（一覧の既定の最低点）ので、利用者を先に引く
     let (user, hash) = with_db(&state, move |db| Ok(viewer(db, me)?)).await?;
-    let list_min = state.web.default_min(hash.as_deref());
-    let min = params.min_or(if filtering { Some(0) } else { list_min })?;
-    // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
-    let read =
-        read_mark(params.read.as_deref())?.unwrap_or(if filtering { None } else { Some(false) });
-    let view = html::ListView {
-        min,
-        default_min: list_min,
-        read,
-        rating,
-        bookmarked,
-    };
+    view.default_min = state.web.default_min(hash.as_deref());
+    view.min = params.min_or(view.min_default())?;
+    view.read = read_mark(params.read.as_deref())?.unwrap_or(view.read_default());
     // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。JavaScript が無いときの
     // 選択のフォームは、評価の「★」（絞らない）で `rating=` や、絞り込みを外したときの `read=0` を残す
     let canonical = view.url();
@@ -158,7 +154,7 @@ pub(super) async fn list(
         let items = db.list_articles(ListQuery {
             read: view.read,
             bookmarked: view.bookmarked,
-            ..list_query(&web, user, hash.as_deref(), now, min)
+            ..list_query(&web, user, hash.as_deref(), now, view.min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、

@@ -106,7 +106,9 @@ pub fn normalize(text: &str) -> String {
         .collect()
 }
 
-type Vector = HashMap<(char, char), f64>;
+/// bigram の順に並ぶ表にする。ノルムや類似度で値を足す順が実行ごとに変わると末尾の桁が変わり、同じ類似度の
+/// 候補の並び（同点は ID の順）が崩れて、同じ入力でも判定の結果が変わる。
+type Vector = BTreeMap<(char, char), f64>;
 
 /// 文字 bigram の出現回数。
 fn bigrams(text: &str) -> HashMap<(char, char), usize> {

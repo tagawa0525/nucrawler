@@ -75,11 +75,13 @@ pub fn render(
         );
     }
     let is_current = |k: &EvalKey| {
-        current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
+        current.is_some_and(|(hash, version)| {
+            k.profile_hash == hash && k.prompt_version == current_version(k, version)
+        })
     };
     // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
     let is_candidate = |k: &EvalKey| {
-        k.prompt_version == version
+        k.prompt_version == current_version(k, version)
             && candidate.is_some_and(|hash| k.profile_hash == hash)
             && !is_current(k)
     };
@@ -116,6 +118,15 @@ pub fn render(
         render_key(&mut out, key, role, labels, scores, prior_strength);
     }
     out
+}
+
+/// キーの採点器の今の版：embedding なら式の版、LLM ならプロンプトの版（`llm_version`）。
+fn current_version(key: &EvalKey, llm_version: i64) -> i64 {
+    if key.backend == crate::db::EMBED_BACKEND {
+        crate::embed_score::SCORE_VERSION
+    } else {
+        llm_version
+    }
 }
 
 /// 確認枠の評価の内訳。評価した記事のうち関心（評価 4〜5）の割合を、閾値未満での見逃し率の見積もりとして示す。
@@ -190,7 +201,8 @@ fn render_key(
         format(concordance(&adjusted)),
     );
     let late = matched.iter().filter(|m| m.2).count();
-    if key.prompt_version == 1 && late > 0 {
+    // embedding の入力に反応は入らない
+    if key.backend != crate::db::EMBED_BACKEND && key.prompt_version == 1 && late > 0 {
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,

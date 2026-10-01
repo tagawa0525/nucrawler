@@ -40,7 +40,31 @@ pub struct EmbedInput {
 impl Db {
     /// 今の空間。まだ作っていなければ `None`。
     pub fn embedding_space(&self) -> Result<Option<EmbeddingSpace>, DbError> {
-        todo!()
+        use rusqlite::OptionalExtension;
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, input_version, fingerprint FROM embedding_space",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(id, name, input_version, fingerprint)| {
+            Ok(EmbeddingSpace {
+                id,
+                name,
+                input_version,
+                fingerprint: serde_json::from_str(&fingerprint)?,
+            })
+        })
+        .transpose()
     }
 
     /// 空間を作る。すでにあれば（同時に始まったほかの実行が先に作った）作らずに、その空間を返す。
@@ -51,7 +75,27 @@ impl Db {
         fingerprint: &Fingerprint,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<EmbeddingSpace, DbError> {
-        todo!()
+        // 有無の確認と挿入を 1 つの書き込みのトランザクションで行い、同時に始まった実行の片方だけが作る
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        self.conn.execute(
+            "INSERT INTO embedding_space (name, input_version, fingerprint, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (singleton) DO NOTHING",
+            rusqlite::params![
+                name,
+                input_version,
+                serde_json::to_string(fingerprint)?,
+                timestamp(now)
+            ],
+        )?;
+        let space = self
+            .embedding_space()?
+            .ok_or_else(|| DbError::UnexpectedValue("embedding space vanished".into()))?;
+        tx.commit()?;
+        Ok(space)
     }
 
     /// `space_id` の空間にベクトルが無い要約を、記事の新しい順に最大 `limit` 件返す。期間は区切らない。
@@ -62,7 +106,58 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<EmbedInput>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT r.article_id, r.id, coalesce(r.title_ja, ''), coalesce(r.summary_ja, ''),
+                    coalesce(json_extract(r.payload, '$.points_ja'), '[]')
+             FROM artifacts AS r
+             JOIN articles AS a ON a.id = r.article_id
+             WHERE r.kind = 'digest'
+               AND NOT EXISTS (
+                 SELECT 1 FROM article_embeddings AS e
+                 WHERE e.artifact_id = r.id AND e.space_id = ?1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM stage_errors AS e
+                 WHERE e.article_id = r.article_id
+                   AND e.stage = 'embed:' || ?1 || ':' || r.id
+                   AND e.backend = ?2 AND e.model = ''
+                   AND (e.attempts >= ?3 OR e.next_retry_at > ?4))
+               AND NOT EXISTS (
+                 SELECT 1 FROM work_claims AS w
+                 WHERE w.article_id = r.article_id AND w.stage = 'embed:' || ?1
+                   AND w.backend = ?2 AND w.model = '')
+             ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC,
+                      r.created_at DESC, r.id DESC
+             LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                space_id,
+                EMBED_BACKEND,
+                MAX_ATTEMPTS,
+                timestamp(now),
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let (article_id, artifact_id, title_ja, summary_ja, points) = row?;
+            Ok(EmbedInput {
+                article_id,
+                artifact_id,
+                title_ja,
+                summary_ja,
+                points_ja: serde_json::from_str(&points)?,
+            })
+        })
+        .collect()
     }
 
     /// 要約のベクトルを保存する。`space_id` の空間がもう無ければ（`rebuild` で消えた）何も保存せず `false`。
@@ -72,12 +167,49 @@ impl Db {
         space_id: i64,
         vectors: &[(i64, Vec<f32>)],
     ) -> Result<bool, DbError> {
-        todo!()
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let current = self.conn.query_row(
+            "SELECT count(*) FROM embedding_space WHERE id = ?1",
+            [space_id],
+            |r| r.get::<_, i64>(0),
+        )? == 1;
+        if !current {
+            return Ok(false);
+        }
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO article_embeddings (artifact_id, space_id, vector) VALUES (?1, ?2, ?3)
+             ON CONFLICT (artifact_id) DO NOTHING",
+        )?;
+        for (artifact_id, vector) in vectors {
+            stmt.execute(rusqlite::params![
+                artifact_id,
+                space_id,
+                crate::embedding::encode(vector)
+            ])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(true)
     }
 
     /// 空間を消し、ベクトルと `embed` の失敗の記録・予約もすべて消す。次の `embed` が新しい空間で作り直す。
     pub fn rebuild_embeddings(&self) -> Result<(), DbError> {
-        todo!()
+        let tx = self.conn.unchecked_transaction()?;
+        // ベクトルは外部キーで一緒に消える
+        tx.execute("DELETE FROM embedding_space", [])?;
+        tx.execute(
+            "DELETE FROM stage_errors WHERE stage LIKE 'embed:%' AND backend = ?1",
+            [EMBED_BACKEND],
+        )?;
+        tx.execute(
+            "DELETE FROM work_claims WHERE stage LIKE 'embed:%' AND backend = ?1",
+            [EMBED_BACKEND],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 }
 

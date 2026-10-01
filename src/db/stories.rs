@@ -109,7 +109,7 @@ impl Db {
         model: &str,
         limit: usize,
     ) -> Result<Vec<StoryPending>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.id, coalesce(a.published_at, a.fetched_at) FROM articles AS a
              WHERE coalesce(a.published_at, a.fetched_at) >= ?1
                AND NOT EXISTS (
@@ -126,18 +126,18 @@ impl Db {
                    AND (a.lang = 'ja' OR EXISTS (
                      SELECT 1 FROM artifacts AS r
                      WHERE r.article_id = a.id AND r.kind = 'title'))))
-               AND NOT EXISTS (
-                 SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = a.id AND e.stage = 'story'
-                   AND e.backend = ?3 AND e.model = ?4
-                   AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
-               AND NOT EXISTS (
-                 SELECT 1 FROM work_claims AS w
-                 WHERE w.article_id = a.id AND w.stage = 'story'
-                   AND w.backend = ?3 AND w.model = ?4)
+               AND {available}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?6",
-        )?;
+            available = super::claims::available(super::claims::Available {
+                article: "a.id",
+                stage: "'story'",
+                backend: "?3",
+                model: "?4",
+                max_attempts: "?2",
+                now: "?5",
+            }),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 timestamp(cutoff),

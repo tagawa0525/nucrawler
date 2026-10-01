@@ -34,6 +34,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<DigestInput>, DbError> {
+        let redo_available = redo_available();
         let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
@@ -44,7 +45,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_AVAILABLE}
+               AND {redo_available}
                AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -78,6 +79,7 @@ impl Db {
         filter: &RedoFilter,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(DigestInput, Option<String>)>, DbError> {
+        let redo_available = redo_available();
         let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.source_id, a.title, a.lang, latest.glossary_at
@@ -90,7 +92,7 @@ impl Db {
              WHERE EXISTS (
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
-               AND {REDO_AVAILABLE}
+               AND {redo_available}
                AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -133,6 +135,7 @@ impl Db {
         filter: &RedoFilter,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(TranslateInput, Option<String>)>, DbError> {
+        let redo_available = redo_available();
         let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.title, latest.glossary_at
@@ -147,7 +150,7 @@ impl Db {
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                    AND c.access_membership_id IS NULL)
-               AND {REDO_AVAILABLE}
+               AND {redo_available}
                AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -181,6 +184,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
+        let redo_available = redo_available();
         let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.title FROM articles AS a
@@ -193,7 +197,7 @@ impl Db {
                  SELECT 1 FROM artifacts AS r
                  WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
-               AND {REDO_AVAILABLE}
+               AND {redo_available}
                AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
@@ -219,14 +223,16 @@ impl Db {
 
 /// `redo` の対象から、このモデルの失敗で再試行待ち・断念済みの記事と、ほかの実行が予約している
 /// 記事を除く条件。
-const REDO_AVAILABLE: &str = "NOT EXISTS (
-    SELECT 1 FROM stage_errors AS e
-    WHERE e.article_id = a.id AND e.stage = :stage AND e.backend = :backend
-      AND e.model = :model AND (e.attempts >= :max_attempts OR e.next_retry_at > :now))
-    AND NOT EXISTS (
-    SELECT 1 FROM work_claims AS w
-    WHERE w.article_id = a.id AND w.stage = :stage AND w.backend = :backend
-      AND w.model = :model)";
+fn redo_available() -> String {
+    super::claims::available(super::claims::Available {
+        article: "a.id",
+        stage: ":stage",
+        backend: ":backend",
+        model: ":model",
+        max_attempts: ":max_attempts",
+        now: ":now",
+    })
+}
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
 /// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。

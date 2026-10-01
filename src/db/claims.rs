@@ -3,6 +3,44 @@
 
 use super::*;
 
+/// 対象を選ぶ条件の、記事を除く条件の材料。各値は SQL の式（パラメータか文字列のリテラル）。
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Available<'a> {
+    /// 記事の id の式
+    pub article: &'a str,
+    pub stage: &'a str,
+    pub backend: &'a str,
+    pub model: &'a str,
+    /// これ以上失敗した記事は断念済み
+    pub max_attempts: &'a str,
+    pub now: &'a str,
+}
+
+/// このステージ・backend・model で処理してよい記事の条件：失敗の記録で再試行待ちか断念済みでなく、ほかの実行の
+/// 作業の予約も無い。LLM を呼ぶステージの対象を選ぶクエリが、どれもこの条件で除く。
+pub(super) fn available(
+    Available {
+        article,
+        stage,
+        backend,
+        model,
+        max_attempts,
+        now,
+    }: Available<'_>,
+) -> String {
+    format!(
+        "NOT EXISTS (
+           SELECT 1 FROM stage_errors AS e
+           WHERE e.article_id = {article} AND e.stage = {stage}
+             AND e.backend = {backend} AND e.model = {model}
+             AND (e.attempts >= {max_attempts} OR e.next_retry_at > {now}))
+         AND NOT EXISTS (
+           SELECT 1 FROM work_claims AS w
+           WHERE w.article_id = {article} AND w.stage = {stage}
+             AND w.backend = {backend} AND w.model = {model})"
+    )
+}
+
 /// 予約のキー（記事を除く）。`stage_errors` と同じく、ステージ・backend・model ごとに分ける。
 #[derive(Debug, Clone, Copy)]
 pub struct ClaimKey<'a> {

@@ -989,7 +989,7 @@ mod tests {
     }
 
     /// 要約から同じ報道の判定までを止めずに走らせた結果と、k 回目の LLM の呼び出しで止める指示を
-    /// 出してから次の実行で再開した結果が、どの k でも同じになる。
+    /// 出してから次の実行で再開した結果が、どの k でも、応答の前後どちらで止まっても同じになる。
     #[tokio::test]
     async fn resuming_after_a_stop_matches_an_uninterrupted_run() {
         const STAGES: &[Stage] = &[
@@ -1028,21 +1028,26 @@ mod tests {
         assert!(calls >= STAGES.len(), "{calls} calls");
         let expected = outcome(&db);
 
-        for k in 0..calls {
-            let db = setup();
-            let cancel = Cancel::default();
-            let stop = cancel.clone();
-            let llm =
-                FakeLlm::responding(std::time::Duration::ZERO, deterministic).hooked(move |n| {
+        // 応答が届いてから止める指示に気づく場合（遅延なし）と、応答を待つ間に止めて呼び出しを捨てる場合
+        for (delay, when) in [
+            (std::time::Duration::ZERO, "after the response"),
+            (std::time::Duration::from_millis(5), "during the call"),
+        ] {
+            for k in 0..calls {
+                let db = setup();
+                let cancel = Cancel::default();
+                let stop = cancel.clone();
+                let llm = FakeLlm::responding(delay, deterministic).hooked(move |n| {
                     if n == k {
                         stop.request();
                     }
                 });
-            let report = crawl_with(&db, &llm, 100, &cancel, STAGES).await;
-            assert!(report.cancelled, "stop at call {k}: {report:?}");
-            let llm = FakeLlm::responding(std::time::Duration::ZERO, deterministic);
-            crawl_with(&db, &llm, 100, &Cancel::default(), STAGES).await;
-            assert_eq!(outcome(&db), expected, "stop at call {k}");
+                let report = crawl_with(&db, &llm, 100, &cancel, STAGES).await;
+                assert!(report.cancelled, "stop at call {k} {when}: {report:?}");
+                let llm = FakeLlm::responding(std::time::Duration::ZERO, deterministic);
+                crawl_with(&db, &llm, 100, &Cancel::default(), STAGES).await;
+                assert_eq!(outcome(&db), expected, "stop at call {k} {when}");
+            }
         }
     }
 

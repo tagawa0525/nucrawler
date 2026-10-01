@@ -371,7 +371,7 @@ mod tests {
 
     /// 失敗を、ステージ・バックエンド・モデルごとに上限に達していないものと断念に分けて数える。記事の期間では
     /// 絞らない（期間を区切らずに処理するステージがある）。
-    /// embedding の失敗は要約ごとの名前なので、空間ごとにまとめる。断念の理由は最後に断念したもの。
+    /// embedding の失敗は要約ごとの名前なので、空間ごとにまとめ、記事ごとに数える。断念の理由は最後に断念したもの。
     #[test]
     fn counts_stage_failures_by_key() {
         let db = Db::open_in_memory().unwrap();
@@ -444,6 +444,8 @@ mod tests {
         };
         embed(ids[0], 100);
         embed(ids[1], 101);
+        // 同じ記事の別の要約の失敗は、記事 1 件と数える
+        embed(ids[0], 102);
 
         let got = db.stage_failures().unwrap();
         let row =

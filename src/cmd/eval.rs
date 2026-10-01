@@ -110,7 +110,9 @@ async fn embedding_trials(
             ));
         }
     }
+    // 候補が今のプロファイルと同じなら、今のプロファイルの `now` と同じキーになるので並べない
     if let Some(candidate) = candidate
+        && db.profile_hash(owner)?.as_deref() != Some(profile::hash(candidate).as_str())
         && let Some(preference) = preference_of(db, &client, cfg, candidate, &cancel).await?
     {
         let (name, formula) = eval::TRIAL_FORMULAS[0];

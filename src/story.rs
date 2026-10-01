@@ -4,7 +4,7 @@
 //! 英語の記事も要約（日本語）で比べる。候補が同じ報道かどうかは LLM が判定し、same の組をつないで
 //! グループにする。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -244,16 +244,17 @@ pub fn components(
     apart: &[(i64, i64)],
     max_size: usize,
 ) -> (Stories, Vec<Rejected>) {
-    let _ = apart;
+    let pair = |x: i64, y: i64| (x.min(y), x.max(y));
+    let apart: HashSet<(i64, i64)> = apart.iter().map(|&(x, y)| pair(x, y)).collect();
     let mut sorted = edges.to_vec();
     sorted.sort_by(|x, y| {
         y.similarity
             .total_cmp(&x.similarity)
             .then((x.a, x.b).cmp(&(y.a, y.b)))
     });
-    // 素集合：親と、根ならその集合の大きさ
+    // 素集合：親と、根ならその集合の記事（2 件以上の集合だけ持つ）
     let mut parent: HashMap<i64, i64> = HashMap::new();
-    let mut size: HashMap<i64, usize> = HashMap::new();
+    let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
     fn root(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
         let p = *parent.entry(x).or_insert(x);
         if p == x {
@@ -269,24 +270,31 @@ pub fn components(
         if ra == rb {
             continue;
         }
-        let (sa, sb) = (*size.get(&ra).unwrap_or(&1), *size.get(&rb).unwrap_or(&1));
-        if sa + sb > max_size {
-            rejected.push(Rejected::TooLarge(e));
+        let ma = members.remove(&ra).unwrap_or_else(|| vec![ra]);
+        let mb = members.remove(&rb).unwrap_or_else(|| vec![rb]);
+        let reject = if ma.len() + mb.len() > max_size {
+            Some(Rejected::TooLarge(e))
+        } else if ma
+            .iter()
+            .any(|&x| mb.iter().any(|&y| apart.contains(&pair(x, y))))
+        {
+            Some(Rejected::Apart(e))
+        } else {
+            None
+        };
+        if let Some(r) = reject {
+            rejected.push(r);
+            members.insert(ra, ma);
+            members.insert(rb, mb);
             continue;
         }
         parent.insert(rb, ra);
-        size.insert(ra, sa + sb);
-    }
-    let ids: Vec<i64> = parent.keys().copied().collect();
-    let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
-    for id in ids {
-        let r = root(&mut parent, id);
-        groups.entry(r).or_default().push(id);
+        members.insert(ra, [ma, mb].concat());
     }
     let mut grouped = Vec::new();
-    for members in groups.into_values().filter(|m| m.len() >= 2) {
-        let story_id = *members.iter().min().unwrap_or(&0);
-        grouped.extend(members.into_iter().map(|m| (m, story_id)));
+    for group in members.into_values().filter(|m| m.len() >= 2) {
+        let story_id = *group.iter().min().unwrap_or(&0);
+        grouped.extend(group.into_iter().map(|m| (m, story_id)));
     }
     (Stories::new(grouped), rejected)
 }

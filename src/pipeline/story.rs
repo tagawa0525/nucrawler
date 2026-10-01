@@ -16,7 +16,7 @@ use crate::db::{
 };
 use crate::llm::{Llm, LlmRequest};
 use crate::prompt::story as p;
-use crate::story::{Candidate, Doc, Index, WINDOW_DAYS};
+use crate::story::{Candidate, Doc, Index, Rejected, WINDOW_DAYS};
 use crate::{errors, prompt};
 
 pub const STAGE: &str = "story";
@@ -107,16 +107,23 @@ fn save(
     Ok(())
 }
 
-/// グループを作り直し、大きくなりすぎるので捨てた組を知らせる。
+/// グループを作り直し、つながなかった組を知らせる。
 fn rebuild(db: &Db) -> Result<(), DbError> {
     for r in db.rebuild_stories()? {
-        if let crate::story::Rejected::TooLarge(e) = r {
-            tracing::warn!(
+        match r {
+            Rejected::TooLarge(e) => tracing::warn!(
                 a = e.a,
                 b = e.b,
                 "story link not joined: the story would exceed {} articles",
                 crate::story::MAX_STORY_SIZE
-            );
+            ),
+            // 判定が割れた組や、別の出来事と判定された記事を介する組。LLM の判定のとおりの結果なので
+            // 異常ではない
+            Rejected::Apart(e) => tracing::info!(
+                a = e.a,
+                b = e.b,
+                "story link not joined: it would join articles judged as different events"
+            ),
         }
     }
     Ok(())

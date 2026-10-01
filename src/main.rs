@@ -339,7 +339,6 @@ async fn profile(
             print!("{}", profile::to_toml(&saved));
             Ok(())
         }
-        // 更新案は LLM を呼ぶので、ロックを取ってから DB を開く
         ProfileArgs::Suggest { out, max_llm_calls } => {
             cmd::suggest(config, data, &out, max_llm_calls).await
         }

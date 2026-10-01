@@ -11,7 +11,6 @@ use nucrawler::eval;
 use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::embed_profiles::eval_trials;
-use nucrawler::pipeline::lock::{self, LockKind};
 use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::profile;
 use nucrawler::prompt;
@@ -26,15 +25,10 @@ pub(crate) async fn eval(
     data: Option<PathBuf>,
     args: EvalArgs,
 ) -> Result<(), Error> {
-    // 候補のファイルと設定の誤りは、ロックを取る前に知らせる
+    // 候補のファイルと設定の誤りは、LLM を呼ぶ前に知らせる
     let candidate = args.profile.as_deref().map(read_profile).transpose()?;
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    // 候補で採点するときは LLM を呼んで DB に書くので、redo と同じく DB を開く前にロックを取る
-    let _lock = candidate
-        .is_some()
-        .then(|| lock::acquire(&data, LockKind::Llm))
-        .transpose()?;
     let db = Db::open(&data.join("nucrawler.db"))?;
     let owner = db.owner_id()?;
     // 候補の採点と embedding の計算で、中断の要求を 1 つに共有する

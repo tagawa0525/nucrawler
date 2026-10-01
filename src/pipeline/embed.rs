@@ -422,6 +422,33 @@ mod tests {
         assert_eq!(embedder.calls().len(), calls);
     }
 
+    /// 文のせいに見える失敗（400 など）でも、指紋の試験文だけの呼び出しも失敗するなら、設定の誤り（モデル名・
+    /// 次元など）やサービスの側の失敗なので、要約の失敗を記録せずに止める（全要約を断念させない）。
+    #[tokio::test]
+    async fn stops_when_even_the_fingerprint_fails() {
+        let db = Db::open_in_memory().unwrap();
+        let a = digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        let b = digest(&db, "b", "2026-09-29T00:00:00.000Z");
+        let embedder = FakeEmbedder::default();
+        let cfg = small_batches();
+        let fp = Fingerprint::make(&embedder, &cfg).await.unwrap();
+        db.create_embedding_space(&space_name(&cfg), INPUT_VERSION, &fp, now())
+            .unwrap();
+        // どの文にも、文のせいに見える失敗を返す
+        let broken = FakeEmbedder {
+            bad: Some(String::new()),
+            ..FakeEmbedder::default()
+        };
+        let err = run(&db, &broken, &cfg).await.unwrap_err();
+        assert!(matches!(err, EmbedStageError::Api(_)), "{err:?}");
+        assert_eq!(saved(&db, a), None);
+        assert_eq!(saved(&db, b), None);
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            0
+        );
+    }
+
     /// サービスの側の失敗では、要約の失敗を記録せずに止める（止まっている間に再試行の上限を使い切らない）。
     #[tokio::test]
     async fn stops_on_service_errors_without_recording_failures() {

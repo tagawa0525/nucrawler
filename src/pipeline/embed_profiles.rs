@@ -136,7 +136,22 @@ pub async fn embed_profiles(
         return Ok(summary);
     };
     check_space(&space, cfg)?;
-    let profiles = db.scoring_profiles()?;
+    // 前の版で取り込んだプロファイルは、今の条件（件数・長さ・重みが正の関心分野）を満たさないことがある。
+    // 取り込み直すまで採点しない
+    let profiles: Vec<ScoringProfile> = db
+        .scoring_profiles()?
+        .into_iter()
+        .filter(|p| match crate::profile::validate(&p.profile) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    user_id = p.user_id,
+                    "not scoring with embeddings: {e}; import the profile again"
+                );
+                false
+            }
+        })
+        .collect();
     let texts: Vec<ProfileTexts> = profiles
         .iter()
         .map(|p| ProfileTexts::new(cfg, &p.profile))
@@ -264,9 +279,7 @@ fn score_user(
             break;
         }
     }
-    if scores.is_empty() {
-        return Ok(0);
-    }
+    // 点数が無くても保存を呼び、古いプロファイルの点数を消す
     if !db.save_embedding_scores(space.id, key, &scores, now)? {
         tracing::info!(
             user_id = profile.user_id,

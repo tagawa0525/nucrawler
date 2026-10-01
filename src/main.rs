@@ -157,6 +157,7 @@ async fn run() -> Result<(), Error> {
         }
         Command::Topics => topics(inv.data_dir, cli::parse_topics_args(&inv.args)?),
         Command::User => user(inv.data_dir, cli::parse_user_args(&inv.args)?),
+        Command::Embed => embed(inv.data_dir, cli::parse_embed_args(&inv.args)?),
         Command::Search => search(
             inv.config_dir,
             inv.data_dir,
@@ -287,6 +288,10 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
         TopicsArgs::Export => print!("{}", topics::to_toml(&db.vocabulary()?)),
     }
     Ok(())
+}
+
+fn embed(data: Option<PathBuf>, args: cli::EmbedArgs) -> Result<(), Error> {
+    todo!()
 }
 
 /// プロファイルはオーナー（このマシンの利用者）のものを扱う。

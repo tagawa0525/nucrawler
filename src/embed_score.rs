@@ -75,13 +75,74 @@ pub struct Raw {
 
 /// 記事のベクトル（正規化済み）の生の値。
 pub fn raw(preference: &Preference, article: &[f32], formula: Formula) -> Raw {
-    todo!()
+    let similarity = |v: &[f32]| dot(v, article).max(0.0);
+    let weighted: Vec<f32> = preference
+        .interests
+        .iter()
+        .map(|i| i.weight * similarity(&i.vector))
+        .collect();
+    let strongest = argmax(&weighted);
+    let a = match formula.aggregate {
+        Aggregate::WeightedMax => strongest.map_or(0.0, |i| weighted[i]),
+        Aggregate::WeightedMean => {
+            let total: f32 = preference.interests.iter().map(|i| i.weight).sum();
+            if total > 0.0 {
+                weighted.iter().sum::<f32>() / total
+            } else {
+                0.0
+            }
+        }
+        Aggregate::TopK(k) => {
+            let mut sorted = weighted.clone();
+            sorted.sort_by(|x, y| y.total_cmp(x));
+            let top = &sorted[..k.min(sorted.len())];
+            if top.is_empty() {
+                0.0
+            } else {
+                top.iter().sum::<f32>() / top.len() as f32
+            }
+        }
+    };
+    let excluded: Vec<f32> = preference
+        .excludes
+        .iter()
+        .map(|e| similarity(&e.vector))
+        .collect();
+    let closest = argmax(&excluded);
+    let b = closest.map_or(0.0, |j| excluded[j]);
+    Raw {
+        value: a - formula.lambda * b,
+        interest: strongest.filter(|_| a > 0.0),
+        exclude: closest.filter(|_| b > 0.0 && formula.lambda * b >= a),
+    }
+}
+
+/// 最大の値の添字（同じなら先のもの）。空なら `None`。
+fn argmax(values: &[f32]) -> Option<usize> {
+    values
+        .iter()
+        .enumerate()
+        .fold(None, |best: Option<(usize, f32)>, (i, &v)| match best {
+            Some((_, b)) if b >= v => best,
+            _ => Some((i, v)),
+        })
+        .map(|(i, _)| i)
 }
 
 /// 生の値 `value` を、基準（直近の要約の生の値）の中での百分位にして 0〜100 点にする。
 /// 0 以下は 0 点。基準が無ければ 50 点。同じ値は中間の順位にする。
 pub fn percentile(value: f32, reference: &[f32]) -> u8 {
-    todo!()
+    if value <= 0.0 {
+        return 0;
+    }
+    if reference.is_empty() {
+        return 50;
+    }
+    let below = reference.iter().filter(|&&r| r < value).count();
+    let equal = reference.iter().filter(|&&r| r == value).count();
+    let share = (below as f64 + 0.5 * equal as f64) / reference.len() as f64;
+    // 0〜1 の割合なので、丸めた値は 0〜100 に収まる
+    (100.0 * share).round() as u8
 }
 
 #[cfg(test)]

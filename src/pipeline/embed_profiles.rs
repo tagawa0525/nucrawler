@@ -100,6 +100,18 @@ impl<'a> ProfileTexts<'a> {
     }
 }
 
+/// `profile`（保存していない候補でもよい）の好みのベクトル。無い文はその場で作って保存する（文がキーなので、
+/// 本番のプロファイルには影響しない）。空間がまだ無ければ `None`。中断されても `None`。
+pub async fn preference_of(
+    db: &Db,
+    embedder: &impl Embedder,
+    cfg: &EmbeddingConfig,
+    profile: &crate::profile::Profile,
+    cancel: &Cancel,
+) -> Result<Option<Preference>, EmbedStageError> {
+    todo!()
+}
+
 /// 好みの文のベクトルを作り、プロファイルのある全員を採点する。好みの文の呼び出しが失敗したら、残りの文は
 /// 呼ばず、ベクトルのそろっている利用者だけを採点してから、その失敗を返す。
 pub async fn embed_profiles(
@@ -602,6 +614,42 @@ mod tests {
         );
         assert_eq!(scores(&db, owner).len(), 2);
         assert!(scores(&db, other).is_empty());
+    }
+
+    /// 候補のプロファイルの好みのベクトルを、本番のプロファイルを変えずに作る。
+    #[tokio::test]
+    async fn builds_a_preference_for_a_candidate_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let candidate = Profile {
+            interests: vec![interest("候補", 0.7, Some("補足"))],
+            exclude: vec!["避けたい".into()],
+        };
+        let embedder = FakeEmbedder::default();
+        let cfg = config();
+        // 空間が無ければ作れない
+        assert_eq!(
+            preference_of(&db, &embedder, &cfg, &candidate, &Cancel::default())
+                .await
+                .unwrap(),
+            None
+        );
+        digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        embed_articles(&db, &embedder, &cfg, &Cancel::default(), &now)
+            .await
+            .unwrap();
+        let preference = preference_of(&db, &embedder, &cfg, &candidate, &Cancel::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(preference.interests.len(), 1);
+        assert_eq!(preference.interests[0].topic, "候補");
+        assert!((preference.interests[0].weight - 0.7).abs() < 1e-6);
+        assert_eq!(
+            preference.interests[0].vector,
+            FakeEmbedder::vector("", &query("候補\n補足"))
+        );
+        assert_eq!(preference.excludes[0].topic, "避けたい");
+        assert_eq!(db.profile_hash(db.owner_id().unwrap()).unwrap(), None);
     }
 
     /// 空間がまだ無ければ（要約のベクトルをまだ作っていない）、何もしない。

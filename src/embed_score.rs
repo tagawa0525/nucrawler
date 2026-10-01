@@ -132,6 +132,49 @@ fn argmax(values: &[f32]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
+/// 点数と、補正の特徴にする関心分野・推薦しない話題の名前。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scored {
+    pub score: u8,
+    pub interest: Option<String>,
+    pub exclude: Option<String>,
+}
+
+/// 好みのベクトルと式で、百分位の基準（直近の要約）に照らして記事を採点する。
+#[derive(Debug, Clone)]
+pub struct Scorer<'a> {
+    preference: &'a Preference,
+    formula: Formula,
+    /// 基準の要約の生の値
+    reference: Vec<f32>,
+}
+
+impl<'a> Scorer<'a> {
+    /// `reference` は基準にする要約のベクトル（正規化済み）。
+    pub fn new(preference: &'a Preference, formula: Formula, reference: &[Vec<f32>]) -> Self {
+        Self {
+            preference,
+            formula,
+            reference: reference
+                .iter()
+                .map(|v| raw(preference, v, formula).value)
+                .collect(),
+        }
+    }
+
+    /// 記事のベクトル（正規化済み）の点数。
+    pub fn score(&self, article: &[f32]) -> Scored {
+        let r = raw(self.preference, article, self.formula);
+        Scored {
+            score: percentile(r.value, &self.reference),
+            interest: r
+                .interest
+                .map(|i| self.preference.interests[i].topic.clone()),
+            exclude: r.exclude.map(|j| self.preference.excludes[j].topic.clone()),
+        }
+    }
+}
+
 /// 生の値 `value` を、基準（直近の要約の生の値）の中での百分位にして 0〜100 点にする。
 /// 0 以下は 0 点。基準が無ければ 50 点。同じ値は中間の順位にする。
 pub fn percentile(value: f32, reference: &[f32]) -> u8 {

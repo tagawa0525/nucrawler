@@ -170,40 +170,24 @@ pub const TRIAL_FORMULAS: [(&str, crate::embed_score::Formula); 5] = {
     ]
 };
 
-/// 評価した記事を、`preference` と `formula` で採点した点数（`key` のキーで）。百分位の基準は `reference`
-/// （直近の要約のベクトル）を同じ式で計算した値。保存した点数（採点した時点の基準で固まっている）とは別に、
-/// 式どうしを同じ時点・同じ基準で比べるために使う。
+/// 評価した記事を `scorer` で採点した点数（`key` のキーで）。保存した点数（採点した時点の基準で固まっている）
+/// とは別に、式どうしを同じ時点・同じ基準で比べるために使う。
 pub fn embedding_trial(
     labeled: &[crate::db::LabeledVector],
-    reference: &[Vec<f32>],
-    preference: &crate::embed_score::Preference,
-    formula: crate::embed_score::Formula,
+    scorer: &crate::embed_score::Scorer,
     key: &EvalKey,
     scored_at: &str,
 ) -> Vec<LabeledScore> {
-    use crate::embed_score::{percentile, raw};
-    let reference: Vec<f32> = reference
-        .iter()
-        .map(|v| raw(preference, v, formula).value)
-        .collect();
     labeled
         .iter()
         .map(|l| {
-            let r = raw(preference, &l.vector, formula);
-            let matched: Vec<String> = r
-                .interest
-                .map(|i| preference.interests[i].topic.clone())
-                .into_iter()
-                .collect();
-            let excluded: Vec<String> = r
-                .exclude
-                .map(|j| preference.excludes[j].topic.clone())
-                .into_iter()
-                .collect();
+            let scored = scorer.score(&l.vector);
+            let matched: Vec<String> = scored.interest.into_iter().collect();
+            let excluded: Vec<String> = scored.exclude.into_iter().collect();
             LabeledScore {
                 key: key.clone(),
                 article_id: l.article_id,
-                score: percentile(r.value, &reference),
+                score: scored.score,
                 scored_at: scored_at.to_string(),
                 features: crate::recommend::features(&l.source_id, &l.topics, &matched, &excluded),
             }
@@ -566,7 +550,7 @@ mod tests {
     /// 評価した記事を、基準と同じ式で計算した百分位で採点し、補正の特徴（ソース・トピック・関心分野）も付ける。
     #[test]
     fn scores_labeled_articles_with_a_formula() {
-        use crate::embed_score::{Formula, Interest, Preference};
+        use crate::embed_score::{Formula, Interest, Preference, Scorer};
         let preference = Preference {
             interests: vec![Interest {
                 topic: "燃料".into(),
@@ -586,14 +570,8 @@ mod tests {
             backend: TRIAL_BACKEND.into(),
             ..key("h", 1)
         };
-        let got = embedding_trial(
-            &labeled,
-            &reference,
-            &preference,
-            Formula::default(),
-            &trial,
-            "2026-10-01T00:00:00.000Z",
-        );
+        let scorer = Scorer::new(&preference, Formula::default(), &reference);
+        let got = embedding_trial(&labeled, &scorer, &trial, "2026-10-01T00:00:00.000Z");
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].article_id, got[0].score), (7, 100));
         assert_eq!(got[0].key, trial);

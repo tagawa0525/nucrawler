@@ -116,11 +116,10 @@ async fn embedding_trials(
         && let Some(preference) = preference_of(db, &client, cfg, &current, cancel).await?
     {
         for (name, formula) in eval::TRIAL_FORMULAS {
+            let scorer = embed_score::Scorer::new(&preference, formula, &reference);
             trials.extend(eval::embedding_trial(
                 &labeled,
-                &reference,
-                &preference,
-                formula,
+                &scorer,
                 &key(&hash, name),
                 &scored_at,
             ));
@@ -132,11 +131,10 @@ async fn embedding_trials(
         && let Some(preference) = preference_of(db, &client, cfg, candidate, cancel).await?
     {
         let (name, formula) = eval::TRIAL_FORMULAS[0];
+        let scorer = embed_score::Scorer::new(&preference, formula, &reference);
         trials.extend(eval::embedding_trial(
             &labeled,
-            &reference,
-            &preference,
-            formula,
+            &scorer,
             &key(&profile::hash(candidate), name),
             &scored_at,
         ));

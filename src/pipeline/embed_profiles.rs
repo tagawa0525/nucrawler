@@ -14,7 +14,7 @@ use crate::config::EmbeddingConfig;
 use crate::db::{
     CandidateFilter, Db, EMBED_BACKEND, EmbeddingScore, EmbeddingSpace, ScoreKey, ScoringProfile,
 };
-use crate::embed_score::{self, Formula, Preference, REFERENCE_LIMIT, SCORE_VERSION};
+use crate::embed_score::{self, Formula, Preference, REFERENCE_LIMIT, SCORE_VERSION, Scorer};
 use crate::embedding::{Embedder, FINGERPRINT_TEXTS, Role, fingerprint_inputs, input};
 use crate::profile::Interest;
 
@@ -260,6 +260,26 @@ async fn embed_texts(
     Ok(true)
 }
 
+/// 百分位の基準にする要約のベクトル：利用者の採点の対象のうち、一覧の期間（`list_days`）の新しいものから
+/// `REFERENCE_LIMIT` 件まで。
+fn reference_vectors(
+    db: &Db,
+    user_id: i64,
+    space_id: i64,
+    list_days: u32,
+    now: DateTime<Utc>,
+) -> Result<Vec<Vec<f32>>, EmbedStageError> {
+    let recent = CandidateFilter {
+        since: Some(now - chrono::Duration::days(list_days.into())),
+        unscored: None,
+    };
+    Ok(db
+        .embedding_candidates(user_id, space_id, recent, 0, REFERENCE_LIMIT)?
+        .into_iter()
+        .map(|c| c.vector)
+        .collect())
+}
+
 /// 利用者の、今のプロファイルの点数がまだ無い要約を採点し、まとめて保存する。付けた点数の数を返す。
 fn score_user(
     db: &Db,
@@ -277,16 +297,8 @@ fn score_user(
         model: &cfg.model,
         prompt_version: SCORE_VERSION,
     };
-    let formula = Formula::default();
-    let recent = CandidateFilter {
-        since: Some(now - chrono::Duration::days(list_days.into())),
-        unscored: None,
-    };
-    let reference: Vec<f32> = db
-        .embedding_candidates(profile.user_id, space.id, recent, 0, REFERENCE_LIMIT)?
-        .iter()
-        .map(|c| embed_score::raw(preference, &c.vector, formula).value)
-        .collect();
+    let reference = reference_vectors(db, profile.user_id, space.id, list_days, now)?;
+    let scorer = Scorer::new(preference, Formula::default(), &reference);
     let unscored = CandidateFilter {
         since: None,
         unscored: Some(key),
@@ -297,12 +309,12 @@ fn score_user(
         let page =
             db.embedding_candidates(profile.user_id, space.id, unscored, scores.len(), PAGE)?;
         for c in &page {
-            let raw = embed_score::raw(preference, &c.vector, formula);
+            let scored = scorer.score(&c.vector);
             scores.push(EmbeddingScore {
                 artifact_id: c.artifact_id,
-                score: embed_score::percentile(raw.value, &reference),
-                interest: raw.interest.map(|i| preference.interests[i].topic.clone()),
-                exclude: raw.exclude.map(|j| preference.excludes[j].topic.clone()),
+                score: scored.score,
+                interest: scored.interest,
+                exclude: scored.exclude,
             });
         }
         if page.len() < PAGE {

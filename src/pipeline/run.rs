@@ -703,6 +703,27 @@ mod tests {
         assert_eq!(embedded(&db), 1);
     }
 
+    /// embed ステージは、要約のベクトルを作った後、プロファイルのある利用者を embedding で採点する。
+    #[tokio::test]
+    async fn embed_scores_users_after_embedding_digests() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        let server = crate::embedding::fake::echo_server();
+        let report = crawl_config(
+            &db,
+            &FakeLlm::new([]),
+            &[Stage::Embed],
+            &embedding_config(&server.url("/v1/embeddings")),
+        )
+        .await;
+        assert_eq!(report, RunReport::default());
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM scores WHERE backend = 'embedding'")
+                .unwrap(),
+            1
+        );
+    }
+
     /// 設定が無ければ embed は何もしない。embedding の失敗は報告し、後続のステージは続ける。
     #[tokio::test]
     async fn reports_embedding_failures_and_continues() {

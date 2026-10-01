@@ -379,6 +379,16 @@ mod tests {
                 "control",
             ),
             ("exclude = [\"a\\tb\"]\n", "control"),
+            // U+2028/U+2029 は制御文字ではないが行を分ける。名前は照合のキーなので全角の空白も拒む
+            (
+                "[[interest]]\ntopic = \"a\\u2028b\"\nweight = 0.5\n",
+                "control",
+            ),
+            (
+                "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"x\\u2029y\"\n",
+                "control",
+            ),
+            ("exclude = [\"核\\u3000融合\"]\n", "control"),
         ] {
             let err = parse(toml).unwrap_err();
             assert!(
@@ -390,6 +400,13 @@ mod tests {
             parse("bogus = 1").unwrap_err(),
             ProfileError::Parse(_)
         ));
+    }
+
+    /// 補足は文なので、全角の空白を許す。
+    #[test]
+    fn accepts_full_width_spaces_in_notes() {
+        let toml = "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"再稼働\\u3000審査\"\n";
+        assert!(parse(toml).is_ok());
     }
 
     /// 好みのベクトルを作る量を抑えるため、件数と長さに上限を置く。重みが正の関心分野が 1 つも無ければ、

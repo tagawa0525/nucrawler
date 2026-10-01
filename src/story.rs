@@ -4,7 +4,7 @@
 //! 英語の記事も要約（日本語）で比べる。候補が同じ報道かどうかは LLM が判定し、same の組をつないで
 //! グループにする。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -228,18 +228,33 @@ fn cosine(a: &Vector, b: &Vector) -> f64 {
         .sum()
 }
 
-/// same の組をつないだグループと、つなぐとグループが `max_size` を超えるので捨てた組。
-/// 組は類似度の高い順につなぐ。
-pub fn components(edges: &[Edge], max_size: usize) -> (Stories, Vec<Edge>) {
+/// つながなかった same の組と、その理由。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Rejected {
+    /// つなぐとグループが上限を超える
+    TooLarge(Edge),
+    /// つなぐと、別の出来事と判定された記事どうしが同じグループに入る
+    Apart(Edge),
+}
+
+/// same の組をつないだグループと、つながなかった組。組は類似度の高い順につなぎ、つなぐとグループが
+/// `max_size` を超える組と、`apart`（別の出来事と判定された記事の組）が同じグループに入る組は捨てる。
+pub fn components(
+    edges: &[Edge],
+    apart: &[(i64, i64)],
+    max_size: usize,
+) -> (Stories, Vec<Rejected>) {
+    let pair = |x: i64, y: i64| (x.min(y), x.max(y));
+    let apart: HashSet<(i64, i64)> = apart.iter().map(|&(x, y)| pair(x, y)).collect();
     let mut sorted = edges.to_vec();
     sorted.sort_by(|x, y| {
         y.similarity
             .total_cmp(&x.similarity)
             .then((x.a, x.b).cmp(&(y.a, y.b)))
     });
-    // 素集合：親と、根ならその集合の大きさ
+    // 素集合：親と、根ならその集合の記事（2 件以上の集合だけ持つ）
     let mut parent: HashMap<i64, i64> = HashMap::new();
-    let mut size: HashMap<i64, usize> = HashMap::new();
+    let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
     fn root(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
         let p = *parent.entry(x).or_insert(x);
         if p == x {
@@ -255,24 +270,30 @@ pub fn components(edges: &[Edge], max_size: usize) -> (Stories, Vec<Edge>) {
         if ra == rb {
             continue;
         }
-        let (sa, sb) = (*size.get(&ra).unwrap_or(&1), *size.get(&rb).unwrap_or(&1));
-        if sa + sb > max_size {
-            rejected.push(e);
+        let ma = members.get(&ra).cloned().unwrap_or_else(|| vec![ra]);
+        let mb = members.get(&rb).cloned().unwrap_or_else(|| vec![rb]);
+        let reject = if ma.len() + mb.len() > max_size {
+            Some(Rejected::TooLarge(e))
+        } else if ma
+            .iter()
+            .any(|&x| mb.iter().any(|&y| apart.contains(&pair(x, y))))
+        {
+            Some(Rejected::Apart(e))
+        } else {
+            None
+        };
+        if let Some(r) = reject {
+            rejected.push(r);
             continue;
         }
         parent.insert(rb, ra);
-        size.insert(ra, sa + sb);
-    }
-    let ids: Vec<i64> = parent.keys().copied().collect();
-    let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
-    for id in ids {
-        let r = root(&mut parent, id);
-        groups.entry(r).or_default().push(id);
+        members.remove(&rb);
+        members.insert(ra, [ma, mb].concat());
     }
     let mut grouped = Vec::new();
-    for members in groups.into_values().filter(|m| m.len() >= 2) {
-        let story_id = *members.iter().min().unwrap_or(&0);
-        grouped.extend(members.into_iter().map(|m| (m, story_id)));
+    for group in members.into_values() {
+        let story_id = *group.iter().min().unwrap_or(&0);
+        grouped.extend(group.into_iter().map(|m| (m, story_id)));
     }
     (Stories::new(grouped), rejected)
 }
@@ -421,7 +442,7 @@ mod tests {
             b,
             similarity: 0.5,
         };
-        let (stories, rejected) = components(&[e(5, 3), e(3, 9), e(20, 21)], MAX_STORY_SIZE);
+        let (stories, rejected) = components(&[e(5, 3), e(3, 9), e(20, 21)], &[], MAX_STORY_SIZE);
         assert_eq!(
             stories.grouped(),
             [(3, 3), (5, 3), (9, 3), (20, 20), (21, 20)]
@@ -433,8 +454,24 @@ mod tests {
     #[test]
     fn components_cap_the_story_size() {
         let e = |a, b, similarity| Edge { a, b, similarity };
-        let (stories, rejected) = components(&[e(1, 2, 0.9), e(2, 3, 0.2), e(3, 4, 0.8)], 3);
+        let (stories, rejected) = components(&[e(1, 2, 0.9), e(2, 3, 0.2), e(3, 4, 0.8)], &[], 3);
         assert_eq!(stories.grouped(), [(1, 1), (2, 1), (3, 3), (4, 3)]);
-        assert_eq!(rejected, [e(2, 3, 0.2)]);
+        assert_eq!(rejected, [Rejected::TooLarge(e(2, 3, 0.2))]);
+    }
+
+    /// 別の出来事と判定された記事どうしが同じグループに入る組は、類似度の低い方を捨てる。
+    /// 組そのものが別の出来事と判定されていれば（判定が割れた組）、その組も捨てる。
+    #[test]
+    fn components_keep_apart_articles_judged_different() {
+        let e = |a, b, similarity| Edge { a, b, similarity };
+        // 1–2 と 3–2 は same だが、1 と 3 は別の出来事
+        let (stories, rejected) = components(&[e(1, 2, 0.9), e(3, 2, 0.4)], &[(1, 3)], 8);
+        assert_eq!(stories.grouped(), [(1, 1), (2, 1)]);
+        assert_eq!(rejected, [Rejected::Apart(e(3, 2, 0.4))]);
+
+        // 向きは問わない。組そのものが別の出来事と判定されていればつながない
+        let (stories, rejected) = components(&[e(5, 6, 0.9), e(7, 8, 0.5)], &[(6, 5)], 8);
+        assert_eq!(stories.grouped(), [(7, 7), (8, 7)]);
+        assert_eq!(rejected, [Rejected::Apart(e(5, 6, 0.9))]);
     }
 }

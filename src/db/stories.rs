@@ -338,37 +338,38 @@ impl Db {
 
     /// 記事ごとの最新の判定の same の組をつないで、グループ（`article_stories`）を作り直す。
     /// 今のグループと比べ、グループの ID が変わる記事の行だけを書く（外れた記事は自分の ID に戻す）。
-    /// 相手の最新の判定が同じ組を same 以外（related・unrelated）にしていれば、判定が割れたので
-    /// つながない。グループが大きくなりすぎるので捨てた組を返す。
-    pub fn rebuild_stories(&self) -> Result<Vec<Edge>, DbError> {
+    /// 最新の判定が same 以外（related・unrelated）の組は、別の出来事として同じグループに入れない
+    /// （その組を相手が same としていても、ほかの記事を介しても）。つながなかった組を返す。
+    pub fn rebuild_stories(&self) -> Result<Vec<crate::story::Rejected>, DbError> {
         let tx = self.conn.unchecked_transaction()?;
-        let edges: Vec<Edge> = {
+        let mut edges: Vec<Edge> = Vec::new();
+        let mut apart: Vec<(i64, i64)> = Vec::new();
+        {
             let mut stmt = tx.prepare(
-                "WITH latest AS (
-                   SELECT r.article_id, l.other_id, l.relation, l.similarity
-                   FROM story_links AS l
-                   JOIN artifacts AS r ON r.id = l.artifact_id
-                   WHERE r.id = (
-                     SELECT r2.id FROM artifacts AS r2
-                     WHERE r2.article_id = r.article_id AND r2.kind = 'story'
-                     ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1))
-                 SELECT x.article_id, x.other_id, x.similarity FROM latest AS x
-                 WHERE x.relation = 'same'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM latest AS y
-                     WHERE y.article_id = x.other_id AND y.other_id = x.article_id
-                       AND y.relation <> 'same')",
+                "SELECT r.article_id, l.other_id, l.relation = 'same', l.similarity
+                 FROM story_links AS l
+                 JOIN artifacts AS r ON r.id = l.artifact_id
+                 WHERE r.id = (
+                   SELECT r2.id FROM artifacts AS r2
+                   WHERE r2.article_id = r.article_id AND r2.kind = 'story'
+                   ORDER BY r2.created_at DESC, r2.id DESC LIMIT 1)",
             )?;
-            let rows = stmt.query_map([], |r| {
-                Ok(Edge {
-                    a: r.get(0)?,
-                    b: r.get(1)?,
-                    similarity: r.get(2)?,
-                })
-            })?;
-            rows.collect::<Result<_, _>>()?
-        };
-        let (stories, rejected) = crate::story::components(&edges, crate::story::MAX_STORY_SIZE);
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let (a, b): (i64, i64) = (r.get(0)?, r.get(1)?);
+                if r.get(2)? {
+                    edges.push(Edge {
+                        a,
+                        b,
+                        similarity: r.get(3)?,
+                    });
+                } else {
+                    apart.push((a, b));
+                }
+            }
+        }
+        let (stories, rejected) =
+            crate::story::components(&edges, &apart, crate::story::MAX_STORY_SIZE);
         let current = self.stories()?;
         let touched: std::collections::BTreeSet<i64> = current
             .grouped()
@@ -891,6 +892,58 @@ mod tests {
         story(&db, f, &[same(e)], "2026-09-27T00:00:00Z");
         db.rebuild_stories().unwrap();
         assert_eq!(stories(&db), [(e, e), (f, e)]);
+    }
+
+    /// 別の出来事（related・unrelated）と判定された記事どうしは、ほかの記事を介しても同じグループに
+    /// しない。同じバッチで単独の記事を候補にした判定どうしや、1 件の記事が複数の候補を same にした
+    /// 判定で、この食い違いが起きる。
+    #[test]
+    fn rebuild_stories_keeps_apart_articles_judged_different() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..6)
+            .map(|n| {
+                ja_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-26T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let [a, b, c, d, e, f] = ids[..] else {
+            unreachable!()
+        };
+        let link = |other_id, relation, similarity| StoryLink {
+            other_id,
+            relation,
+            similarity,
+        };
+        use StoryRelation::{Related, Same, Unrelated};
+        // a は b と同じで c とは別の出来事、c は b と同じと判定した（同じバッチで b を単独の候補にした）
+        story(
+            &db,
+            a,
+            &[link(b, Same, 0.9), link(c, Related, 0.3)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, c, &[link(b, Same, 0.4)], "2026-09-27T00:00:00Z");
+        // d は e とも f とも同じと判定したが、e は f を無関係と判定した
+        story(
+            &db,
+            d,
+            &[link(e, Same, 0.8), link(f, Same, 0.6)],
+            "2026-09-27T00:00:00Z",
+        );
+        story(&db, e, &[link(f, Unrelated, 0.6)], "2026-09-27T00:00:00Z");
+        let rejected = db.rebuild_stories().unwrap();
+        assert_eq!(stories(&db), [(a, a), (b, a), (d, d), (e, d)]);
+        let apart: Vec<(i64, i64)> = rejected
+            .iter()
+            .filter_map(|r| match r {
+                crate::story::Rejected::Apart(x) => Some((x.a, x.b)),
+                crate::story::Rejected::TooLarge(_) => None,
+            })
+            .collect();
+        assert_eq!(apart, [(d, f), (c, b)]);
     }
 
     #[test]

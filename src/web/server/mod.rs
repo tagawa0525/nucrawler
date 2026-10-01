@@ -210,7 +210,7 @@ impl PageParts {
         db: &Db,
         me: crate::db::Viewer,
         profile_hash: Option<&str>,
-        min_score: u8,
+        web: &WebConfig,
     ) -> Result<Self, DbError> {
         Ok(Self {
             warnings: if me.is_admin {
@@ -218,7 +218,7 @@ impl PageParts {
             } else {
                 Vec::new()
             },
-            default_min: default_min(min_score, profile_hash),
+            default_min: web.default_min(profile_hash),
             is_admin: me.is_admin,
         })
     }

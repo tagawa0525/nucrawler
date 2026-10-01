@@ -2,6 +2,7 @@
 //! 結果をすぐ DB に書く。途中で止まっても、次回は残りから再開する。
 
 pub mod digest;
+pub mod embed;
 pub mod extract;
 pub mod fetch;
 pub mod llm_call;

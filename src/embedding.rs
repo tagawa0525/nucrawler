@@ -288,12 +288,17 @@ impl Embedder for Client {
     }
 }
 
+/// テストで使う、偽の embedding と応答を返すサーバー。
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
     use super::*;
     use crate::testutil::{Route, Server};
 
-    fn cfg(url: &str) -> EmbeddingConfig {
+    /// テスト用の設定（ruri と同じ接頭辞）。
+    pub(crate) fn cfg(url: &str) -> EmbeddingConfig {
         EmbeddingConfig {
             url: url.to_string(),
             model: "m".into(),
@@ -307,12 +312,12 @@ mod tests {
         }
     }
 
-    fn no_env(_: &str) -> Option<String> {
+    pub(crate) fn no_env(_: &str) -> Option<String> {
         None
     }
 
     /// `data` を OpenAI の形の応答にする（`index` は与えた順）。
-    fn response(data: &[(usize, Vec<f32>)]) -> Route {
+    pub(crate) fn response(data: &[(usize, Vec<f32>)]) -> Route {
         let data: Vec<_> = data
             .iter()
             .map(|(i, v)| serde_json::json!({"object": "embedding", "index": i, "embedding": v}))
@@ -333,7 +338,7 @@ mod tests {
     }
 
     /// 入力の文ごとに `fake_vector` を返すサーバー。
-    fn echo_server() -> Server {
+    pub(crate) fn echo_server() -> Server {
         Server::start_with(|req| {
             let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
             let inputs = body["input"].as_array().unwrap();
@@ -346,6 +351,53 @@ mod tests {
             )
         })
     }
+
+    /// 偽の embedding。`model` を変えると、同じ文でも違うベクトルを返す（中身のモデルの入れ替え）。
+    /// `bad` を含む文があれば、文のせいの失敗（413）を返す。`errors` に入れた失敗は、先頭から順に返す。
+    #[derive(Default)]
+    pub(crate) struct FakeEmbedder {
+        pub model: Mutex<String>,
+        pub bad: Option<String>,
+        pub errors: Mutex<VecDeque<EmbedError>>,
+        pub calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl FakeEmbedder {
+        pub(crate) fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// `model` のモデルが `text` に返すベクトル。
+        pub(crate) fn vector(model: &str, text: &str) -> Vec<f32> {
+            normalize(fake_vector(&format!("{model}{text}"))).unwrap()
+        }
+    }
+
+    impl Embedder for FakeEmbedder {
+        async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            self.calls.lock().unwrap().push(inputs.to_vec());
+            if let Some(e) = self.errors.lock().unwrap().pop_front() {
+                return Err(e);
+            }
+            if let Some(bad) = &self.bad
+                && inputs.iter().any(|t| t.contains(bad.as_str()))
+            {
+                return Err(EmbedError::Status {
+                    status: 413,
+                    body: "too long".into(),
+                });
+            }
+            let model = self.model.lock().unwrap().clone();
+            Ok(inputs.iter().map(|t| Self::vector(&model, t)).collect())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::*;
+    use super::*;
+    use crate::testutil::{Route, Server};
 
     fn assert_unit(v: &[f32]) {
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();

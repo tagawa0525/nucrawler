@@ -405,7 +405,7 @@ mod tests {
     use super::*;
     use crate::config::Lang;
     use crate::db::{
-        ArtifactKind, ContentKind, ContentOrigin, EmbedInput, NewArticle, NewArtifact,
+        ArtifactKind, ContentKind, ContentOrigin, EmbedInput, NewArticle, NewArtifact, Rating,
     };
     use crate::embedding::EmbedError;
     use crate::embedding::fake::{FakeEmbedder, cfg};
@@ -857,6 +857,175 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(summary, ProfileSummary::default());
+        assert!(embedder.calls().is_empty());
+    }
+
+    /// 所有者が評価した、一覧の期間の要約を作る。記事の id と、要約の文書としての入力を返す。
+    fn rated(db: &Db, title: &str, rating: u8) -> (i64, String) {
+        let (artifact_id, text) = digest(db, title, "2026-09-30T00:00:00.000Z");
+        let article_id = db
+            .query_i64(&format!(
+                "SELECT article_id FROM artifacts WHERE id = {artifact_id}"
+            ))
+            .unwrap();
+        db.rate(
+            db.owner_id().unwrap(),
+            article_id,
+            Rating::new(rating),
+            now(),
+        )
+        .unwrap();
+        (article_id, text)
+    }
+
+    async fn trials(
+        db: &Db,
+        embedder: &FakeEmbedder,
+        candidate: Option<&Profile>,
+    ) -> Vec<crate::db::LabeledScore> {
+        eval_trials(
+            db,
+            embedder,
+            &config(),
+            7,
+            candidate,
+            &Cancel::default(),
+            now(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// 採点のキー（プロファイルと式の名前）ごとの、記事の点数。
+    fn by_key(trials: &[crate::db::LabeledScore]) -> HashMap<(String, String), Vec<(i64, u8)>> {
+        let mut got: HashMap<(String, String), Vec<(i64, u8)>> = HashMap::new();
+        for t in trials {
+            assert_eq!(
+                (t.key.backend.as_str(), t.key.prompt_version),
+                (TRIAL_BACKEND, SCORE_VERSION)
+            );
+            got.entry((t.key.profile_hash.clone(), t.key.model.clone()))
+                .or_default()
+                .push((t.article_id, t.score));
+        }
+        got
+    }
+
+    fn model(name: &str) -> String {
+        format!("{} {name}", config().model)
+    }
+
+    /// 評価した記事を、今のプロファイルでは式の候補ごとに、候補のプロファイルでは今の式で採点する。
+    /// 基準は一覧の期間の要約で、点数は保存しない。
+    #[tokio::test]
+    async fn eval_trials_score_the_current_and_candidate_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let current = Profile {
+            interests: vec![interest("関心", 1.0, None)],
+            exclude: vec![],
+        };
+        db.save_profile(owner, &current, now()).unwrap();
+        let candidate = Profile {
+            interests: vec![interest("候補", 1.0, None)],
+            exclude: vec![],
+        };
+        let (liked, liked_text) = rated(&db, "liked", 5);
+        let (disliked, disliked_text) = rated(&db, "disliked", 1);
+        let embedder = FakeEmbedder::default();
+        {
+            let mut fixed = embedder.fixed.lock().unwrap();
+            fixed.insert(query("関心"), at(0.0));
+            fixed.insert(query("候補"), at(90.0));
+            fixed.insert(liked_text, at(10.0));
+            fixed.insert(disliked_text, at(80.0));
+        }
+        embed_articles(&db, &embedder, &config(), &Cancel::default(), &now)
+            .await
+            .unwrap();
+        let got = by_key(&trials(&db, &embedder, Some(&candidate)).await);
+        let hash = crate::profile::hash(&current);
+        let mut keys: Vec<&(String, String)> = got.keys().collect();
+        keys.sort();
+        let mut expected: Vec<(String, String)> = TRIAL_FORMULAS
+            .iter()
+            .map(|(name, _)| (hash.clone(), model(name)))
+            .chain([(crate::profile::hash(&candidate), model("now"))])
+            .collect();
+        expected.sort();
+        assert_eq!(keys, expected.iter().collect::<Vec<_>>());
+        // 基準は 2 件：liked（cos 10°）は上、disliked（cos 80°）は下。候補では逆になる
+        assert_eq!(got[&(hash, model("now"))], [(liked, 75), (disliked, 25)]);
+        assert_eq!(
+            got[&(crate::profile::hash(&candidate), model("now"))],
+            [(liked, 25), (disliked, 75)]
+        );
+        assert_eq!(db.query_i64("SELECT count(*) FROM scores").unwrap(), 0);
+    }
+
+    /// 候補が今のプロファイルと同じなら、今のプロファイルの `now` と同じキーになるので、候補の分は並べない。
+    #[tokio::test]
+    async fn eval_trials_skip_a_candidate_same_as_the_current_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let current = Profile {
+            interests: vec![interest("関心", 1.0, None)],
+            exclude: vec![],
+        };
+        db.save_profile(db.owner_id().unwrap(), &current, now())
+            .unwrap();
+        rated(&db, "a", 5);
+        let embedder = FakeEmbedder::default();
+        embed_articles(&db, &embedder, &config(), &Cancel::default(), &now)
+            .await
+            .unwrap();
+        // 評価した記事は 1 件なので、式ごとに 1 件ずつ
+        let got = trials(&db, &embedder, Some(&current)).await;
+        assert_eq!(got.len(), TRIAL_FORMULAS.len());
+    }
+
+    /// 前の版で取り込んだ、今の条件を満たさないプロファイルでは採点しない（embed ステージと同じ）。候補は採点する。
+    #[tokio::test]
+    async fn eval_trials_skip_a_current_profile_that_is_no_longer_valid() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            db.owner_id().unwrap(),
+            &Profile {
+                interests: vec![interest("なし", 0.0, None)],
+                exclude: vec![],
+            },
+            now(),
+        )
+        .unwrap();
+        let candidate = Profile {
+            interests: vec![interest("候補", 1.0, None)],
+            exclude: vec![],
+        };
+        rated(&db, "a", 5);
+        let embedder = FakeEmbedder::default();
+        embed_articles(&db, &embedder, &config(), &Cancel::default(), &now)
+            .await
+            .unwrap();
+        let got = by_key(&trials(&db, &embedder, Some(&candidate)).await);
+        let keys: Vec<&(String, String)> = got.keys().collect();
+        assert_eq!(keys, [&(crate::profile::hash(&candidate), model("now"))]);
+    }
+
+    /// 空間がまだ無ければ（要約のベクトルをまだ作っていない）、何も採点せず、好みの文も作らない。
+    #[tokio::test]
+    async fn eval_trials_need_a_space() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(
+            db.owner_id().unwrap(),
+            &Profile {
+                interests: vec![interest("関心", 1.0, None)],
+                exclude: vec![],
+            },
+            now(),
+        )
+        .unwrap();
+        rated(&db, "a", 5);
+        let embedder = FakeEmbedder::default();
+        assert!(trials(&db, &embedder, None).await.is_empty());
         assert!(embedder.calls().is_empty());
     }
 }

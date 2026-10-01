@@ -114,10 +114,22 @@ pub async fn preference_of(
     let texts = ProfileTexts::new(cfg, profile);
     let all: Vec<String> = texts.all().cloned().collect();
     let mut summary = ProfileSummary::default();
-    if !embed_texts(db, embedder, cfg, &space, &all, cancel, &mut summary).await? {
+    let mut vectors = db.text_embeddings(space.id, &all)?;
+    if !embed_texts(
+        db,
+        embedder,
+        cfg,
+        &space,
+        &mut vectors,
+        &all,
+        cancel,
+        &mut summary,
+    )
+    .await?
+    {
         return Ok(None);
     }
-    Ok(texts.preference(&db.text_embeddings(space.id, &all)?))
+    Ok(texts.preference(&vectors))
 }
 
 /// 好みの文のベクトルを作り、プロファイルのある全員を採点する。好みの文の呼び出しが失敗したら、残りの文は
@@ -163,14 +175,25 @@ pub async fn embed_profiles(
         .filter(|t| seen.insert(*t))
         .cloned()
         .collect();
-    let failure = match embed_texts(db, embedder, cfg, &space, &all, cancel, &mut summary).await {
+    let mut vectors = db.text_embeddings(space.id, &all)?;
+    let failure = match embed_texts(
+        db,
+        embedder,
+        cfg,
+        &space,
+        &mut vectors,
+        &all,
+        cancel,
+        &mut summary,
+    )
+    .await
+    {
         Ok(true) => None,
         // 中断されたか、空間が消えた
         Ok(false) => return Ok(summary),
         Err(e) => Some(e),
     };
     db.prune_text_embeddings(space.id, &all)?;
-    let vectors = db.text_embeddings(space.id, &all)?;
     for (profile, texts) in profiles.iter().zip(&texts) {
         if cancel.is_requested() {
             break;
@@ -188,29 +211,35 @@ pub async fn embed_profiles(
     }
 }
 
-/// ベクトルの無い文を作る。作り終えれば `true`、中断されたか空間が消えたら `false`。呼び出しが失敗したら、
-/// 残りは呼ばずに返す。
+/// `vectors`（DB から読んだ分）に無い文を作り、保存して `vectors` にも足す。作り終えれば `true`、中断されたか
+/// 空間が消えたら `false`。呼び出しが失敗したら、残りは呼ばずに返す。読み直さずに `vectors` を使うので、
+/// 重なって動くほかの処理（`embed` の後片付けや `eval --profile`）が文の行を消しても、この計算は影響を受けない。
+#[allow(clippy::too_many_arguments)]
 async fn embed_texts(
     db: &Db,
     embedder: &impl Embedder,
     cfg: &EmbeddingConfig,
     space: &EmbeddingSpace,
+    vectors: &mut HashMap<String, Vec<f32>>,
     all: &[String],
     cancel: &Cancel,
     summary: &mut ProfileSummary,
 ) -> Result<bool, EmbedStageError> {
-    let have = db.text_embeddings(space.id, all)?;
-    let missing: Vec<&String> = all.iter().filter(|t| !have.contains_key(*t)).collect();
+    let missing: Vec<String> = all
+        .iter()
+        .filter(|t| !vectors.contains_key(*t))
+        .cloned()
+        .collect();
     for chunk in missing.chunks(cfg.batch_size - FINGERPRINT_TEXTS) {
         let mut inputs = fingerprint_inputs(cfg, Role::Query);
-        inputs.extend(chunk.iter().map(|t| (*t).clone()));
+        inputs.extend(chunk.iter().cloned());
         let result = tokio::select! {
             r = embedder.embed(&inputs) => r,
             () = cancel.requested() => return Ok(false),
         };
         summary.calls += 1;
-        let vectors = result.map_err(EmbedStageError::Api)?;
-        let (fingerprint, vectors) = vectors.split_at(FINGERPRINT_TEXTS);
+        let returned = result.map_err(EmbedStageError::Api)?;
+        let (fingerprint, returned) = returned.split_at(FINGERPRINT_TEXTS);
         if !space.fingerprint.matches(Role::Query, fingerprint) {
             return Err(EmbedStageError::SpaceChanged(
                 "the model behind the same settings returns different vectors".into(),
@@ -218,14 +247,15 @@ async fn embed_texts(
         }
         let pairs: Vec<(String, Vec<f32>)> = chunk
             .iter()
-            .map(|t| (*t).clone())
-            .zip(vectors.iter().cloned())
+            .cloned()
+            .zip(returned.iter().cloned())
             .collect();
         if !db.save_text_embeddings(space.id, &pairs)? {
             tracing::warn!("the embedding space was rebuilt during this run; stopping");
             return Ok(false);
         }
         summary.embedded += chunk.len();
+        vectors.extend(pairs);
     }
     Ok(true)
 }

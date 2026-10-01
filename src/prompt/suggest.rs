@@ -362,7 +362,7 @@ mod tests {
         // 空の根拠は根拠にならない
         for (change, evidence) in [("", "b"), ("a", " ")] {
             let reason = serde_json::json!({
-                "interests": [], "exclude": [],
+                "interests": [{"topic": "a", "weight": 0.5, "note": ""}], "exclude": [],
                 "reasons": [{"change": change, "evidence": evidence}],
             });
             assert!(
@@ -373,7 +373,7 @@ mod tests {
         // 根拠の文も端末に表示するので、制御文字（改行を含む）は受け付けない
         for (change, evidence) in [("a\u{1b}[2J", "b"), ("a", "b\nc")] {
             let reason = serde_json::json!({
-                "interests": [], "exclude": [],
+                "interests": [{"topic": "a", "weight": 0.5, "note": ""}], "exclude": [],
                 "reasons": [{"change": change, "evidence": evidence}],
             });
             assert!(

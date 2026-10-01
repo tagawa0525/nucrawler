@@ -462,6 +462,71 @@ mod tests {
             db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
             0
         );
+        // 1 件だけの呼び出しでも同じ
+        let single = EmbeddingConfig {
+            batch_size: FINGERPRINT_TEXTS + 1,
+            ..cfg
+        };
+        let err = run(&db, &broken, &single).await.unwrap_err();
+        assert!(matches!(err, EmbedStageError::Api(_)), "{err:?}");
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            0
+        );
+    }
+
+    /// 切り分けの呼び出しと、初回の指紋の作成も、中断が要求されれば待たずに終える（応答しないサーバーで
+    /// タイムアウトまで止まらない）。中断で終えたときは、要約の失敗を記録しない。
+    #[tokio::test]
+    async fn api_calls_stop_on_cancel() {
+        let limit = std::time::Duration::from_secs(5);
+        let db = Db::open_in_memory().unwrap();
+        digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        digest(&db, "b", "2026-09-29T00:00:00.000Z");
+        let cfg = small_batches();
+        // 初回の指紋の作成（0 回目の呼び出し）が応答しない
+        let cancel = Cancel::default();
+        let hanging = FakeEmbedder {
+            hang_from: Some(0),
+            cancel_at: Some((0, cancel.clone())),
+            ..FakeEmbedder::default()
+        };
+        let summary =
+            tokio::time::timeout(limit, embed_articles(&db, &hanging, &cfg, &cancel, &now))
+                .await
+                .expect("fingerprinting stops on cancel")
+                .unwrap();
+        assert_eq!(summary.embedded, 0);
+        assert_eq!(db.embedding_space().unwrap(), None);
+        // まとめた呼び出しが文のせいに見える失敗で、その後の切り分け（1 回目）が応答しない
+        let fp = Fingerprint::make(&FakeEmbedder::default(), &cfg)
+            .await
+            .unwrap();
+        db.create_embedding_space(&space_name(&cfg), INPUT_VERSION, &fp, now())
+            .unwrap();
+        let cancel = Cancel::default();
+        let hanging = FakeEmbedder {
+            errors: std::sync::Mutex::new(
+                [EmbedError::Status {
+                    status: 400,
+                    body: "bad".into(),
+                }]
+                .into(),
+            ),
+            hang_from: Some(1),
+            cancel_at: Some((1, cancel.clone())),
+            ..FakeEmbedder::default()
+        };
+        let summary =
+            tokio::time::timeout(limit, embed_articles(&db, &hanging, &cfg, &cancel, &now))
+                .await
+                .expect("the probe stops on cancel")
+                .unwrap();
+        assert_eq!((summary.embedded, summary.failed), (0, 0));
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            0
+        );
     }
 
     /// サービスの側の失敗では、要約の失敗を記録せずに止める（止まっている間に再試行の上限を使い切らない）。

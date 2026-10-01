@@ -354,12 +354,15 @@ pub(crate) mod fake {
 
     /// 偽の embedding。`model` を変えると、同じ文でも違うベクトルを返す（中身のモデルの入れ替え）。
     /// `bad` を含む文があれば、文のせいの失敗（413）を返す。`errors` に入れた失敗は、先頭から順に返す。
+    /// `hang_from` 回目（0 から数える）以降の呼び出しは応答しない。`cancel_at` 回目の呼び出しでは中断を要求する。
     #[derive(Default)]
     pub(crate) struct FakeEmbedder {
         pub model: Mutex<String>,
         pub bad: Option<String>,
         pub errors: Mutex<VecDeque<EmbedError>>,
         pub calls: Mutex<Vec<Vec<String>>>,
+        pub hang_from: Option<usize>,
+        pub cancel_at: Option<(usize, crate::pipeline::Cancel)>,
     }
 
     impl FakeEmbedder {
@@ -375,7 +378,19 @@ pub(crate) mod fake {
 
     impl Embedder for FakeEmbedder {
         async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
-            self.calls.lock().unwrap().push(inputs.to_vec());
+            let n = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(inputs.to_vec());
+                calls.len() - 1
+            };
+            if let Some((at, cancel)) = &self.cancel_at
+                && *at == n
+            {
+                cancel.request();
+            }
+            if self.hang_from.is_some_and(|from| n >= from) {
+                std::future::pending::<()>().await;
+            }
             if let Some(e) = self.errors.lock().unwrap().pop_front() {
                 return Err(e);
             }

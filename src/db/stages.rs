@@ -56,36 +56,44 @@ impl Db {
         // 断念した行の次の時刻は、どれも最後の失敗から同じだけ先（`backoff(MAX_ATTEMPTS)`）なので、
         // その降順は最後に失敗した順になる
         let mut stmt = self.conn.prepare(
-            "SELECT stage, backend, model, attempts >= ?1, last_error
+            "SELECT stage, backend, model, article_id, attempts >= ?1, last_error
              FROM stage_errors
              ORDER BY next_retry_at DESC",
         )?;
         let mut rows = stmt.query([MAX_ATTEMPTS])?;
-        let mut by_key: std::collections::BTreeMap<(String, String, String), StageFailures> =
+        // 記事ごとに数える（embedding は同じ記事の要約ごとに記録があり、空間ごとにまとめると重なる）
+        #[derive(Default)]
+        struct Counted {
+            failing: std::collections::HashSet<i64>,
+            gave_up: std::collections::HashSet<i64>,
+            last_gave_up_error: Option<String>,
+        }
+        let mut by_key: std::collections::BTreeMap<(String, String, String), Counted> =
             std::collections::BTreeMap::new();
         while let Some(r) = rows.next()? {
             let stage = super::failure_stage_group(&r.get::<_, String>(0)?).to_string();
-            let (backend, model): (String, String) = (r.get(1)?, r.get(2)?);
-            let f = by_key
-                .entry((stage.clone(), backend.clone(), model.clone()))
-                .or_insert_with(|| StageFailures {
-                    stage,
-                    backend,
-                    model,
-                    failing: 0,
-                    gave_up: 0,
-                    last_gave_up_error: None,
-                });
-            if r.get(3)? {
-                f.gave_up += 1;
-                if f.last_gave_up_error.is_none() {
-                    f.last_gave_up_error = Some(r.get(4)?);
+            let c = by_key.entry((stage, r.get(1)?, r.get(2)?)).or_default();
+            let article_id: i64 = r.get(3)?;
+            if r.get(4)? {
+                c.gave_up.insert(article_id);
+                if c.last_gave_up_error.is_none() {
+                    c.last_gave_up_error = Some(r.get(5)?);
                 }
             } else {
-                f.failing += 1;
+                c.failing.insert(article_id);
             }
         }
-        Ok(by_key.into_values().collect())
+        Ok(by_key
+            .into_iter()
+            .map(|((stage, backend, model), c)| StageFailures {
+                stage,
+                backend,
+                model,
+                failing: c.failing.len(),
+                gave_up: c.gave_up.len(),
+                last_gave_up_error: c.last_gave_up_error,
+            })
+            .collect())
     }
 
     /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。

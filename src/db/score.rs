@@ -79,17 +79,17 @@ impl Db {
                  SELECT 1 FROM scores AS s
                  WHERE s.user_id = ?1 AND s.artifact_id = l.id AND s.profile_hash = ?3
                    AND s.backend = ?4 AND s.model = ?5 AND s.prompt_version = ?10)
-               AND NOT EXISTS (
-                 SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = l.article_id AND e.stage = ?9
-                   AND e.backend = ?4 AND e.model = ?5
-                   AND (e.attempts >= ?6 OR e.next_retry_at > ?7))
-               AND NOT EXISTS (
-                 SELECT 1 FROM work_claims AS w
-                 WHERE w.article_id = l.article_id AND w.stage = ?9
-                   AND w.backend = ?4 AND w.model = ?5)
+               AND {available}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
+            available = super::claims::available(super::claims::Available {
+                article: "l.article_id",
+                stage: "?9",
+                backend: "?4",
+                model: "?5",
+                max_attempts: "?6",
+                now: "?7",
+            }),
             latest = super::read::latest_digests("?1"),
             linked = linked_topics("l"),
         ))?;

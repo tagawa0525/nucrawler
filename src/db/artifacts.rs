@@ -92,7 +92,7 @@ impl Db {
         model: &str,
         limit: usize,
     ) -> Result<Vec<DigestInput>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
              WHERE coalesce(a.published_at, a.fetched_at) >= ?1
                AND NOT EXISTS (
@@ -111,18 +111,18 @@ impl Db {
                      SELECT 1 FROM stage_errors AS e
                      WHERE e.article_id = a.id AND e.stage = 'extract'
                        AND e.backend = '' AND e.model = '' AND e.attempts >= ?2)))
-               AND NOT EXISTS (
-                 SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = a.id AND e.stage = 'digest'
-                   AND e.backend = ?3 AND e.model = ?4
-                   AND (e.attempts >= ?2 OR e.next_retry_at > ?5))
-               AND NOT EXISTS (
-                 SELECT 1 FROM work_claims AS w
-                 WHERE w.article_id = a.id AND w.stage = 'digest'
-                   AND w.backend = ?3 AND w.model = ?4)
+               AND {available}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?6",
-        )?;
+            available = super::claims::available(super::claims::Available {
+                article: "a.id",
+                stage: "'digest'",
+                backend: "?3",
+                model: "?4",
+                max_attempts: "?2",
+                now: "?5",
+            }),
+        ))?;
         let articles = stmt
             .query_map(
                 rusqlite::params![
@@ -162,7 +162,7 @@ impl Db {
         model: &str,
         limit: usize,
     ) -> Result<Vec<TitleInput>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.id, a.title FROM articles AS a
              WHERE a.lang = 'en'
                AND NOT EXISTS (
@@ -172,18 +172,18 @@ impl Db {
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                    AND c.access_membership_id IS NULL)
-               AND NOT EXISTS (
-                 SELECT 1 FROM stage_errors AS e
-                 WHERE e.article_id = a.id AND e.stage = 'title'
-                   AND e.backend = ?2 AND e.model = ?3
-                   AND (e.attempts >= ?1 OR e.next_retry_at > ?4))
-               AND NOT EXISTS (
-                 SELECT 1 FROM work_claims AS w
-                 WHERE w.article_id = a.id AND w.stage = 'title'
-                   AND w.backend = ?2 AND w.model = ?3)
+               AND {available}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?5",
-        )?;
+            available = super::claims::available(super::claims::Available {
+                article: "a.id",
+                stage: "'title'",
+                backend: "?2",
+                model: "?3",
+                max_attempts: "?1",
+                now: "?4",
+            }),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 MAX_ATTEMPTS,

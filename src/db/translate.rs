@@ -99,15 +99,7 @@ impl Db {
                    SELECT 1 FROM contents AS c
                    WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                      AND c.access_membership_id IS NULL)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM stage_errors AS e
-                   WHERE e.article_id = a.id AND e.stage = 'translate'
-                     AND e.backend = ?3 AND e.model = ?4
-                     AND (e.attempts >= ?5 OR e.next_retry_at > ?6))
-                 AND NOT EXISTS (
-                   SELECT 1 FROM work_claims AS w
-                   WHERE w.article_id = a.id AND w.stage = 'translate'
-                     AND w.backend = ?3 AND w.model = ?4)
+                 AND {available}
              ),
              candidates AS (
                SELECT b.*,
@@ -130,6 +122,14 @@ impl Db {
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
             digest_id = super::read::latest_digest("id", "a.id", "?1"),
+            available = super::claims::available(super::claims::Available {
+                article: "a.id",
+                stage: "'translate'",
+                backend: "?3",
+                model: "?4",
+                max_attempts: "?5",
+                now: "?6",
+            }),
         ))?;
         let articles = stmt
             .query_map(

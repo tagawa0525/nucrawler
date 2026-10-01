@@ -27,6 +27,15 @@ pub fn embed_failure_stage(space_id: i64, artifact_id: i64) -> String {
     format!("embed:{space_id}:{artifact_id}")
 }
 
+/// 失敗の記録のステージの名前を、数えるときのまとまりにする：`embed_failure_stage` の名前は要約の ID を
+/// 除いた空間ごとの名前（`embed:{space_id}`）にし、ほかのステージの名前はそのまま返す。
+pub(super) fn failure_stage_group(stage: &str) -> &str {
+    match stage.strip_prefix("embed:") {
+        Some(_) => stage.rsplit_once(':').map_or(stage, |(group, _)| group),
+        None => stage,
+    }
+}
+
 /// embedding にする要約。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedInput {

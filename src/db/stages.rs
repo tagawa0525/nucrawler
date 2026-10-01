@@ -55,8 +55,41 @@ impl Db {
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<StageFailures>, DbError> {
-        let _ = cutoff;
-        todo!()
+        // 断念した行の次の時刻は、どれも最後の失敗から同じだけ先（`backoff(MAX_ATTEMPTS)`）なので、
+        // その降順は最後に失敗した順になる
+        let mut stmt = self.conn.prepare(
+            "SELECT e.stage, e.backend, e.model, e.attempts >= ?2, e.last_error
+             FROM stage_errors AS e
+             JOIN articles AS a ON a.id = e.article_id
+             WHERE coalesce(a.published_at, a.fetched_at) >= ?1
+             ORDER BY e.next_retry_at DESC",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![timestamp(cutoff), MAX_ATTEMPTS])?;
+        let mut by_key: std::collections::BTreeMap<(String, String, String), StageFailures> =
+            std::collections::BTreeMap::new();
+        while let Some(r) = rows.next()? {
+            let stage = super::failure_stage_group(&r.get::<_, String>(0)?).to_string();
+            let (backend, model): (String, String) = (r.get(1)?, r.get(2)?);
+            let f = by_key
+                .entry((stage.clone(), backend.clone(), model.clone()))
+                .or_insert_with(|| StageFailures {
+                    stage,
+                    backend,
+                    model,
+                    retrying: 0,
+                    gave_up: 0,
+                    last_gave_up_error: None,
+                });
+            if r.get(3)? {
+                f.gave_up += 1;
+                if f.last_gave_up_error.is_none() {
+                    f.last_gave_up_error = Some(r.get(4)?);
+                }
+            } else {
+                f.retrying += 1;
+            }
+        }
+        Ok(by_key.into_values().collect())
     }
 
     /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。

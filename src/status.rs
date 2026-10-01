@@ -56,8 +56,32 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
 /// ステージごとの失敗の記録（`since` は数えた記事の期間の始まりの日付）。断念した記事があれば、最後に
 /// 断念した理由を添える。
 pub fn render_failures(failures: &[StageFailures], since: &str) -> String {
-    let _ = (failures, since);
-    todo!()
+    if failures.is_empty() {
+        return format!("\nno stage failures (articles since {since})\n");
+    }
+    let key = |f: &StageFailures| match (f.backend.is_empty(), f.model.is_empty()) {
+        (true, true) => "-".to_string(),
+        (false, true) => f.backend.clone(),
+        _ => format!("{}/{}", f.backend, f.model),
+    };
+    let stage_width = failures.iter().map(|f| f.stage.len()).max().unwrap_or(0);
+    let key_width = failures.iter().map(|f| key(f).len()).max().unwrap_or(0);
+    let mut out = format!("\nstage failures (articles since {since}):\n");
+    for f in failures {
+        let _ = write!(
+            out,
+            "{:stage_width$}  {:key_width$}  retrying {}  gave up {}",
+            f.stage,
+            key(f),
+            f.retrying,
+            f.gave_up
+        );
+        if let Some(error) = &f.last_gave_up_error {
+            let _ = write!(out, "  last given up: {error}");
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]

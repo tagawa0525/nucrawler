@@ -679,9 +679,18 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::json!({"items": "x"}),
-            serde_json::json!({"items": [{"title_ja": "no id"}]}),
         ] {
             assert!(parse(&bad, &[1], &vocab()).is_err(), "{bad}");
         }
+    }
+
+    /// id の無い項目は、その項目だけを捨てる（ほかの記事の結果は残し、捨てた記事は欠けとして再試行に回す）。
+    #[test]
+    fn parse_drops_items_without_an_id() {
+        let output = serde_json::json!({"items": [{"title_ja": "no id"}, item(1)]});
+        let parsed = parse(&output, &[1, 2], &vocab()).unwrap();
+        let ids: Vec<i64> = parsed.items.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [1]);
+        assert_eq!(parsed.missing, [2]);
     }
 }

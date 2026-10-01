@@ -72,6 +72,19 @@ pub fn collect_items<T>(
     })
 }
 
+/// LLM が作る文（補足・根拠・見出しの和訳）に入れない文字：制御文字（改行やエスケープシーケンス）と、半角・全角
+/// 以外の空白（U+2028/U+2029 などは制御文字ではないが行を分ける）。端末の表示やプロンプトの 1 行の構造を壊さない
+/// ために拒む。
+pub fn breaks_line(c: char) -> bool {
+    c.is_control() || (c.is_whitespace() && c != ' ' && c != '\u{3000}')
+}
+
+/// 名前（語彙の語、関心分野の名前、推薦しない話題）に入れない文字：`breaks_line` に加えて全角の空白。名前は
+/// 照合のキーなので、見た目の同じ別の名前を作らない。
+pub fn breaks_name(c: char) -> bool {
+    breaks_line(c) || c == '\u{3000}'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

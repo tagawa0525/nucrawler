@@ -196,14 +196,14 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
             r.change
         )));
     }
-    // 根拠の文も端末に表示するので、プロファイルと同じくエスケープシーケンスや改行を通さない
+    // 根拠の文も端末に表示するので、プロファイルと同じく行を崩す文字を通さない
     if let Some(r) = output.reasons.iter().find(|r| {
         format!("{}{}", r.change, r.evidence)
             .chars()
-            .any(char::is_control)
+            .any(super::breaks_line)
     }) {
         return Err(SuggestError::Malformed(format!(
-            "reason {:?} contains control characters",
+            "reason {:?} contains control characters or disallowed whitespace",
             r.change
         )));
     }
@@ -371,7 +371,7 @@ mod tests {
             );
         }
         // 根拠の文も端末に表示するので、制御文字（改行を含む）は受け付けない
-        for (change, evidence) in [("a\u{1b}[2J", "b"), ("a", "b\nc")] {
+        for (change, evidence) in [("a\u{1b}[2J", "b"), ("a", "b\nc"), ("a", "b\u{2028}c")] {
             let reason = serde_json::json!({
                 "interests": [{"topic": "a", "weight": 0.5, "note": ""}], "exclude": [],
                 "reasons": [{"change": change, "evidence": evidence}],
@@ -381,5 +381,11 @@ mod tests {
                 "{change:?} {evidence:?}"
             );
         }
+        // 全角の空白は文の一部として許す
+        let full_width = serde_json::json!({
+            "interests": [{"topic": "a", "weight": 0.5, "note": ""}], "exclude": [],
+            "reasons": [{"change": "a", "evidence": "関心\u{3000}3 件"}],
+        });
+        assert!(parse(&full_width).is_ok());
     }
 }

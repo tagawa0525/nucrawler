@@ -86,12 +86,6 @@ pub fn build_prompt(inputs: &[TitleInput]) -> String {
     out
 }
 
-/// 一覧の 1 行を崩す文字。U+2028/U+2029 などは制御文字ではないが行を分けるので、空白のうち
-/// 半角と全角の空白以外も拒む。
-fn breaks_line(c: char) -> bool {
-    c.is_control() || (c.is_whitespace() && c != ' ' && c != '\u{3000}')
-}
-
 /// 応答から、依頼した記事の見出しを取り出す。依頼していない id は無視し、欠けた id を報告する。
 /// 空の見出し・改行を含む見出し・スキーマに合わない項目は採らず、欠けたものとして扱う。
 pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, TitleError> {
@@ -101,7 +95,7 @@ pub fn parse(output: &serde_json::Value, requested: &[i64]) -> Result<Parsed, Ti
             return None;
         };
         let title = title_ja.trim();
-        if title.is_empty() || title.chars().any(breaks_line) {
+        if title.is_empty() || title.chars().any(super::breaks_line) {
             tracing::warn!(id, "ignoring an invalid title {title_ja:?}");
             return None;
         }

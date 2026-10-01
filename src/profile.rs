@@ -78,16 +78,22 @@ pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
             )));
         }
     }
-    // 案は LLM が作って端末に表示するので、エスケープシーケンスや改行を通さない
-    let texts = profile
+    // 案は LLM が作って端末に表示し、採点のプロンプトにも 1 行ずつ埋め込むので、行を崩す文字を通さない
+    let names = profile
         .interests
         .iter()
-        .flat_map(|i| std::iter::once(&i.topic).chain(i.note.as_ref()))
-        .chain(&profile.exclude);
-    for text in texts {
-        if text.chars().any(char::is_control) {
+        .map(|i| &i.topic)
+        .chain(&profile.exclude)
+        .map(|n| (n, crate::prompt::breaks_name as fn(char) -> bool));
+    let notes = profile
+        .interests
+        .iter()
+        .filter_map(|i| i.note.as_ref())
+        .map(|n| (n, crate::prompt::breaks_line as fn(char) -> bool));
+    for (text, breaks) in names.chain(notes) {
+        if text.chars().any(breaks) {
             return Err(ProfileError::Invalid(format!(
-                "{text:?} must not contain control characters"
+                "{text:?} must not contain control characters or disallowed whitespace"
             )));
         }
     }
@@ -379,6 +385,16 @@ mod tests {
                 "control",
             ),
             ("exclude = [\"a\\tb\"]\n", "control"),
+            // U+2028/U+2029 は制御文字ではないが行を分ける。名前は照合のキーなので全角の空白も拒む
+            (
+                "[[interest]]\ntopic = \"a\\u2028b\"\nweight = 0.5\n",
+                "control",
+            ),
+            (
+                "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"x\\u2029y\"\n",
+                "control",
+            ),
+            ("exclude = [\"核\\u3000融合\"]\n", "control"),
         ] {
             let err = parse(toml).unwrap_err();
             assert!(
@@ -390,6 +406,13 @@ mod tests {
             parse("bogus = 1").unwrap_err(),
             ProfileError::Parse(_)
         ));
+    }
+
+    /// 補足は文なので、全角の空白を許す。
+    #[test]
+    fn accepts_full_width_spaces_in_notes() {
+        let toml = "[[interest]]\ntopic = \"a\"\nweight = 0.5\nnote = \"再稼働\\u3000審査\"\n";
+        assert!(parse(toml).is_ok());
     }
 
     /// 好みのベクトルを作る量を抑えるため、件数と長さに上限を置く。重みが正の関心分野が 1 つも無ければ、

@@ -537,6 +537,52 @@ mod tests {
         }
     }
 
+    /// リダイレクトはたどらない（鍵のヘッダーをほかのサイトへ送らない）。サービスの側の失敗にする。
+    #[tokio::test]
+    async fn does_not_follow_redirects() {
+        let elsewhere = echo_server();
+        let target = elsewhere.url("/e");
+        let server = Server::start_with(move |_| Route::redirect(&target));
+        let cfg = EmbeddingConfig {
+            auth: EmbeddingAuth::ApiKey,
+            api_key_env: Some("KEY".into()),
+            ..cfg(&server.url("/e"))
+        };
+        let client = Client::from_config(&cfg, |_| Some("secret".into())).unwrap();
+        let err = client.embed(&["a".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbedError::Status { status: 302, .. }),
+            "{err:?}"
+        );
+        assert!(!err.is_input_error());
+        assert!(elsewhere.requests().is_empty());
+    }
+
+    /// 応答は、送った文の数から決めた大きさまでしか読まない。超えれば誤りにする（壊れたサーバーで
+    /// メモリを使い切らない）。失敗の応答の本文も、表示に使う分だけを読む。
+    #[tokio::test]
+    async fn limits_response_sizes() {
+        let huge = vec![b' '; 4 * 1024 * 1024];
+        let body = huge.clone();
+        let server = Server::start_with(move |_| Route::ok(body.clone()));
+        let client = Client::from_config(&cfg(&server.url("/e")), no_env).unwrap();
+        let err = client.embed(&["a".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(&err, EmbedError::Invalid(m) if m.contains("larger")),
+            "{err:?}"
+        );
+        let failing = Server::start_with(move |_| Route {
+            body: huge.clone(),
+            ..Route::status(503)
+        });
+        let client = Client::from_config(&cfg(&failing.url("/e")), no_env).unwrap();
+        let err = client.embed(&["a".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(&err, EmbedError::Status { status: 503, body } if body.len() <= 500),
+            "{err:?}"
+        );
+    }
+
     /// 応答しないサーバーへの呼び出しは、`timeout_secs` で失敗になる（サービスの側の失敗）。
     #[tokio::test]
     async fn times_out() {

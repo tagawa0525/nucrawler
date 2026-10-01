@@ -196,14 +196,14 @@ pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
             r.change
         )));
     }
-    // 根拠の文も端末に表示するので、プロファイルと同じくエスケープシーケンスや改行を通さない
+    // 根拠の文も端末に表示するので、プロファイルと同じく行を崩す文字を通さない
     if let Some(r) = output.reasons.iter().find(|r| {
         format!("{}{}", r.change, r.evidence)
             .chars()
-            .any(char::is_control)
+            .any(super::breaks_line)
     }) {
         return Err(SuggestError::Malformed(format!(
-            "reason {:?} contains control characters",
+            "reason {:?} contains control characters or line-breaking spaces",
             r.change
         )));
     }

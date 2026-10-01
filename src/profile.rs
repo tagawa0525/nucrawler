@@ -78,16 +78,22 @@ pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
             )));
         }
     }
-    // 案は LLM が作って端末に表示するので、エスケープシーケンスや改行を通さない
-    let texts = profile
+    // 案は LLM が作って端末に表示し、採点のプロンプトにも 1 行ずつ埋め込むので、行を崩す文字を通さない
+    let names = profile
         .interests
         .iter()
-        .flat_map(|i| std::iter::once(&i.topic).chain(i.note.as_ref()))
-        .chain(&profile.exclude);
-    for text in texts {
-        if text.chars().any(char::is_control) {
+        .map(|i| &i.topic)
+        .chain(&profile.exclude)
+        .map(|n| (n, crate::prompt::breaks_name as fn(char) -> bool));
+    let notes = profile
+        .interests
+        .iter()
+        .filter_map(|i| i.note.as_ref())
+        .map(|n| (n, crate::prompt::breaks_line as fn(char) -> bool));
+    for (text, breaks) in names.chain(notes) {
+        if text.chars().any(breaks) {
             return Err(ProfileError::Invalid(format!(
-                "{text:?} must not contain control characters"
+                "{text:?} must not contain control characters or line-breaking spaces"
             )));
         }
     }

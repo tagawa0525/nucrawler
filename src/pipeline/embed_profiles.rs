@@ -34,7 +34,70 @@ pub struct ProfileSummary {
 
 /// 関心分野の文：名前と、あれば補足（note）を改行でつなぐ。
 pub fn interest_text(interest: &Interest) -> String {
-    todo!()
+    match interest.note.as_deref().map(str::trim) {
+        Some(note) if !note.is_empty() => format!("{}\n{note}", interest.topic),
+        _ => interest.topic.clone(),
+    }
+}
+
+/// プロファイルの好みの文（接頭辞を付けた入力）。重みが 0 の関心分野は点数に効かないので含めない。
+struct ProfileTexts<'a> {
+    interests: Vec<(&'a Interest, String)>,
+    excludes: Vec<(&'a str, String)>,
+}
+
+impl<'a> ProfileTexts<'a> {
+    fn new(cfg: &EmbeddingConfig, profile: &'a ScoringProfile) -> Self {
+        Self {
+            interests: profile
+                .profile
+                .interests
+                .iter()
+                .filter(|i| i.weight > 0.0)
+                .map(|i| (i, input(cfg, Role::Query, &interest_text(i))))
+                .collect(),
+            excludes: profile
+                .profile
+                .exclude
+                .iter()
+                .map(|e| (e.as_str(), input(cfg, Role::Query, e)))
+                .collect(),
+        }
+    }
+
+    fn all(&self) -> impl Iterator<Item = &String> {
+        self.interests
+            .iter()
+            .map(|(_, t)| t)
+            .chain(self.excludes.iter().map(|(_, t)| t))
+    }
+
+    /// すべての文のベクトルがそろっていれば、好みのベクトル。
+    fn preference(&self, vectors: &HashMap<String, Vec<f32>>) -> Option<Preference> {
+        Some(Preference {
+            interests: self
+                .interests
+                .iter()
+                .map(|(i, t)| {
+                    Some(embed_score::Interest {
+                        topic: i.topic.clone(),
+                        weight: i.weight as f32,
+                        vector: vectors.get(t)?.clone(),
+                    })
+                })
+                .collect::<Option<_>>()?,
+            excludes: self
+                .excludes
+                .iter()
+                .map(|(e, t)| {
+                    Some(embed_score::Exclude {
+                        topic: (*e).to_string(),
+                        vector: vectors.get(t)?.clone(),
+                    })
+                })
+                .collect::<Option<_>>()?,
+        })
+    }
 }
 
 /// 好みの文のベクトルを作り、プロファイルのある全員を採点する。好みの文の呼び出しが失敗したら、残りの文は
@@ -47,7 +110,148 @@ pub async fn embed_profiles(
     cancel: &Cancel,
     clock: &dyn Fn() -> DateTime<Utc>,
 ) -> Result<ProfileSummary, EmbedStageError> {
-    todo!()
+    let mut summary = ProfileSummary::default();
+    // 空間は要約のベクトルを作るときに作る
+    let Some(space) = db.embedding_space()? else {
+        return Ok(summary);
+    };
+    check_space(&space, cfg)?;
+    let profiles = db.scoring_profiles()?;
+    let texts: Vec<ProfileTexts> = profiles.iter().map(|p| ProfileTexts::new(cfg, p)).collect();
+    let mut seen = HashSet::new();
+    let all: Vec<String> = texts
+        .iter()
+        .flat_map(ProfileTexts::all)
+        .filter(|t| seen.insert(*t))
+        .cloned()
+        .collect();
+    let failure = match embed_texts(db, embedder, cfg, &space, &all, cancel, &mut summary).await {
+        Ok(true) => None,
+        // 中断されたか、空間が消えた
+        Ok(false) => return Ok(summary),
+        Err(e) => Some(e),
+    };
+    db.prune_text_embeddings(&all)?;
+    let vectors = db.text_embeddings(space.id, &all)?;
+    for (profile, texts) in profiles.iter().zip(&texts) {
+        if cancel.is_requested() {
+            break;
+        }
+        // ベクトルのそろわない利用者は、点数が付かない（次の実行でまた作る）
+        if let Some(preference) = texts.preference(&vectors) {
+            let scored = score_user(db, cfg, &space, profile, &preference, list_days, clock())?;
+            summary.users += 1;
+            summary.scored += scored;
+        }
+    }
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(summary),
+    }
+}
+
+/// ベクトルの無い文を作る。作り終えれば `true`、中断されたか空間が消えたら `false`。呼び出しが失敗したら、
+/// 残りは呼ばずに返す。
+async fn embed_texts(
+    db: &Db,
+    embedder: &impl Embedder,
+    cfg: &EmbeddingConfig,
+    space: &EmbeddingSpace,
+    all: &[String],
+    cancel: &Cancel,
+    summary: &mut ProfileSummary,
+) -> Result<bool, EmbedStageError> {
+    let have = db.text_embeddings(space.id, all)?;
+    let missing: Vec<&String> = all.iter().filter(|t| !have.contains_key(*t)).collect();
+    for chunk in missing.chunks(cfg.batch_size - FINGERPRINT_TEXTS) {
+        let mut inputs = fingerprint_inputs(cfg, Role::Query);
+        inputs.extend(chunk.iter().map(|t| (*t).clone()));
+        let result = tokio::select! {
+            r = embedder.embed(&inputs) => r,
+            () = cancel.requested() => return Ok(false),
+        };
+        summary.calls += 1;
+        let vectors = result.map_err(EmbedStageError::Api)?;
+        let (fingerprint, vectors) = vectors.split_at(FINGERPRINT_TEXTS);
+        if !space.fingerprint.matches(Role::Query, fingerprint) {
+            return Err(EmbedStageError::SpaceChanged(
+                "the model behind the same settings returns different vectors".into(),
+            ));
+        }
+        let pairs: Vec<(String, Vec<f32>)> = chunk
+            .iter()
+            .map(|t| (*t).clone())
+            .zip(vectors.iter().cloned())
+            .collect();
+        if !db.save_text_embeddings(space.id, &pairs)? {
+            tracing::warn!("the embedding space was rebuilt during this run; stopping");
+            return Ok(false);
+        }
+        summary.embedded += chunk.len();
+    }
+    Ok(true)
+}
+
+/// 利用者の、今のプロファイルの点数がまだ無い要約を採点し、まとめて保存する。付けた点数の数を返す。
+fn score_user(
+    db: &Db,
+    cfg: &EmbeddingConfig,
+    space: &EmbeddingSpace,
+    profile: &ScoringProfile,
+    preference: &Preference,
+    list_days: u32,
+    now: DateTime<Utc>,
+) -> Result<usize, EmbedStageError> {
+    let key = ScoreKey {
+        user_id: profile.user_id,
+        profile_hash: &profile.hash,
+        backend: EMBED_BACKEND,
+        model: &cfg.model,
+        prompt_version: SCORE_VERSION,
+    };
+    let formula = Formula::default();
+    let recent = CandidateFilter {
+        since: Some(now - chrono::Duration::days(list_days.into())),
+        unscored: None,
+    };
+    let reference: Vec<f32> = db
+        .embedding_candidates(profile.user_id, space.id, recent, 0, REFERENCE_LIMIT)?
+        .iter()
+        .map(|c| embed_score::raw(preference, &c.vector, formula).value)
+        .collect();
+    let unscored = CandidateFilter {
+        since: None,
+        unscored: Some(key),
+    };
+    let mut scores = Vec::new();
+    // 保存はまとめて最後に行うので、まだ点数の無いものは読んでいる間に変わらない。ページは件数で進める
+    loop {
+        let page =
+            db.embedding_candidates(profile.user_id, space.id, unscored, scores.len(), PAGE)?;
+        for c in &page {
+            let raw = embed_score::raw(preference, &c.vector, formula);
+            scores.push(EmbeddingScore {
+                artifact_id: c.artifact_id,
+                score: embed_score::percentile(raw.value, &reference),
+                interest: raw.interest.map(|i| preference.interests[i].topic.clone()),
+                exclude: raw.exclude.map(|j| preference.excludes[j].topic.clone()),
+            });
+        }
+        if page.len() < PAGE {
+            break;
+        }
+    }
+    if scores.is_empty() {
+        return Ok(0);
+    }
+    if !db.save_embedding_scores(space.id, key, &scores, now)? {
+        tracing::info!(
+            user_id = profile.user_id,
+            "the profile or the embedding space changed while scoring; scoring again next run"
+        );
+        return Ok(0);
+    }
+    Ok(scores.len())
 }
 
 #[cfg(test)]

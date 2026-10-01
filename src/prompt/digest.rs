@@ -5,6 +5,7 @@ use crate::db::DigestInput;
 use crate::glossary::Term;
 use crate::prompt::escape_data;
 use crate::topics::Topic;
+use serde::Deserialize;
 
 /// プロンプトや出力の形を変えたら上げる。成果物はこの版ごとに別の行として残る。
 pub const PROMPT_VERSION: i64 = 3;
@@ -273,7 +274,7 @@ pub fn parse(
 ) -> Result<Parsed, DigestError> {
     let collected = super::collect_items(output, requested, "digest", |id, item| {
         // スキーマ（型、必須、余計な項目の禁止）に合わない項目は採らず、欠けたものとして扱う。
-        match serde_json::from_value::<Item>(item.clone())
+        match Item::deserialize(item)
             .map_err(|e| e.to_string())
             .and_then(|i| i.into_payload(vocab))
         {

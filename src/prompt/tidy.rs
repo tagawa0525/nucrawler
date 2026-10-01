@@ -3,6 +3,7 @@
 //! LLM の呼び出しやステージの進行はここでは扱わない。
 
 use crate::db::{TopicMerge, TopicUsage};
+use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TidyError {
@@ -101,7 +102,7 @@ pub fn parse(
     usage: &[TopicUsage],
 ) -> Result<Vec<TopicMerge>, TidyError> {
     let Output { merges } =
-        serde_json::from_value(output.clone()).map_err(|e| TidyError::Malformed(e.to_string()))?;
+        Output::deserialize(output).map_err(|e| TidyError::Malformed(e.to_string()))?;
     let find = |name: &str| usage.iter().find(|u| u.name == name);
     let mut kept: Vec<Item> = Vec::new();
     for m in merges {

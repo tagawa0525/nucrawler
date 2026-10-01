@@ -279,7 +279,7 @@ fn link_digest_topics(
 ) -> Result<(), DbError> {
     use rusqlite::OptionalExtension;
     let new_topics: Vec<crate::topics::Topic> = match payload.get("new_topics") {
-        Some(v) => serde_json::from_value(v.clone())?,
+        Some(v) => serde::Deserialize::deserialize(v)?,
         None => Vec::new(),
     };
     // 統合済みの語（別名）が提案されても語彙に戻さず、下で統合先に付ける
@@ -292,7 +292,7 @@ fn link_digest_topics(
         )?;
     }
     let names: Vec<String> = match payload.get("topics") {
-        Some(v) => serde_json::from_value(v.clone())?,
+        Some(v) => serde::Deserialize::deserialize(v)?,
         None => Vec::new(),
     };
     for name in names {

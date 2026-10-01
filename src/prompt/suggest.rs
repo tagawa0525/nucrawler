@@ -4,6 +4,7 @@
 use crate::db::Evidence;
 use crate::profile::{Interest, Profile, ProfileError};
 use crate::prompt::escape_data;
+use serde::Deserialize;
 
 /// プロンプトに並べる評価した記事の見出しの上限（新しい順）
 const TITLES: usize = 100;
@@ -170,8 +171,8 @@ struct OutputReason {
 /// 応答をプロファイルにし、`profile import` と同じ規則で検証する。空の note は無しにする。
 /// 根拠の文も制御文字を含まないことを確かめる。
 pub fn parse(output: &serde_json::Value) -> Result<Suggestion, SuggestError> {
-    let output: Output = serde_json::from_value(output.clone())
-        .map_err(|e| SuggestError::Malformed(e.to_string()))?;
+    let output: Output =
+        Output::deserialize(output).map_err(|e| SuggestError::Malformed(e.to_string()))?;
     let profile = Profile {
         interests: output
             .interests

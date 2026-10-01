@@ -3,6 +3,7 @@
 use crate::db::TranslateInput;
 use crate::glossary::Term;
 use crate::prompt::escape_data;
+use serde::Deserialize;
 
 pub const PROMPT_VERSION: i64 = 1;
 
@@ -67,8 +68,8 @@ struct Output {
 
 /// 応答から和訳を取り出す。空の和訳や余計な項目は拒否する。
 pub fn parse(output: &serde_json::Value) -> Result<String, TranslateError> {
-    let Output { body_ja } = serde_json::from_value(output.clone())
-        .map_err(|e| TranslateError::Malformed(e.to_string()))?;
+    let Output { body_ja } =
+        Output::deserialize(output).map_err(|e| TranslateError::Malformed(e.to_string()))?;
     if body_ja.trim().is_empty() {
         return Err(TranslateError::Malformed("`body_ja` is empty".into()));
     }

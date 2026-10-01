@@ -6,12 +6,11 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 
+use super::Target;
 use super::llm_call::{
-    Call, LlmStage, MISSING, Outcome, Reserved, Shared, call_recorded, claim_ttl, held_missing,
-    permit, record_failures, reserve,
+    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
 };
 use super::workers::run_workers;
-use super::{Halt, Target};
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
     ArtifactKind, ClaimKey, Db, DbError, DigestInput, NewArtifact, RedoFilter, RedoKey, StageKey,
@@ -31,38 +30,27 @@ pub enum DigestStageError {
 #[derive(Debug, Default, PartialEq)]
 pub struct DigestSummary {
     pub digested: usize,
-    /// 再試行に回した記事の数
-    pub failed: usize,
-    pub calls: usize,
-    pub halted: Option<Halt>,
-    pub cancelled: bool,
+    pub tally: Tally,
 }
 
 impl DigestSummary {
     /// 作業者ごとの集計を合わせる。
     fn merge(mut self, other: DigestSummary) -> DigestSummary {
         self.digested += other.digested;
-        self.failed += other.failed;
-        self.calls += other.calls;
-        self.halted = Halt::most_severe(self.halted, other.halted);
-        self.cancelled |= other.cancelled;
+        self.tally.merge(other.tally);
         self
     }
 }
 
 pub async fn digest_articles<L: Llm>(
-    LlmStage {
-        db,
-        llm,
-        quota,
-        cancel,
-        clock,
-    }: LlmStage<'_, L>,
+    env: LlmStage<'_, L>,
     llm_cfg: &LlmConfig,
     pipeline_cfg: &PipelineConfig,
     target: &Target,
     now: DateTime<Utc>,
 ) -> Result<DigestSummary, DigestStageError> {
+    let workers = Workers::new(env);
+    let (db, llm, clock) = (workers.db, workers.llm, workers.clock);
     let backend = llm.backend();
     let model = llm_cfg.digest_model.as_str();
     let cutoff = now - chrono::Duration::days(i64::from(pipeline_cfg.backlog_days));
@@ -83,50 +71,18 @@ pub async fn digest_articles<L: Llm>(
         .collect(),
         _ => VecDeque::new(),
     };
-    let shared = Shared::new(quota);
     let outdated = RefCell::new(outdated);
     // `llm.concurrency` 個の作業者を同時に回す。同じ記事は作業の予約で分かれる
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = DigestSummary::default();
         loop {
-            // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
-            // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
-            tokio::task::yield_now().await;
-            if shared.stopped() {
-                break;
-            }
-            if cancel.is_requested() {
-                summary.cancelled = true;
-                break;
-            }
             // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-            // 呼び出しの枠を先に取り、判定・予約・呼び出しをその中で行う（枠はこの周の終わりまで持つ）
-            let _slot = match reserve(llm, cancel).await {
-                Reserved::Slot(slot) => slot,
-                Reserved::Cancelled => {
-                    summary.cancelled = true;
-                    break;
-                }
-                Reserved::Failed(message) => {
-                    summary.halted = Some(Halt::LlmFailed(message));
-                    break;
-                }
+            let Some(_slot) = workers
+                .begin_round(STAGE, llm_cfg.score_reserved_calls, &mut summary.tally)
+                .await?
+            else {
+                break;
             };
-            // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
-            if shared.stopped() {
-                break;
-            }
-            if let Err(stop) = permit(
-                db,
-                &shared,
-                llm.backend(),
-                clock(),
-                llm_cfg.score_reserved_calls,
-            )? {
-                tracing::info!("digest stops: {stop}");
-                summary.halted = Some(Halt::Quota(stop));
-                break;
-            }
             let claim_key = ClaimKey {
                 stage: STAGE,
                 backend,
@@ -175,11 +131,8 @@ pub async fn digest_articles<L: Llm>(
             let system =
                 prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
             let schema = prompt::digest::schema(&vocab);
-            let outcome = call_recorded(
-                db,
-                llm,
-                &shared,
-                Call {
+            let outcome = workers
+                .call(Call {
                     stage: STAGE,
                     n_items: batch.len(),
                     req: LlmRequest {
@@ -188,12 +141,8 @@ pub async fn digest_articles<L: Llm>(
                         schema: &schema,
                         model,
                     },
-                },
-                clock,
-                cancel,
-            )
-            .await?;
-            summary.calls += 1;
+                })
+                .await?;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
             let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
@@ -203,27 +152,21 @@ pub async fn digest_articles<L: Llm>(
                 backend,
                 model,
             };
-            let response = match outcome {
-                Outcome::Response(response) => response,
-                Outcome::Cancelled => {
-                    summary.cancelled = true;
-                    break;
-                }
-                Outcome::Halted(halt) => {
-                    if let Halt::LlmFailed(message) = &halt {
-                        summary.failed +=
-                            record_failures(db, held.iter().map(|&id| key(id)), message, now)?;
-                    }
-                    summary.halted = Some(halt);
-                    break;
-                }
+            let Some(response) = workers.settle(
+                outcome,
+                &mut summary.tally,
+                held.iter().map(|&id| key(id)),
+                now,
+            )?
+            else {
+                break;
             };
             let parsed = match prompt::digest::parse(&response.output, &ids, &vocab) {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     let message = errors::error_chain(&e);
                     tracing::warn!("digest output rejected: {message}");
-                    summary.failed +=
+                    summary.tally.failed +=
                         record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
                     continue;
                 }
@@ -264,17 +207,14 @@ pub async fn digest_articles<L: Llm>(
                 db.clear_stage_failure(key(*id))?;
                 summary.digested += 1;
             }
-            summary.failed += record_failures(
+            summary.tally.failed += record_failures(
                 db,
                 held_missing(&parsed.missing, &held).map(key),
                 MISSING,
                 now,
             )?;
         }
-        // 止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）
-        if summary.halted.is_some() || summary.cancelled {
-            shared.stop();
-        }
+        workers.finish(&summary.tally);
         Ok::<_, DigestStageError>(summary)
     })
     .await?;
@@ -324,6 +264,7 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmFailure, LlmResponse, RateLimit, Usage, Window};
     use crate::pipeline::Cancel;
+    use crate::pipeline::Halt;
     use crate::quota::{Quota, QuotaConfig, Stop};
 
     fn now() -> DateTime<Utc> {
@@ -556,10 +497,10 @@ mod tests {
             summary,
             DigestSummary {
                 digested: 3,
-                failed: 0,
-                calls: 2,
-                halted: None,
-                cancelled: false,
+                tally: Tally {
+                    calls: 2,
+                    ..Tally::default()
+                },
             }
         );
         let reqs = llm.requests();
@@ -603,10 +544,13 @@ mod tests {
         let ids = articles(&db, 2);
         let llm = FakeLlm::new([ok(&ids[..1], 0.1)]);
         let summary = run(&db, &llm, &mut quota(10), 5).await;
-        assert_eq!((summary.digested, summary.failed, summary.calls), (1, 1, 1));
+        assert_eq!(
+            (summary.digested, summary.tally.failed, summary.tally.calls),
+            (1, 1, 1)
+        );
         // 同じ時刻の再実行では、欠けた記事は再試行待ちなので呼び出さない
         let again = run(&db, &FakeLlm::new([]), &mut quota(10), 5).await;
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
     }
 
     #[tokio::test]
@@ -615,9 +559,9 @@ mod tests {
         let ids = articles(&db, 2);
         let llm = FakeLlm::new([ok(&ids[..1], 0.1)]);
         let summary = run(&db, &llm, &mut quota(1), 1).await;
-        assert_eq!(summary.calls, 1);
+        assert_eq!(summary.tally.calls, 1);
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::MaxCalls { limit: 1 }))
         );
         // 応答の使用率で止まる場合（11 時の枠は 85%）
@@ -625,9 +569,9 @@ mod tests {
         let ids = articles(&db, 2);
         let llm = FakeLlm::new([ok(&ids[..1], 0.9)]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
-        assert_eq!(summary.calls, 1);
+        assert_eq!(summary.tally.calls, 1);
         assert!(matches!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::FiveHour { .. }))
         ));
     }
@@ -660,9 +604,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(summary.calls, 2);
+        assert_eq!(summary.tally.calls, 2);
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::Quota(Stop::Reserved { reserved: 1 }))
         );
         assert!(
@@ -689,12 +633,12 @@ mod tests {
         }]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
         assert_eq!(
-            summary.halted,
+            summary.tally.halted,
             Some(Halt::UsageLimit {
                 resets_at: Some(1790457000)
             })
         );
-        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.tally.failed, 0);
         assert_eq!(
             db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
             0
@@ -724,9 +668,11 @@ mod tests {
             message: "Not logged in".into(),
         })]);
         let summary = run(&db, &llm, &mut quota(10), 2).await;
-        assert_eq!(summary.calls, 1);
-        assert_eq!(summary.failed, 2);
-        assert!(matches!(&summary.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in")));
+        assert_eq!(summary.tally.calls, 1);
+        assert_eq!(summary.tally.failed, 2);
+        assert!(
+            matches!(&summary.tally.halted, Some(Halt::LlmFailed(m)) if m.contains("Not logged in"))
+        );
         assert_eq!(
             db.query_i64("SELECT count(*) FROM stage_errors WHERE stage = 'digest'")
                 .unwrap(),
@@ -746,8 +692,11 @@ mod tests {
             ok(&ids[1..], 0.1),
         ]);
         let summary = run(&db, &llm, &mut quota(10), 1).await;
-        assert_eq!((summary.digested, summary.failed, summary.calls), (1, 1, 2));
-        assert_eq!(summary.halted, None);
+        assert_eq!(
+            (summary.digested, summary.tally.failed, summary.tally.calls),
+            (1, 1, 2)
+        );
+        assert_eq!(summary.tally.halted, None);
     }
 
     /// 訳語集が変わった後に作られていない要約だけを、同じモデルで新しい版として作り直す。
@@ -767,7 +716,7 @@ mod tests {
         db.add_glossary_term(&term, later).unwrap();
         let llm = FakeLlm::new([ok(&ids[..1], 0.1)]);
         let summary = redo_glossary(&db, &llm, later).await;
-        assert_eq!((summary.digested, summary.calls), (1, 1));
+        assert_eq!((summary.digested, summary.tally.calls), (1, 1));
         let prompt = &llm.requests()[0].prompt;
         assert!(
             prompt.contains(&format!("<article id=\"{}\"", ids[0])),
@@ -787,7 +736,7 @@ mod tests {
             ["-".to_string(), crate::db::timestamp(later)]
         );
         let again = redo_glossary(&db, &FakeLlm::new([]), later).await;
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
     }
 
     async fn redo_glossary(db: &Db, llm: &FakeLlm, now: DateTime<Utc>) -> DigestSummary {
@@ -850,7 +799,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.digested, summary.calls), (1, 1));
+        assert_eq!((summary.digested, summary.tally.calls), (1, 1));
         assert_eq!(llm.requests()[0].model, "opus");
         assert_eq!(
             db.query_strings(&format!(
@@ -875,7 +824,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(again.calls, 0);
+        assert_eq!(again.tally.calls, 0);
     }
 
     /// 応答を返さない LLM（中断されるまで待ち続ける呼び出し）。
@@ -963,8 +912,8 @@ mod tests {
         .await
         .expect("the stage must stop without waiting for the response")
         .unwrap();
-        assert!(summary.cancelled, "{summary:?}");
-        assert_eq!((summary.failed, summary.halted), (0, None));
+        assert!(summary.tally.cancelled, "{summary:?}");
+        assert_eq!((summary.tally.failed, summary.tally.halted), (0, None));
         assert_nothing_recorded(&db);
     }
 
@@ -990,8 +939,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(summary.cancelled, "{summary:?}");
-        assert_eq!((summary.failed, summary.halted), (0, None));
+        assert!(summary.tally.cancelled, "{summary:?}");
+        assert_eq!((summary.tally.failed, summary.tally.halted), (0, None));
         assert_nothing_recorded(&db);
     }
 
@@ -1040,7 +989,7 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(summary.digested, 2, "{summary:?}");
-            assert!(summary.cancelled, "{summary:?}");
+            assert!(summary.tally.cancelled, "{summary:?}");
         }
     }
 
@@ -1067,8 +1016,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(summary.cancelled);
-        assert_eq!(summary.calls, 0);
+        assert!(summary.tally.cancelled);
+        assert_eq!(summary.tally.calls, 0);
     }
 
     /// ほかの実行が予約している記事は飛ばし、自分の予約は処理を終えたら外す。
@@ -1171,7 +1120,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((summary.digested, summary.calls), (1, 1));
+        assert_eq!((summary.digested, summary.tally.calls), (1, 1));
     }
 
     /// 呼び出しの最中に予約の期限が切れ、ほかの実行に取り直されたら、その記事の結果は保存しない。
@@ -1258,7 +1207,7 @@ mod tests {
                     .unwrap();
             });
             let summary = run(&db, &llm, &mut quota(10), 5).await;
-            assert_eq!(summary.failed, 1, "{name}");
+            assert_eq!(summary.tally.failed, 1, "{name}");
             assert_eq!(
                 db.query_i64(&format!(
                     "SELECT count(*) FROM stage_errors WHERE article_id = {lost}"
@@ -1315,9 +1264,12 @@ mod tests {
             },
         );
         let summary = run(&db, &llm, &mut quota(10), 2).await;
-        assert_eq!((summary.digested, summary.calls), (2, 1));
+        assert_eq!((summary.digested, summary.tally.calls), (2, 1));
         assert!(
-            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            matches!(
+                summary.tally.halted,
+                Some(Halt::Quota(Stop::FiveHour { .. }))
+            ),
             "{summary:?}"
         );
     }
@@ -1361,9 +1313,12 @@ mod tests {
                 .unwrap();
         });
         let summary = run(&db, &llm, &mut quota(10), 5).await;
-        assert_eq!(summary.calls, 0);
+        assert_eq!(summary.tally.calls, 0);
         assert!(
-            matches!(summary.halted, Some(Halt::Quota(Stop::FiveHour { .. }))),
+            matches!(
+                summary.tally.halted,
+                Some(Halt::Quota(Stop::FiveHour { .. }))
+            ),
             "{summary:?}"
         );
         assert_eq!(db.query_i64("SELECT count(*) FROM work_claims").unwrap(), 0);

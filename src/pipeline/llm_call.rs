@@ -19,6 +19,30 @@ pub enum Outcome {
     Halted(Halt),
     /// 止める指示で呼び出しをやめた。記事の失敗にも LLM の失敗にも数えず、次回続きから処理する
     Cancelled,
+    /// 止める指示が先に出ていたので呼ばなかった（呼び出しにも数えない）
+    NotStarted,
+}
+
+/// LLM ステージの集計のうち、どのステージにもある項目。
+#[derive(Debug, Default, PartialEq)]
+pub struct Tally {
+    /// 失敗を記録した（再試行に回した）記事の数
+    pub failed: usize,
+    pub calls: usize,
+    /// 止めた理由（クォータ・LLM の失敗）
+    pub halted: Option<Halt>,
+    /// 止める指示で止まった
+    pub cancelled: bool,
+}
+
+impl Tally {
+    /// 作業者ごとの集計を合わせる。
+    pub fn merge(&mut self, other: Tally) {
+        self.failed += other.failed;
+        self.calls += other.calls;
+        self.halted = Halt::most_severe(self.halted.take(), other.halted);
+        self.cancelled |= other.cancelled;
+    }
 }
 
 /// LLM ステージが共有する実行環境。クォータは実行全体で 1 つなので、ステージ間で引き継ぐ。
@@ -50,7 +74,7 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
 
 /// ステージの中で同時に回す作業者が共有する状態。作業者は同じタスクの中で動くので、`RefCell` で
 /// 共有し、`await` をまたいで借りない。
-pub struct Shared<'q> {
+struct Shared<'q> {
     quota: RefCell<&'q mut Quota>,
     stop: Cell<bool>,
 }
@@ -74,8 +98,136 @@ impl<'q> Shared<'q> {
     }
 }
 
+/// ステージの作業者が共有する実行環境と、周の進め方。各ステージは「対象を選ぶ・プロンプトを作る・応答を解釈して
+/// 保存する」だけを書き、周の始めの判定（`begin_round`）・呼び出し（`call`）・結果の振り分け（`settle`）・
+/// 終わり（`finish`）はここで行う。
+pub struct Workers<'a, L> {
+    pub db: &'a Db,
+    pub llm: &'a L,
+    pub cancel: &'a Cancel,
+    pub clock: &'a dyn Fn() -> DateTime<Utc>,
+    shared: Shared<'a>,
+}
+
+impl<'a, L: Llm> Workers<'a, L> {
+    pub fn new(
+        LlmStage {
+            db,
+            llm,
+            quota,
+            cancel,
+            clock,
+        }: LlmStage<'a, L>,
+    ) -> Self {
+        Self {
+            db,
+            llm,
+            cancel,
+            clock,
+            shared: Shared::new(quota),
+        }
+    }
+
+    /// 周の始め。ほかの作業者に譲り、止まっていないか・止める指示が無いかを見て、呼び出しの枠を取り、クォータで
+    /// 判定する。呼んでよければ枠を返す（判定・作業の予約・呼び出しをその中で行い、周の終わりまで持つ）。止まる
+    /// なら理由を `tally` に記録して `None`。`reserve_calls` は残す呼び出し回数（`permit` を参照）。
+    pub async fn begin_round(
+        &self,
+        stage: &str,
+        reserve_calls: u32,
+        tally: &mut Tally,
+    ) -> Result<Option<L::Slot>, DbError> {
+        // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
+        // （作業者は決まった順で進むので、譲らないと先の作業者が次の呼び出しを始めてしまう）
+        tokio::task::yield_now().await;
+        if self.shared.stopped() {
+            return Ok(None);
+        }
+        if self.cancel.is_requested() {
+            tally.cancelled = true;
+            return Ok(None);
+        }
+        let slot = match reserve(self.llm, self.cancel).await {
+            Reserved::Slot(slot) => slot,
+            Reserved::Cancelled => {
+                tally.cancelled = true;
+                return Ok(None);
+            }
+            Reserved::Failed(message) => {
+                tally.halted = Some(Halt::LlmFailed(message));
+                return Ok(None);
+            }
+        };
+        // 枠を待つ間にほかの作業者が止まっていたら、呼ばずに止まる
+        if self.shared.stopped() {
+            return Ok(None);
+        }
+        if let Err(stop) = permit(
+            self.db,
+            &self.shared,
+            self.llm.backend(),
+            (self.clock)(),
+            reserve_calls,
+        )? {
+            tracing::info!("{stage} stops: {stop}");
+            tally.halted = Some(Halt::Quota(stop));
+            return Ok(None);
+        }
+        Ok(Some(slot))
+    }
+
+    /// 呼び出す（`call_recorded`）。`begin_round` の判定からここまでの間に `await` を挟まないこと。
+    pub async fn call(&self, call: Call<'_>) -> Result<Outcome, DbError> {
+        call_recorded(
+            self.db,
+            self.llm,
+            &self.shared,
+            call,
+            self.clock,
+            self.cancel,
+        )
+        .await
+    }
+
+    /// 始めた呼び出しを数え（止める指示で終わった呼び出しも数える）、結果を振り分ける。応答なら返す。
+    /// 止める指示・止める理由なら `tally` に記録して `None`（作業者は止まる）。LLM の失敗は認証切れなど記事に
+    /// よらない原因かもしれないので、そのバッチの記事（`batch`。予約を持っているものだけを渡す）だけを失敗にする。
+    pub fn settle<'k>(
+        &self,
+        outcome: Outcome,
+        tally: &mut Tally,
+        batch: impl IntoIterator<Item = StageKey<'k>>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<LlmResponse>, DbError> {
+        if !matches!(outcome, Outcome::NotStarted) {
+            tally.calls += 1;
+        }
+        match outcome {
+            Outcome::Response(response) => Ok(Some(response)),
+            Outcome::Cancelled | Outcome::NotStarted => {
+                tally.cancelled = true;
+                Ok(None)
+            }
+            Outcome::Halted(halt) => {
+                if let Halt::LlmFailed(message) = &halt {
+                    tally.failed += record_failures(self.db, batch, message, now)?;
+                }
+                tally.halted = Some(halt);
+                Ok(None)
+            }
+        }
+    }
+
+    /// 作業者を終える。止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）。
+    pub fn finish(&self, tally: &Tally) {
+        if tally.halted.is_some() || tally.cancelled {
+            self.shared.stop();
+        }
+    }
+}
+
 /// 呼び出しの枠を取った結果。
-pub enum Reserved<S> {
+enum Reserved<S> {
     Slot(S),
     /// 止める指示で待つのをやめた
     Cancelled,
@@ -85,7 +237,7 @@ pub enum Reserved<S> {
 
 /// 呼び出しの枠を取る。止める指示が出れば待つのをやめる。ステージは周の最初に枠を取り、
 /// クォータの判定・作業の予約・呼び出しをその中で行う。
-pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
+async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
     if cancel.is_requested() {
         return Reserved::Cancelled;
     }
@@ -103,7 +255,7 @@ pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 /// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
 /// `now` は判定する時点の時刻（`LlmStage::clock`）。ステージを始めた時刻を使うと、枠を待つ間や
 /// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
-pub fn permit(
+fn permit(
     db: &Db,
     shared: &Shared<'_>,
     backend: &str,
@@ -151,7 +303,7 @@ pub struct Call<'a> {
 
 /// 判定（`permit`）から呼び出しを始めるまでの間に `await` を挟まないこと。呼び出しは始めた時点で
 /// 数えるので、その間に並行する作業者が判定すると、上限を超えて呼んでしまう。
-pub async fn call_recorded<L: Llm>(
+async fn call_recorded<L: Llm>(
     db: &Db,
     llm: &L,
     shared: &Shared<'_>,
@@ -165,7 +317,7 @@ pub async fn call_recorded<L: Llm>(
 ) -> Result<Outcome, DbError> {
     // 既に止める指示が出ていれば呼ばない（応答を優先する下の select は、先に呼び出しを始めてしまう）
     if cancel.is_requested() {
-        return Ok(Outcome::Cancelled);
+        return Ok(Outcome::NotStarted);
     }
     shared.quota.borrow_mut().start_call();
     // 記録する時刻は呼び出しを始めた時刻（ステージを始めた時刻では、長いステージの呼び出しがすべて
@@ -276,6 +428,103 @@ mod tests {
         .unwrap();
         assert!(matches!(outcome, Outcome::Cancelled));
         assert_eq!(db.query_i64("SELECT count(*) FROM llm_calls").unwrap(), 0);
+    }
+
+    /// 止める指示で終わった呼び出しも、始めたので数える。どのステージ（1 回だけ呼ぶ `profile suggest`・
+    /// 語彙の整理を含む）も `Workers::settle` で数える。
+    #[tokio::test]
+    async fn a_call_ended_by_the_stop_is_counted() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([Err(crate::llm::LlmError::Exit {
+            status: "signal: 2 (SIGINT)".into(),
+            stderr: String::new(),
+            interrupted: true,
+        })]);
+        let cancel = Cancel::default();
+        let requester = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            requester.request();
+        });
+        let mut quota = Quota::new(QuotaConfig::default(), None, None);
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &Utc::now,
+        });
+        let schema = serde_json::json!({});
+        let outcome = workers
+            .call(Call {
+                stage: "suggest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            })
+            .await
+            .unwrap();
+        let mut tally = Tally::default();
+        let response = workers
+            .settle(outcome, &mut tally, std::iter::empty(), Utc::now())
+            .unwrap();
+        assert!(response.is_none());
+        assert_eq!(
+            tally,
+            Tally {
+                calls: 1,
+                cancelled: true,
+                ..Tally::default()
+            }
+        );
+    }
+
+    /// 呼び出しを始める前に止める指示が出ていれば、呼ばないので数えない。
+    #[tokio::test]
+    async fn a_call_not_started_for_the_stop_is_not_counted() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([]);
+        let cancel = Cancel::default();
+        cancel.request();
+        let mut quota = Quota::new(QuotaConfig::default(), None, None);
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &Utc::now,
+        });
+        let schema = serde_json::json!({});
+        let outcome = workers
+            .call(Call {
+                stage: "suggest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            })
+            .await
+            .unwrap();
+        let mut tally = Tally::default();
+        let response = workers
+            .settle(outcome, &mut tally, std::iter::empty(), Utc::now())
+            .unwrap();
+        assert!(response.is_none());
+        assert!(llm.requests().is_empty());
+        assert_eq!(
+            tally,
+            Tally {
+                cancelled: true,
+                ..Tally::default()
+            }
+        );
     }
 
     /// クレジットで判定するときは、DB にある今月の消費（ほかの実行の分も含む）で判定する。
@@ -425,7 +674,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, Outcome::Cancelled));
+        assert!(matches!(outcome, Outcome::NotStarted));
         assert!(llm.requests().is_empty());
     }
 }

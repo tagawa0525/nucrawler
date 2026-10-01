@@ -274,53 +274,23 @@ pub fn parse(
     requested: &[i64],
     vocab: &[Topic],
 ) -> Result<Parsed, DigestError> {
-    let top = output
-        .as_object()
-        .ok_or_else(|| DigestError::Malformed("the output is not an object".into()))?;
-    if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(DigestError::Malformed(format!(
-            "unexpected property `{extra}`"
-        )));
-    }
-    let items = top
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| DigestError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<(i64, serde_json::Value)> = Vec::new();
-    for item in items {
-        let id = item["id"]
-            .as_i64()
-            .ok_or_else(|| DigestError::Malformed("an item has no integer `id`".into()))?;
-        if !requested.contains(&id) {
-            tracing::warn!(id, "ignoring digest for an article that was not requested");
-            continue;
-        }
+    let collected = super::collect_items(output, requested, "digest", |id, item| {
         // スキーマ（型、必須、余計な項目の禁止）に合わない項目は採らず、欠けたものとして扱う。
-        let payload = match serde_json::from_value::<Item>(item.clone())
+        match serde_json::from_value::<Item>(item.clone())
             .map_err(|e| e.to_string())
             .and_then(|i| i.into_payload(vocab))
         {
-            Ok(payload) => payload,
+            Ok(payload) => Some(serde_json::to_value(payload).expect("plain data serializes")),
             Err(e) => {
                 tracing::warn!(id, "ignoring digest that violates the schema: {e}");
-                continue;
+                None
             }
-        };
-        if found.iter().all(|(seen, _)| *seen != id) {
-            found.push((
-                id,
-                serde_json::to_value(payload).expect("plain data serializes"),
-            ));
         }
-    }
-    let missing = requested
-        .iter()
-        .copied()
-        .filter(|id| found.iter().all(|(seen, _)| seen != id))
-        .collect();
+    })
+    .map_err(DigestError::Malformed)?;
     Ok(Parsed {
-        items: found,
-        missing,
+        items: collected.items,
+        missing: collected.missing,
     })
 }
 

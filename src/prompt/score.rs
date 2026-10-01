@@ -124,6 +124,10 @@ pub fn build_prompt(inputs: &[ScoreInput]) -> String {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Item {
+    #[expect(
+        dead_code,
+        reason = "id は検証前に JSON から読むので、ここでは受け付けるだけ"
+    )]
     id: i64,
     score: i64,
     reason: String,
@@ -136,37 +140,17 @@ pub fn parse(
     requested: &[i64],
     profile: &Profile,
 ) -> Result<Parsed, ScoreError> {
-    let top = output
-        .as_object()
-        .ok_or_else(|| ScoreError::Malformed("the output is not an object".into()))?;
-    if let Some(extra) = top.keys().find(|k| *k != "items") {
-        return Err(ScoreError::Malformed(format!(
-            "unexpected property `{extra}`"
-        )));
-    }
-    let items = top
-        .get("items")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| ScoreError::Malformed("`items` is not an array".into()))?;
-    let mut found: Vec<Scored> = Vec::new();
-    for item in items {
-        let id = item["id"]
-            .as_i64()
-            .ok_or_else(|| ScoreError::Malformed("an item has no integer `id`".into()))?;
-        if !requested.contains(&id) {
-            tracing::warn!(id, "ignoring score for an article that was not requested");
-            continue;
-        }
+    let collected = super::collect_items(output, requested, "score", |id, item| {
         let checked = match serde_json::from_value::<Item>(item.clone()) {
             Ok(checked) => checked,
             Err(e) => {
                 tracing::warn!(id, "ignoring score that violates the schema: {e}");
-                continue;
+                return None;
             }
         };
         let Some(score) = u8::try_from(checked.score).ok().filter(|s| *s <= 100) else {
             tracing::warn!(id, score = checked.score, "ignoring score outside 0..=100");
-            continue;
+            return None;
         };
         // プロファイルに無い語はスキーマ違反と同じに扱う（捨てて再試行に回す）
         let known = |terms: &[String], allowed: &mut dyn Iterator<Item = &str>| {
@@ -181,26 +165,20 @@ pub fn parse(
             &mut profile.exclude.iter().map(String::as_str),
         ) {
             tracing::warn!(id, "ignoring score whose matches are not in the profile");
-            continue;
+            return None;
         }
-        if found.iter().all(|seen| seen.id != checked.id) {
-            found.push(Scored {
-                id: checked.id,
-                score,
-                reason: checked.reason,
-                matched: dedup(checked.matched),
-                excluded: dedup(checked.excluded),
-            });
-        }
-    }
-    let missing = requested
-        .iter()
-        .copied()
-        .filter(|id| found.iter().all(|seen| seen.id != *id))
-        .collect();
+        Some(Scored {
+            id,
+            score,
+            reason: checked.reason,
+            matched: dedup(checked.matched),
+            excluded: dedup(checked.excluded),
+        })
+    })
+    .map_err(ScoreError::Malformed)?;
     Ok(Parsed {
-        items: found,
-        missing,
+        items: collected.items.into_iter().map(|(_, s)| s).collect(),
+        missing: collected.missing,
     })
 }
 

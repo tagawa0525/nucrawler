@@ -355,6 +355,7 @@ mod tests {
         crate::profile::hash(&profile)
     }
 
+    #[derive(Clone, Copy)]
     struct Seed<'a> {
         source_id: &'a str,
         url: &'a str,
@@ -512,6 +513,54 @@ mod tests {
         assert_eq!(a.url, "https://e.com/down");
         assert_eq!(a.title_ja.as_deref(), Some("題"));
         assert_eq!(a.reason.as_deref(), Some("理由"));
+    }
+
+    /// プロファイルが無い利用者は採点が無いので、既定では Web UI の一覧と同じく最低点を掛けない。評価 1〜2 と
+    /// 軽水炉に関係しない記事は隠す。
+    #[test]
+    fn search_without_a_profile_shows_unscored_articles_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let unscored = Seed {
+            score: None,
+            ..Seed::default()
+        };
+        let shown = seed(&db, "", unscored);
+        seed(
+            &db,
+            "",
+            Seed {
+                url: "https://e.com/other",
+                lwr_relevant: false,
+                ..unscored
+            },
+        );
+        let down = seed(
+            &db,
+            "",
+            Seed {
+                url: "https://e.com/down",
+                ..unscored
+            },
+        );
+        db.rate(db.owner_id().unwrap(), down, Rating::new(2), now())
+            .unwrap();
+        let result = run_search(&db, SearchParams::default()).unwrap();
+        assert_eq!(ids(&result), [shown]);
+    }
+
+    /// 最低点は Web UI と同じく 0〜100。
+    #[test]
+    fn search_rejects_a_minimum_above_100() {
+        let db = Db::open_in_memory().unwrap();
+        let err = run_search(
+            &db,
+            SearchParams {
+                min_score: Some(101),
+                ..SearchParams::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParams(_)), "{err:?}");
     }
 
     #[test]

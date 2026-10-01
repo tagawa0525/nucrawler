@@ -110,7 +110,8 @@ DB が持つベクトルの空間は常に 1 つにする。
 - 点数を選ぶ 4 か所の SQL（`list_articles`・`pending_translate`・`recommend_examples`・`redo --min-score`）を 1 つの断片にまとめる
 - 最低点は、**一覧の期間に、利用者の今のプロファイルで点数の付いた記事が 1 件以上あるとき**だけ掛ける（今の「プロファイルがあれば掛ける」をやめる）。
   点数が付かない間に一覧が空になるのを防ぐ。MCP の検索も同じ判定を通す
-- 今の `llm_score`（`ListItem`・JSON・MCP・画面の「LLM {点数}」）は、出どころが embedding にもなるので、中立の名前と出どころの表示に変える
+- 今の `llm_score`（`ListItem`・JSON・MCP・画面の「LLM {点数}」）は、出どころが embedding にもなるので、中立の名前と出どころ（`llm` か `embedding`）を
+  加えて画面に出す。JSON（`/api/articles`）と MCP の `llm_score` は公開のフィールドなので、使う側が移るまで同じ値で残す
 
 ### Web でプロファイルを編集する（段階 4）
 

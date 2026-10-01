@@ -42,7 +42,98 @@ pub struct EmbedSummary {
 /// 要約を embedding にする文：見出しの和訳・要約・要点を改行でつなぐ。
 /// つなぎ方を変えたら `embedding::INPUT_VERSION` を上げる。
 pub fn document_text(digest: &EmbedInput) -> String {
-    todo!()
+    let mut parts = vec![digest.title_ja.as_str(), digest.summary_ja.as_str()];
+    parts.extend(digest.points_ja.iter().map(String::as_str));
+    parts.join("\n")
+}
+
+/// 1 回の呼び出しの結果。
+enum Outcome {
+    Saved,
+    /// 文のせいの失敗（まとめて送ったなら、1 件ずつ送り直す）
+    InputError(EmbedError),
+    Cancelled,
+    /// 空間が消えた（`rebuild` された）ので、このステージは何も保存せずに終える
+    Rebuilt,
+}
+
+struct Run<'a, E> {
+    db: &'a Db,
+    embedder: &'a E,
+    cfg: &'a EmbeddingConfig,
+    cancel: &'a Cancel,
+    clock: &'a dyn Fn() -> DateTime<Utc>,
+    space: EmbeddingSpace,
+    summary: EmbedSummary,
+}
+
+impl<E: Embedder> Run<'_, E> {
+    /// `digests` を 1 回で送り、指紋が空間と一致すれば保存する。
+    async fn embed(&mut self, digests: &[EmbedInput]) -> Result<Outcome, EmbedStageError> {
+        let mut inputs = fingerprint_inputs(self.cfg, Role::Document);
+        inputs.extend(
+            digests
+                .iter()
+                .map(|d| input(self.cfg, Role::Document, &document_text(d))),
+        );
+        let result = tokio::select! {
+            r = self.embedder.embed(&inputs) => r,
+            () = self.cancel.requested() => return Ok(Outcome::Cancelled),
+        };
+        self.summary.calls += 1;
+        let vectors = match result {
+            Ok(vectors) => vectors,
+            Err(e) if e.is_input_error() => return Ok(Outcome::InputError(e)),
+            Err(e) => return Err(EmbedStageError::Api(e)),
+        };
+        let (fingerprint, vectors) = vectors.split_at(FINGERPRINT_TEXTS);
+        if !self.space.fingerprint.matches(Role::Document, fingerprint) {
+            return Err(EmbedStageError::SpaceChanged(
+                "the model behind the same settings returns different vectors".into(),
+            ));
+        }
+        let pairs: Vec<(i64, Vec<f32>)> = digests
+            .iter()
+            .map(|d| d.artifact_id)
+            .zip(vectors.iter().cloned())
+            .collect();
+        if !self.db.save_article_embeddings(self.space.id, &pairs)? {
+            return Ok(Outcome::Rebuilt);
+        }
+        for d in digests {
+            self.db.clear_stage_failure(
+                self.failure_key(d, &embed_failure_stage(self.space.id, d.artifact_id)),
+            )?;
+        }
+        self.summary.embedded += digests.len();
+        Ok(Outcome::Saved)
+    }
+
+    fn failure_key<'k>(&self, digest: &EmbedInput, stage: &'k str) -> StageKey<'k> {
+        StageKey {
+            article_id: digest.article_id,
+            stage,
+            backend: EMBED_BACKEND,
+            model: "",
+        }
+    }
+
+    /// 文のせいで作れなかった要約を記録する（間を空けて再試行する）。
+    fn record_failure(&mut self, digest: &EmbedInput, error: &EmbedError) -> Result<(), DbError> {
+        let stage = embed_failure_stage(self.space.id, digest.artifact_id);
+        tracing::warn!(
+            article_id = digest.article_id,
+            "failed to embed the digest: {error}"
+        );
+        self.db.record_stage_failure(
+            self.failure_key(digest, &stage),
+            &error.to_string(),
+            (self.clock)(),
+            false,
+        )?;
+        self.summary.failed += 1;
+        Ok(())
+    }
 }
 
 /// ベクトルの無い要約を、無くなるか中断されるまで作る。
@@ -53,7 +144,91 @@ pub async fn embed_articles(
     cancel: &Cancel,
     clock: &dyn Fn() -> DateTime<Utc>,
 ) -> Result<EmbedSummary, EmbedStageError> {
-    todo!()
+    if cancel.is_requested() {
+        return Ok(EmbedSummary::default());
+    }
+    let mut summary = EmbedSummary::default();
+    let name = space_name(cfg);
+    let space = match db.embedding_space()? {
+        Some(space) => space,
+        None => {
+            let fingerprint = Fingerprint::make(embedder, cfg)
+                .await
+                .map_err(EmbedStageError::Api)?;
+            summary.calls += 2;
+            db.create_embedding_space(&name, INPUT_VERSION, &fingerprint, clock())?
+        }
+    };
+    if space.name != name {
+        return Err(EmbedStageError::SpaceChanged(format!(
+            "the settings changed from {} to {name}",
+            space.name
+        )));
+    }
+    if space.input_version != INPUT_VERSION {
+        return Err(EmbedStageError::SpaceChanged(format!(
+            "the input version changed from {} to {INPUT_VERSION}",
+            space.input_version
+        )));
+    }
+    let claim_stage = embed_claim_stage(space.id);
+    let key = ClaimKey {
+        stage: &claim_stage,
+        backend: EMBED_BACKEND,
+        model: "",
+    };
+    // 予約は、まとめた呼び出しと 1 件ずつの送り直し（最大 batch_size + 1 回）がすべてタイムアウトしても切れない長さにする
+    let calls = u32::try_from(cfg.batch_size + 1).unwrap_or(u32::MAX);
+    let ttl = chrono::Duration::from_std(std::time::Duration::from_secs(cfg.timeout_secs) * calls)
+        .unwrap_or(chrono::Duration::MAX);
+    let mut run = Run {
+        db,
+        embedder,
+        cfg,
+        cancel,
+        clock,
+        space,
+        summary,
+    };
+    let per_batch = cfg.batch_size - FINGERPRINT_TEXTS;
+    while !cancel.is_requested() {
+        let now = clock();
+        let (digests, _claim) = db.claim_selected(
+            key,
+            now,
+            ttl,
+            |db| db.pending_embeddings(run.space.id, now, per_batch),
+            |d| d.article_id,
+        )?;
+        if digests.is_empty() {
+            break;
+        }
+        match run.embed(&digests).await? {
+            Outcome::Saved => {}
+            Outcome::Cancelled => break,
+            Outcome::Rebuilt => {
+                tracing::warn!("the embedding space was rebuilt during this run; stopping");
+                break;
+            }
+            Outcome::InputError(e) if digests.len() == 1 => run.record_failure(&digests[0], &e)?,
+            Outcome::InputError(_) => {
+                for digest in &digests {
+                    match run.embed(std::slice::from_ref(digest)).await? {
+                        Outcome::Saved => {}
+                        Outcome::InputError(e) => run.record_failure(digest, &e)?,
+                        Outcome::Cancelled => return Ok(run.summary),
+                        Outcome::Rebuilt => {
+                            tracing::warn!(
+                                "the embedding space was rebuilt during this run; stopping"
+                            );
+                            return Ok(run.summary);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(run.summary)
 }
 
 #[cfg(test)]

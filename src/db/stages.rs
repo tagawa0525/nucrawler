@@ -33,7 +33,32 @@ pub struct LlmCall<'a> {
     pub usage: Option<&'a crate::llm::Usage>,
 }
 
+/// ステージ（とバックエンド・モデル）ごとの、失敗の記録が残っている記事の数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFailures {
+    /// ステージの名前（embedding は空間ごとにまとめる。`failure_stage_group`）
+    pub stage: String,
+    pub backend: String,
+    pub model: String,
+    /// 再試行する記事（次に試してよい時刻を待っているか、次の実行を待っている）
+    pub retrying: usize,
+    /// 再試行を諦めた記事
+    pub gave_up: usize,
+    /// 諦めた記事のうち、最後に失敗したものの理由
+    pub last_gave_up_error: Option<String>,
+}
+
 impl Db {
+    /// `cutoff` 以降に公開（無ければ取得）された記事の失敗の記録を、ステージ・バックエンド・モデルごとに
+    /// 数える（ステージの名前の順）。
+    pub fn stage_failures(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StageFailures>, DbError> {
+        let _ = cutoff;
+        todo!()
+    }
+
     /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。
     /// そうでなければ試行回数を 1 増やし、次に試してよい時刻を指数的に先へ延ばす。
     /// 以後は再試行しない（断念した）なら `true` を返す。
@@ -313,6 +338,108 @@ mod tests {
         db.record_stage_failure(key, "x", t("2026-09-27T00:00:00Z"), true)
             .unwrap();
         assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    /// 期間内の記事の失敗を、ステージ・バックエンド・モデルごとに再試行と断念に分けて数える。
+    /// embedding の失敗は要約ごとの名前なので、空間ごとにまとめる。断念の理由は最後に断念したもの。
+    #[test]
+    fn counts_stage_failures_by_key() {
+        let db = Db::open_in_memory().unwrap();
+        let old = page_article(&db, "https://e.com/old", "2026-09-01T00:00:00.000Z");
+        let ids: Vec<i64> = (0..4)
+            .map(|n| {
+                page_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-20T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let key = |article_id, stage, model| StageKey {
+            article_id,
+            stage,
+            backend: "claude-cli",
+            model,
+        };
+        let fail = |k, error: &str, at: &str, permanent| {
+            db.record_stage_failure(k, error, t(at), permanent).unwrap();
+        };
+        // 要約：1 件は再試行、2 件は断念（後に断念した方の理由を出す）。期間外の記事は数えない
+        fail(
+            key(ids[0], "digest", "sonnet"),
+            "timeout",
+            "2026-09-27T00:00:00Z",
+            false,
+        );
+        fail(
+            key(ids[1], "digest", "sonnet"),
+            "bad json",
+            "2026-09-26T00:00:00Z",
+            true,
+        );
+        fail(
+            key(ids[2], "digest", "sonnet"),
+            "refused",
+            "2026-09-27T00:00:00Z",
+            true,
+        );
+        fail(
+            key(old, "digest", "sonnet"),
+            "old",
+            "2026-09-28T00:00:00Z",
+            true,
+        );
+        // 別のモデルは別に数える
+        fail(
+            key(ids[3], "digest", "opus"),
+            "timeout",
+            "2026-09-27T00:00:00Z",
+            false,
+        );
+        // embedding は空間ごと
+        let embed = |article_id, artifact_id| {
+            let stage = crate::db::embed_failure_stage(7, artifact_id);
+            db.record_stage_failure(
+                StageKey {
+                    article_id,
+                    stage: &stage,
+                    backend: "openai",
+                    model: "",
+                },
+                "too long",
+                t("2026-09-27T00:00:00Z"),
+                false,
+            )
+            .unwrap();
+        };
+        embed(ids[0], 100);
+        embed(ids[1], 101);
+
+        let got = db.stage_failures(t("2026-09-10T00:00:00Z")).unwrap();
+        let row =
+            |stage: &str, backend: &str, model: &str, retrying, gave_up, error: Option<&str>| {
+                StageFailures {
+                    stage: stage.into(),
+                    backend: backend.into(),
+                    model: model.into(),
+                    retrying,
+                    gave_up,
+                    last_gave_up_error: error.map(Into::into),
+                }
+            };
+        assert_eq!(
+            got,
+            [
+                row("digest", "claude-cli", "opus", 1, 0, None),
+                row("digest", "claude-cli", "sonnet", 1, 2, Some("refused")),
+                row("embed:7", "openai", "", 2, 0, None),
+            ]
+        );
+        assert!(
+            db.stage_failures(t("2026-09-30T00:00:00Z"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

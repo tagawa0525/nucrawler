@@ -1,9 +1,9 @@
-//! `status`：ソースごとの記事数と取得状況（最後の取得の件数を含む）を表示する。
+//! `status`：ソースごとの記事数と取得状況（最後の取得の件数を含む）と、ステージごとの失敗の記録を表示する。
 
 use std::fmt::Write as _;
 
 use crate::config::Source;
-use crate::db::SourceOverview;
+use crate::db::{SourceOverview, StageFailures};
 
 /// 設定にあるソースを設定順に表示し、DB にだけ残っている（設定から消した）ソースを後ろに並べる。
 pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
@@ -53,11 +53,50 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
     out
 }
 
+/// ステージごとの失敗の記録（`since` は数えた記事の期間の始まりの日付）。断念した記事があれば、最後に
+/// 断念した理由を添える。
+pub fn render_failures(failures: &[StageFailures], since: &str) -> String {
+    let _ = (failures, since);
+    todo!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Category, Filter, Lang, SourceKind};
     use crate::db::FetchCounts;
+
+    #[test]
+    fn renders_stage_failures() {
+        let row =
+            |stage: &str, backend: &str, model: &str, retrying, gave_up, error: Option<&str>| {
+                StageFailures {
+                    stage: stage.into(),
+                    backend: backend.into(),
+                    model: model.into(),
+                    retrying,
+                    gave_up,
+                    last_gave_up_error: error.map(Into::into),
+                }
+            };
+        let out = render_failures(
+            &[
+                row("digest", "claude-cli", "sonnet", 1, 2, Some("bad json")),
+                row("extract", "", "", 3, 0, None),
+            ],
+            "2026-09-18",
+        );
+        assert_eq!(
+            out,
+            "\nstage failures (articles since 2026-09-18):\n\
+             digest   claude-cli/sonnet  retrying 1  gave up 2  last given up: bad json\n\
+             extract  -                  retrying 3  gave up 0\n"
+        );
+        assert_eq!(
+            render_failures(&[], "2026-09-18"),
+            "\nno stage failures (articles since 2026-09-18)\n"
+        );
+    }
 
     fn src(id: &str, enabled: bool) -> Source {
         Source {

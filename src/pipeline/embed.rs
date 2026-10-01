@@ -110,14 +110,15 @@ impl<E: Embedder> Run<'_, E> {
     }
 
     /// 指紋の試験文だけで呼び、失敗すればサービスの側の失敗にする。
-    async fn probe(&mut self) -> Result<(), EmbedStageError> {
+    /// 中断が要求されれば `false`。
+    async fn probe(&mut self) -> Result<bool, EmbedStageError> {
         let inputs = fingerprint_inputs(self.cfg, Role::Document);
+        let result = tokio::select! {
+            r = self.embedder.embed(&inputs) => r,
+            () = self.cancel.requested() => return Ok(false),
+        };
         self.summary.calls += 1;
-        self.embedder
-            .embed(&inputs)
-            .await
-            .map(drop)
-            .map_err(EmbedStageError::Api)
+        result.map(|_| true).map_err(EmbedStageError::Api)
     }
 
     fn failure_key<'k>(&self, digest: &EmbedInput, stage: &'k str) -> StageKey<'k> {
@@ -163,9 +164,10 @@ pub async fn embed_articles(
     let space = match db.embedding_space()? {
         Some(space) => space,
         None => {
-            let fingerprint = Fingerprint::make(embedder, cfg)
-                .await
-                .map_err(EmbedStageError::Api)?;
+            let fingerprint = tokio::select! {
+                r = Fingerprint::make(embedder, cfg) => r.map_err(EmbedStageError::Api)?,
+                () = cancel.requested() => return Ok(summary),
+            };
             summary.calls += 2;
             db.create_embedding_space(&name, INPUT_VERSION, &fingerprint, clock())?
         }
@@ -222,11 +224,16 @@ pub async fn embed_articles(
                 tracing::warn!("the embedding space was rebuilt during this run; stopping");
                 break;
             }
-            Outcome::InputError(e) if digests.len() == 1 => run.record_failure(&digests[0], &e)?,
-            Outcome::InputError(_) => {
+            Outcome::InputError(e) => {
                 // 400 などは、文のせいでなく設定の誤り（モデル名・次元）でも返る。指紋の試験文だけでも失敗するなら、
                 // どの要約でも失敗するので、要約の失敗として記録せずに止める
-                run.probe().await?;
+                if !run.probe().await? {
+                    break;
+                }
+                if let [digest] = digests.as_slice() {
+                    run.record_failure(digest, &e)?;
+                    continue;
+                }
                 for digest in &digests {
                     match run.embed(std::slice::from_ref(digest)).await? {
                         Outcome::Saved => {}

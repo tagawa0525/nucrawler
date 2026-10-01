@@ -99,13 +99,21 @@ pub enum EmbeddingAuth {
 impl EmbeddingConfig {
     /// 呼び出しが成り立たない値を拒否する。
     pub fn validate(&self) -> Result<(), String> {
-        if url::Url::parse(&self.url).is_err() {
-            return Err(format!("embedding.url is not a url: {:?}", self.url));
+        if !url::Url::parse(&self.url).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) {
+            return Err(format!(
+                "embedding.url is not an http(s) url: {:?}",
+                self.url
+            ));
         }
         if self.model.trim().is_empty() {
             return Err("embedding.model must not be empty".into());
         }
-        if self.auth != EmbeddingAuth::None && self.api_key_env.is_none() {
+        if self.auth != EmbeddingAuth::None
+            && self
+                .api_key_env
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+        {
             return Err("embedding.auth needs embedding.api_key_env".into());
         }
         if self.dimensions == Some(0) {

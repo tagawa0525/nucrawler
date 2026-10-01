@@ -171,12 +171,7 @@ impl Db {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let current = self.conn.query_row(
-            "SELECT count(*) FROM embedding_space WHERE id = ?1",
-            [space_id],
-            |r| r.get::<_, i64>(0),
-        )? == 1;
-        if !current {
+        if !self.has_embedding_space(space_id)? {
             return Ok(false);
         }
         let mut stmt = self.conn.prepare(

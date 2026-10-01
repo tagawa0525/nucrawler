@@ -195,6 +195,14 @@ mod tests {
         .collect()
     }
 
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）先回りの和訳に使わない。
+    #[test]
+    fn pending_translate_ignores_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        assert!(translate_ids(&db, false, "2026-09-27T00:00:00Z").is_empty());
+    }
+
     #[test]
     fn pending_translate_picks_requests_then_high_scores() {
         let db = Db::open_in_memory().unwrap();

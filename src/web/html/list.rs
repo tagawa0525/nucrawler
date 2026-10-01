@@ -96,7 +96,7 @@ impl ListView {
     }
 
     /// この表示での最低点の既定。一覧は利用者の既定（`default_min`）、絞り込みは 0（点数で絞らない）。
-    fn min_default(self) -> Option<u8> {
+    pub fn min_default(self) -> Option<u8> {
         if self.filtered() {
             Some(0)
         } else {

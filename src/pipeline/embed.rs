@@ -109,7 +109,7 @@ impl<E: Embedder> Run<'_, E> {
         Ok(Outcome::Saved)
     }
 
-    /// 指紋の試験文だけで呼び、失敗すればサービスの側の失敗にする。
+    /// 指紋の試験文だけで呼び、失敗すればサービスの側の失敗にする。返った指紋も空間と照らす。
     /// 中断が要求されれば `false`。
     async fn probe(&mut self) -> Result<bool, EmbedStageError> {
         let inputs = fingerprint_inputs(self.cfg, Role::Document);
@@ -118,7 +118,13 @@ impl<E: Embedder> Run<'_, E> {
             () = self.cancel.requested() => return Ok(false),
         };
         self.summary.calls += 1;
-        result.map(|_| true).map_err(EmbedStageError::Api)
+        let vectors = result.map_err(EmbedStageError::Api)?;
+        if !self.space.fingerprint.matches(Role::Document, &vectors) {
+            return Err(EmbedStageError::SpaceChanged(
+                "the model behind the same settings returns different vectors".into(),
+            ));
+        }
+        Ok(true)
     }
 
     fn failure_key<'k>(&self, digest: &EmbedInput, stage: &'k str) -> StageKey<'k> {

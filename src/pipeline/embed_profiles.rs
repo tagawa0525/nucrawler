@@ -9,14 +9,14 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use super::Cancel;
-use super::embed::{EmbedStageError, check_space};
+use super::embed::{Checked, EmbedStageError, check_space, embed_checked};
 use crate::config::EmbeddingConfig;
 use crate::db::{
     CandidateFilter, Db, EMBED_BACKEND, EmbeddingScore, EmbeddingSpace, EvalKey, LabeledScore,
     ScoreKey, ScoringProfile, timestamp,
 };
 use crate::embed_score::{self, Formula, Preference, REFERENCE_LIMIT, SCORE_VERSION, Scorer};
-use crate::embedding::{Embedder, FINGERPRINT_TEXTS, Role, fingerprint_inputs, input};
+use crate::embedding::{Embedder, FINGERPRINT_TEXTS, Role, input};
 use crate::eval::{TRIAL_BACKEND, TRIAL_FORMULAS, embedding_trial};
 use crate::profile::{Interest, Profile};
 
@@ -299,25 +299,22 @@ async fn embed_texts(
         .cloned()
         .collect();
     for chunk in missing.chunks(cfg.batch_size - FINGERPRINT_TEXTS) {
-        let mut inputs = fingerprint_inputs(cfg, Role::Query);
-        inputs.extend(chunk.iter().cloned());
-        let result = tokio::select! {
-            r = embedder.embed(&inputs) => r,
-            () = cancel.requested() => return Ok(false),
+        let returned = match embed_checked(
+            embedder,
+            cfg,
+            space,
+            Role::Query,
+            chunk.iter().cloned(),
+            cancel,
+            &mut summary.calls,
+        )
+        .await?
+        {
+            Checked::Vectors(vectors) => vectors,
+            Checked::Failed(e) => return Err(EmbedStageError::Api(e)),
+            Checked::Cancelled => return Ok(false),
         };
-        summary.calls += 1;
-        let returned = result.map_err(EmbedStageError::Api)?;
-        let (fingerprint, returned) = returned.split_at(FINGERPRINT_TEXTS);
-        if !space.fingerprint.matches(Role::Query, fingerprint) {
-            return Err(EmbedStageError::SpaceChanged(
-                "the model behind the same settings returns different vectors".into(),
-            ));
-        }
-        let pairs: Vec<(String, Vec<f32>)> = chunk
-            .iter()
-            .cloned()
-            .zip(returned.iter().cloned())
-            .collect();
+        let pairs: Vec<(String, Vec<f32>)> = chunk.iter().cloned().zip(returned).collect();
         if !db.save_text_embeddings(space.id, &pairs)? {
             tracing::warn!("the embedding space was rebuilt during this run; stopping");
             return Ok(false);
@@ -409,6 +406,7 @@ mod tests {
     };
     use crate::embedding::EmbedError;
     use crate::embedding::fake::{FakeEmbedder, cfg};
+    use crate::embedding::fingerprint_inputs;
     use crate::pipeline::embed::{document_text, embed_articles};
     use crate::profile::Profile;
 

@@ -47,6 +47,49 @@ pub fn document_text(digest: &EmbedInput) -> String {
     parts.join("\n")
 }
 
+/// 試験文を付けた 1 回の呼び出しの結果。
+pub(super) enum Checked {
+    /// 試験文を除いた、送った文の順のベクトル
+    Vectors(Vec<Vec<f32>>),
+    /// API の失敗（入力のせいの失敗をどう扱うかは呼び出し側が決める）
+    Failed(EmbedError),
+    /// 止める指示で呼び出しをやめた（呼び出しに数えない）
+    Cancelled,
+}
+
+/// `texts`（`role` の接頭辞を付けた入力）の前に指紋の試験文を付けて 1 回呼ぶ。返った試験文のベクトルが空間の
+/// 指紋と一致しなければ、同じ設定の後ろのモデルが替わったので `SpaceChanged`。終わった呼び出しは `calls` に数える。
+pub(super) async fn embed_checked(
+    embedder: &impl Embedder,
+    cfg: &EmbeddingConfig,
+    space: &EmbeddingSpace,
+    role: Role,
+    texts: impl IntoIterator<Item = String>,
+    cancel: &Cancel,
+    calls: &mut usize,
+) -> Result<Checked, EmbedStageError> {
+    let mut inputs = fingerprint_inputs(cfg, role);
+    inputs.extend(texts);
+    let result = tokio::select! {
+        r = embedder.embed(&inputs) => r,
+        () = cancel.requested() => return Ok(Checked::Cancelled),
+    };
+    *calls += 1;
+    let mut vectors = match result {
+        Ok(vectors) => vectors,
+        Err(e) => return Ok(Checked::Failed(e)),
+    };
+    if !space
+        .fingerprint
+        .matches(role, &vectors[..FINGERPRINT_TEXTS])
+    {
+        return Err(EmbedStageError::SpaceChanged(
+            "the model behind the same settings returns different vectors".into(),
+        ));
+    }
+    Ok(Checked::Vectors(vectors.split_off(FINGERPRINT_TEXTS)))
+}
+
 /// 1 回の呼び出しの結果。
 enum Outcome {
     Saved,
@@ -70,34 +113,29 @@ struct Run<'a, E> {
 impl<E: Embedder> Run<'_, E> {
     /// `digests` を 1 回で送り、指紋が空間と一致すれば保存する。
     async fn embed(&mut self, digests: &[EmbedInput]) -> Result<Outcome, EmbedStageError> {
-        let mut inputs = fingerprint_inputs(self.cfg, Role::Document);
-        inputs.extend(
-            digests
-                .iter()
-                .map(|d| input(self.cfg, Role::Document, &document_text(d))),
-        );
-        let result = tokio::select! {
-            r = self.embedder.embed(&inputs) => r,
-            () = self.cancel.requested() => return Ok(Outcome::Cancelled),
-        };
-        self.summary.calls += 1;
-        let vectors = match result {
-            Ok(vectors) => vectors,
-            Err(e) if e.is_input_error() => return Ok(Outcome::InputError(e)),
-            Err(e) => return Err(EmbedStageError::Api(e)),
-        };
-        let (fingerprint, vectors) = vectors.split_at(FINGERPRINT_TEXTS);
-        if !self.space.fingerprint.matches(Role::Document, fingerprint) {
-            return Err(EmbedStageError::SpaceChanged(
-                "the model behind the same settings returns different vectors".into(),
-            ));
-        }
-        let pairs: Vec<(i64, Vec<f32>)> = digests
+        let texts = digests
             .iter()
-            .map(|d| d.artifact_id)
-            .zip(vectors.iter().cloned())
-            .collect();
+            .map(|d| input(self.cfg, Role::Document, &document_text(d)));
+        let vectors = match embed_checked(
+            self.embedder,
+            self.cfg,
+            &self.space,
+            Role::Document,
+            texts,
+            self.cancel,
+            &mut self.summary.calls,
+        )
+        .await?
+        {
+            Checked::Vectors(vectors) => vectors,
+            Checked::Failed(e) if e.is_input_error() => return Ok(Outcome::InputError(e)),
+            Checked::Failed(e) => return Err(EmbedStageError::Api(e)),
+            Checked::Cancelled => return Ok(Outcome::Cancelled),
+        };
+        let pairs: Vec<(i64, Vec<f32>)> =
+            digests.iter().map(|d| d.artifact_id).zip(vectors).collect();
         if !self.db.save_article_embeddings(self.space.id, &pairs)? {
+            tracing::warn!("the embedding space was rebuilt during this run; stopping");
             return Ok(Outcome::Rebuilt);
         }
         for d in digests {
@@ -112,19 +150,21 @@ impl<E: Embedder> Run<'_, E> {
     /// 指紋の試験文だけで呼び、失敗すればサービスの側の失敗にする。返った指紋も空間と照らす。
     /// 中断が要求されれば `false`。
     async fn probe(&mut self) -> Result<bool, EmbedStageError> {
-        let inputs = fingerprint_inputs(self.cfg, Role::Document);
-        let result = tokio::select! {
-            r = self.embedder.embed(&inputs) => r,
-            () = self.cancel.requested() => return Ok(false),
-        };
-        self.summary.calls += 1;
-        let vectors = result.map_err(EmbedStageError::Api)?;
-        if !self.space.fingerprint.matches(Role::Document, &vectors) {
-            return Err(EmbedStageError::SpaceChanged(
-                "the model behind the same settings returns different vectors".into(),
-            ));
+        match embed_checked(
+            self.embedder,
+            self.cfg,
+            &self.space,
+            Role::Document,
+            [],
+            self.cancel,
+            &mut self.summary.calls,
+        )
+        .await?
+        {
+            Checked::Vectors(_) => Ok(true),
+            Checked::Failed(e) => Err(EmbedStageError::Api(e)),
+            Checked::Cancelled => Ok(false),
         }
-        Ok(true)
     }
 
     fn failure_key<'k>(&self, digest: &EmbedInput, stage: &'k str) -> StageKey<'k> {
@@ -236,10 +276,7 @@ pub async fn embed_articles(
         match run.embed(&digests).await? {
             Outcome::Saved => {}
             Outcome::Cancelled => break,
-            Outcome::Rebuilt => {
-                tracing::warn!("the embedding space was rebuilt during this run; stopping");
-                break;
-            }
+            Outcome::Rebuilt => break,
             Outcome::InputError(e) => {
                 // 400 などは、文のせいでなく設定の誤り（モデル名・次元）でも返る。指紋の試験文だけでも失敗するなら、
                 // どの要約でも失敗するので、要約の失敗として記録せずに止める
@@ -256,9 +293,6 @@ pub async fn embed_articles(
                         Outcome::InputError(e) => run.record_failure(digest, &e)?,
                         Outcome::Cancelled => return Ok(run.summary),
                         Outcome::Rebuilt => {
-                            tracing::warn!(
-                                "the embedding space was rebuilt during this run; stopping"
-                            );
                             return Ok(run.summary);
                         }
                     }

@@ -116,6 +116,15 @@ impl EmbeddingConfig {
         {
             return Err("embedding.auth needs embedding.api_key_env".into());
         }
+        // 鍵を平文で送らない
+        if self.auth != EmbeddingAuth::None
+            && !url::Url::parse(&self.url).is_ok_and(|u| u.scheme() == "https")
+        {
+            return Err(format!(
+                "embedding.url must be https when embedding.auth sends a key, got {:?}",
+                self.url
+            ));
+        }
         if self.dimensions == Some(0) {
             return Err("embedding.dimensions must be at least 1".into());
         }

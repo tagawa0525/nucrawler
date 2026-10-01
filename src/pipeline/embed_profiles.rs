@@ -154,7 +154,7 @@ pub async fn embed_profiles(
         Ok(false) => return Ok(summary),
         Err(e) => Some(e),
     };
-    db.prune_text_embeddings(&all)?;
+    db.prune_text_embeddings(space.id, &all)?;
     let vectors = db.text_embeddings(space.id, &all)?;
     for (profile, texts) in profiles.iter().zip(&texts) {
         if cancel.is_requested() {
@@ -661,6 +661,63 @@ mod tests {
         );
         assert_eq!(preference.excludes[0].topic, "避けたい");
         assert_eq!(db.profile_hash(db.owner_id().unwrap()).unwrap(), None);
+    }
+
+    /// 前の版で取り込んだ、今の条件を満たさないプロファイル（重みが正の関心分野が無いなど）では採点しない。
+    #[tokio::test]
+    async fn skips_profiles_that_are_no_longer_valid() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.save_profile(
+            owner,
+            &Profile {
+                interests: vec![interest("なし", 0.0, None)],
+                exclude: vec![],
+            },
+            now(),
+        )
+        .unwrap();
+        digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        let summary = run(&db, &FakeEmbedder::default()).await.unwrap();
+        assert_eq!(summary.users, 0);
+        assert!(scores(&db, owner).is_empty());
+    }
+
+    /// プロファイルを変えた後は、採点する要約が無くても、古いプロファイルの点数を消す。
+    #[tokio::test]
+    async fn drops_old_scores_even_without_candidates() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.save_profile(
+            owner,
+            &Profile {
+                interests: vec![interest("一", 1.0, None)],
+                exclude: vec![],
+            },
+            now(),
+        )
+        .unwrap();
+        let (a, _) = digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        let embedder = FakeEmbedder::default();
+        run(&db, &embedder).await.unwrap();
+        assert_eq!(scores(&db, owner).len(), 1);
+        // 要約のベクトルが無くなる（採点の対象が無い）状態で、プロファイルを変える
+        db.conn()
+            .execute("DELETE FROM article_embeddings WHERE artifact_id = ?1", [a])
+            .unwrap();
+        db.save_profile(
+            owner,
+            &Profile {
+                interests: vec![interest("二", 1.0, None)],
+                exclude: vec![],
+            },
+            now(),
+        )
+        .unwrap();
+        embed_profiles(&db, &embedder, &config(), 7, &Cancel::default(), &now)
+            .await
+            .unwrap();
+        assert!(scores(&db, owner).is_empty());
     }
 
     /// 空間がまだ無ければ（要約のベクトルをまだ作っていない）、何もしない。

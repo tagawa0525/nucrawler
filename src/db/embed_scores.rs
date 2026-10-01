@@ -186,8 +186,8 @@ impl Db {
         Ok(true)
     }
 
-    /// `keep` に無い文のベクトルを消す（今のどのプロファイルにも使われなくなったもの）。
-    pub fn prune_text_embeddings(&self, keep: &[String]) -> Result<(), DbError> {
+    /// `space_id` の空間の、`keep` に無い文のベクトルを消す（今のどのプロファイルにも使われなくなったもの）。
+    pub fn prune_text_embeddings(&self, space_id: i64, keep: &[String]) -> Result<(), DbError> {
         self.conn.execute(
             "DELETE FROM text_embeddings WHERE text NOT IN (SELECT value FROM json_each(?1))",
             [serde_json::to_string(keep)?],
@@ -443,7 +443,10 @@ mod tests {
         );
         db.save_text_embeddings(s, &[("b".into(), vec![1.0, 0.0])])
             .unwrap();
-        db.prune_text_embeddings(&["b".to_string()]).unwrap();
+        // ほかの世代を指定しても消さない
+        db.prune_text_embeddings(s + 1, &[]).unwrap();
+        assert_eq!(db.text_embeddings(s, &texts).unwrap().len(), 2);
+        db.prune_text_embeddings(s, &["b".to_string()]).unwrap();
         assert_eq!(
             db.text_embeddings(s, &texts)
                 .unwrap()

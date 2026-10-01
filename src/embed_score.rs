@@ -210,6 +210,12 @@ mod tests {
             ..Formula::default()
         };
         assert!(close(raw(&p, &at(60.0), lighter).value, 0.0));
+        // 減点しない式（λ = 0）では、推薦しない話題を特徴にしない（関心が 0 の記事でも）
+        let no_penalty = Formula {
+            lambda: 0.0,
+            ..Formula::default()
+        };
+        assert_eq!(raw(&p, &at(150.0), no_penalty).exclude, None);
     }
 
     /// 類似度は 0 未満を 0 に切り詰める。推薦しない話題と反対向きの記事も加点されず、関心と反対向きの記事で

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, extract, fetch, score, story, suggest, tidy, title, translate};
+use super::{digest, embed, extract, fetch, score, story, suggest, tidy, title, translate};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -234,7 +234,26 @@ pub async fn crawl<L: LlmSet>(
                 );
                 block(report, env.backend(LlmTask::Tidy), summary.halted);
             }
-            Stage::Embed => {}
+            Stage::Embed => {
+                let Some(cfg) = &config.embedding else {
+                    tracing::debug!("embed stage skipped: no [embedding] settings");
+                    continue;
+                };
+                match embed_stage(db, cfg, env.cancel, env.clock).await {
+                    Ok(summary) => tracing::info!(
+                        embedded = summary.embedded,
+                        failed = summary.failed,
+                        calls = summary.calls,
+                        "embed stage finished"
+                    ),
+                    // 記事の embedding が作れなくても、ほかのステージは続ける（最後に報告する）
+                    Err(e) => {
+                        let message = crate::errors::error_chain(&e);
+                        tracing::error!("embed stage stopped: {message}");
+                        report.embedding_failure = Some(message);
+                    }
+                }
+            }
             Stage::Extract => {
                 let summary = extract::extract_pages(
                     db,
@@ -256,6 +275,25 @@ pub async fn crawl<L: LlmSet>(
     }
     report.cancelled = env.cancel.is_requested();
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+enum EmbedRunError {
+    #[error(transparent)]
+    Client(#[from] crate::embedding::EmbedError),
+    #[error(transparent)]
+    Stage(#[from] embed::EmbedStageError),
+}
+
+/// 設定の API で embed ステージを流す。鍵は環境変数から読む。
+async fn embed_stage(
+    db: &Db,
+    cfg: &crate::config::EmbeddingConfig,
+    cancel: &Cancel,
+    clock: &dyn Fn() -> DateTime<Utc>,
+) -> Result<embed::EmbedSummary, EmbedRunError> {
+    let client = crate::embedding::Client::from_config(cfg, |name| std::env::var(name).ok())?;
+    Ok(embed::embed_articles(db, &client, cfg, cancel, clock).await?)
 }
 
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の

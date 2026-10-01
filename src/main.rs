@@ -38,6 +38,8 @@ enum Error {
     Run(#[from] RunError),
     #[error("llm call failed: {0}")]
     LlmFailed(String),
+    #[error("embedding failed: {0}")]
+    EmbeddingFailed(String),
     #[error(transparent)]
     Profile(#[from] ProfileError),
     #[error(transparent)]

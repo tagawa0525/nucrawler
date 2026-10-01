@@ -15,13 +15,16 @@ pub(crate) use eval::eval;
 pub(crate) use redo::redo;
 pub(crate) use suggest::suggest;
 
-/// 実行の結果をエラーにする。中断を最優先し、次に LLM の失敗、最後に取得に失敗したソースを報告する。
+/// 実行の結果をエラーにする。中断を最優先し、次に LLM の失敗、embedding の失敗、最後に取得に失敗したソースを報告する。
 fn finish(report: RunReport) -> Result<(), Error> {
     if report.cancelled {
         return Err(Error::Interrupted);
     }
     if let Some(message) = report.llm_failure {
         return Err(Error::LlmFailed(message));
+    }
+    if let Some(message) = report.embedding_failure {
+        return Err(Error::EmbeddingFailed(message));
     }
     if report.failed_sources > 0 {
         return Err(Error::SourcesFailed(report.failed_sources));

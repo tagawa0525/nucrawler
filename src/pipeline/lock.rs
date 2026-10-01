@@ -49,7 +49,7 @@ pub fn acquire(dir: &Path, kind: LockKind) -> Result<Lock, LockError> {
         LockKind::Tidy => "tidy.lock",
     };
     Ok(Lock {
-        _file: Some(try_lock(dir, name, File::try_lock)?),
+        _file: Some(try_lock(dir, name)?),
     })
 }
 
@@ -64,7 +64,7 @@ pub struct Slot {
 pub async fn acquire_slot(dir: &Path, n: usize) -> Result<Slot, LockError> {
     loop {
         for i in 0..n {
-            match try_lock(dir, &format!("llm-slot-{i}.lock"), File::try_lock) {
+            match try_lock(dir, &format!("llm-slot-{i}.lock")) {
                 Ok(file) => return Ok(Slot { _file: file }),
                 Err(LockError::Held { .. }) => {}
                 Err(e) => return Err(e),
@@ -74,13 +74,10 @@ pub async fn acquire_slot(dir: &Path, n: usize) -> Result<Slot, LockError> {
     }
 }
 
-fn try_lock(
-    dir: &Path,
-    name: &str,
-    lock: fn(&File) -> Result<(), std::fs::TryLockError>,
-) -> Result<File, LockError> {
+/// `dir` の `name` のロックを、待たずに排他で取る。
+fn try_lock(dir: &Path, name: &str) -> Result<File, LockError> {
     let (path, file) = open(dir, name)?;
-    match lock(&file) {
+    match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held { path }),
         Err(std::fs::TryLockError::Error(source)) => Err(LockError::Io { path, source }),

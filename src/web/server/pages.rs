@@ -2,11 +2,6 @@
 
 use super::*;
 
-/// 利用者の一覧の既定の最低点。プロファイルがあれば設定の最低点（`min_score`）、無ければ採点が無いので最低点なし。
-pub(super) fn default_min(min_score: u8, profile_hash: Option<&str>) -> Option<u8> {
-    profile_hash.map(|_| min_score)
-}
-
 /// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が無ければ推薦点で絞らず、0 なら、評価 1〜2・未採点・
 /// 軽水炉と無関係の記事も出す（すべて）。既読は一覧の既定と同じく未読だけ（フィード・JSON の一覧もこれを使う）。
 fn list_query<'a>(
@@ -128,7 +123,7 @@ pub(super) async fn list(
     // 最低点の既定は、一覧では利用者の既定（プロファイルが無ければ最低点なし）、絞り込みでは 0（点数で絞らない）。
     // 正規の URL がプロファイルの有無で変わるので、利用者を先に引く
     let (user, hash) = with_db(&state, move |db| Ok(viewer(db, me)?)).await?;
-    let list_min = default_min(state.web.min_score, hash.as_deref());
+    let list_min = state.web.default_min(hash.as_deref());
     let min = params.min_or(if filtering { Some(0) } else { list_min })?;
     // 既読の既定は、一覧では未読だけ、絞り込み（評価した記事を探す）では絞らない
     let read =
@@ -191,7 +186,7 @@ pub(super) async fn list(
         } else {
             Vec::new()
         };
-        let parts = PageParts::new(db, me, hash.as_deref(), web.min_score)?;
+        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
         let page = parts.page(&labels);
         Ok(html::list_page_with_explore(
             &new, &earlier, &explore, view, &page,
@@ -232,7 +227,7 @@ fn filtered(
         .to_query(user, hash, web.list_limit)
         .map_err(|_| AppError::BadRequest("rating must be 1..=5"))?;
     let items = db.search_articles(&query)?;
-    let parts = PageParts::new(db, me, hash, web.min_score)?;
+    let parts = PageParts::new(db, me, hash, web)?;
     let page = parts.page(labels);
     Ok(html::filtered_page(&items, view, &page))
 }
@@ -259,7 +254,7 @@ pub(super) async fn feed(
             return Ok(None);
         };
         let (user, hash) = viewer(db, me)?;
-        let min = default_min(web.min_score, hash.as_deref());
+        let min = web.default_min(hash.as_deref());
         let items = list_items(db, &web, user, hash.as_deref(), now, min)?;
         // フィード自身の URL はトークン付き（購読し直すリーダーが読めるように）
         let token = params.token.unwrap_or_default();
@@ -297,7 +292,7 @@ pub(super) async fn search(
     let (status, page) = with_db(&state, move |db| {
         let (user, hash) = viewer(db, me)?;
         let vocabulary = db.topic_usage()?;
-        let parts = PageParts::new(db, me, hash.as_deref(), web.min_score)?;
+        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
         let page = parts.page(&labels);
         // 条件が無くても（並びだけでも）値の誤りは 400 で返してから、フォームだけの画面にする
         let html = match params.to_query(user, hash.as_deref(), web.list_limit) {
@@ -346,7 +341,7 @@ pub(super) async fn detail(
     // 書き込みの後に戻った詳細と、HEAD（リンクの確かめなど。axum は GET の受付に回す）は開いたと数えない
     let returned = params.back.is_some() || method == Method::HEAD;
     let labels = state.labels.clone();
-    let min_score = state.web.min_score;
+    let web = state.web.clone();
     let page = with_db(&state, move |db| {
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
@@ -380,7 +375,7 @@ pub(super) async fn detail(
                 .read_at
                 .get_or_insert_with(|| crate::db::timestamp(now));
         }
-        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
         let page = parts.page(&labels);
         let comments = db.comments(user, id)?;
         let notes = html::Notes {
@@ -442,7 +437,7 @@ pub(super) async fn settings_html(
     notice: Option<html::PasswordNotice>,
 ) -> Result<String, AppError> {
     let labels = state.labels.clone();
-    let min_score = state.web.min_score;
+    let web = state.web.clone();
     let base = format!("http://{}", request_host(headers, &state.web));
     with_db(state, move |db| {
         let (user, hash) = viewer(db, me)?;
@@ -462,7 +457,7 @@ pub(super) async fn settings_html(
         } else {
             None
         };
-        let parts = PageParts::new(db, me, hash.as_deref(), min_score)?;
+        let parts = PageParts::new(db, me, hash.as_deref(), &web)?;
         let page = parts.page(&labels);
         Ok(html::settings_page(
             terms,

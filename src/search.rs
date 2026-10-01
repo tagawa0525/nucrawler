@@ -201,6 +201,8 @@ impl Params {
             unrated: self.unrated,
             min_rating,
             min_score,
+            // 検索は一覧で隠す記事も出す
+            hide: false,
             hide_below: None,
             order,
             limit,
@@ -386,7 +388,7 @@ mod tests {
         assert_eq!(q.min_rating, crate::db::Rating::new(4));
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
-        assert_eq!(q.hide_below, None, "search shows what the list hides");
+        assert!(!q.hide, "search shows what the list hides");
 
         // 最低点 0 は、一覧の 00 と同じく点数で絞らない（未採点も出す）
         let zero = Params {

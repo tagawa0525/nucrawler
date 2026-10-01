@@ -96,7 +96,9 @@ pub struct SearchQuery<'a> {
     pub unrated: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、評価 1〜2・非軽水炉・未採点・この点数未満を隠す
+    /// 一覧の既定と同じく、評価 1〜2・非軽水炉の記事と、`hide_below` があれば未採点とその点数未満の記事を隠す
+    pub hide: bool,
+    /// `hide` のときに隠す最低点。`None` なら推薦点では隠さない（プロファイルが無く採点が無い利用者の既定）
     pub hide_below: Option<u8>,
     pub order: SearchOrder,
     pub limit: usize,
@@ -433,7 +435,7 @@ impl Db {
         )
     }
 
-    /// 検索。条件は `SearchQuery` のとおりで、`hide_below` を指定しなければ一覧で隠す記事も含め、
+    /// 検索。条件は `SearchQuery` のとおりで、`hide` でなければ一覧で隠す記事も含め、
     /// `order` の順（既定は新しい順）に並べる。
     pub fn search_articles(&self, q: &SearchQuery) -> Result<Vec<ListItem>, DbError> {
         self.query_items(q.user_id, q.profile_hash, ItemScope::Search(q))
@@ -680,7 +682,7 @@ impl Db {
             ItemScope::Search(q) => (
                 None,
                 q.since,
-                q.hide_below.is_none(),
+                !q.hide,
                 q.hide_below,
                 q.limit,
                 match q.order {
@@ -1564,6 +1566,7 @@ mod tests {
         // 一覧の既定と同じく隠す：評価 1〜2・未採点・閾値未満
         assert_eq!(
             with(SearchQuery {
+                hide: true,
                 hide_below: Some(60),
                 ..search_query(&db)
             }),

@@ -2,8 +2,8 @@
 //! 読み取り専用のツールだけを持つ（LLM の呼び出しや DB への書き込みはしない）。
 //! stdout は JSON-RPC に使うので、ログは stderr（tracing）にだけ出す。
 //!
-//! 閲覧判定と「記事ごとに見える最も詳しい版」は、Web UI と同じ `Db::list_articles` と
-//! `Db::article_detail` に任せる。stdio で起動できるのはこのマシンの利用者だけなので、
+//! 閲覧判定と記事ごとに見せる版は、Web UI と同じ `Db::search_articles`（検索）と
+//! `Db::article_detail`（記事）に任せる。stdio で起動できるのはこのマシンの利用者だけなので、
 //! オーナーとして判定する。
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -66,7 +66,7 @@ pub struct SearchParams {
     pub until: Option<String>,
     /// ソースの ID（sources.toml の id）
     pub source: Option<String>,
-    /// この点数以上の記事だけ。既定は Web UI の一覧と同じ（設定の web.min_score）。指定すると include_hidden でも未採点の記事は除く
+    /// この点数以上の記事だけ（0〜100）。既定は Web UI の一覧と同じ（設定の web.min_score。プロファイルが無ければ採点が無いので絞らない）。指定すると include_hidden でも未採点の記事は除く
     pub min_score: Option<u8>,
     /// Web UI の「すべて表示」と同じく、評価 1〜2・閾値未満・未採点・軽水炉に関係しない記事も含める
     #[serde(default)]
@@ -168,7 +168,7 @@ impl Server {
     }
 
     #[tool(
-        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（評価 1〜2 を付けた記事を除く）を点数の高い順に返す。"
+        description = "原子力ニュースの記事を検索する。既定では Web UI の一覧と同じく、直近の期間の、閾値以上に採点された軽水炉関係の記事（評価 1〜2 を付けた記事を除く。プロファイルが無ければ点数で絞らない）を点数の高い順に返す。一覧と違い、既読の記事も返し、同じ報道の記事をまとめない。"
     )]
     pub async fn search_articles(
         &self,
@@ -258,6 +258,9 @@ fn search(
         .map(crate::search::until)
         .transpose()
         .map_err(invalid)?;
+    if params.min_score.is_some_and(|min| min > 100) {
+        return Err(ToolError::InvalidParams("min_score must be 0..=100".into()));
+    }
     let (user, hash) = viewer(db)?;
     let items = db.search_articles(&SearchQuery {
         user_id: user,
@@ -271,8 +274,11 @@ fn search(
         until,
         sources: params.source.into_iter().collect(),
         min_score: params.min_score,
-        // 既定は Web UI の一覧と同じく隠す
-        hide_below: (!params.include_hidden).then(|| params.min_score.unwrap_or(web.min_score)),
+        // 既定は Web UI の一覧と同じく隠す（最低点の既定も一覧と同じ）
+        hide: !params.include_hidden,
+        hide_below: params
+            .min_score
+            .or_else(|| web.default_min(hash.as_deref())),
         order: SearchOrder::Score,
         limit: params.limit.unwrap_or(web.list_limit),
         ..SearchQuery::default()
@@ -355,6 +361,7 @@ mod tests {
         crate::profile::hash(&profile)
     }
 
+    #[derive(Clone, Copy)]
     struct Seed<'a> {
         source_id: &'a str,
         url: &'a str,
@@ -512,6 +519,54 @@ mod tests {
         assert_eq!(a.url, "https://e.com/down");
         assert_eq!(a.title_ja.as_deref(), Some("題"));
         assert_eq!(a.reason.as_deref(), Some("理由"));
+    }
+
+    /// プロファイルが無い利用者は採点が無いので、既定では Web UI の一覧と同じく最低点を掛けない。評価 1〜2 と
+    /// 軽水炉に関係しない記事は隠す。
+    #[test]
+    fn search_without_a_profile_shows_unscored_articles_by_default() {
+        let db = Db::open_in_memory().unwrap();
+        let unscored = Seed {
+            score: None,
+            ..Seed::default()
+        };
+        let shown = seed(&db, "", unscored);
+        seed(
+            &db,
+            "",
+            Seed {
+                url: "https://e.com/other",
+                lwr_relevant: false,
+                ..unscored
+            },
+        );
+        let down = seed(
+            &db,
+            "",
+            Seed {
+                url: "https://e.com/down",
+                ..unscored
+            },
+        );
+        db.rate(db.owner_id().unwrap(), down, Rating::new(2), now())
+            .unwrap();
+        let result = run_search(&db, SearchParams::default()).unwrap();
+        assert_eq!(ids(&result), [shown]);
+    }
+
+    /// 最低点は Web UI と同じく 0〜100。
+    #[test]
+    fn search_rejects_a_minimum_above_100() {
+        let db = Db::open_in_memory().unwrap();
+        let err = run_search(
+            &db,
+            SearchParams {
+                min_score: Some(101),
+                ..SearchParams::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidParams(_)), "{err:?}");
     }
 
     #[test]

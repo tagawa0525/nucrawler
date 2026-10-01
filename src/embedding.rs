@@ -164,6 +164,28 @@ fn normalize(mut v: Vec<f32>) -> Option<Vec<f32>> {
     Some(v)
 }
 
+/// 応答の大きさの上限：1 件あたり（3,072 次元を JSON の数で書いても収まる量）と、それ以外の部分。
+const RESPONSE_BYTES_PER_INPUT: usize = 128 * 1024;
+const RESPONSE_BYTES_BASE: usize = 64 * 1024;
+/// 失敗の応答の本文は、表示に使う分だけを読む。
+const ERROR_BODY_BYTES: usize = 4 * 1024;
+
+/// 本文を `limit` バイトまで読む。超える分があれば、そこで読むのをやめて `Err` に読んだ分を入れて返す。
+async fn read_limited(
+    resp: &mut reqwest::Response,
+    limit: usize,
+) -> Result<Result<Vec<u8>, Vec<u8>>, EmbedError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(EmbedError::Request)? {
+        if body.len() + chunk.len() > limit {
+            body.extend_from_slice(&chunk[..limit - body.len()]);
+            return Ok(Err(body));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Ok(body))
+}
+
 #[derive(Deserialize)]
 struct Response {
     data: Vec<Datum>,
@@ -210,6 +232,8 @@ impl Client {
         };
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_secs))
+            // embeddings API はリダイレクトしない。たどると鍵のヘッダー（api-key）をほかのサイトへ送ってしまう
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(EmbedError::Build)?;
         Ok(Self {
@@ -272,16 +296,23 @@ impl Embedder for Client {
         if let Some((name, value)) = &self.auth {
             req = req.header(*name, value);
         }
-        let resp = req.send().await.map_err(EmbedError::Request)?;
+        let mut resp = req.send().await.map_err(EmbedError::Request)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            // 表示に使う分だけを読む
+            let body = match read_limited(&mut resp, ERROR_BODY_BYTES).await {
+                Ok(Ok(body) | Err(body)) => body,
+                Err(_) => Vec::new(),
+            };
             return Err(EmbedError::Status {
                 status: status.as_u16(),
-                body: body.chars().take(500).collect(),
+                body: String::from_utf8_lossy(&body).chars().take(500).collect(),
             });
         }
-        let bytes = resp.bytes().await.map_err(EmbedError::Request)?;
+        let limit = RESPONSE_BYTES_PER_INPUT * inputs.len() + RESPONSE_BYTES_BASE;
+        let bytes = read_limited(&mut resp, limit)
+            .await?
+            .map_err(|_| EmbedError::Invalid(format!("response larger than {limit} bytes")))?;
         let resp: Response = serde_json::from_slice(&bytes)
             .map_err(|e| EmbedError::Invalid(format!("not an embeddings response: {e}")))?;
         self.check(inputs.len(), resp)

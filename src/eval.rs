@@ -74,20 +74,26 @@ pub fn render(
             "note: fewer than {FEW_LABELS} ratings of 4-5 or of 1-2; treat the numbers as rough"
         );
     }
-    let is_current = |k: &EvalKey| {
-        current.is_some_and(|(hash, version)| k.profile_hash == hash && k.prompt_version == version)
+    let of_current = |k: &EvalKey| {
+        current.is_some_and(|(hash, version)| {
+            k.profile_hash == hash && k.prompt_version == current_version(k, version)
+        })
     };
+    // その場で計算した式の候補は、現行のプロファイルのものを現行と分けて並べる
+    let is_trial = |k: &EvalKey| k.backend == TRIAL_BACKEND && of_current(k);
+    let is_current = |k: &EvalKey| k.backend != TRIAL_BACKEND && of_current(k);
     // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
     let is_candidate = |k: &EvalKey| {
-        k.prompt_version == version
+        k.prompt_version == current_version(k, version)
             && candidate.is_some_and(|hash| k.profile_hash == hash)
             && !is_current(k)
+            && !is_trial(k)
     };
     let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
-    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), *k));
+    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), !is_trial(k), *k));
     keys.dedup();
     if !all {
-        keys.retain(|k| is_current(k) || is_candidate(k));
+        keys.retain(|k| is_current(k) || is_candidate(k) || is_trial(k));
         // 候補だけ採点済みでも、比べる相手が無いことを示す
         if !keys.iter().any(|k| is_current(k)) {
             out.push('\n');
@@ -110,12 +116,108 @@ pub fn render(
             "  (current)"
         } else if is_candidate(key) {
             "  (candidate)"
+        } else if is_trial(key) {
+            "  (trial)"
         } else {
             ""
         };
         render_key(&mut out, key, role, labels, scores, prior_strength);
     }
     out
+}
+
+/// `eval` がその場で計算する embedding の点数（式やプロファイルの候補）のバックエンド。保存はしない。
+pub const TRIAL_BACKEND: &str = "embedding-trial";
+
+/// `eval` で比べる式（名前と式）。最初は今の式を同じ時点・同じ基準で計算し直したもので、ほかの候補と比べる基準にする
+/// （保存した点数は採点した時点の基準で固まっているので、そのままでは候補と比べられない）。
+pub const TRIAL_FORMULAS: [(&str, crate::embed_score::Formula); 5] = {
+    use crate::embed_score::{Aggregate, Formula, LAMBDA};
+    let current = Formula {
+        lambda: LAMBDA,
+        aggregate: Aggregate::WeightedMax,
+    };
+    [
+        ("now", current),
+        (
+            "λ=0.5",
+            Formula {
+                lambda: 0.5,
+                ..current
+            },
+        ),
+        (
+            "λ=0",
+            Formula {
+                lambda: 0.0,
+                ..current
+            },
+        ),
+        (
+            "mean",
+            Formula {
+                aggregate: Aggregate::WeightedMean,
+                ..current
+            },
+        ),
+        (
+            "top3",
+            Formula {
+                aggregate: Aggregate::TopK(3),
+                ..current
+            },
+        ),
+    ]
+};
+
+/// 評価した記事を、`preference` と `formula` で採点した点数（`key` のキーで）。百分位の基準は `reference`
+/// （直近の要約のベクトル）を同じ式で計算した値。保存した点数（採点した時点の基準で固まっている）とは別に、
+/// 式どうしを同じ時点・同じ基準で比べるために使う。
+pub fn embedding_trial(
+    labeled: &[crate::db::LabeledVector],
+    reference: &[Vec<f32>],
+    preference: &crate::embed_score::Preference,
+    formula: crate::embed_score::Formula,
+    key: &EvalKey,
+    scored_at: &str,
+) -> Vec<LabeledScore> {
+    use crate::embed_score::{percentile, raw};
+    let reference: Vec<f32> = reference
+        .iter()
+        .map(|v| raw(preference, v, formula).value)
+        .collect();
+    labeled
+        .iter()
+        .map(|l| {
+            let r = raw(preference, &l.vector, formula);
+            let matched: Vec<String> = r
+                .interest
+                .map(|i| preference.interests[i].topic.clone())
+                .into_iter()
+                .collect();
+            let excluded: Vec<String> = r
+                .exclude
+                .map(|j| preference.excludes[j].topic.clone())
+                .into_iter()
+                .collect();
+            LabeledScore {
+                key: key.clone(),
+                article_id: l.article_id,
+                score: percentile(r.value, &reference),
+                scored_at: scored_at.to_string(),
+                features: crate::recommend::features(&l.source_id, &l.topics, &matched, &excluded),
+            }
+        })
+        .collect()
+}
+
+/// キーの採点器の今の版：embedding なら式の版、LLM ならプロンプトの版（`llm_version`）。
+fn current_version(key: &EvalKey, llm_version: i64) -> i64 {
+    if key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND {
+        crate::embed_score::SCORE_VERSION
+    } else {
+        llm_version
+    }
 }
 
 /// 確認枠の評価の内訳。評価した記事のうち関心（評価 4〜5）の割合を、閾値未満での見逃し率の見積もりとして示す。
@@ -190,7 +292,9 @@ fn render_key(
         format(concordance(&adjusted)),
     );
     let late = matched.iter().filter(|m| m.2).count();
-    if key.prompt_version == 1 && late > 0 {
+    // embedding の入力に反応は入らない
+    let embedding = key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND;
+    if !embedding && key.prompt_version == 1 && late > 0 {
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,
@@ -384,6 +488,119 @@ mod tests {
         let out = render(&labels, &scores, Some("h"), None, 2, false, 1.0);
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
+    }
+
+    /// embedding の点数は、embedding の式の今の版のキーを現行として、LLM の現行のキーと並べる。その場で計算するので
+    /// いつも評価の後になるが、反応の見出しは入力に無いので注記しない。
+    #[test]
+    fn shows_embedding_scores_as_current_without_the_late_note() {
+        let labels = [label(1, 4), label(2, 2)];
+        let llm = key("h", 3);
+        let embedding = EvalKey {
+            backend: crate::db::EMBED_BACKEND.into(),
+            model: "ruri".into(),
+            prompt_version: crate::embed_score::SCORE_VERSION,
+            ..key("h", 0)
+        };
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [
+            scored(&llm, 1, 80, after),
+            scored(&llm, 2, 20, after),
+            scored(&embedding, 1, 70, after),
+            scored(&embedding, 2, 30, after),
+        ];
+        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        assert!(
+            out.contains(&format!(
+                "embedding/ruri  prompt v{}  (current)",
+                crate::embed_score::SCORE_VERSION
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("claude-cli/sonnet  prompt v3  (current)"),
+            "{out}"
+        );
+        assert!(!out.contains("after the reaction"), "{out}");
+        // LLM の版 1 の注記は、embedding の版が 1 でも出さない
+        let v1 = EvalKey {
+            prompt_version: 1,
+            ..embedding
+        };
+        let scores = [scored(&v1, 1, 70, after), scored(&v1, 2, 30, after)];
+        let out = render(&labels, &scores, Some("h"), None, 3, true, 1.0);
+        assert!(!out.contains("after the reaction"), "{out}");
+    }
+
+    /// その場で計算した式の候補（trial）は、現行のプロファイルのものなら --all でなくても並べる。
+    #[test]
+    fn shows_trials_of_the_current_profile() {
+        let labels = [label(1, 4), label(2, 2)];
+        let trial = EvalKey {
+            backend: TRIAL_BACKEND.into(),
+            model: "ruri λ=0.5".into(),
+            prompt_version: crate::embed_score::SCORE_VERSION,
+            ..key("h", 0)
+        };
+        let other = EvalKey {
+            profile_hash: "old".into(),
+            ..trial.clone()
+        };
+        let after = "2026-09-28T00:00:00.000Z";
+        let scores = [
+            scored(&trial, 1, 70, after),
+            scored(&trial, 2, 30, after),
+            scored(&other, 1, 70, after),
+        ];
+        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        assert!(out.contains("embedding-trial/ruri λ=0.5"), "{out}");
+        assert!(out.contains("(trial)"), "{out}");
+        assert!(!out.contains("profile old"), "{out}");
+        assert!(!out.contains("after the reaction"), "{out}");
+        // 候補が今のプロファイルと同じでも、今のプロファイルの式の候補は trial のまま
+        let same = render(&labels, &scores, Some("h"), Some("h"), 3, false, 1.0);
+        assert!(same.contains("(trial)"), "{same}");
+        assert!(!same.contains("(candidate)"), "{same}");
+    }
+
+    /// 評価した記事を、基準と同じ式で計算した百分位で採点し、補正の特徴（ソース・トピック・関心分野）も付ける。
+    #[test]
+    fn scores_labeled_articles_with_a_formula() {
+        use crate::embed_score::{Formula, Interest, Preference};
+        let preference = Preference {
+            interests: vec![Interest {
+                topic: "燃料".into(),
+                weight: 1.0,
+                vector: vec![1.0, 0.0],
+            }],
+            excludes: vec![],
+        };
+        let labeled = [crate::db::LabeledVector {
+            article_id: 7,
+            source_id: "wnn".into(),
+            topics: vec!["燃料".into()],
+            vector: vec![1.0, 0.0],
+        }];
+        let reference = [vec![0.6, 0.8], vec![0.0, 1.0]];
+        let trial = EvalKey {
+            backend: TRIAL_BACKEND.into(),
+            ..key("h", 1)
+        };
+        let got = embedding_trial(
+            &labeled,
+            &reference,
+            &preference,
+            Formula::default(),
+            &trial,
+            "2026-10-01T00:00:00.000Z",
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].article_id, got[0].score), (7, 100));
+        assert_eq!(got[0].key, trial);
+        assert_eq!(
+            got[0].features,
+            crate::recommend::features("wnn", &["燃料".into()], &["燃料".into()], &[])
+        );
     }
 
     #[test]

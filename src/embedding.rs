@@ -394,6 +394,8 @@ pub(crate) mod fake {
         pub calls: Mutex<Vec<Vec<String>>>,
         pub hang_from: Option<usize>,
         pub cancel_at: Option<(usize, crate::pipeline::Cancel)>,
+        /// 文ごとに返すベクトルを決める（正規化して返す）。無い文は `vector` で作る
+        pub fixed: Mutex<std::collections::HashMap<String, Vec<f32>>>,
     }
 
     impl FakeEmbedder {
@@ -434,7 +436,14 @@ pub(crate) mod fake {
                 });
             }
             let model = self.model.lock().unwrap().clone();
-            Ok(inputs.iter().map(|t| Self::vector(&model, t)).collect())
+            let fixed = self.fixed.lock().unwrap();
+            Ok(inputs
+                .iter()
+                .map(|t| match fixed.get(t) {
+                    Some(v) => normalize(v.clone()).unwrap(),
+                    None => Self::vector(&model, t),
+                })
+                .collect())
         }
     }
 }

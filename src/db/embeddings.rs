@@ -171,12 +171,7 @@ impl Db {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        let current = self.conn.query_row(
-            "SELECT count(*) FROM embedding_space WHERE id = ?1",
-            [space_id],
-            |r| r.get::<_, i64>(0),
-        )? == 1;
-        if !current {
+        if !self.has_embedding_space(space_id)? {
             return Ok(false);
         }
         let mut stmt = self.conn.prepare(
@@ -195,7 +190,7 @@ impl Db {
         Ok(true)
     }
 
-    /// 空間を消し、ベクトルと `embed` の失敗の記録・予約もすべて消す。次の `embed` が新しい空間で作り直す。
+    /// 空間を消し、ベクトル・embedding の点数と `embed` の失敗の記録・予約もすべて消す。次の `embed` が新しい空間で作り直す。
     pub fn rebuild_embeddings(&self) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction()?;
         // ベクトルは外部キーで一緒に消える
@@ -204,6 +199,8 @@ impl Db {
             "DELETE FROM stage_errors WHERE stage LIKE 'embed:%' AND backend = ?1",
             [EMBED_BACKEND],
         )?;
+        // embedding の点数も、消した空間のベクトルから作ったものなので消す（好みの文のベクトルは外部キーで消える）
+        tx.execute("DELETE FROM scores WHERE backend = ?1", [EMBED_BACKEND])?;
         tx.execute(
             "DELETE FROM work_claims WHERE stage LIKE 'embed:%' AND backend = ?1",
             [EMBED_BACKEND],

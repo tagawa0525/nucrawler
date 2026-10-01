@@ -232,6 +232,8 @@ const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
     AND (:min_score IS NULL OR (
       SELECT s.score FROM scores AS s
       WHERE s.user_id = :user AND s.profile_hash = :profile
+        -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+        AND s.backend <> 'embedding'
         AND s.artifact_id = (
           SELECT r.id FROM artifacts AS r
           WHERE r.article_id = a.id AND r.kind = 'digest'
@@ -292,6 +294,18 @@ mod tests {
             .into_iter()
             .map(|d| d.article_id)
             .collect()
+    }
+
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）`--min-score` に使わない。
+    #[test]
+    fn redo_min_score_ignores_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        let filter = RedoFilter {
+            min_score: Some(50),
+            ..RedoFilter::default()
+        };
+        assert!(redo_digest_ids(&db, "haiku", &filter).is_empty());
     }
 
     #[test]

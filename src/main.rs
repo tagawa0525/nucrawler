@@ -41,6 +41,10 @@ enum Error {
     #[error("embedding failed: {0}")]
     EmbeddingFailed(String),
     #[error(transparent)]
+    Embedding(#[from] nucrawler::embedding::EmbedError),
+    #[error(transparent)]
+    EmbedStage(#[from] nucrawler::pipeline::embed::EmbedStageError),
+    #[error(transparent)]
     Profile(#[from] ProfileError),
     #[error(transparent)]
     Auth(#[from] AuthError),

@@ -703,6 +703,8 @@ impl Db {
                       (SELECT s.id FROM scores AS s
                        WHERE s.user_id = :user AND s.profile_hash = :profile
                          AND s.artifact_id = i.digest_id
+                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+                         AND s.backend <> 'embedding'
                        -- 採点のプロンプトの最新の版を使い、その版で複数のモデルの採点があれば、
                        -- 先回り和訳と同じく最高点を使う
                        ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
@@ -921,6 +923,20 @@ mod tests {
             .map(|i| i.article_id)
             .collect();
         assert_eq!(limited, [b, other]);
+    }
+
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）一覧では使わない。
+    #[test]
+    fn list_ignores_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 90);
+        let item = db
+            .list_articles(list_query(&db, true))
+            .unwrap()
+            .into_iter()
+            .find(|i| i.article_id == a)
+            .unwrap();
+        assert_eq!((item.score, item.llm_score), (None, None));
     }
 
     /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。評価 1〜2 も同じ。

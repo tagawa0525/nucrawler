@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoSpec, Stage, Target};
-use super::{digest, embed, extract, fetch, score, story, suggest, tidy, title, translate};
+use super::{
+    digest, embed, embed_profiles, extract, fetch, score, story, suggest, tidy, title, translate,
+};
 use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -239,11 +241,14 @@ pub async fn crawl<L: LlmSet>(
                     tracing::debug!("embed stage skipped: no [embedding] settings");
                     continue;
                 };
-                match embed_stage(db, cfg, env.cancel, env.clock).await {
-                    Ok(summary) => tracing::info!(
-                        embedded = summary.embedded,
-                        failed = summary.failed,
-                        calls = summary.calls,
+                match embed_stage(db, cfg, config.web.list_days, env.cancel, env.clock).await {
+                    Ok((articles, profiles)) => tracing::info!(
+                        embedded = articles.embedded,
+                        failed = articles.failed,
+                        profile_texts = profiles.embedded,
+                        scored_users = profiles.users,
+                        scored = profiles.scored,
+                        calls = articles.calls + profiles.calls,
                         "embed stage finished"
                     ),
                     // 記事の embedding が作れなくても、ほかのステージは続ける（最後に報告する）
@@ -285,15 +290,20 @@ enum EmbedRunError {
     Stage(#[from] embed::EmbedStageError),
 }
 
-/// 設定の API で embed ステージを流す。鍵は環境変数から読む。
+/// 設定の API で embed ステージを流す：要約のベクトルを作り、好みのベクトルを作って利用者を採点する。
+/// 鍵は環境変数から読む。百分位の基準は一覧の期間（`list_days`）の要約。
 async fn embed_stage(
     db: &Db,
     cfg: &crate::config::EmbeddingConfig,
+    list_days: u32,
     cancel: &Cancel,
     clock: &dyn Fn() -> DateTime<Utc>,
-) -> Result<embed::EmbedSummary, EmbedRunError> {
+) -> Result<(embed::EmbedSummary, embed_profiles::ProfileSummary), EmbedRunError> {
     let client = crate::embedding::Client::from_config(cfg, |name| std::env::var(name).ok())?;
-    Ok(embed::embed_articles(db, &client, cfg, cancel, clock).await?)
+    let articles = embed::embed_articles(db, &client, cfg, cancel, clock).await?;
+    let profiles =
+        embed_profiles::embed_profiles(db, &client, cfg, list_days, cancel, clock).await?;
+    Ok((articles, profiles))
 }
 
 /// 指定したモデルで要約か和訳を作り直す。条件に合う記事のうち、そのモデル・プロンプト版の
@@ -701,6 +711,27 @@ mod tests {
         assert!(report.llm_failure.is_some());
         assert_eq!(report.embedding_failure, None);
         assert_eq!(embedded(&db), 1);
+    }
+
+    /// embed ステージは、要約のベクトルを作った後、プロファイルのある利用者を embedding で採点する。
+    #[tokio::test]
+    async fn embed_scores_users_after_embedding_digests() {
+        let db = Db::open_in_memory().unwrap();
+        digested_and_pending(&db).await;
+        let server = crate::embedding::fake::echo_server();
+        let report = crawl_config(
+            &db,
+            &FakeLlm::new([]),
+            &[Stage::Embed],
+            &embedding_config(&server.url("/v1/embeddings")),
+        )
+        .await;
+        assert_eq!(report, RunReport::default());
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM scores WHERE backend = 'embedding'")
+                .unwrap(),
+            1
+        );
     }
 
     /// 設定が無ければ embed は何もしない。embedding の失敗は報告し、後続のステージは続ける。

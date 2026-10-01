@@ -123,6 +123,8 @@ impl Db {
                       (SELECT s.score FROM scores AS s
                        WHERE s.user_id = ?1 AND s.profile_hash = ?2
                          AND s.artifact_id = b.digest_id
+                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
+                         AND s.backend <> 'embedding'
                        ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) AS score,
                       (SELECT json_extract(r.payload, '$.lwr_relevant') FROM artifacts AS r
                        WHERE r.id = b.digest_id) AS relevant
@@ -193,6 +195,14 @@ mod tests {
         .into_iter()
         .map(|i| i.article_id)
         .collect()
+    }
+
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）先回りの和訳に使わない。
+    #[test]
+    fn pending_translate_ignores_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        assert!(translate_ids(&db, false, "2026-09-27T00:00:00Z").is_empty());
     }
 
     #[test]

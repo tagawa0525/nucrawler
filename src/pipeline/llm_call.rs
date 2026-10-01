@@ -479,6 +479,50 @@ mod tests {
         );
     }
 
+    /// 呼び出しを始める前に止める指示が出ていれば、呼ばないので数えない。
+    #[tokio::test]
+    async fn a_call_not_started_for_the_stop_is_not_counted() {
+        let db = Db::open_in_memory().unwrap();
+        let llm = FakeLlm::new([]);
+        let cancel = Cancel::default();
+        cancel.request();
+        let mut quota = Quota::new(QuotaConfig::default(), None, None);
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &Utc::now,
+        });
+        let schema = serde_json::json!({});
+        let outcome = workers
+            .call(Call {
+                stage: "suggest",
+                n_items: 1,
+                req: LlmRequest {
+                    system: "s",
+                    prompt: "p",
+                    schema: &schema,
+                    model: "m",
+                },
+            })
+            .await
+            .unwrap();
+        let mut tally = Tally::default();
+        let response = workers
+            .settle(outcome, &mut tally, std::iter::empty(), Utc::now())
+            .unwrap();
+        assert!(response.is_none());
+        assert!(llm.requests().is_empty());
+        assert_eq!(
+            tally,
+            Tally {
+                cancelled: true,
+                ..Tally::default()
+            }
+        );
+    }
+
     /// クレジットで判定するときは、DB にある今月の消費（ほかの実行の分も含む）で判定する。
     #[test]
     fn permit_counts_this_months_credits() {

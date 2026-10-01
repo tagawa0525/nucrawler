@@ -240,9 +240,6 @@ pub async fn judge_stories<L: Llm>(
                 now,
             )?
             else {
-                if summary.tally.halted.is_some() {
-                    rebuild(db)?;
-                }
                 break;
             };
             let parsed = match prompt::story::parse(&response.output, &requested) {

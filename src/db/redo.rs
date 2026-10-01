@@ -240,13 +240,9 @@ fn redo_filter() -> String {
       WHERE s.user_id = :user AND s.profile_hash = :profile
         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
         AND s.backend <> 'embedding'
-        AND s.artifact_id = (
-          SELECT r.id FROM artifacts AS r
-          WHERE r.article_id = a.id AND r.kind = 'digest'
-            AND {viewable}
-          ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
+        AND s.artifact_id = {digest_id}
       ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)",
-        viewable = super::read::viewable("r", ":user"),
+        digest_id = super::read::latest_digest("id", "a.id", ":user"),
     )
 }
 

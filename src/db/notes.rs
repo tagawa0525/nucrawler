@@ -305,14 +305,7 @@ impl Db {
     pub fn reports(&self, user_id: i64, filter: &ReportFilter) -> Result<Vec<Report>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.article_id,
-                    coalesce(nullif(trim((SELECT d.title_ja FROM artifacts AS d
-                                          WHERE d.article_id = a.id AND d.kind = 'digest'
-                                            AND {viewable}
-                                          ORDER BY d.created_at DESC, d.id DESC LIMIT 1)), ''),
-                             (SELECT tt.title_ja FROM artifacts AS tt
-                              WHERE tt.article_id = a.id AND tt.kind = 'title'
-                              ORDER BY tt.created_at DESC, tt.id DESC LIMIT 1),
-                             a.title),
+                    coalesce({title_ja}, a.title),
                     r.kind, r.found, r.wanted, r.source, r.note, r.status, r.term_id, t.target,
                     r.reply, r.reported_at, r.resolved_at
              FROM reports AS r
@@ -323,7 +316,10 @@ impl Db {
                AND (:article IS NULL OR r.article_id = :article)
                AND (:reporter IS NULL OR r.user_id = :reporter)
              ORDER BY r.reported_at DESC, r.id DESC",
-            viewable = viewable("d", ":user")
+            title_ja = super::read::title_ja(
+                &super::read::latest_digest("title_ja", "a.id", ":user"),
+                "a.id",
+            ),
         ))?;
         let mut rows = stmt.query(rusqlite::named_params! {
             ":user": user_id,

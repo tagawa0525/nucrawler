@@ -84,9 +84,7 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "WITH rated AS (
                SELECT rt.article_id, rt.value,
-                      (SELECT r.id FROM artifacts AS r
-                       WHERE r.article_id = rt.article_id AND r.kind = 'digest' AND {viewable}
-                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+                      {digest_id} AS digest_id
                FROM ratings AS rt WHERE rt.user_id = :user),
              scored AS (
                SELECT rated.*,
@@ -99,18 +97,16 @@ impl Db {
                        LIMIT 1) AS score_id
                FROM rated)
              SELECT x.value, s.score, a.source_id, {topics},
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = s.id AND kind = 'interest' ORDER BY topic)),
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = s.id AND kind = 'exclude' ORDER BY topic))
+                    {matched},
+                    {excluded}
              FROM scored AS x
              JOIN scores AS s ON s.id = x.score_id
              JOIN artifacts AS r ON r.id = x.digest_id
              JOIN articles AS a ON a.id = x.article_id
              ORDER BY x.article_id",
-            viewable = super::read::viewable("r", ":user"),
+            digest_id = super::read::latest_digest("id", "rt.article_id", ":user"),
+            matched = super::read::matched_topics("s.id", "interest"),
+            excluded = super::read::matched_topics("s.id", "exclude"),
             topics = super::read::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(

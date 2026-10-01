@@ -78,16 +78,14 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "WITH digests AS (
                SELECT rt.article_id, rt.value, rt.rated_at,
-                      (SELECT r.id FROM artifacts AS r
-                       WHERE r.article_id = rt.article_id AND r.kind = 'digest' AND {viewable}
-                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+                      {digest_id} AS digest_id
                FROM ratings AS rt
                WHERE rt.user_id = :user)
              SELECT d.article_id, d.value, d.rated_at, r.title_ja, {topics}
              FROM digests AS d
              JOIN artifacts AS r ON r.id = d.digest_id
              ORDER BY d.rated_at DESC, d.article_id DESC",
-            viewable = super::read::viewable("r", ":user"),
+            digest_id = super::read::latest_digest("id", "rt.article_id", ":user"),
             topics = super::read::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
@@ -158,17 +156,15 @@ impl Db {
                WHERE s.user_id = ?1)
              SELECT r.profile_hash, r.backend, r.model, r.prompt_version, r.article_id, r.score,
                     r.created_at, a.source_id, {topics},
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = r.score_id AND kind = 'interest' ORDER BY topic)),
-                    (SELECT json_group_array(topic) FROM (
-                       SELECT topic FROM score_matches
-                       WHERE score_id = r.score_id AND kind = 'exclude' ORDER BY topic))
+                    {matched},
+                    {excluded}
              FROM ranked AS r
              JOIN articles AS a ON a.id = r.article_id
              WHERE r.rn = 1
              ORDER BY r.profile_hash, r.backend, r.model, r.prompt_version, r.article_id",
             topics = super::read::linked_topics("r"),
+            matched = super::read::matched_topics("r.score_id", "interest"),
+            excluded = super::read::matched_topics("r.score_id", "exclude"),
         ))?;
         let rows = stmt.query_map([user_id], |r| {
             Ok((

@@ -89,10 +89,7 @@ impl Db {
                        WHERE tr.article_id = a.id AND tr.done_at IS NULL) AS requested_at,
                       -- 利用者が閲覧できる最新の digest。先回りの判定（点数と lwr_relevant）は
                       -- この版だけで行い、古い版の高得点では先回りしない
-                      (SELECT r.id FROM artifacts AS r
-                       WHERE r.article_id = a.id AND r.kind = 'digest'
-                         AND {viewable}
-                       ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
+                      {digest_id} AS digest_id
                FROM articles AS a
                WHERE a.lang = 'en'
                  AND NOT EXISTS (
@@ -132,7 +129,7 @@ impl Db {
                 OR (?7 = 0 AND relevant = 1 AND score >= ?8 AND at >= ?9)
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
-            viewable = super::read::viewable("r", "?1"),
+            digest_id = super::read::latest_digest("id", "a.id", "?1"),
         ))?;
         let articles = stmt
             .query_map(

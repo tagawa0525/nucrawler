@@ -154,6 +154,27 @@ impl<E: Embedder> Run<'_, E> {
     }
 }
 
+/// 保存した空間が、今の設定と入力の組み立て方の版のものか。違えば、作り直しを案内する。
+pub(super) fn check_space(
+    space: &EmbeddingSpace,
+    cfg: &EmbeddingConfig,
+) -> Result<(), EmbedStageError> {
+    let name = space_name(cfg);
+    if space.name != name {
+        return Err(EmbedStageError::SpaceChanged(format!(
+            "the settings changed from {} to {name}",
+            space.name
+        )));
+    }
+    if space.input_version != INPUT_VERSION {
+        return Err(EmbedStageError::SpaceChanged(format!(
+            "the input version changed from {} to {INPUT_VERSION}",
+            space.input_version
+        )));
+    }
+    Ok(())
+}
+
 /// ベクトルの無い要約を、無くなるか中断されるまで作る。
 pub async fn embed_articles(
     db: &Db,
@@ -178,18 +199,7 @@ pub async fn embed_articles(
             db.create_embedding_space(&name, INPUT_VERSION, &fingerprint, clock())?
         }
     };
-    if space.name != name {
-        return Err(EmbedStageError::SpaceChanged(format!(
-            "the settings changed from {} to {name}",
-            space.name
-        )));
-    }
-    if space.input_version != INPUT_VERSION {
-        return Err(EmbedStageError::SpaceChanged(format!(
-            "the input version changed from {} to {INPUT_VERSION}",
-            space.input_version
-        )));
-    }
+    check_space(&space, cfg)?;
     let claim_stage = embed_claim_stage(space.id);
     let key = ClaimKey {
         stage: &claim_stage,

@@ -84,14 +84,14 @@ impl TryFrom<DocRow> for Doc {
         Ok(Doc {
             article_id,
             source_id,
-            at: parse_at(at)?,
+            at: parse_at(&at)?,
             text,
         })
     }
 }
 
-fn parse_at(at: String) -> Result<chrono::DateTime<chrono::Utc>, DbError> {
-    chrono::DateTime::parse_from_rfc3339(&at)
+fn parse_at(at: &str) -> Result<chrono::DateTime<chrono::Utc>, DbError> {
+    chrono::DateTime::parse_from_rfc3339(at)
         .map(|t| t.to_utc())
         .map_err(|_| DbError::UnexpectedValue(format!("article time {at:?}")))
 }
@@ -153,7 +153,7 @@ impl Db {
             let (article_id, at) = row?;
             Ok(StoryPending {
                 article_id,
-                at: parse_at(at)?,
+                at: parse_at(&at)?,
             })
         })
         .collect()

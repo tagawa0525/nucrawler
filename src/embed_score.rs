@@ -93,7 +93,7 @@ pub fn raw(preference: &Preference, article: &[f32], formula: Formula) -> Raw {
             }
         }
         Aggregate::TopK(k) => {
-            let mut sorted = weighted.clone();
+            let mut sorted = weighted;
             sorted.sort_by(|x, y| y.total_cmp(x));
             let top = &sorted[..k.min(sorted.len())];
             if top.is_empty() {

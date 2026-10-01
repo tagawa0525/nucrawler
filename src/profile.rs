@@ -218,7 +218,9 @@ pub fn diff(from: &Profile, to: &Profile) -> Vec<Change> {
 
 impl std::fmt::Display for Change {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let note = |n: &Option<String>| n.clone().unwrap_or_else(|| "(none)".into());
+        fn note(n: &Option<String>) -> &str {
+            n.as_deref().unwrap_or("(none)")
+        }
         match self {
             Self::Added {
                 topic,

@@ -188,6 +188,17 @@ mod tests {
             .unwrap()
     }
 
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）補正の学習に使わない。
+    #[test]
+    fn examples_ignore_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        db.rate(owner, a, Rating::new(5), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        assert!(db.recommend_examples(owner, "h1").unwrap().is_empty());
+    }
+
     /// 評価が無ければ、推薦点は LLM の点数と同じ。
     #[test]
     fn without_ratings_the_list_keeps_the_llm_scores() {

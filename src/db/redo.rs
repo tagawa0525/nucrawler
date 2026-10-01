@@ -294,6 +294,18 @@ mod tests {
             .collect()
     }
 
+    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）`--min-score` に使わない。
+    #[test]
+    fn redo_min_score_ignores_embedding_scores_for_now() {
+        let db = Db::open_in_memory().unwrap();
+        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        let filter = RedoFilter {
+            min_score: Some(50),
+            ..RedoFilter::default()
+        };
+        assert!(redo_digest_ids(&db, "haiku", &filter).is_empty());
+    }
+
     #[test]
     fn redo_digest_selects_articles_missing_this_model() {
         let db = Db::open_in_memory().unwrap();

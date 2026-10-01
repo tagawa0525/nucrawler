@@ -74,11 +74,14 @@ pub fn render(
             "note: fewer than {FEW_LABELS} ratings of 4-5 or of 1-2; treat the numbers as rough"
         );
     }
-    let is_current = |k: &EvalKey| {
+    let of_current = |k: &EvalKey| {
         current.is_some_and(|(hash, version)| {
             k.profile_hash == hash && k.prompt_version == current_version(k, version)
         })
     };
+    // その場で計算した式の候補は、現行のプロファイルのものを現行と分けて並べる
+    let is_trial = |k: &EvalKey| k.backend == TRIAL_BACKEND && of_current(k);
+    let is_current = |k: &EvalKey| k.backend != TRIAL_BACKEND && of_current(k);
     // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
     let is_candidate = |k: &EvalKey| {
         k.prompt_version == current_version(k, version)
@@ -86,10 +89,10 @@ pub fn render(
             && !is_current(k)
     };
     let mut keys: Vec<&EvalKey> = scores.iter().map(|s| &s.key).collect();
-    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), *k));
+    keys.sort_by_key(|k| (!is_current(k), !is_candidate(k), !is_trial(k), *k));
     keys.dedup();
     if !all {
-        keys.retain(|k| is_current(k) || is_candidate(k));
+        keys.retain(|k| is_current(k) || is_candidate(k) || is_trial(k));
         // 候補だけ採点済みでも、比べる相手が無いことを示す
         if !keys.iter().any(|k| is_current(k)) {
             out.push('\n');
@@ -112,6 +115,8 @@ pub fn render(
             "  (current)"
         } else if is_candidate(key) {
             "  (candidate)"
+        } else if is_trial(key) {
+            "  (trial)"
         } else {
             ""
         };
@@ -134,12 +139,39 @@ pub fn embedding_trial(
     key: &EvalKey,
     scored_at: &str,
 ) -> Vec<LabeledScore> {
-    todo!()
+    use crate::embed_score::{percentile, raw};
+    let reference: Vec<f32> = reference
+        .iter()
+        .map(|v| raw(preference, v, formula).value)
+        .collect();
+    labeled
+        .iter()
+        .map(|l| {
+            let r = raw(preference, &l.vector, formula);
+            let matched: Vec<String> = r
+                .interest
+                .map(|i| preference.interests[i].topic.clone())
+                .into_iter()
+                .collect();
+            let excluded: Vec<String> = r
+                .exclude
+                .map(|j| preference.excludes[j].topic.clone())
+                .into_iter()
+                .collect();
+            LabeledScore {
+                key: key.clone(),
+                article_id: l.article_id,
+                score: percentile(r.value, &reference),
+                scored_at: scored_at.to_string(),
+                features: crate::recommend::features(&l.source_id, &l.topics, &matched, &excluded),
+            }
+        })
+        .collect()
 }
 
 /// キーの採点器の今の版：embedding なら式の版、LLM ならプロンプトの版（`llm_version`）。
 fn current_version(key: &EvalKey, llm_version: i64) -> i64 {
-    if key.backend == crate::db::EMBED_BACKEND {
+    if key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND {
         crate::embed_score::SCORE_VERSION
     } else {
         llm_version
@@ -219,7 +251,8 @@ fn render_key(
     );
     let late = matched.iter().filter(|m| m.2).count();
     // embedding の入力に反応は入らない
-    if key.backend != crate::db::EMBED_BACKEND && key.prompt_version == 1 && late > 0 {
+    let embedding = key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND;
+    if !embedding && key.prompt_version == 1 && late > 0 {
         // 版 1 の採点のプロンプトは直近の反応の見出しを含むので、反応の後の採点は甘くなりうる
         let _ = writeln!(
             out,

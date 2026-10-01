@@ -56,7 +56,55 @@ impl Db {
         user_id: i64,
         space_id: i64,
     ) -> Result<Vec<LabeledVector>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH viewable AS (
+               SELECT r.id, r.article_id, r.created_at, r.payload
+               FROM artifacts AS r
+               WHERE r.kind = 'digest'
+                 AND r.article_id IN (SELECT article_id FROM ratings WHERE user_id = ?1)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM artifact_access AS aa
+                   WHERE aa.artifact_id = r.id
+                     AND aa.membership_id NOT IN (
+                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+             ),
+             latest AS (
+               SELECT v.* FROM viewable AS v
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM viewable AS w
+                 WHERE w.article_id = v.article_id
+                   AND (w.created_at > v.created_at
+                        OR (w.created_at = v.created_at AND w.id > v.id)))
+             )
+             SELECT l.article_id, a.source_id, {topics}, e.vector
+             FROM latest AS l
+             JOIN articles AS a ON a.id = l.article_id
+             JOIN article_embeddings AS e ON e.artifact_id = l.id AND e.space_id = ?2
+             WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+             ORDER BY l.article_id",
+            topics = super::read::linked_topics("l"),
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![user_id, space_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (article_id, source_id, topics, bytes) = row?;
+            let vector = crate::embedding::decode(&bytes).ok_or_else(|| {
+                DbError::UnexpectedValue(format!("vector of article {article_id}"))
+            })?;
+            Ok(LabeledVector {
+                article_id,
+                source_id,
+                topics: serde_json::from_str(&topics)?,
+                vector,
+            })
+        })
+        .collect()
     }
 
     /// プロファイルのある利用者（利用者の id 順）。

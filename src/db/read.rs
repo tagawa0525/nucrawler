@@ -285,7 +285,7 @@ fn search_term_filter(term: &str, param: &str) -> String {
                     SELECT membership_id FROM user_memberships WHERE user_id = :user)))
              AND (d.artifact_id IS NULL OR d.artifact_id IN (
                SELECT r.id FROM artifacts AS r WHERE {viewable_r})))",
-        viewable_r = viewable("r"),
+        viewable_r = viewable("r", ":user"),
     )
 }
 
@@ -319,14 +319,14 @@ pub(super) fn linked_topics(alias: &str) -> String {
     )
 }
 
-/// 別名 `alias` の成果物を、利用者（`:user`）が閲覧できる条件。
-pub(super) fn viewable(alias: &str) -> String {
+/// 別名 `alias` の成果物を、利用者（パラメータ `user`。`:user` や `?1`）が閲覧できる条件。
+pub(super) fn viewable(alias: &str, user: &str) -> String {
     format!(
         "NOT EXISTS (
            SELECT 1 FROM artifact_access AS aa
            WHERE aa.artifact_id = {alias}.id
              AND aa.membership_id NOT IN (
-               SELECT membership_id FROM user_memberships WHERE user_id = :user))"
+               SELECT membership_id FROM user_memberships WHERE user_id = {user}))"
     )
 }
 
@@ -499,7 +499,7 @@ impl Db {
              WHERE r.article_id = :article AND r.kind = :kind AND {viewable}
              ORDER BY r.created_at DESC, r.id DESC",
             linked = linked_topics("r"),
-            viewable = viewable("r"),
+            viewable = viewable("r", ":user"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
@@ -795,8 +795,8 @@ impl Db {
              WHERE {fold}
              ORDER BY {order}
              LIMIT :limit",
-            viewable_r = viewable("r"),
-            viewable_t = viewable("t"),
+            viewable_r = viewable("r", ":user"),
+            viewable_t = viewable("t", ":user"),
             rec = super::recommend::recommend_score_sql(),
         );
         let model = self.recommend_model(user_id, profile_hash)?;

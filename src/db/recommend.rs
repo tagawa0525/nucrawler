@@ -110,7 +110,7 @@ impl Db {
              JOIN artifacts AS r ON r.id = x.digest_id
              JOIN articles AS a ON a.id = x.article_id
              ORDER BY x.article_id",
-            viewable = super::read::viewable("r"),
+            viewable = super::read::viewable("r", ":user"),
             topics = super::read::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(

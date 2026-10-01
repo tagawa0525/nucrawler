@@ -72,7 +72,7 @@ pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<It
 
 /// ステージの中で同時に回す作業者が共有する状態。作業者は同じタスクの中で動くので、`RefCell` で
 /// 共有し、`await` をまたいで借りない。
-pub struct Shared<'q> {
+struct Shared<'q> {
     quota: RefCell<&'q mut Quota>,
     stop: Cell<bool>,
 }
@@ -223,7 +223,7 @@ impl<'a, L: Llm> Workers<'a, L> {
 }
 
 /// 呼び出しの枠を取った結果。
-pub enum Reserved<S> {
+enum Reserved<S> {
     Slot(S),
     /// 止める指示で待つのをやめた
     Cancelled,
@@ -233,7 +233,7 @@ pub enum Reserved<S> {
 
 /// 呼び出しの枠を取る。止める指示が出れば待つのをやめる。ステージは周の最初に枠を取り、
 /// クォータの判定・作業の予約・呼び出しをその中で行う。
-pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
+async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
     if cancel.is_requested() {
         return Reserved::Cancelled;
     }
@@ -251,7 +251,7 @@ pub async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 /// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
 /// `now` は判定する時点の時刻（`LlmStage::clock`）。ステージを始めた時刻を使うと、枠を待つ間や
 /// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
-pub fn permit(
+fn permit(
     db: &Db,
     shared: &Shared<'_>,
     backend: &str,
@@ -299,7 +299,7 @@ pub struct Call<'a> {
 
 /// 判定（`permit`）から呼び出しを始めるまでの間に `await` を挟まないこと。呼び出しは始めた時点で
 /// 数えるので、その間に並行する作業者が判定すると、上限を超えて呼んでしまう。
-pub async fn call_recorded<L: Llm>(
+async fn call_recorded<L: Llm>(
     db: &Db,
     llm: &L,
     shared: &Shared<'_>,

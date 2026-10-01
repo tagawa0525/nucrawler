@@ -6,10 +6,8 @@
 //! - 出力は stream-json。`rate_limit_event` から使用率を、`result` から構造化出力を得る。
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
-use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, RateLimit, Usage, Window};
 
 pub struct ClaudeCli {
@@ -52,7 +50,8 @@ impl Llm for ClaudeCli {
     async fn call(&self, req: LlmRequest<'_>) -> Result<LlmResponse, LlmFailure> {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         let schema = req.schema.to_string();
-        let child = tokio::process::Command::new(&self.command)
+        let mut command = tokio::process::Command::new(&self.command);
+        command
             .args(["-p", "--output-format", "stream-json", "--verbose"])
             .args(["--json-schema", &schema])
             .args(["--tools", ""])
@@ -64,65 +63,14 @@ impl Llm for ClaudeCli {
             .args(["--setting-sources", ""])
             .args(["--system-prompt", req.system])
             .args(["--model", req.model])
-            .current_dir(&self.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // タイムアウトで future を捨てたときに子プロセスも止める。
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| LlmError::Spawn {
-                command: self.command.display().to_string(),
-                source,
-            })?;
-        let output = match super::process::run(child, req.prompt.as_bytes(), self.timeout)
-            .await
-            .map_err(LlmError::Io)?
-        {
-            Ran::Exited(output) => output,
-            // 使用率を知らせた後に止まっても、その使用率を次回の判定に使う
-            Ran::TimedOut { stdout } => {
-                let (_, rate_limit) = parse_stream(&String::from_utf8_lossy(&stdout));
-                return Err(LlmFailure {
-                    error: LlmError::Timeout {
-                        secs: self.timeout.as_secs(),
-                    },
-                    usage: rate_limit.map(Usage::Subscription),
-                });
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (parsed, rate_limit) = parse_stream(&stdout);
-        let usage = rate_limit.map(Usage::Subscription);
-        match parsed {
-            Ok(output) => Ok(LlmResponse { output, usage }),
-            // 結果行が無い（途中で落ちた）ときだけ、終了コードと stderr で報告する。
-            // 結果行があれば、終了コードに関わらずそちらが結果と原因を正確に表す。
-            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmFailure {
-                error: LlmError::Exit {
-                    status: output.status.to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                    interrupted: interrupted(output.status),
-                },
-                usage,
-            }),
-            // 上限での拒否やエラーの報告でも、それまでに分かった使用率を残して次回の判定に使う
-            Err(error) => Err(LlmFailure { error, usage }),
-        }
+            .current_dir(&self.cwd);
+        // 使用率は、結果が得られなくても、知らせた分を次回の判定に使う
+        super::process::call_cli(command, req.prompt.as_bytes(), self.timeout, |stdout| {
+            let (parsed, rate_limit) = parse_stream(stdout);
+            (parsed, rate_limit.map(Usage::Subscription))
+        })
+        .await
     }
-}
-
-/// SIGINT・SIGTERM で終わったか。シグナルで殺された場合と、シグナルを受けて 128 + 番号で
-/// 終了した場合の両方を含む。
-pub(super) fn interrupted(status: std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt;
-    const SIGINT: i32 = 2;
-    const SIGTERM: i32 = 15;
-    let signal = status
-        .signal()
-        .or_else(|| status.code().and_then(|c| c.checked_sub(128)));
-    matches!(signal, Some(SIGINT | SIGTERM))
 }
 
 /// stream-json の出力から、構造化出力と最後の使用率を取り出す。使用率は、構造化出力が得られなくても

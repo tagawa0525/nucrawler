@@ -11,11 +11,9 @@
 //!   AI Credits を、`result` から終了コードを得る。
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::process::Ran;
 use super::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse, Usage};
 
 /// `llm_calls` などに記録する名前
@@ -76,7 +74,8 @@ impl Llm for CopilotCli {
         std::fs::create_dir_all(&self.cwd).map_err(LlmError::Io)?;
         // 子プロセスより後に消す（宣言の逆順に drop される）
         let home = Home::create(&self.homes).map_err(LlmError::Io)?;
-        let child = tokio::process::Command::new(&self.command)
+        let mut command = tokio::process::Command::new(&self.command);
+        command
             .args(["--output-format", "json"])
             .args(["--model", req.model])
             .args(["--available-tools", NO_TOOLS])
@@ -87,51 +86,13 @@ impl Llm for CopilotCli {
             // Nix で入れた版から勝手に変わらないようにする
             .env("COPILOT_AUTO_UPDATE", "false")
             .env_remove("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
-            .current_dir(&self.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // タイムアウトで future を捨てたときに子プロセスも止める。
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| LlmError::Spawn {
-                command: self.command.display().to_string(),
-                source,
-            })?;
-        let output = match super::process::run(child, compose(&req).as_bytes(), self.timeout)
-            .await
-            .map_err(LlmError::Io)?
-        {
-            Ran::Exited(output) => output,
-            // 消費を知らせた後に止まっても、消費した分はクォータに数える
-            Ran::TimedOut { stdout } => {
-                let (_, credits) = parse_events(&String::from_utf8_lossy(&stdout));
-                return Err(LlmFailure {
-                    error: LlmError::Timeout {
-                        secs: self.timeout.as_secs(),
-                    },
-                    usage: credits.map(|nano_aiu| Usage::Credits { nano_aiu }),
-                });
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (parsed, credits) = parse_events(&stdout);
-        let usage = credits.map(|nano_aiu| Usage::Credits { nano_aiu });
-        match parsed {
-            Ok(output) => Ok(LlmResponse { output, usage }),
-            // 結果行が無い（起動時に失敗した、途中で落ちた）ときだけ、終了コードと stderr で報告する。
-            Err(LlmError::Protocol(_)) if !output.status.success() => Err(LlmFailure {
-                error: LlmError::Exit {
-                    status: output.status.to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                    interrupted: super::claude_cli::interrupted(output.status),
-                },
-                usage,
-            }),
-            // 応答の形が崩れても、消費した分はクォータに数える
-            Err(error) => Err(LlmFailure { error, usage }),
-        }
+            .current_dir(&self.cwd);
+        // 消費は、結果が得られなくても、知らせた分をクォータに数える
+        super::process::call_cli(command, compose(&req).as_bytes(), self.timeout, |stdout| {
+            let (parsed, credits) = parse_events(stdout);
+            (parsed, credits.map(|nano_aiu| Usage::Credits { nano_aiu }))
+        })
+        .await
     }
 }
 

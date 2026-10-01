@@ -482,6 +482,36 @@ mod tests {
         );
     }
 
+    /// 切り分けで返った指紋が空間と違えば（モデルが替わった）、要約の失敗にせず、作り直しを案内して止める。
+    #[tokio::test]
+    async fn the_probe_checks_the_fingerprint() {
+        let db = Db::open_in_memory().unwrap();
+        digest(&db, "a", "2026-09-30T00:00:00.000Z");
+        let cfg = small_batches();
+        let fp = Fingerprint::make(&FakeEmbedder::default(), &cfg)
+            .await
+            .unwrap();
+        db.create_embedding_space(&space_name(&cfg), INPUT_VERSION, &fp, now())
+            .unwrap();
+        let changed = FakeEmbedder {
+            model: std::sync::Mutex::new("other".into()),
+            errors: std::sync::Mutex::new(
+                [EmbedError::Status {
+                    status: 400,
+                    body: "bad".into(),
+                }]
+                .into(),
+            ),
+            ..FakeEmbedder::default()
+        };
+        let err = run(&db, &changed, &cfg).await.unwrap_err();
+        assert!(matches!(err, EmbedStageError::SpaceChanged(_)), "{err:?}");
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            0
+        );
+    }
+
     /// 切り分けの呼び出しと、初回の指紋の作成も、中断が要求されれば待たずに終える（応答しないサーバーで
     /// タイムアウトまで止まらない）。中断で終えたときは、要約の失敗を記録しない。
     #[tokio::test]

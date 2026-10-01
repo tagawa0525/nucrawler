@@ -93,7 +93,7 @@ pub fn validate(profile: &Profile) -> Result<(), ProfileError> {
     for (text, breaks) in names.chain(notes) {
         if text.chars().any(breaks) {
             return Err(ProfileError::Invalid(format!(
-                "{text:?} must not contain control characters or line-breaking spaces"
+                "{text:?} must not contain control characters or disallowed whitespace"
             )));
         }
     }

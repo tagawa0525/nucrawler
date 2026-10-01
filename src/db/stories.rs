@@ -284,7 +284,7 @@ impl Db {
                FROM articles AS a
                WHERE a.id IN ({ids_sql}))
              ORDER BY {order}",
-            viewable = super::read::viewable("r"),
+            viewable = super::read::viewable("r", ":user"),
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(

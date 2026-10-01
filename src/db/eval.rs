@@ -87,7 +87,7 @@ impl Db {
              FROM digests AS d
              JOIN artifacts AS r ON r.id = d.digest_id
              ORDER BY d.rated_at DESC, d.article_id DESC",
-            viewable = super::read::viewable("r"),
+            viewable = super::read::viewable("r", ":user"),
             topics = super::read::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {

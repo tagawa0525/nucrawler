@@ -57,31 +57,15 @@ impl Db {
         space_id: i64,
     ) -> Result<Vec<LabeledVector>, DbError> {
         let mut stmt = self.conn.prepare(&format!(
-            "WITH viewable AS (
-               SELECT r.id, r.article_id, r.created_at, r.payload
-               FROM artifacts AS r
-               WHERE r.kind = 'digest'
-                 AND r.article_id IN (SELECT article_id FROM ratings WHERE user_id = ?1)
-                 AND NOT EXISTS (
-                   SELECT 1 FROM artifact_access AS aa
-                   WHERE aa.artifact_id = r.id
-                     AND aa.membership_id NOT IN (
-                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
-             ),
-             latest AS (
-               SELECT v.* FROM viewable AS v
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM viewable AS w
-                 WHERE w.article_id = v.article_id
-                   AND (w.created_at > v.created_at
-                        OR (w.created_at = v.created_at AND w.id > v.id)))
-             )
+            "WITH {latest}
              SELECT l.article_id, a.source_id, {topics}, e.vector
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
              JOIN article_embeddings AS e ON e.artifact_id = l.id AND e.space_id = ?2
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
+               AND l.article_id IN (SELECT article_id FROM ratings WHERE user_id = ?1)
              ORDER BY l.article_id",
+            latest = super::read::latest_digests("?1"),
             topics = super::read::linked_topics("l"),
         ))?;
         let rows = stmt.query_map(rusqlite::params![user_id, space_id], |r| {
@@ -206,26 +190,8 @@ impl Db {
         limit: usize,
     ) -> Result<Vec<Candidate>, DbError> {
         let unscored = filter.unscored;
-        let mut stmt = self.conn.prepare(
-            "WITH viewable AS (
-               -- 利用者が持っていない会員資格を必要とする digest は見せない（LLM の採点と同じ条件）
-               SELECT r.id, r.article_id, r.created_at, r.payload
-               FROM artifacts AS r
-               WHERE r.kind = 'digest'
-                 AND NOT EXISTS (
-                   SELECT 1 FROM artifact_access AS aa
-                   WHERE aa.artifact_id = r.id
-                     AND aa.membership_id NOT IN (
-                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
-             ),
-             latest AS (
-               SELECT v.* FROM viewable AS v
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM viewable AS w
-                 WHERE w.article_id = v.article_id
-                   AND (w.created_at > v.created_at
-                        OR (w.created_at = v.created_at AND w.id > v.id)))
-             )
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH {latest}
              SELECT l.article_id, l.id, e.vector
              FROM latest AS l
              JOIN articles AS a ON a.id = l.article_id
@@ -238,7 +204,8 @@ impl Db {
                    AND s.backend = ?5 AND s.model = ?6 AND s.prompt_version = ?7))
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8 OFFSET ?9",
-        )?;
+            latest = super::read::latest_digests("?1"),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::params![
                 user_id,

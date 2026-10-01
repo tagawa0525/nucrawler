@@ -34,6 +34,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<DigestInput>, DbError> {
+        let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.source_id, a.title, a.lang FROM articles AS a
              WHERE EXISTS (
@@ -44,7 +45,7 @@ impl Db {
                  WHERE r.article_id = a.id AND r.kind = 'digest' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
                AND {REDO_AVAILABLE}
-               AND {REDO_FILTER}
+               AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
         );
@@ -77,6 +78,7 @@ impl Db {
         filter: &RedoFilter,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(DigestInput, Option<String>)>, DbError> {
+        let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.source_id, a.title, a.lang, latest.glossary_at
              FROM articles AS a
@@ -89,7 +91,7 @@ impl Db {
                  SELECT 1 FROM contents AS c
                  WHERE c.article_id = a.id AND c.access_membership_id IS NULL)
                AND {REDO_AVAILABLE}
-               AND {REDO_FILTER}
+               AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
         );
@@ -131,6 +133,7 @@ impl Db {
         filter: &RedoFilter,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<(TranslateInput, Option<String>)>, DbError> {
+        let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.title, latest.glossary_at
              FROM articles AS a
@@ -145,7 +148,7 @@ impl Db {
                  WHERE c.article_id = a.id AND c.kind IN ('body', 'fulltext')
                    AND c.access_membership_id IS NULL)
                AND {REDO_AVAILABLE}
-               AND {REDO_FILTER}
+               AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
         );
@@ -178,6 +181,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
+        let redo_filter = redo_filter();
         let sql = format!(
             "SELECT a.id, a.title FROM articles AS a
              WHERE a.lang = 'en'
@@ -190,7 +194,7 @@ impl Db {
                  WHERE r.article_id = a.id AND r.kind = 'translation' AND r.backend = :backend
                    AND r.model = :model AND r.prompt_version = :version)
                AND {REDO_AVAILABLE}
-               AND {REDO_FILTER}
+               AND {redo_filter}
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT :limit"
         );
@@ -226,7 +230,9 @@ const REDO_AVAILABLE: &str = "NOT EXISTS (
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
 /// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。
-const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
+fn redo_filter() -> String {
+    format!(
+        "(:source IS NULL OR a.source_id = :source)
     AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
     AND (:ids = '[]' OR a.id IN (SELECT value FROM json_each(:ids)))
     AND (:min_score IS NULL OR (
@@ -237,13 +243,12 @@ const REDO_FILTER: &str = "(:source IS NULL OR a.source_id = :source)
         AND s.artifact_id = (
           SELECT r.id FROM artifacts AS r
           WHERE r.article_id = a.id AND r.kind = 'digest'
-            AND NOT EXISTS (
-              SELECT 1 FROM artifact_access AS aa
-              WHERE aa.artifact_id = r.id
-                AND aa.membership_id NOT IN (
-                  SELECT membership_id FROM user_memberships WHERE user_id = :user))
+            AND {viewable}
           ORDER BY r.created_at DESC, r.id DESC LIMIT 1)
-      ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)";
+      ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)",
+        viewable = super::read::viewable("r", ":user"),
+    )
+}
 
 /// 名前付きパラメータ（名前と値）の並び。
 type NamedParams = Vec<(&'static str, Box<dyn rusqlite::ToSql>)>;

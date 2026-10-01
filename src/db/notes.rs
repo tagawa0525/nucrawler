@@ -323,7 +323,7 @@ impl Db {
                AND (:article IS NULL OR r.article_id = :article)
                AND (:reporter IS NULL OR r.user_id = :reporter)
              ORDER BY r.reported_at DESC, r.id DESC",
-            viewable = viewable("d")
+            viewable = viewable("d", ":user")
         ))?;
         let mut rows = stmt.query(rusqlite::named_params! {
             ":user": user_id,

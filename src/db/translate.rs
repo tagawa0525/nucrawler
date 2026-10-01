@@ -81,7 +81,7 @@ impl Db {
         now: chrono::DateTime<chrono::Utc>,
         limit: usize,
     ) -> Result<Vec<TranslateInput>, DbError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "WITH base AS (
                SELECT a.id, a.title, coalesce(a.published_at, a.fetched_at) AS at,
                       -- 和訳は全員で共有するので、依頼は誰のものでも拾い、最も古い依頼で並べる
@@ -91,11 +91,7 @@ impl Db {
                       -- この版だけで行い、古い版の高得点では先回りしない
                       (SELECT r.id FROM artifacts AS r
                        WHERE r.article_id = a.id AND r.kind = 'digest'
-                         AND NOT EXISTS (
-                           SELECT 1 FROM artifact_access AS aa
-                           WHERE aa.artifact_id = r.id
-                             AND aa.membership_id NOT IN (
-                               SELECT membership_id FROM user_memberships WHERE user_id = ?1))
+                         AND {viewable}
                        ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS digest_id
                FROM articles AS a
                WHERE a.lang = 'en'
@@ -136,7 +132,8 @@ impl Db {
                 OR (?7 = 0 AND relevant = 1 AND score >= ?8 AND at >= ?9)
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
-        )?;
+            viewable = super::read::viewable("r", "?1"),
+        ))?;
         let articles = stmt
             .query_map(
                 rusqlite::params![

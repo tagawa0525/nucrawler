@@ -33,7 +33,69 @@ pub struct LlmCall<'a> {
     pub usage: Option<&'a crate::llm::Usage>,
 }
 
+/// ステージ（とバックエンド・モデル）ごとの、失敗の記録が残っている記事の数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageFailures {
+    /// ステージの名前（embedding は空間ごとにまとめる。`failure_stage_group`）
+    pub stage: String,
+    pub backend: String,
+    pub model: String,
+    /// 失敗が上限の回数に達していない記事。そのステージが対象にする範囲（期間など）にあれば再試行する
+    pub failing: usize,
+    /// 再試行を諦めた記事
+    pub gave_up: usize,
+    /// 諦めた記事のうち、最後に失敗したものの理由
+    pub last_gave_up_error: Option<String>,
+}
+
 impl Db {
+    /// 失敗の記録（成功すると消える）を、ステージ・バックエンド・モデルごとに数える（ステージの名前の順）。
+    /// 記事の期間では絞らない：見出しの和訳や embedding のように期間を区切らずに処理するステージもあり、
+    /// どのステージがどの範囲を対象にするかの規則をここに書き写さないため。
+    pub fn stage_failures(&self) -> Result<Vec<StageFailures>, DbError> {
+        // 断念した行の次の時刻は、どれも最後の失敗から同じだけ先（`backoff(MAX_ATTEMPTS)`）なので、
+        // その降順は最後に失敗した順になる
+        let mut stmt = self.conn.prepare(
+            "SELECT stage, backend, model, article_id, attempts >= ?1, last_error
+             FROM stage_errors
+             ORDER BY next_retry_at DESC",
+        )?;
+        let mut rows = stmt.query([MAX_ATTEMPTS])?;
+        // 記事ごとに数える（embedding は同じ記事の要約ごとに記録があり、空間ごとにまとめると重なる）
+        #[derive(Default)]
+        struct Counted {
+            failing: std::collections::HashSet<i64>,
+            gave_up: std::collections::HashSet<i64>,
+            last_gave_up_error: Option<String>,
+        }
+        let mut by_key: std::collections::BTreeMap<(String, String, String), Counted> =
+            std::collections::BTreeMap::new();
+        while let Some(r) = rows.next()? {
+            let stage = super::failure_stage_group(&r.get::<_, String>(0)?).to_string();
+            let c = by_key.entry((stage, r.get(1)?, r.get(2)?)).or_default();
+            let article_id: i64 = r.get(3)?;
+            if r.get(4)? {
+                c.gave_up.insert(article_id);
+                if c.last_gave_up_error.is_none() {
+                    c.last_gave_up_error = Some(r.get(5)?);
+                }
+            } else {
+                c.failing.insert(article_id);
+            }
+        }
+        Ok(by_key
+            .into_iter()
+            .map(|((stage, backend, model), c)| StageFailures {
+                stage,
+                backend,
+                model,
+                failing: c.failing.len(),
+                gave_up: c.gave_up.len(),
+                last_gave_up_error: c.last_gave_up_error,
+            })
+            .collect())
+    }
+
     /// 失敗を記録する。`permanent` なら再試行しない（試行回数を上限にする）。
     /// そうでなければ試行回数を 1 増やし、次に試してよい時刻を指数的に先へ延ばす。
     /// 以後は再試行しない（断念した）なら `true` を返す。
@@ -313,6 +375,106 @@ mod tests {
         db.record_stage_failure(key, "x", t("2026-09-27T00:00:00Z"), true)
             .unwrap();
         assert_eq!(pending_ids(&db, "2026-09-27T00:00:00Z"), [a]);
+    }
+
+    /// 失敗を、ステージ・バックエンド・モデルごとに上限に達していないものと断念に分けて数える。記事の期間では
+    /// 絞らない（期間を区切らずに処理するステージがある）。
+    /// embedding の失敗は要約ごとの名前なので、空間ごとにまとめ、記事ごとに数える。断念の理由は最後に断念したもの。
+    #[test]
+    fn counts_stage_failures_by_key() {
+        let db = Db::open_in_memory().unwrap();
+        let ids: Vec<i64> = (0..4)
+            .map(|n| {
+                page_article(
+                    &db,
+                    &format!("https://e.com/{n}"),
+                    "2026-09-20T00:00:00.000Z",
+                )
+            })
+            .collect();
+        let key = |article_id, stage, model| StageKey {
+            article_id,
+            stage,
+            backend: "claude-cli",
+            model,
+        };
+        let fail = |k, error: &str, at: &str, permanent| {
+            db.record_stage_failure(k, error, t(at), permanent).unwrap();
+        };
+        // 要約：1 件は失敗中、3 件は断念（最後に断念したものの理由を出す）。古い記事も数える
+        fail(
+            key(ids[0], "digest", "sonnet"),
+            "timeout",
+            "2026-09-27T00:00:00Z",
+            false,
+        );
+        fail(
+            key(ids[1], "digest", "sonnet"),
+            "bad json",
+            "2026-09-26T00:00:00Z",
+            true,
+        );
+        fail(
+            key(ids[2], "digest", "sonnet"),
+            "refused",
+            "2026-09-27T00:00:00Z",
+            true,
+        );
+        let old = page_article(&db, "https://e.com/old", "2025-01-01T00:00:00.000Z");
+        fail(
+            key(old, "digest", "sonnet"),
+            "old",
+            "2026-09-25T00:00:00Z",
+            true,
+        );
+        // 別のモデルは別に数える
+        fail(
+            key(ids[3], "digest", "opus"),
+            "timeout",
+            "2026-09-27T00:00:00Z",
+            false,
+        );
+        // embedding は空間ごと
+        let embed = |article_id, artifact_id| {
+            let stage = crate::db::embed_failure_stage(7, artifact_id);
+            db.record_stage_failure(
+                StageKey {
+                    article_id,
+                    stage: &stage,
+                    backend: "openai",
+                    model: "",
+                },
+                "too long",
+                t("2026-09-27T00:00:00Z"),
+                false,
+            )
+            .unwrap();
+        };
+        embed(ids[0], 100);
+        embed(ids[1], 101);
+        // 同じ記事の別の要約の失敗は、記事 1 件と数える
+        embed(ids[0], 102);
+
+        let got = db.stage_failures().unwrap();
+        let row =
+            |stage: &str, backend: &str, model: &str, failing, gave_up, error: Option<&str>| {
+                StageFailures {
+                    stage: stage.into(),
+                    backend: backend.into(),
+                    model: model.into(),
+                    failing,
+                    gave_up,
+                    last_gave_up_error: error.map(Into::into),
+                }
+            };
+        assert_eq!(
+            got,
+            [
+                row("digest", "claude-cli", "opus", 1, 0, None),
+                row("digest", "claude-cli", "sonnet", 1, 3, Some("refused")),
+                row("embed:7", "openai", "", 2, 0, None),
+            ]
+        );
     }
 
     #[test]

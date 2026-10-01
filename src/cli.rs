@@ -85,7 +85,7 @@ options:
 commands:
   crawl     巡回・抽出・要約・採点のパイプラインを実行（中断しても次回再開）
   redo      指定モデルで要約・和訳をやり直す（redo digest|translate --model M ...）
-  status    ステージごとの未処理件数などを表示
+  status    ソースごとの取得状況と、ステージごとの失敗中・断念した記事の数を表示
   sources   ソースの取得確認（sources check [ID]）
   serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動

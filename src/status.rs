@@ -1,9 +1,9 @@
-//! `status`：ソースごとの記事数と取得状況（最後の取得の件数を含む）を表示する。
+//! `status`：ソースごとの記事数と取得状況（最後の取得の件数を含む）と、ステージごとの失敗の記録を表示する。
 
 use std::fmt::Write as _;
 
 use crate::config::Source;
-use crate::db::SourceOverview;
+use crate::db::{SourceOverview, StageFailures};
 
 /// 設定にあるソースを設定順に表示し、DB にだけ残っている（設定から消した）ソースを後ろに並べる。
 pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
@@ -53,11 +53,67 @@ pub fn render(sources: &[Source], overview: &[SourceOverview]) -> String {
     out
 }
 
+/// ステージごとの失敗の記録。断念した記事があれば、最後に断念した理由を添える。
+pub fn render_failures(failures: &[StageFailures]) -> String {
+    if failures.is_empty() {
+        return "\nno stage failures\n".to_string();
+    }
+    let key = |f: &StageFailures| match (f.backend.is_empty(), f.model.is_empty()) {
+        (true, true) => "-".to_string(),
+        (false, true) => f.backend.clone(),
+        _ => format!("{}/{}", f.backend, f.model),
+    };
+    let stage_width = failures.iter().map(|f| f.stage.len()).max().unwrap_or(0);
+    let key_width = failures.iter().map(|f| key(f).len()).max().unwrap_or(0);
+    let mut out = "\nstage failures:\n".to_string();
+    for f in failures {
+        let _ = write!(
+            out,
+            "{:stage_width$}  {:key_width$}  failing {}  gave up {}",
+            f.stage,
+            key(f),
+            f.failing,
+            f.gave_up
+        );
+        if let Some(error) = &f.last_gave_up_error {
+            let _ = write!(out, "  last given up: {error}");
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Category, Filter, Lang, SourceKind};
     use crate::db::FetchCounts;
+
+    #[test]
+    fn renders_stage_failures() {
+        let row =
+            |stage: &str, backend: &str, model: &str, failing, gave_up, error: Option<&str>| {
+                StageFailures {
+                    stage: stage.into(),
+                    backend: backend.into(),
+                    model: model.into(),
+                    failing,
+                    gave_up,
+                    last_gave_up_error: error.map(Into::into),
+                }
+            };
+        let out = render_failures(&[
+            row("digest", "claude-cli", "sonnet", 1, 2, Some("bad json")),
+            row("extract", "", "", 3, 0, None),
+        ]);
+        assert_eq!(
+            out,
+            "\nstage failures:\n\
+             digest   claude-cli/sonnet  failing 1  gave up 2  last given up: bad json\n\
+             extract  -                  failing 3  gave up 0\n"
+        );
+        assert_eq!(render_failures(&[]), "\nno stage failures\n");
+    }
 
     fn src(id: &str, enabled: bool) -> Source {
         Source {

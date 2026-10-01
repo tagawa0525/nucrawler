@@ -402,6 +402,7 @@ fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
         "{}",
         status::render(&sources.sources, &db.source_overview()?)
     );
+    print!("{}", status::render_failures(&db.stage_failures()?));
     Ok(())
 }
 

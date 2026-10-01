@@ -67,25 +67,7 @@ impl Db {
             ScoreScope::Articles(ids) => (None, Some(serde_json::to_string(ids)?)),
         };
         let mut stmt = self.conn.prepare(&format!(
-            "WITH viewable AS (
-               -- 利用者が持っていない会員資格を必要とする digest は見せない
-               SELECT r.id, r.article_id, r.created_at, r.title_ja, r.summary_ja, r.payload
-               FROM artifacts AS r
-               WHERE r.kind = 'digest'
-                 AND NOT EXISTS (
-                   SELECT 1 FROM artifact_access AS aa
-                   WHERE aa.artifact_id = r.id
-                     AND aa.membership_id NOT IN (
-                       SELECT membership_id FROM user_memberships WHERE user_id = ?1))
-             ),
-             latest AS (
-               SELECT v.* FROM viewable AS v
-               WHERE NOT EXISTS (
-                 SELECT 1 FROM viewable AS w
-                 WHERE w.article_id = v.article_id
-                   AND (w.created_at > v.created_at
-                        OR (w.created_at = v.created_at AND w.id > v.id)))
-             )
+            "WITH {latest}
              SELECT l.article_id, l.id, l.title_ja, l.summary_ja,
                     {linked}
              FROM latest AS l
@@ -108,6 +90,7 @@ impl Db {
                    AND w.backend = ?4 AND w.model = ?5)
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8",
+            latest = super::read::latest_digests("?1"),
             linked = linked_topics("l"),
         ))?;
         let rows = stmt.query_map(

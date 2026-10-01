@@ -319,6 +319,26 @@ pub(super) fn linked_topics(alias: &str) -> String {
     )
 }
 
+/// 利用者（パラメータ `user`）が閲覧できる要約（`viewable`）と、そのうち記事ごとに最新のもの（`latest`）の
+/// CTE（`WITH` の後に置く）。採点の対象を選ぶ処理で、LLM と embedding の条件をそろえる。
+pub(super) fn latest_digests(user: &str) -> String {
+    format!(
+        "viewable AS (
+           SELECT r.* FROM artifacts AS r
+           WHERE r.kind = 'digest' AND {viewable}
+         ),
+         latest AS (
+           SELECT v.* FROM viewable AS v
+           WHERE NOT EXISTS (
+             SELECT 1 FROM viewable AS w
+             WHERE w.article_id = v.article_id
+               AND (w.created_at > v.created_at
+                    OR (w.created_at = v.created_at AND w.id > v.id)))
+         )",
+        viewable = viewable("r", user),
+    )
+}
+
 /// 別名 `alias` の成果物を、利用者（パラメータ `user`。`:user` や `?1`）が閲覧できる条件。
 pub(super) fn viewable(alias: &str, user: &str) -> String {
     format!(

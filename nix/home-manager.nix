@@ -35,9 +35,6 @@ let
   crawlService = description: args: {
     Unit = {
       Description = description;
-      # embed ステージが呼ぶ。止まっていても crawl は続き、embed の失敗として報告する
-      Wants = lib.optional emb.enable "nucrawler-embedding.service";
-      After = lib.optional emb.enable "nucrawler-embedding.service";
       # 設定の反映（home-manager switch）で止めたり起動したりしない。oneshot なので起動すると
       # 巡回が終わるまで反映が待たされ（LLM を使うと数十分）、実行中の巡回も中断される。
       # 新しい定義は次に timer で起動したときから使われる
@@ -210,7 +207,16 @@ in
     };
 
     systemd.user.services = {
-      nucrawler-crawl = crawlService "nucrawler: fetch, extract, digest, score and translate" [ ];
+      # embed ステージを含むのは全体を流す crawl だけなので、embedding のサーバーを待つのもこれだけにする。
+      # サーバーが止まっていても crawl は続き、embed の失敗として報告する
+      nucrawler-crawl =
+        lib.recursiveUpdate (crawlService "nucrawler: fetch, extract, digest, score and translate" [ ])
+          {
+            Unit = lib.optionalAttrs emb.enable {
+              Wants = [ "nucrawler-embedding.service" ];
+              After = [ "nucrawler-embedding.service" ];
+            };
+          };
       nucrawler-fetch = crawlService "nucrawler: fetch and extract only" [
         "--until"
         "extract"

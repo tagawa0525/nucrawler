@@ -314,6 +314,7 @@ mod tests {
             found(
                 &db,
                 SearchQuery {
+                    hide: true,
                     hide_below: Some(60),
                     ..search_query(&db)
                 }

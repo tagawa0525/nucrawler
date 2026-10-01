@@ -258,6 +258,9 @@ fn search(
         .map(crate::search::until)
         .transpose()
         .map_err(invalid)?;
+    if params.min_score.is_some_and(|min| min > 100) {
+        return Err(ToolError::InvalidParams("min_score must be 0..=100".into()));
+    }
     let (user, hash) = viewer(db)?;
     let items = db.search_articles(&SearchQuery {
         user_id: user,
@@ -271,8 +274,11 @@ fn search(
         until,
         sources: params.source.into_iter().collect(),
         min_score: params.min_score,
-        // 既定は Web UI の一覧と同じく隠す
-        hide_below: (!params.include_hidden).then(|| params.min_score.unwrap_or(web.min_score)),
+        // 既定は Web UI の一覧と同じく隠す（最低点の既定も一覧と同じ）
+        hide: !params.include_hidden,
+        hide_below: params
+            .min_score
+            .or_else(|| web.default_min(hash.as_deref())),
         order: SearchOrder::Score,
         limit: params.limit.unwrap_or(web.list_limit),
         ..SearchQuery::default()

@@ -187,7 +187,8 @@ impl Db {
         self
     }
 
-    pub fn schema_version(&self) -> Result<i64, DbError> {
+    #[cfg(test)]
+    pub(crate) fn schema_version(&self) -> Result<i64, DbError> {
         schema_version(&self.conn)
     }
 

@@ -360,8 +360,10 @@ impl Quota {
         Ok(())
     }
 
-    /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する。
-    pub fn record_call(&mut self, usage: Option<RateLimit>) {
+    /// 呼び出しを 1 回行ったことと、その応答で分かった使用率を記録する（本番は始めた時点で `start_call`、
+    /// 応答で `observe` を別に呼ぶ）。
+    #[cfg(test)]
+    pub(crate) fn record_call(&mut self, usage: Option<RateLimit>) {
         self.start_call();
         self.observe(usage);
     }

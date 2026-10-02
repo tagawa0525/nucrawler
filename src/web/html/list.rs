@@ -1602,6 +1602,7 @@ mod tests {
     }
 
     /// 一覧に出ない記事があるときは、どの条件で何件隠れているかを、その条件を外した表示へのリンクにして出す。
+    /// 最低点を外すと、点数の足りない記事のほかに未採点（軽水炉と無関係で採点しない記事を含む）も加わる。
     /// 1 件も出ないときは、「新しい記事はありません」の代わりに効いている条件を出す（何が記事を隠しているか分かるように）。
     #[test]
     fn list_page_explains_what_the_conditions_hide() {
@@ -1626,7 +1627,7 @@ mod tests {
         assert!(!html.contains("新しい記事はありません"), "{html}");
         assert!(
             html.contains(
-                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満 32 件</a>・<a href="/?read=any">既読 12 件</a>・<a href="/?rating=any">★1〜2 3 件</a></p>"#
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満・未採点 32 件</a>・<a href="/?read=any">既読 12 件</a>・<a href="/?rating=any">★1〜2 3 件</a></p>"#
             ),
             "{html}"
         );

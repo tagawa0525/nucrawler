@@ -1063,6 +1063,47 @@ mod tests {
         assert_eq!(listed(RatingFilter::Any), [(b, Rating::new(2))]);
     }
 
+    /// 一覧の件数は、件数の上限を掛けずに一覧と同じ条件で数える（記事を組み立てずに数える）。
+    #[test]
+    fn count_matches_the_unlimited_list() {
+        let db = Db::open_in_memory().unwrap();
+        let user = db.owner_id().unwrap();
+        let article =
+            |url: &str, at: &str, score: u8| scored_article(&db, url, Lang::En, at, score);
+        let a = article("https://e.com/a", "2026-09-25T00:00:00Z", 70);
+        let b = article("https://e.com/b", "2026-09-26T00:00:00Z", 90);
+        let c = article("https://e.com/c", "2026-09-26T00:00:00Z", 30);
+        let d = article("https://e.com/d", "2026-09-26T00:00:00Z", 85);
+        page_article(&db, "https://e.com/raw", "2026-09-26T00:00:00.000Z");
+        group(&db, &[a, b]);
+        db.rate(user, d, Rating::new(2), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        db.set_read(user, c, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        for (show_all, read, rating) in [
+            (false, None, RatingFilter::HideLow),
+            (true, None, RatingFilter::HideLow),
+            (false, Some(false), RatingFilter::Any),
+            (true, Some(true), RatingFilter::Any),
+        ] {
+            let q = ListQuery {
+                read,
+                rating,
+                limit: 1,
+                ..list_query(&db, show_all)
+            };
+            let all = db
+                .list_articles(ListQuery {
+                    limit: usize::MAX,
+                    ..q
+                })
+                .unwrap()
+                .len();
+            assert!(all > 0, "{q:?}");
+            assert_eq!(db.count_articles(q).unwrap(), all, "{q:?}");
+        }
+    }
+
     /// 一覧の評価の条件は、バーの ★ の選択のとおりに絞る。最低点の「すべて」（00）は点数の条件だけで、
     /// ★1〜2 を隠す条件は解かない。
     #[test]

@@ -1050,7 +1050,7 @@ mod tests {
         let (_, html) = server.get("/").await;
         assert!(
             html.contains(
-                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満 1 件</a>・<a href="/?read=any">既読 1 件</a>・<a href="/?rating=any">★1〜2 1 件</a></p>"#
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満・未採点 1 件</a>・<a href="/?read=any">既読 1 件</a>・<a href="/?rating=any">★1〜2 1 件</a></p>"#
             ),
             "{html}"
         );

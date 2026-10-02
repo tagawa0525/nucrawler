@@ -198,6 +198,15 @@ enum ItemScope<'a> {
     },
 }
 
+/// `run_items_query` が返すもの。
+#[derive(Clone, Copy)]
+enum Projection {
+    /// 記事（`ListItem`）
+    Items,
+    /// 件数（1 行 1 列）
+    Count,
+}
+
 /// 既読・ブックマークの印で絞る条件（組み立てた行 `rows` の条件、`AND` で始まる）。
 /// `Some(true)` は印のある記事だけ、`Some(false)` は印の無い記事だけ、`None` は絞らない。
 /// 既読（`read_at` の列の式）とブックマークの条件。
@@ -702,6 +711,51 @@ impl Db {
         profile_hash: Option<&str>,
         scope: ItemScope,
     ) -> Result<Vec<ListItem>, DbError> {
+        self.run_items_query(
+            user_id,
+            profile_hash,
+            scope,
+            Projection::Items,
+            |stmt, params| read_items(stmt, params),
+        )
+    }
+
+    /// 一覧の件数。件数の上限は掛けずに、一覧と同じ条件で数える（記事を組み立てない）。
+    pub fn count_articles(&self, q: ListQuery) -> Result<usize, DbError> {
+        let scope = ItemScope::List {
+            since: q.since,
+            show_all: q.show_all,
+            min_score: q.min_score,
+            read: q.read,
+            bookmarked: q.bookmarked,
+            rating: q.rating,
+            limit: usize::MAX,
+        };
+        self.run_items_query(
+            q.user_id,
+            q.profile_hash,
+            scope,
+            Projection::Count,
+            |stmt, params| {
+                let count: i64 = stmt.query_row(params, |r| r.get(0))?;
+                Ok(usize::try_from(count).unwrap_or_default())
+            },
+        )
+    }
+
+    /// 一覧・詳細・件数に共通の問い合わせを組み立て、`read` で結果を読む。条件と並びは `scope` で決まり、
+    /// `projection` は返すもの（記事か件数か）だけを変える。
+    fn run_items_query<T>(
+        &self,
+        user_id: i64,
+        profile_hash: Option<&str>,
+        scope: ItemScope,
+        projection: Projection,
+        read: impl FnOnce(
+            &mut rusqlite::Statement<'_>,
+            &[(&str, &dyn rusqlite::ToSql)],
+        ) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
         // 並び・閾値は推薦点（rows.rec）で決める
         const BY_SCORE: &str = "rows.rec IS NULL, rows.rec DESC, rows.at DESC, rows.id DESC";
         const NEWEST: &str = "rows.at DESC, rows.id DESC";
@@ -768,6 +822,27 @@ impl Db {
             rows: rows_filter,
             params: filter_params,
         } = &filters;
+        // 件数では、条件（`fold` が見る評価）と同じ報道のまとめに要る列だけを選ぶ（ほかの列は計算されない）
+        let (outer, columns, sort) = match projection {
+            Projection::Items => (
+                "*",
+                format!(
+                    "rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
+                    rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
+                    rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
+                    rows.requested, rows.locked_by, rows.bookmarked,
+                    {matched} AS matched,
+                    {excluded} AS excluded,
+                    s.score, rows.story_id, rows.story_others,
+                    coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
+                    rows.rating IS NOT NULL OR rows.story_rated AS story_rated,",
+                    matched = matched_topics("s.id", "interest"),
+                    excluded = matched_topics("s.id", "exclude"),
+                ),
+                format!("ORDER BY {order}"),
+            ),
+            Projection::Count => ("count(*)", "rows.rating,".to_string(), String::new()),
+        };
         let sql = format!(
             "WITH items AS (
                SELECT a.id, a.source_id, a.url, a.title, a.lang,
@@ -846,16 +921,8 @@ impl Db {
                FROM rows
                LEFT JOIN scores AS s ON s.id = rows.score_id
              )
-             SELECT * FROM (
-             SELECT rows.id, rows.source_id, rows.url, rows.title, rows.lang, rows.at,
-                    rows.fetched_at, rows.title_ja, rows.summary_ja, rows.relevant,
-                    rows.rec, s.reason, rows.read_at, rows.rating, rows.has_translation,
-                    rows.requested, rows.locked_by, rows.bookmarked,
-                    {matched} AS matched,
-                    {excluded} AS excluded,
-                    s.score, rows.story_id, rows.story_others,
-                    coalesce(rows.read_at, rows.story_read_at) IS NOT NULL AS story_read,
-                    rows.rating IS NOT NULL OR rows.story_rated AS story_rated,
+             SELECT {outer} FROM (
+             SELECT {columns}
                     row_number() OVER (
                       PARTITION BY rows.story_id ORDER BY {order})
                       AS story_rank
@@ -868,12 +935,10 @@ impl Db {
                {list_filter}
              ) AS rows
              WHERE {fold}
-             ORDER BY {order}
+             {sort}
              LIMIT :limit",
             digest_id = latest_digest("id", "a.id", ":user"),
             title_ja = title_ja("d.title_ja", "i.id"),
-            matched = matched_topics("s.id", "interest"),
-            excluded = matched_topics("s.id", "exclude"),
             viewable_t = viewable("t", ":user"),
             rec = super::recommend::recommend_score_sql(),
         );
@@ -897,52 +962,60 @@ impl Db {
                 .iter()
                 .map(|(name, value)| (name.as_str(), value.as_ref())),
         );
-        let rows = stmt.query_map(params.as_slice(), |r| {
-            let item = ListItem {
-                article_id: r.get(0)?,
-                source_id: r.get(1)?,
-                url: r.get(2)?,
-                title: r.get(3)?,
-                lang: r.get(4)?,
-                at: r.get(5)?,
-                fetched_at: r.get(6)?,
-                title_ja: r.get(7)?,
-                summary_ja: r.get(8)?,
-                lwr_relevant: r.get(9)?,
-                score: r.get(10)?,
-                llm_score: r.get(20)?,
-                reason: r.get(11)?,
-                matched: Vec::new(),
-                excluded: Vec::new(),
-                read_at: r.get(12)?,
-                rating: r.get(13)?,
-                bookmarked: r.get(17)?,
-                has_translation: r.get(14)?,
-                translation_requested: r.get(15)?,
-                locked_by: Vec::new(),
-                story_id: r.get(21)?,
-                story_others: Vec::new(),
-                story_read: r.get(23)?,
-                story_rated: r.get(24)?,
-            };
-            Ok((
-                item,
-                r.get::<_, String>(16)?,
-                r.get::<_, String>(18)?,
-                r.get::<_, String>(19)?,
-                r.get::<_, String>(22)?,
-            ))
-        })?;
-        rows.map(|row| {
-            let (mut item, locked_by, matched, excluded, story_others) = row?;
-            item.locked_by = serde_json::from_str(&locked_by)?;
-            item.matched = serde_json::from_str(&matched)?;
-            item.excluded = serde_json::from_str(&excluded)?;
-            item.story_others = serde_json::from_str(&story_others)?;
-            Ok(item)
-        })
-        .collect()
+        read(&mut stmt, params.as_slice())
     }
+}
+
+/// 記事の問い合わせ（`Projection::Items`）の結果を読む。
+fn read_items(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: &[(&str, &dyn rusqlite::ToSql)],
+) -> Result<Vec<ListItem>, DbError> {
+    let rows = stmt.query_map(params, |r| {
+        let item = ListItem {
+            article_id: r.get(0)?,
+            source_id: r.get(1)?,
+            url: r.get(2)?,
+            title: r.get(3)?,
+            lang: r.get(4)?,
+            at: r.get(5)?,
+            fetched_at: r.get(6)?,
+            title_ja: r.get(7)?,
+            summary_ja: r.get(8)?,
+            lwr_relevant: r.get(9)?,
+            score: r.get(10)?,
+            llm_score: r.get(20)?,
+            reason: r.get(11)?,
+            matched: Vec::new(),
+            excluded: Vec::new(),
+            read_at: r.get(12)?,
+            rating: r.get(13)?,
+            bookmarked: r.get(17)?,
+            has_translation: r.get(14)?,
+            translation_requested: r.get(15)?,
+            locked_by: Vec::new(),
+            story_id: r.get(21)?,
+            story_others: Vec::new(),
+            story_read: r.get(23)?,
+            story_rated: r.get(24)?,
+        };
+        Ok((
+            item,
+            r.get::<_, String>(16)?,
+            r.get::<_, String>(18)?,
+            r.get::<_, String>(19)?,
+            r.get::<_, String>(22)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (mut item, locked_by, matched, excluded, story_others) = row?;
+        item.locked_by = serde_json::from_str(&locked_by)?;
+        item.matched = serde_json::from_str(&matched)?;
+        item.excluded = serde_json::from_str(&excluded)?;
+        item.story_others = serde_json::from_str(&story_others)?;
+        Ok(item)
+    })
+    .collect()
 }
 
 #[cfg(test)]

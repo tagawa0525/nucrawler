@@ -222,7 +222,14 @@ fn hidden_note(view: ListView, hidden: HiddenCounts) -> String {
     let min = view
         .min
         .filter(|m| *m > 0)
-        .map(|m| (hidden.min, format!("点数 {m} 未満"), view.with_min(0)));
+        // 最低点を外すと、未採点（軽水炉と無関係で採点しない記事を含む）も加わる
+        .map(|m| {
+            (
+                hidden.min,
+                format!("点数 {m} 未満・未採点"),
+                view.with_min(0),
+            )
+        });
     let read = view.read.map(|read| {
         let label = if read { "未読" } else { "既読" };
         (hidden.read, label.to_string(), view.with_read(None))

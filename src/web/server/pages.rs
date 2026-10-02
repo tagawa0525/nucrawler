@@ -226,21 +226,14 @@ pub(super) async fn list(
     Ok(Html(page).into_response())
 }
 
-/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。件数の上限は掛けずに数える。
+/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。件数の上限は掛けずに、
+/// 記事を組み立てずに数える。
 fn hidden_counts(db: &Db, query: ListQuery) -> Result<html::HiddenCounts, DbError> {
-    let count = |q: ListQuery| -> Result<usize, DbError> {
-        Ok(db
-            .list_articles(ListQuery {
-                limit: usize::MAX,
-                ..q
-            })?
-            .len())
-    };
-    let shown = count(query)?;
+    let shown = db.count_articles(query)?;
     // 外す条件が効いていなければ数えない
     let added = |effective: bool, lifted: ListQuery| -> Result<usize, DbError> {
         Ok(if effective {
-            count(lifted)?.saturating_sub(shown)
+            db.count_articles(lifted)?.saturating_sub(shown)
         } else {
             0
         })
@@ -559,7 +552,7 @@ mod tests {
             .expect("explore section");
         assert!(section.contains("低い点"), "{html}");
         // 👎・無関係・未採点は候補にしない
-        for hidden in ["評価 2", "無関係", "未採点"] {
+        for hidden in ["評価 2", "無関係", "採点前の記事"] {
             assert!(!section.contains(hidden), "{hidden}: {html}");
         }
         let (_, all) = server.get("/?min=0").await;
@@ -575,12 +568,12 @@ mod tests {
         score(&db, digest, 40);
         let (_, digest) = seed(&db, "https://e.com/twenty", "二十点");
         score(&db, digest, 20);
-        seed(&db, "https://e.com/unscored", "未採点");
+        seed(&db, "https://e.com/unscored", "採点前の記事");
         let server = Server::start(db).await;
         let (status, html) = server.get("/?min=30").await;
         assert_eq!(status, 200);
         assert!(html.contains("四十点"), "{html}");
-        assert!(!html.contains("未採点"), "{html}");
+        assert!(!html.contains("採点前の記事"), "{html}");
         // 二十点は一覧に無く、確認枠（設定の 50 点未満）にだけ出うる。四十点は確認枠に重ねない
         let explore = html.split("<h2>確認枠</h2>").nth(1).unwrap_or("");
         assert!(!explore.contains("四十点"), "{html}");
@@ -598,7 +591,7 @@ mod tests {
             "{html}"
         );
         let (_, html) = server.get("/?min=0").await;
-        for title in ["四十点", "二十点", "未採点"] {
+        for title in ["四十点", "二十点", "採点前の記事"] {
             assert!(html.contains(title), "{title}: {html}");
         }
         for bad in ["x", "101", "-1"] {
@@ -737,7 +730,7 @@ mod tests {
             "{xml}"
         );
         assert_eq!(xml.matches("<entry>").count(), 1, "{xml}");
-        for hidden in ["低い点", "評価 2", "無関係", "未採点"] {
+        for hidden in ["低い点", "評価 2", "無関係", "採点前の記事"] {
             assert!(!xml.contains(hidden), "{hidden}: {xml}");
         }
         // 和訳タイトル・要約・元記事と詳細ページへのリンク・日付
@@ -873,14 +866,14 @@ mod tests {
     #[tokio::test]
     async fn list_without_a_profile_has_no_score_floor() {
         let db = Db::open_in_memory().unwrap();
-        seed(&db, "https://e.com/a", "未採点");
+        seed(&db, "https://e.com/a", "採点前の記事");
         seed_with(&db, "https://e.com/unrelated", "無関係", false);
         let server = Server::start(db).await;
 
         let (status, html) = server.get("/").await;
         assert_eq!(status, 200);
         assert!(
-            html.contains("未採点") && !html.contains("無関係"),
+            html.contains("採点前の記事") && !html.contains("無関係"),
             "{html}"
         );
         assert!(!html.contains("確認枠"), "{html}");
@@ -895,16 +888,22 @@ mod tests {
             assert_eq!(res.status().as_u16(), 200, "{canonical}");
         }
         let (_, html) = server.get("/?min=0").await;
-        assert!(html.contains("未採点") && html.contains("無関係"), "{html}");
+        assert!(
+            html.contains("採点前の記事") && html.contains("無関係"),
+            "{html}"
+        );
         let (_, html) = server.get("/?min=50").await;
-        assert!(!html.contains("未採点"), "{html}");
+        assert!(!html.contains("採点前の記事"), "{html}");
         // JavaScript が無いときの選択で送られる空の値は、既定（最低点なし）
         let res = server.get_raw("/?min=").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");
 
         let (_, xml) = server.get(&server.feed_path()).await;
-        assert!(xml.contains("未採点") && !xml.contains("無関係"), "{xml}");
+        assert!(
+            xml.contains("採点前の記事") && !xml.contains("無関係"),
+            "{xml}"
+        );
         let (_, json) = server.get_json("/api/articles").await;
         assert_eq!(json["articles"].as_array().unwrap().len(), 1, "{json}");
     }

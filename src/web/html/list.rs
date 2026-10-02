@@ -787,6 +787,30 @@ mod tests {
         assert!(earlier.is_empty());
     }
 
+    /// カードの 👁 は、同じ報道のグループのどれかを読んでいれば付いた状態で出す（一覧の既読の絞り込みと同じ）。
+    #[test]
+    fn card_shows_the_story_as_read() {
+        let mut story_read = item(1, "2026-09-27T05:00:00.000Z");
+        story_read.story_read = true;
+        let html = list_page(
+            &[],
+            &[story_read],
+            ListView {
+                read: None,
+                ..ListView::default()
+            },
+            &Page::default(),
+        );
+        assert!(
+            html.contains(r#"<div class="card read" data-id="1" tabindex="0">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<form method="post" action="/articles/1/read"><button name="on" value="0" aria-pressed="true" aria-label="既読" title="既読" class="on">👁</button></form>"#),
+            "{html}"
+        );
+    }
+
     /// 一覧のカードでは、評価・ブックマーク・既読の印をその場で付け外しできる。
     /// 印の状態はボタンが示すので、見出しの下の行には重ねて出さない。
     #[test]

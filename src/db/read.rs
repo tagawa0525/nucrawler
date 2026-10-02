@@ -1107,6 +1107,29 @@ mod tests {
         assert_eq!(listed(RatingFilter::Unrated, false), [unrated]);
     }
 
+    /// 検索（と全期間の絞り込み）でも、既読は同じ報道のグループ単位で絞る（一覧と同じ）。
+    #[test]
+    fn search_filters_read_by_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let other = scored_article(&db, "https://e.com/o", Lang::En, "2026-09-24T00:00:00Z", 80);
+        group(&db, &[a, b]);
+        db.set_read(db.owner_id().unwrap(), a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let read = |read| {
+            found(
+                &db,
+                SearchQuery {
+                    read: Some(read),
+                    ..search_query(&db)
+                },
+            )
+        };
+        assert_eq!(read(true), [b, a]);
+        assert_eq!(read(false), [other]);
+    }
+
     /// 検索ではまとめない（グループの記事を全部出し、ほかの記事のソースは添える）。
     #[test]
     fn search_keeps_every_article_of_a_story() {

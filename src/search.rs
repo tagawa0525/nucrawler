@@ -4,7 +4,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::config::Lang;
-use crate::db::{Rating, SearchOrder, SearchQuery};
+use crate::db::{Rating, RatingFilter, SearchOrder, SearchQuery};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
@@ -178,9 +178,12 @@ impl Params {
             })
             .transpose()?;
         // 評価の無い記事と ★N 以上の記事は重ならないので、両方は指定できない
-        if self.unrated && min_rating.is_some() {
-            return Err(SearchError::ConflictingRating);
-        }
+        let rating = match (self.unrated, min_rating) {
+            (true, Some(_)) => return Err(SearchError::ConflictingRating),
+            (true, None) => RatingFilter::Unrated,
+            (false, Some(min)) => RatingFilter::AtLeast(min),
+            (false, None) => RatingFilter::Any,
+        };
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -198,8 +201,7 @@ impl Params {
             translated: self.translated,
             read: self.read,
             bookmarked: self.bookmarked,
-            unrated: self.unrated,
-            min_rating,
+            rating,
             min_score,
             // 検索は一覧で隠す記事も出す
             hide: false,
@@ -378,14 +380,20 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && !q.unrated);
+        assert!(q.translated);
         assert_eq!((q.read, q.bookmarked), (Some(false), Some(true)));
         let unrated = Params {
             unrated: true,
             ..Params::default()
         };
-        assert!(unrated.to_query(7, None, 30).unwrap().unrated);
-        assert_eq!(q.min_rating, crate::db::Rating::new(4));
+        assert_eq!(
+            unrated.to_query(7, None, 30).unwrap().rating,
+            RatingFilter::Unrated
+        );
+        assert_eq!(
+            q.rating,
+            RatingFilter::AtLeast(crate::db::Rating::new(4).unwrap())
+        );
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert!(!q.hide, "search shows what the list hides");

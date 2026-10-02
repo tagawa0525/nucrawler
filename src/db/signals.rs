@@ -577,7 +577,7 @@ mod tests {
             found(
                 &db,
                 SearchQuery {
-                    min_rating: Rating::new(4),
+                    rating: RatingFilter::AtLeast(Rating::new(4).unwrap()),
                     ..search_query(&db)
                 }
             ),

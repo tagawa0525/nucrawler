@@ -86,14 +86,12 @@ pub struct SearchQuery<'a> {
     pub lang: Option<Lang>,
     /// 閲覧できる和訳がある
     pub translated: bool,
-    /// この評価以上（評価なしは除く）
-    pub min_rating: Option<Rating>,
+    /// 評価で絞る
+    pub rating: RatingFilter,
     /// 既読で絞る（true は既読だけ、false は未読だけ）
     pub read: Option<bool>,
     /// ブックマークで絞る（true はブックマーク中だけ、false はブックマークしていない記事だけ）
     pub bookmarked: Option<bool>,
-    /// 評価の無い記事だけ
-    pub unrated: bool,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
     /// 一覧の既定と同じく、評価 1〜2・非軽水炉の記事と、`hide_below` があれば未採点とその点数未満の記事を隠す
@@ -112,6 +110,29 @@ pub enum SearchOrder {
     Newest,
     /// 一覧と同じく点数の高い順（未採点は後ろ）、同点なら新しい順
     Score,
+}
+
+/// 評価で絞る条件。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RatingFilter {
+    /// 絞らない
+    #[default]
+    Any,
+    /// 評価を付けた記事のうち、この評価以上
+    AtLeast(Rating),
+    /// 評価の無い記事だけ
+    Unrated,
+}
+
+impl RatingFilter {
+    /// 組み立てた行（`rows`）の条件（`AND` で始まる）。
+    fn sql(self) -> String {
+        match self {
+            Self::Any => String::new(),
+            Self::AtLeast(min) => format!(" AND rows.rating >= {}", min.get()),
+            Self::Unrated => " AND rows.rating IS NULL".to_string(),
+        }
+    }
 }
 
 /// 成果物の 1 版。
@@ -241,15 +262,9 @@ impl SearchFilters {
         if q.translated {
             f.rows.push_str(" AND rows.has_translation = 1");
         }
-        if let Some(min) = q.min_rating {
-            f.rows.push_str(" AND rows.rating >= :min_rating");
-            f.params.push((":min_rating".into(), Box::new(min)));
-        }
+        f.rows.push_str(&q.rating.sql());
         f.rows
             .push_str(&mark_filter("rows.read_at", q.read, q.bookmarked));
-        if q.unrated {
-            f.rows.push_str(" AND rows.rating IS NULL");
-        }
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND rows.rec >= :min_score");
             f.params.push((":min_score".into(), Box::new(min)));
@@ -1561,7 +1576,7 @@ mod tests {
         );
         assert_eq!(
             with(SearchQuery {
-                min_rating: Rating::new(4),
+                rating: RatingFilter::AtLeast(Rating::new(4).unwrap()),
                 ..search_query(&db)
             }),
             [liked]
@@ -1569,7 +1584,7 @@ mod tests {
         // 評価の無い記事だけ
         assert_eq!(
             with(SearchQuery {
-                unrated: true,
+                rating: RatingFilter::Unrated,
                 ..search_query(&db)
             }),
             [unscored, read, translated]

@@ -182,6 +182,19 @@ pub(super) fn embedding_scored_article(db: &Db, url: &str, published: &str, scor
     a
 }
 
+/// 記事を同じ報道のグループにする（グループの ID は最小の記事 ID）。
+pub(super) fn group(db: &Db, ids: &[i64]) {
+    let story = *ids.iter().min().unwrap();
+    for id in ids {
+        db.conn()
+            .execute(
+                "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
+                [*id, story],
+            )
+            .unwrap();
+    }
+}
+
 pub(super) fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
     ListQuery {
         user_id: db.owner_id().unwrap(),

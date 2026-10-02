@@ -945,19 +945,6 @@ mod tests {
     use super::*;
     use crate::db::test_support::*;
 
-    /// 記事を同じ報道のグループにする（グループの ID は最小の記事 ID）。
-    fn group(db: &Db, ids: &[i64]) {
-        let story = *ids.iter().min().unwrap();
-        for id in ids {
-            db.conn()
-                .execute(
-                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
-                    [*id, story],
-                )
-                .unwrap();
-        }
-    }
-
     fn set_source(db: &Db, id: i64, source: &str) {
         db.conn()
             .execute(

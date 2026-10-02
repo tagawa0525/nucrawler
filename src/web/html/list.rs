@@ -515,14 +515,18 @@ pub(super) fn home_bar(page: &Page) -> String {
 /// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
 pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
     let mut body = bar(&view, false);
+    // 0 件でも、何で絞ったかと全期間であることは出す
+    body.push_str(&format!(
+        "<h2>{}<span class=\"count\">{} 件</span></h2>",
+        filtered_heading(view),
+        items.len(),
+    ));
     if items.is_empty() {
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
         // 欄に絞り込みの条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
         body.push_str(&format!(
-            "<h2>{}<span class=\"count\">{} 件</span></h2><div class=\"sections\"{}>",
-            filtered_heading(view),
-            items.len(),
+            "<div class=\"sections\"{}>",
             mark_conditions(view),
         ));
         body.extend(items.iter().map(|i| card(i, true, page)));

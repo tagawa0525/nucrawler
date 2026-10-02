@@ -65,7 +65,7 @@ pub struct ListQuery<'a> {
     pub read: Option<bool>,
     /// ブックマークで絞る（true はブックマーク中だけ、false はブックマークしていない記事だけ）
     pub bookmarked: Option<bool>,
-    /// 評価で絞る。同じ報道のグループは、まとめる前に記事ごとに判定する
+    /// 評価で絞る。同じ報道のグループは、まとめた後にカードに出る記事自身の評価で判定する
     pub rating: RatingFilter,
     pub limit: usize,
 }
@@ -709,27 +709,23 @@ impl Db {
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
                 .to_string(),
-            // 同じ報道のグループは、どれかを読んだら既読。評価は記事ごとに判定する
+            // 同じ報道のグループは、どれかを読んだら既読（評価はまとめた後の `fold` で絞る）
             ItemScope::List {
+                read, bookmarked, ..
+            } => mark_filter(
+                "coalesce(rows.read_at, rows.story_read_at)",
                 read,
                 bookmarked,
-                rating,
-                ..
-            } => format!(
-                "{}{}",
-                rating.sql(),
-                mark_filter(
-                    "coalesce(rows.read_at, rows.story_read_at)",
-                    read,
-                    bookmarked
-                )
             ),
             _ => String::new(),
         };
-        // 一覧と確認枠では、同じ報道のグループを並びの先頭の 1 件にまとめる
+        // 一覧と確認枠では、同じ報道のグループを並びの先頭の 1 件にまとめる。一覧の評価の条件は、まとめた後に
+        // カードに出る記事自身の評価で判定する（★1〜2 のカードの話は、ほかの記事に入れ替えずに隠す。一覧でその場で
+        // 隠したカードと、開き直したときが一致する）
         let fold = match scope {
-            ItemScope::List { .. } | ItemScope::Explore { .. } => "rows.story_rank = 1",
-            _ => "1",
+            ItemScope::List { rating, .. } => format!("rows.story_rank = 1{}", rating.sql()),
+            ItemScope::Explore { .. } => "rows.story_rank = 1".to_string(),
+            _ => "1".to_string(),
         };
         let (id, since, show_all, min_score, limit, order) = match scope {
             ItemScope::One(id) => (Some(id), None, true, None, 1, BY_SCORE),

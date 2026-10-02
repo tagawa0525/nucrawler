@@ -1010,16 +1010,14 @@ mod tests {
         assert_eq!((item.score, item.llm_score), (None, None));
     }
 
-    /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。評価 1〜2 も同じ。
+    /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。
     #[test]
-    fn list_hides_a_story_read_or_rated_low_anywhere() {
+    fn list_hides_a_story_read_anywhere() {
         let db = Db::open_in_memory().unwrap();
         let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
         let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
-        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-25T00:00:00Z", 70);
         let d = scored_article(&db, "https://e.com/d", Lang::En, "2026-09-26T00:00:00Z", 85);
         group(&db, &[a, b]);
-        group(&db, &[c, d]);
         let user = db.owner_id().unwrap();
         let unread = |db: &Db| -> Vec<i64> {
             db.list_articles(ListQuery {
@@ -1035,16 +1033,84 @@ mod tests {
         db.set_read(user, a, true, t("2026-09-27T00:00:00Z"))
             .unwrap();
         assert_eq!(unread(&db), [d]);
-        db.rate(
-            user,
-            c,
-            Some(Rating::new(1).unwrap()),
-            t("2026-09-27T00:00:00Z"),
-        )
-        .unwrap();
-        assert!(unread(&db).is_empty());
-        // 「すべて」では隠さない
-        assert_eq!(list_ids(&db, true).len(), 2);
+    }
+
+    /// 評価は、グループではなく記事ごとに判定する。グループのほかの記事に ★1〜2 があっても、記事自身が
+    /// ★3 以上か未評価なら出す。まとめる前に絞るので、カードには条件に合う記事が出る（見えている星と判定が一致する）。
+    #[test]
+    fn list_judges_ratings_by_each_article() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        group(&db, &[a, b]);
+        let user = db.owner_id().unwrap();
+        db.rate(user, b, Rating::new(2), t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let listed = |rating: RatingFilter| -> Vec<(i64, Option<Rating>)> {
+            db.list_articles(ListQuery {
+                rating,
+                ..list_query(&db, false)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.article_id, i.rating))
+            .collect()
+        };
+        assert_eq!(listed(RatingFilter::HideLow), [(a, None)]);
+        db.rate(user, a, Rating::new(3), t("2026-09-28T00:00:00Z"))
+            .unwrap();
+        assert_eq!(listed(RatingFilter::HideLow), [(a, Rating::new(3))]);
+        // 評価で絞らなければ、推薦点の高い記事がグループを代表する
+        assert_eq!(listed(RatingFilter::Any), [(b, Rating::new(2))]);
+    }
+
+    /// 一覧の評価の条件は、バーの ★ の選択のとおりに絞る。最低点の「すべて」（00）は点数の条件だけで、
+    /// ★1〜2 を隠す条件は解かない。
+    #[test]
+    fn list_filters_ratings_only_by_the_rating_condition() {
+        let db = Db::open_in_memory().unwrap();
+        let user = db.owner_id().unwrap();
+        let article = |url: &str, score: u8| {
+            scored_article(&db, url, Lang::En, "2026-09-26T00:00:00Z", score)
+        };
+        let liked = article("https://e.com/liked", 90);
+        let neutral = article("https://e.com/neutral", 85);
+        let disliked = article("https://e.com/disliked", 80);
+        let unrated = article("https://e.com/unrated", 75);
+        for (id, value) in [(liked, 4), (neutral, 3), (disliked, 2)] {
+            db.rate(user, id, Rating::new(value), t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
+        let listed = |rating: RatingFilter, show_all: bool| -> Vec<i64> {
+            let mut ids: Vec<i64> = db
+                .list_articles(ListQuery {
+                    rating,
+                    ..list_query(&db, show_all)
+                })
+                .unwrap()
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(
+            listed(RatingFilter::HideLow, false),
+            [liked, neutral, unrated]
+        );
+        assert_eq!(
+            listed(RatingFilter::HideLow, true),
+            [liked, neutral, unrated]
+        );
+        assert_eq!(
+            listed(RatingFilter::Any, false),
+            [liked, neutral, disliked, unrated]
+        );
+        assert_eq!(
+            listed(RatingFilter::AtLeast(Rating::new(3).unwrap()), false),
+            [liked, neutral]
+        );
+        assert_eq!(listed(RatingFilter::Unrated, false), [unrated]);
     }
 
     /// 検索ではまとめない（グループの記事を全部出し、ほかの記事のソースは添える）。
@@ -1189,12 +1255,23 @@ mod tests {
         let _ = old;
 
         assert_eq!(list_ids(&db, false), [high, mid]);
-        let all = list_ids(&db, true);
+        // 「すべて」は点数の条件だけを外す（★1〜2 を隠すのは評価の条件）
+        assert_eq!(list_ids(&db, true), [high, mid, low, unscored]);
+        let all_ratings = ListQuery {
+            rating: RatingFilter::Any,
+            ..list_query(&db, true)
+        };
+        let all: Vec<i64> = db
+            .list_articles(all_ratings)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.article_id)
+            .collect();
         assert_eq!(&all[..4], [disliked, high, mid, low]);
         assert_eq!(all[4], unscored);
         assert_eq!(all.len(), 5, "old articles stay hidden");
 
-        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let items = db.list_articles(all_ratings).unwrap();
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
@@ -1207,7 +1284,7 @@ mod tests {
     }
 
     /// 最低点なし（プロファイルの無い利用者の既定）は推薦点で絞らず、未採点も新しい順に出す。
-    /// 評価 1〜2 と軽水炉と無関係の記事を隠すのは、最低点があるときと同じ。
+    /// 軽水炉と無関係の記事を隠すのは、最低点があるときと同じ。評価 1〜2 は評価の条件（既定）で隠す。
     #[test]
     fn list_without_a_score_floor_shows_unscored_articles_newest_first() {
         let db = Db::open_in_memory().unwrap();
@@ -1612,11 +1689,20 @@ mod tests {
             }),
             [disliked, read, translated]
         );
-        // 一覧の既定と同じく隠す：評価 1〜2・未採点・閾値未満
+        // 一覧の既定と同じく隠す：未採点・閾値未満。評価 1〜2 は評価の条件で隠す
         assert_eq!(
             with(SearchQuery {
                 hide: true,
                 hide_below: Some(60),
+                ..search_query(&db)
+            }),
+            [disliked, read, translated]
+        );
+        assert_eq!(
+            with(SearchQuery {
+                hide: true,
+                hide_below: Some(60),
+                rating: RatingFilter::HideLow,
                 ..search_query(&db)
             }),
             [read, translated]

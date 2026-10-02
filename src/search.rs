@@ -368,6 +368,7 @@ mod tests {
             read: Some(false),
             bookmarked: Some(true),
             unrated: false,
+            hide_low: false,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -393,6 +394,14 @@ mod tests {
         assert_eq!(
             q.rating,
             RatingFilter::AtLeast(crate::db::Rating::new(4).unwrap())
+        );
+        let hide_low = Params {
+            hide_low: true,
+            ..Params::default()
+        };
+        assert_eq!(
+            hide_low.to_query(7, None, 30).unwrap().rating,
+            RatingFilter::HideLow
         );
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
@@ -466,23 +475,40 @@ mod tests {
             }),
             SearchError::InvalidSort("old".into())
         );
-        // 評価なしと ★N 以上は同時には成り立たない
-        assert_eq!(
-            err(Params {
+        // 評価の条件は 1 つだけ選ぶ（評価なし・★N 以上・★1〜2 を隠す）
+        for conflicting in [
+            Params {
                 unrated: true,
                 min_rating: "4".into(),
                 ..Params::default()
-            }),
-            SearchError::ConflictingRating
-        );
+            },
+            Params {
+                hide_low: true,
+                min_rating: "4".into(),
+                ..Params::default()
+            },
+            Params {
+                hide_low: true,
+                unrated: true,
+                ..Params::default()
+            },
+        ] {
+            assert_eq!(err(conflicting), SearchError::ConflictingRating);
+        }
     }
 
-    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、空は絞らない。
+    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、`hide-low` は ★1〜2 を隠す、
+    /// `any` と空は絞らない。
     #[test]
     fn reads_the_bar_rating() {
         assert!(Params::from_query("rating=0").unrated);
         assert_eq!(Params::from_query("rating=4").min_rating, "4");
         assert_eq!(Params::from_query("rating="), Params::default());
+        assert_eq!(Params::from_query("rating=any"), Params::default());
+        let hide_low = Params::from_query("rating=hide-low");
+        assert!(hide_low.hide_low && !hide_low.is_empty());
+        assert_eq!(hide_low.query_string(), "hide_low=1");
+        assert_eq!(Params::from_query("hide_low=1"), hide_low);
     }
 
     #[test]

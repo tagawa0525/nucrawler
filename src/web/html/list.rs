@@ -666,8 +666,12 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Rating;
+    use crate::db::{Rating, RatingFilter};
     use crate::web::html::test_support::*;
+
+    fn at_least(rating: u8) -> RatingFilter {
+        RatingFilter::AtLeast(Rating::new(rating).unwrap())
+    }
 
     /// 同じ報道のグループの代表には、ほかの記事の数とソース（重ねずに）を添える。
     #[test]
@@ -831,7 +835,7 @@ mod tests {
         );
         // 既読を隠す一覧では、既読にしたカードをその場で隠し、しばらく「元に戻す」（u キー）を出す
         assert!(
-            html.contains(r#"<div class="sections" data-read="0">"#),
+            html.contains(r#"<div class="sections" data-read="0" data-hide-low="1">"#),
             "{html}"
         );
         assert!(
@@ -862,7 +866,10 @@ mod tests {
             shown,
             &Page::default(),
         );
-        assert!(html.contains(r#"<div class="sections">"#), "{html}");
+        assert!(
+            html.contains(r#"<div class="sections" data-hide-low="1">"#),
+            "{html}"
+        );
         // ←/→ で既読・ブックマーク、↓/↑ で選ぶ
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
@@ -981,9 +988,10 @@ mod tests {
         assert!(!html.contains(r#"name="read""#), "{html}");
     }
 
-    /// 評価の選択は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
-    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示す。並びは最低点と同じく小さい順で、
-    /// 最低点と同じく「以上」の印（↑）は付けない。絞っているときは切り替えの ON と同じ緑にする。
+    /// 評価の選択は、★1〜2 を隠す（一覧の既定）・評価（★1〜5）以上・評価の無い記事だけから選び、🔖 はブックマークだけに、
+    /// 一覧の上部のバーで絞る（検索画面へは移らない）。評価の選択は、最低点の数字と見分けられるよう ★ で示す。
+    /// 並びは最低点と同じく小さい順で、最低点と同じく「以上」の印（↑）は付けない。絞っているときは切り替えの ON と
+    /// 同じ緑にする。★1〜2 を隠す選択肢は、開いた一覧では意味を書き、閉じた選択では短く ★3+☆ と書く。
     #[test]
     fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
         assert!(
@@ -996,14 +1004,40 @@ mod tests {
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" data-closed="★" selected>-</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option><option value="0" data-href="/?rating=0">☆</option></select>"#
+                r#"<form class="stars on" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="any" data-href="/?rating=any" data-closed="★">-</option><option value="hide-low" data-href="/" data-closed="★3+☆" selected>★1〜2 を隠す</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option><option value="0" data-href="/?rating=0">☆</option></select>"#
             ),
             "{html}"
         );
+        // ★1〜2 を付けたカードは、その場でも隠す（`MARKS_SCRIPT`）
+        assert!(
+            html.contains(r#"<div class="sections" data-read="0" data-hide-low="1">"#),
+            "{html}"
+        );
+        assert!(MARKS_SCRIPT.contains("f.hideLow"), "{MARKS_SCRIPT}");
         assert!(
             html.contains(
                 r#"<a class="btn" href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）" title="ブックマーク：絞らない（押すとブックマーク中だけ）">🔖</a>"#
             ),
+            "{html}"
+        );
+        // 絞らない一覧では欄に評価の条件を持たせない
+        let any = ListView {
+            rating: RatingFilter::Any,
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], any, &Page::default());
+        assert!(
+            html.contains(r#"<form class="stars" method="get" action="/">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<option value="hide-low" data-href="/" data-closed="★3+☆">★1〜2 を隠す</option>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-read="0">"#),
             "{html}"
         );
     }
@@ -1015,7 +1049,7 @@ mod tests {
         // 絞り込んだ画面の既定は、既読も出す
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             read: None,
             ..ListView::default()
         };
@@ -1054,10 +1088,11 @@ mod tests {
             ),
             "{html}"
         );
-        // 条件から外れたカードはその場で隠して「元に戻す」を出し、件数も合わせる（`MARKS_SCRIPT`）
+        // 全期間から探した画面だと見出しで分かるようにする。条件から外れたカードはその場で隠して「元に戻す」を出し、
+        // 件数も合わせる（`MARKS_SCRIPT`）
         assert!(
             html.contains(
-                r#"<h2 class="count">1 件</h2><div class="sections" data-min-rating="4">"#
+                r#"<h2>★4 以上（全期間）<span class="count">1 件</span></h2><div class="sections" data-min-rating="4">"#
             ),
             "{html}"
         );
@@ -1073,7 +1108,7 @@ mod tests {
 
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             bookmarked: Some(true),
             read: None,
             ..ListView::default()
@@ -1084,7 +1119,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<div class="sections" data-bookmarked="1" data-min-rating="4">"#),
+            html.contains(r#"<h2>ブックマーク中・★4 以上（全期間）<span class="count">1 件</span></h2><div class="sections" data-bookmarked="1" data-min-rating="4">"#),
             "{html}"
         );
         let html = filtered_page(&[], view, &Page::default());
@@ -1114,7 +1149,7 @@ mod tests {
         // 👁 を OFF にした絞り込みは、既読を隠し（その場でも隠す）、絞り込みを変えても OFF を引き継ぐ
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             ..ListView::default()
         };
         let html = filtered_page(
@@ -1158,14 +1193,19 @@ mod tests {
             html.contains(r#"href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）""#),
             "{html}"
         );
-        // 一覧の評価の選択は、一覧の 👁 を絞り込みへ持ち込まない
+        // JavaScript が無いときの評価の選択は、今の条件と、どちらの画面から送ったかを送る。行き先が一覧か絞り込みかは
+        // 選んだ評価で決まるので、行き来したときに 👁・最低点を行き先の既定に戻すのは受け取った側で行う
         let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
         let stars = stars.split("</form>").next().unwrap();
-        assert!(!stars.contains(r#"name="read""#), "{stars}");
+        assert!(
+            stars.contains(r#"<input type="hidden" name="read" value="any">"#)
+                && stars.contains(r#"<input type="hidden" name="from" value="list">"#),
+            "{stars}"
+        );
     }
 
-    /// JavaScript が無いとき、一覧から評価の選択で絞り込みへ移っても、ブックマークなしだけの条件は引き継ぐ
-    /// （JavaScript のときの行き先と同じ）。最低点と 👁 は絞り込みの既定にするので送らない。
+    /// JavaScript が無いとき、一覧の評価の選択はブックマークなしだけの条件も送る（JavaScript のときの行き先と同じく
+    /// 引き継ぐ）。一覧の既定の最低点と 👁 は送らない。
     #[test]
     fn no_js_rating_keeps_the_bookmark_condition() {
         let view = ListView {
@@ -1186,6 +1226,17 @@ mod tests {
         assert!(
             stars.contains(r#"data-href="/?rating=4&amp;bookmarked=0""#),
             "{stars}"
+        );
+        let filtered = ListView {
+            min: Some(0),
+            read: None,
+            rating: at_least(4),
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], filtered, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="from" value="filtered">"#),
+            "{html}"
         );
     }
 
@@ -1259,7 +1310,9 @@ mod tests {
         );
         // 欄の条件は印ごとに、あり（1）・なし（0）で持つ
         assert!(
-            html.contains(r#"<div class="sections" data-read="0" data-bookmarked="0">"#),
+            html.contains(
+                r#"<div class="sections" data-read="0" data-bookmarked="0" data-hide-low="1">"#
+            ),
             "{html}"
         );
         assert!(
@@ -1288,7 +1341,7 @@ mod tests {
             &[],
             ListView {
                 min: Some(0),
-                rating: Some(4),
+                rating: at_least(4),
                 read: None,
                 ..ListView::default()
             },
@@ -1304,7 +1357,7 @@ mod tests {
         let unrated = ListView {
             min: Some(0),
             read: None,
-            rating: Some(0),
+            rating: RatingFilter::Unrated,
             ..ListView::default()
         };
         let html = filtered_page(
@@ -1335,9 +1388,17 @@ mod tests {
             html.contains(r#"<form class="min on" method="get" action="/">"#),
             "{html}"
         );
-        // 一覧へ戻ると、最低点は設定の最低点に戻る
+        // 一覧へ戻ると、最低点は設定の最低点に戻る。選んだ評価の条件はそのまま
         assert!(
-            html.contains(r#"<option value="" data-href="/" data-closed="★">-</option>"#),
+            html.contains(
+                r#"<option value="any" data-href="/?rating=any" data-closed="★">-</option>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<option value="hide-low" data-href="/" data-closed="★3+☆">★1〜2 を隠す</option>"#
+            ),
             "{html}"
         );
         // 一覧から絞り込みへ移ると、最低点は 00 になる

@@ -861,8 +861,9 @@ mod tests {
         }
     }
 
-    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。選択のフォームは値を選べないので、
-    /// 👍 を「👍」に戻すと `rating=` や、絞り込みの `read=0` が残る。正規の形なら移らない。
+    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。正規の形なら移らない。
+    /// JavaScript が無いときの評価の選択は、今の条件とどちらの画面から送ったか（`from`）を送るので、一覧と絞り込みを
+    /// 行き来したときは最低点と 👁 を行き先の既定にする。
     #[tokio::test]
     async fn list_redirects_to_the_canonical_url() {
         // 既定の最低点（設定の値）は、プロファイルがあるときのもの
@@ -871,6 +872,7 @@ mod tests {
         let server = Server::start(db).await;
         for (from, to) in [
             ("/?rating=", "/"),
+            ("/?rating=hide-low", "/"),
             ("/?rating=&read=0", "/"),
             ("/?rating=&read=0&bookmarked=1", "/?read=0&bookmarked=1"),
             ("/?min=50", "/"),
@@ -880,12 +882,18 @@ mod tests {
             // 絞り込みの最低点の既定は 0（00）
             ("/?rating=4&min=0", "/?rating=4"),
             ("/?rating=4&min=60", "/?min=60&rating=4"),
-            // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）を一緒に送るが、
-            // 一覧へ戻るので一覧の既定にする
-            ("/?rating=&min=60", "/"),
-            ("/?rating=&min=0&read=0", "/"),
+            // 絞り込みから一覧へ戻るときは、絞り込みの最低点・既読を使わない
+            ("/?rating=hide-low&min=60&from=filtered", "/"),
+            ("/?rating=any&min=0&read=0&from=filtered", "/?rating=any"),
             // ブックマークで絞り込んだままなら、絞り込みの条件を引き継ぐ
-            ("/?rating=&min=60&bookmarked=1", "/?min=60&bookmarked=1"),
+            (
+                "/?rating=hide-low&min=60&bookmarked=1&from=filtered",
+                "/?min=60&rating=hide-low&bookmarked=1",
+            ),
+            // 一覧から絞り込みへ移るときは、一覧の最低点・既読を使わない
+            ("/?rating=4&min=60&read=any&from=list", "/?rating=4"),
+            // 一覧の中で評価を変えたなら、一覧の条件を引き継ぐ
+            ("/?rating=any&min=60&from=list", "/?min=60&rating=any"),
         ] {
             let res = server.get_raw(from).await;
             assert_eq!(res.status().as_u16(), 303, "{from}");
@@ -895,6 +903,8 @@ mod tests {
             "/",
             "/?min=0",
             "/?min=30&read=1",
+            "/?rating=any",
+            "/?rating=hide-low&bookmarked=1",
             "/?rating=4&read=0&bookmarked=1",
             "/?rating=0",
         ] {
@@ -905,7 +915,36 @@ mod tests {
             );
         }
         // 誤った値は移さずに 400 のまま
-        assert_eq!(server.get_raw("/?rating=9").await.status().as_u16(), 400);
+        for bad in ["/?rating=9", "/?rating=x&from=list", "/?from=x"] {
+            assert_eq!(server.get_raw(bad).await.status().as_u16(), 400, "{bad}");
+        }
+    }
+
+    /// 一覧の既定は ★1〜2 を付けた記事を隠す（バーの ★ の選択に見える条件）。評価で絞らない（`rating=any`）と出る。
+    /// 最低点の「すべて」（00）は点数の条件だけを外し、★1〜2 は隠したまま。
+    #[tokio::test]
+    async fn list_hides_low_ratings_by_the_rating_choice() {
+        let db = Db::open_in_memory().unwrap();
+        let (down, digest) = seed(&db, "https://e.com/down", "星二つの記事");
+        score(&db, digest, 80);
+        let (_, digest) = seed(&db, "https://e.com/kept", "評価前の記事");
+        score(&db, digest, 80);
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{down}/rating"), "value=2")
+            .await;
+        for hidden in ["/", "/?min=0"] {
+            let (_, html) = server.get(hidden).await;
+            assert!(
+                !html.contains("星二つの記事") && html.contains("評価前の記事"),
+                "{hidden}: {html}"
+            );
+        }
+        let (_, html) = server.get("/?rating=any").await;
+        assert!(
+            html.contains("星二つの記事") && html.contains("評価前の記事"),
+            "{html}"
+        );
     }
 
     /// 一覧の 👁 と 🔖 は、印のある記事だけ（1）・無い記事だけ（0）・絞らない（any）で絞る。

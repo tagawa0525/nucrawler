@@ -191,6 +191,8 @@ pub(super) fn list_query(db: &Db, show_all: bool) -> ListQuery<'static> {
         show_all,
         read: None,
         bookmarked: None,
+        // 一覧の既定
+        rating: RatingFilter::HideLow,
         limit: 50,
     }
 }

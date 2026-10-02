@@ -321,6 +321,11 @@ mod tests {
             bar.contains(r#"<option value="0" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;unrated=1&amp;min_score=60">☆</option>"#),
             "{bar}"
         );
+        // 評価の選択は一覧と同じ選択肢（検索の既定は絞らない）
+        assert!(
+            bar.contains(r#"<option value="any" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;min_score=60" data-closed="★">-</option><option value="hide-low" data-href="/search?q=%E7%82%89%E5%BF%83&amp;read=0&amp;hide_low=1&amp;min_score=60" data-closed="★3+☆">★1〜2 を隠す</option>"#),
+            "{bar}"
+        );
         assert!(
             bar.contains(r#"<a class="btn not" href="/search?q=%E7%82%89%E5%BF%83&amp;min_rating=4&amp;min_score=60" aria-label="既読：未読だけ（押すと絞らない）""#),
             "{bar}"
@@ -356,7 +361,8 @@ mod tests {
         );
         assert!(
             !stars_form.contains(r#"name="min_rating""#)
-                && !stars_form.contains(r#"name="unrated""#),
+                && !stars_form.contains(r#"name="unrated""#)
+                && !stars_form.contains(r#"name="hide_low""#),
             "{stars_form}"
         );
         assert!(
@@ -369,7 +375,14 @@ mod tests {
             .nth(1)
             .unwrap();
         let form = form.split("</form>").next().unwrap();
-        for name in ["read", "bookmarked", "unrated", "min_rating", "min_score"] {
+        for name in [
+            "read",
+            "bookmarked",
+            "unrated",
+            "hide_low",
+            "min_rating",
+            "min_score",
+        ] {
             assert!(
                 !form.contains(&format!(r#"name="{name}" value="1" checked"#))
                     && !form.contains(&format!(r#"<select name="{name}""#))
@@ -386,6 +399,16 @@ mod tests {
             );
         }
         assert!(!form.contains(r#"name="bookmarked""#), "{form}");
+        let hide_low = Params {
+            q: "炉心".into(),
+            hide_low: true,
+            ..Params::default()
+        };
+        let html = search_page(&hide_low, Some(&[]), &[], None, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="hide_low" value="1">"#),
+            "{html}"
+        );
         // 和訳ありはバーに無いのでフォームに残す
         assert!(form.contains(r#"name="translated" value="1">"#), "{form}");
     }

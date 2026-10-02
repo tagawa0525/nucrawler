@@ -1136,9 +1136,9 @@ mod tests {
         assert_eq!(listed(RatingFilter::Any), [(b, Rating::new(2))]);
     }
 
-    /// 一覧の件数は、件数の上限を掛けずに一覧と同じ条件で数える（記事を組み立てずに数える）。
+    /// 一覧の記事の ID は、件数の上限を掛けずに一覧と同じ条件・同じ並びで返す（記事を組み立てずに）。
     #[test]
-    fn count_matches_the_unlimited_list() {
+    fn ids_match_the_unlimited_list() {
         let db = Db::open_in_memory().unwrap();
         let user = db.owner_id().unwrap();
         let article =
@@ -1165,15 +1165,17 @@ mod tests {
                 limit: 1,
                 ..list_query(&db, show_all)
             };
-            let all = db
+            let all: Vec<i64> = db
                 .list_articles(ListQuery {
                     limit: usize::MAX,
                     ..q
                 })
                 .unwrap()
-                .len();
-            assert!(all > 0, "{q:?}");
-            assert_eq!(db.count_articles(q).unwrap(), all, "{q:?}");
+                .into_iter()
+                .map(|i| i.article_id)
+                .collect();
+            assert!(all.len() > 1, "{q:?}");
+            assert_eq!(db.list_article_ids(q).unwrap(), all, "{q:?}");
         }
     }
 

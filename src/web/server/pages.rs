@@ -1055,6 +1055,37 @@ mod tests {
         );
     }
 
+    /// 条件を外したときに出る記事のうち、今は出ていない記事を数える。同じ報道のカードの代表が入れ替わるだけでも、
+    /// 外すと出る記事は隠れている記事として数える（件数の差では 0 になる）。
+    #[tokio::test]
+    async fn list_counts_a_story_card_replaced_by_a_hidden_article() {
+        let db = Db::open_in_memory().unwrap();
+        let (kept, digest) = seed(&db, "https://e.com/kept", "取っておく記事");
+        score(&db, digest, 90);
+        let (other, digest) = seed(&db, "https://e.com/other", "同じ話の記事");
+        score(&db, digest, 70);
+        // 同じ報道のグループにする
+        db.conn()
+            .execute(
+                "UPDATE article_stories SET story_id = ?1 WHERE article_id = ?2",
+                [kept, other],
+            )
+            .unwrap();
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{kept}/bookmark"), "on=1")
+            .await;
+        let (_, html) = server.get("/?bookmarked=0").await;
+        assert!(
+            html.contains("同じ話の記事") && !html.contains("取っておく記事"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/">ブックマーク中 1 件</a>"#),
+            "{html}"
+        );
+    }
+
     /// 一覧の 👁 と 🔖 は、印のある記事だけ（1）・無い記事だけ（0）・絞らない（any）で絞る。
     #[tokio::test]
     async fn list_filters_by_marks_both_ways() {

@@ -182,12 +182,14 @@ pub(super) async fn list(
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         // 既読・ブックマークでは件数の上限より前に絞る（上位が既読で埋まっても、下の未読が出るように）
-        let items = db.list_articles(ListQuery {
+        let query = ListQuery {
             read: view.read,
             bookmarked: view.bookmarked,
             rating: view.rating,
             ..list_query(web, user, hash.as_deref(), now, view.min)
-        })?;
+        };
+        let items = db.list_articles(query)?;
+        let hidden = hidden_counts(db, query)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、
         // 閾値未満という区別も無いので出さない
@@ -217,11 +219,63 @@ pub(super) async fn list(
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);
         Ok(html::list_page_with_explore(
-            &new, &earlier, &explore, view, &page,
+            &new, &earlier, &explore, view, hidden, &page,
         ))
     })
     .await?;
     Ok(Html(page).into_response())
+}
+
+/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。件数の上限は掛けずに数える。
+fn hidden_counts(db: &Db, query: ListQuery) -> Result<html::HiddenCounts, DbError> {
+    let count = |q: ListQuery| -> Result<usize, DbError> {
+        Ok(db
+            .list_articles(ListQuery {
+                limit: usize::MAX,
+                ..q
+            })?
+            .len())
+    };
+    let shown = count(query)?;
+    // 外す条件が効いていなければ数えない
+    let added = |effective: bool, lifted: ListQuery| -> Result<usize, DbError> {
+        Ok(if effective {
+            count(lifted)?.saturating_sub(shown)
+        } else {
+            0
+        })
+    };
+    Ok(html::HiddenCounts {
+        min: added(
+            !query.show_all && query.min_score.is_some(),
+            ListQuery {
+                min_score: Some(0),
+                show_all: true,
+                ..query
+            },
+        )?,
+        read: added(
+            query.read.is_some(),
+            ListQuery {
+                read: None,
+                ..query
+            },
+        )?,
+        rating: added(
+            query.rating != RatingFilter::Any,
+            ListQuery {
+                rating: RatingFilter::Any,
+                ..query
+            },
+        )?,
+        bookmarked: added(
+            query.bookmarked.is_some(),
+            ListQuery {
+                bookmarked: None,
+                ..query
+            },
+        )?,
+    })
 }
 
 /// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す（既読の表示は 👁 のとおり）。

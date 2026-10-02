@@ -1,10 +1,10 @@
 //! 画面の HTML。I/O を持たない関数だけにして、テストしやすくする。
-//! JavaScript は一覧の印の付け外し（`MARKS_SCRIPT`）、上部のバーの選択の「絞らない」の書き分け
+//! JavaScript は一覧の印の付け外し（`MARKS_SCRIPT`）、上部のバーの選択肢の書き分け
 //! （`BAR_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）にだけ使い、無くても読める。
 
 use crate::db::{
-    ArticleDetail, Comment, ListItem, Rating, Report, ReportFilter, ReportKind, ReportStatus,
-    TopicUsage, Visibility, Warning,
+    ArticleDetail, Comment, ListItem, Rating, RatingFilter, Report, ReportFilter, ReportKind,
+    ReportStatus, TopicUsage, Visibility, Warning,
 };
 
 use crate::search::Params;

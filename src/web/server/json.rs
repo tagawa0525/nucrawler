@@ -6,7 +6,8 @@ pub(super) fn json(body: String) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// Web の一覧と同じ記事（`min` で最低点を選べ、0 ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
+/// Web の一覧と同じ記事。Web と同じく `min` で最低点（0 なら点数で絞らない）、`rating` で評価の条件を選べる。
+/// 閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_list(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
@@ -16,7 +17,7 @@ pub(super) async fn api_list(
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
         let min = params.min_or(web.default_min(hash.as_deref()))?;
-        let items = list_items(db, web, user, hash.as_deref(), now, min)?;
+        let items = list_items(db, web, user, hash.as_deref(), now, min, params.rating()?)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, labels,
         ))?)

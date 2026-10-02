@@ -16,8 +16,8 @@ use chrono::{Duration, Utc};
 use crate::config::WebConfig;
 
 use crate::db::{
-    Db, DbError, ListQuery, NewReport, OpenKind, Rating, ReportFilter, ReportKind, ReportStatus,
-    Visibility,
+    Db, DbError, ListQuery, NewReport, OpenKind, Rating, RatingFilter, ReportFilter, ReportKind,
+    ReportStatus, SearchQuery, Visibility,
 };
 
 use crate::search::Params;

@@ -59,12 +59,14 @@ pub struct ListQuery<'a> {
     pub min_score: Option<u8>,
     /// これ以降に公開（無ければ取得）された記事
     pub since: chrono::DateTime<chrono::Utc>,
-    /// 評価 1〜2、閾値未満、未採点、非軽水炉の記事も表示する
+    /// 閾値未満、未採点、非軽水炉の記事も表示する
     pub show_all: bool,
     /// 既読で絞る（true は既読だけ、false は未読だけ、None は絞らない）。件数の上限より前に絞る
     pub read: Option<bool>,
     /// ブックマークで絞る（true はブックマーク中だけ、false はブックマークしていない記事だけ）
     pub bookmarked: Option<bool>,
+    /// 評価で絞る。同じ報道のグループは、まとめる前に記事ごとに判定する
+    pub rating: RatingFilter,
     pub limit: usize,
 }
 
@@ -94,7 +96,8 @@ pub struct SearchQuery<'a> {
     pub bookmarked: Option<bool>,
     /// この点数以上（未採点は除く）
     pub min_score: Option<u8>,
-    /// 一覧の既定と同じく、評価 1〜2・非軽水炉の記事と、`hide_below` があれば未採点とその点数未満の記事を隠す
+    /// 一覧の既定と同じく、非軽水炉の記事と、`hide_below` があれば未採点とその点数未満の記事を隠す
+    /// （評価 1〜2 を隠すのは評価の条件 `rating`）
     pub hide: bool,
     /// `hide` のときに隠す最低点。`None` なら推薦点では隠さない（プロファイルが無く採点が無い利用者の既定）
     pub hide_below: Option<u8>,
@@ -118,6 +121,8 @@ pub enum RatingFilter {
     /// 絞らない
     #[default]
     Any,
+    /// 関心が無い（★1〜2）と評価した記事を隠す。未評価は残す（一覧の既定）
+    HideLow,
     /// 評価を付けた記事のうち、この評価以上
     AtLeast(Rating),
     /// 評価の無い記事だけ
@@ -129,6 +134,7 @@ impl RatingFilter {
     fn sql(self) -> String {
         match self {
             Self::Any => String::new(),
+            Self::HideLow => " AND (rows.rating IS NULL OR rows.rating > 2)".to_string(),
             Self::AtLeast(min) => format!(" AND rows.rating >= {}", min.get()),
             Self::Unrated => " AND rows.rating IS NULL".to_string(),
         }
@@ -178,6 +184,7 @@ enum ItemScope<'a> {
         min_score: Option<u8>,
         read: Option<bool>,
         bookmarked: Option<bool>,
+        rating: RatingFilter,
         limit: usize,
     },
     Search(&'a SearchQuery<'a>),
@@ -485,6 +492,7 @@ impl Db {
                 min_score: q.min_score,
                 read: q.read,
                 bookmarked: q.bookmarked,
+                rating: q.rating,
                 limit: q.limit,
             },
         )
@@ -701,11 +709,15 @@ impl Db {
                    SELECT 1 FROM explore_picks AS p
                    WHERE p.user_id = :user AND p.article_id = rows.id)"
                 .to_string(),
-            // 同じ報道のグループは、どれかを読んだら既読、どれかの評価が 1〜2 なら隠す
+            // 同じ報道のグループは、どれかを読んだら既読。評価は記事ごとに判定する
             ItemScope::List {
-                read, bookmarked, ..
+                read,
+                bookmarked,
+                rating,
+                ..
             } => format!(
-                "{} AND (:all = 1 OR rows.story_low = 0)",
+                "{}{}",
+                rating.sql(),
                 mark_filter(
                     "coalesce(rows.read_at, rows.story_read_at)",
                     read,
@@ -824,12 +836,7 @@ impl Db {
                         SELECT 1 FROM article_stories AS s1
                         JOIN article_stories AS s2 ON s2.story_id = s1.story_id
                         JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
-                        WHERE s1.article_id = i.id) AS story_rated,
-                      EXISTS (
-                        SELECT 1 FROM article_stories AS s1
-                        JOIN article_stories AS s2 ON s2.story_id = s1.story_id
-                        JOIN ratings AS rt ON rt.article_id = s2.article_id AND rt.user_id = :user
-                        WHERE s1.article_id = i.id AND rt.value <= 2) AS story_low
+                        WHERE s1.article_id = i.id) AS story_rated
                FROM items AS i
                LEFT JOIN artifacts AS d ON d.id = i.digest_id
              ),
@@ -853,10 +860,9 @@ impl Db {
                       AS story_rank
              FROM scored AS rows
              LEFT JOIN scores AS s ON s.id = rows.score_id
-             -- 既定では評価 1〜2、非軽水炉を隠し、最低点があれば未採点と閾値未満も隠す
+             -- 既定では非軽水炉を隠し、最低点があれば未採点と閾値未満も隠す
              WHERE (:all = 1
-                OR ((rows.rating IS NULL OR rows.rating > 2)
-                    AND rows.relevant = 1 AND (:min IS NULL OR rows.rec >= :min)))
+                OR (rows.relevant = 1 AND (:min IS NULL OR rows.rec >= :min)))
                {rows_filter}
                {list_filter}
              ) AS rows

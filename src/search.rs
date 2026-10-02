@@ -18,7 +18,7 @@ pub enum SearchError {
     InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
-    #[error("unrated and min_rating cannot be combined")]
+    #[error("only one of unrated, min_rating and hide_low can be given")]
     ConflictingRating,
 }
 
@@ -39,6 +39,8 @@ pub struct Params {
     pub bookmarked: Option<bool>,
     /// 評価の無い記事だけ
     pub unrated: bool,
+    /// 関心が無い（★1〜2）と評価した記事を隠す（未評価は残す）
+    pub hide_low: bool,
     /// この評価（1〜5）以上
     pub min_rating: String,
     pub min_score: String,
@@ -65,11 +67,14 @@ impl Params {
                 "unread" if value == "1" => p.read = Some(false),
                 "bookmarked" => p.bookmarked = flag(&value),
                 "unrated" => p.unrated = value == "1",
+                "hide_low" => p.hide_low = value == "1",
                 "min_rating" => p.min_rating = value,
-                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、空は絞らない
+                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、hide-low は ★1〜2 を隠す、
+                // any と空は絞らない
                 "rating" => match value.as_str() {
-                    "" => {}
+                    "" | "any" => {}
                     "0" => p.unrated = true,
+                    "hide-low" => p.hide_low = true,
                     _ => p.min_rating = value,
                 },
                 "min_score" => p.min_score = value,
@@ -111,8 +116,11 @@ impl Params {
                 q.append_pair(key, if on { "1" } else { "0" });
             }
         }
-        if self.unrated {
-            q.append_pair("unrated", "1");
+        let flags = [("unrated", self.unrated), ("hide_low", self.hide_low)];
+        for (key, on) in flags {
+            if on {
+                q.append_pair(key, "1");
+            }
         }
         let rest = [
             ("min_rating", &self.min_rating),
@@ -141,7 +149,7 @@ impl Params {
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.unrated)
+            && !(self.translated || self.unrated || self.hide_low)
             && self.read.is_none()
             && self.bookmarked.is_none()
     }
@@ -177,12 +185,13 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
             })
             .transpose()?;
-        // 評価の無い記事と ★N 以上の記事は重ならないので、両方は指定できない
-        let rating = match (self.unrated, min_rating) {
-            (true, Some(_)) => return Err(SearchError::ConflictingRating),
-            (true, None) => RatingFilter::Unrated,
-            (false, Some(min)) => RatingFilter::AtLeast(min),
-            (false, None) => RatingFilter::Any,
+        // 評価の条件は上部のバーの 1 つの選択なので、1 つだけ指定できる
+        let rating = match (self.unrated, self.hide_low, min_rating) {
+            (false, false, None) => RatingFilter::Any,
+            (true, false, None) => RatingFilter::Unrated,
+            (false, true, None) => RatingFilter::HideLow,
+            (false, false, Some(min)) => RatingFilter::AtLeast(min),
+            _ => return Err(SearchError::ConflictingRating),
         };
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,

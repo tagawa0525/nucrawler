@@ -5,7 +5,7 @@ use super::*;
 
 /// 検索の画面の上部のバーが指す検索。点数・評価・既読・ブックマークはバーの条件で、変えるとほかの条件は
 /// そのままに検索し直す。👁・🔖 は既定で絞らず、押すたびに 印のある記事だけ（`read=1`・`bookmarked=1`）→
-/// 印の無い記事だけ（`read=0`・`bookmarked=0`）→ 絞らない と切り替える。評価の ☆ は評価の無い記事だけ。
+/// 印の無い記事だけ（`read=0`・`bookmarked=0`）→ 絞らない と切り替える。評価は一覧と同じ選択肢で、既定は絞らない。
 #[derive(Clone)]
 struct SearchView(Params);
 
@@ -34,11 +34,20 @@ impl BarView for SearchView {
     fn extra_min(&self) -> Option<u8> {
         None
     }
-    fn rating(&self) -> Option<u8> {
+    fn rating(&self) -> RatingFilter {
         if self.0.unrated {
-            Some(0)
+            RatingFilter::Unrated
+        } else if self.0.hide_low {
+            RatingFilter::HideLow
         } else {
-            self.0.min_rating.trim().parse().ok()
+            // 検索の条件と同じく、前後の空白を除いて読む
+            self.0
+                .min_rating
+                .trim()
+                .parse()
+                .ok()
+                .and_then(Rating::new)
+                .map_or(RatingFilter::Any, RatingFilter::AtLeast)
         }
     }
     fn read(&self) -> Option<bool> {
@@ -56,13 +65,14 @@ impl BarView for SearchView {
             }
         })
     }
-    fn with_rating(&self, rating: Option<u8>) -> Self {
+    fn with_rating(&self, rating: RatingFilter) -> Self {
         self.with(|p| {
-            p.unrated = rating == Some(0);
-            p.min_rating = rating
-                .filter(|r| *r > 0)
-                .map(|r| r.to_string())
-                .unwrap_or_default();
+            p.unrated = rating == RatingFilter::Unrated;
+            p.hide_low = rating == RatingFilter::HideLow;
+            p.min_rating = match rating {
+                RatingFilter::AtLeast(r) => r.get().to_string(),
+                _ => String::new(),
+            };
         })
     }
     fn with_read(&self, read: Option<bool>) -> Self {
@@ -74,9 +84,9 @@ impl BarView for SearchView {
     fn min_name(&self) -> &'static str {
         "min_score"
     }
-    /// 評価の選択（`rating`、検索の条件の読み取りで min_rating・unrated にする）で置き換わる
+    /// 評価の選択（`rating`、検索の条件の読み取りで min_rating・unrated・hide_low にする）で置き換わる
     fn rating_replaces(&self) -> &'static [&'static str] {
-        &["min_rating", "unrated"]
+        &["min_rating", "unrated", "hide_low"]
     }
 }
 
@@ -116,6 +126,7 @@ fn hidden_bar_conditions(p: &Params) -> String {
         .into_iter()
         .filter_map(|(name, v)| v.map(|on| (name, if on { "1" } else { "0" }.to_string())))
         .chain(p.unrated.then(|| ("unrated", "1".to_string())))
+        .chain(p.hide_low.then(|| ("hide_low", "1".to_string())))
         .chain(
             texts
                 .into_iter()

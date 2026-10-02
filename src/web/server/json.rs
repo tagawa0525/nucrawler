@@ -6,7 +6,8 @@ pub(super) fn json(body: String) -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// Web の一覧と同じ記事（`min` で最低点を選べ、0 ならすべて）。閲覧ではないので、訪問も開いたことも記録しない。
+/// Web の一覧と同じ記事。Web と同じく `min` で最低点（0 なら点数で絞らない）、`rating` で評価の条件を選べる。
+/// 閲覧ではないので、訪問も開いたことも記録しない。
 pub(super) async fn api_list(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
@@ -16,7 +17,7 @@ pub(super) async fn api_list(
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
         let min = params.min_or(web.default_min(hash.as_deref()))?;
-        let items = list_items(db, web, user, hash.as_deref(), now, min)?;
+        let items = list_items(db, web, user, hash.as_deref(), now, min, params.rating()?)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, labels,
         ))?)
@@ -186,7 +187,8 @@ mod tests {
         server.assert_no_views();
     }
 
-    /// API の一覧は既定では Web と同じ記事を出し、`min` で最低点を選べる（0 ですべて）。閲覧としては記録しない。
+    /// API の一覧は既定では Web と同じ記事を出し、Web と同じく `min` で最低点（0 なら点数で絞らない）、`rating` で
+    /// 評価の条件（既定は ★1〜2 を隠す）を選べる。閲覧としては記録しない。
     #[tokio::test]
     async fn api_lists_the_same_articles_as_the_web() {
         let db = Db::open_in_memory().unwrap();
@@ -205,13 +207,18 @@ mod tests {
         assert!(a["score"].as_u64().is_some_and(|s| s < 90), "{a}");
         assert_eq!(a["url"], "https://e.com/good?a=1&b=2");
 
+        // 0 は点数の条件だけを外す（評価 2 は評価の条件で隠れたまま）
         let (_, json) = server.get_json("/api/articles?min=0").await;
+        assert_eq!(json["articles"].as_array().unwrap().len(), 4, "{json}");
+        let (_, json) = server.get_json("/api/articles?min=0&rating=any").await;
         assert_eq!(json["articles"].as_array().unwrap().len(), 5, "{json}");
         let (_, json) = server.get_json("/api/articles?min=5").await;
-        // 低い点（10 点）も出る。評価 2・無関係・未採点は 0 のときだけ
+        // 低い点（10 点）も出る。無関係・未採点は 0 のときだけ
         assert_eq!(json["articles"].as_array().unwrap().len(), 2, "{json}");
-        let (status, _) = server.get_json("/api/articles?min=x").await;
-        assert_eq!(status, 400);
+        for bad in ["min=x", "rating=x"] {
+            let (status, _) = server.get_json(&format!("/api/articles?{bad}")).await;
+            assert_eq!(status, 400, "{bad}");
+        }
         server.assert_no_views();
     }
 

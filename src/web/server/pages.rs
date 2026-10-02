@@ -2,8 +2,9 @@
 
 use super::*;
 
-/// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が無ければ推薦点で絞らず、0 なら、評価 1〜2・未採点・
-/// 軽水炉と無関係の記事も出す（すべて）。既読は一覧の既定と同じく未読だけ（フィード・JSON の一覧もこれを使う）。
+/// Web の一覧の条件（設定の期間・件数と、表示する最低点）。最低点が無ければ推薦点で絞らず、0 なら、未採点・
+/// 軽水炉と無関係の記事も出す（すべて）。既読・評価は一覧の既定と同じく未読だけ・★1〜2 を隠す（フィード・JSON の
+/// 一覧もこれを使う）。
 fn list_query<'a>(
     web: &WebConfig,
     user: i64,
@@ -19,11 +20,12 @@ fn list_query<'a>(
         show_all: min_score == Some(0),
         read: Some(false),
         bookmarked: None,
+        rating: RatingFilter::HideLow,
         limit: web.list_limit,
     }
 }
 
-/// Web の一覧に出す記事。
+/// Web の一覧に出す記事（既読・評価は一覧の既定、評価は `rating` があればその条件）。
 pub(super) fn list_items(
     db: &Db,
     web: &WebConfig,
@@ -31,8 +33,13 @@ pub(super) fn list_items(
     profile_hash: Option<&str>,
     now: chrono::DateTime<Utc>,
     min_score: Option<u8>,
+    rating: Option<RatingFilter>,
 ) -> Result<Vec<crate::db::ListItem>, DbError> {
-    db.list_articles(list_query(web, user, profile_hash, now, min_score))
+    let query = list_query(web, user, profile_hash, now, min_score);
+    db.list_articles(ListQuery {
+        rating: rating.unwrap_or(query.rating),
+        ..query
+    })
 }
 
 /// 警告は直近 24 時間のものだけ出す。
@@ -47,10 +54,13 @@ pub(super) struct ListParams {
     min: Option<String>,
     /// Web の一覧だけが使う（`1` なら既読も出し、`0` なら隠す。無ければ一覧は隠し、絞り込みは出す）
     read: Option<String>,
-    /// Web の一覧だけが使う（この評価（1〜5）以上に絞る。空なら絞らない）
+    /// 評価で絞る（`rating` を見る）
     rating: Option<String>,
     /// Web の一覧だけが使う（ブックマークに絞る）
     bookmarked: Option<String>,
+    /// Web の一覧だけが使う（JavaScript が無いときの評価の選択を、一覧（`list`）と絞り込み（`filtered`）の
+    /// どちらから送ったか）
+    from: Option<String>,
 }
 
 impl ListParams {
@@ -67,16 +77,35 @@ impl ListParams {
         }
     }
 
-    fn rating(&self) -> Result<Option<u8>, AppError> {
-        match self.rating.as_deref().filter(|v| !v.is_empty()) {
-            None => Ok(None),
-            Some(v) => v
+    /// 評価の条件。`any` は絞らない、`hide-low` は ★1〜2 を隠す、1〜5 は ★N 以上、0 は評価の無い記事だけ。
+    /// 無ければ（空の値も）`None`（既定）。
+    pub(super) fn rating(&self) -> Result<Option<RatingFilter>, AppError> {
+        let Some(value) = self.rating.as_deref().filter(|v| !v.is_empty()) else {
+            return Ok(None);
+        };
+        let rating = match value {
+            "any" => RatingFilter::Any,
+            "hide-low" => RatingFilter::HideLow,
+            "0" => RatingFilter::Unrated,
+            v => v
                 .parse()
                 .ok()
-                // 0 は評価の無い記事だけ
-                .filter(|r| (0..=5).contains(r))
-                .map(Some)
-                .ok_or(AppError::BadRequest("rating must be 0..=5")),
+                .and_then(crate::db::Rating::new)
+                .map(RatingFilter::AtLeast)
+                .ok_or(AppError::BadRequest(
+                    "rating must be any, hide-low or 0..=5",
+                ))?,
+        };
+        Ok(Some(rating))
+    }
+
+    /// JavaScript が無いときの評価の選択を、絞り込み（`Some(true)`）と一覧（`Some(false)`）のどちらから送ったか。
+    fn sent_from_filtered(&self) -> Result<Option<bool>, AppError> {
+        match self.from.as_deref() {
+            None => Ok(None),
+            Some("filtered") => Ok(Some(true)),
+            Some("list") => Ok(Some(false)),
+            Some(_) => Err(AppError::BadRequest("from must be list or filtered")),
         }
     }
 }
@@ -110,17 +139,22 @@ pub(super) async fn list(
 ) -> Result<Response, AppError> {
     // 既定の規則（一覧か絞り込みか、それぞれの最低点と既読の既定）は `ListView` にだけ置き、正規の URL と
     // そろえる。絞り込みの条件を先に入れ、最低点と既読は既定を受け取ってから決める
+    // 評価の既定も一覧か絞り込みか（ブックマーク中だけか）で決まるので、指定が無ければ既定を後で決める
+    let rating = params.rating()?;
     let mut view = html::ListView {
         min: None,
         default_min: None,
         read: None,
-        rating: params.rating()?,
+        rating: rating.unwrap_or(RatingFilter::Any),
         bookmarked: bookmark_mark(params.bookmarked.as_deref())?,
     };
-    // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）も一緒に送る。一覧へ戻るので、
-    // それらは使わずに一覧の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
-    let leaving = params.rating.as_deref() == Some("") && !view.filtered();
-    let carried = |value: Option<&str>| value.filter(|_| !leaving).map(str::to_string);
+    view.rating = rating.unwrap_or(view.rating_default());
+    // JavaScript が無いときの評価の選択は、送った画面の条件（最低点・既読）も一緒に送る。一覧と絞り込みを行き来した
+    // なら、それらは使わずに行き先の既定にする（JavaScript があれば、選択肢の正規の URL へ移るので送られない）
+    let crossing = params
+        .sent_from_filtered()?
+        .is_some_and(|from| from != view.filtered());
+    let carried = |value: Option<&str>| value.filter(|_| !crossing).map(str::to_string);
     let params = ListParams {
         min: carried(params.min.as_deref()),
         read: carried(params.read.as_deref()),
@@ -131,8 +165,7 @@ pub(super) async fn list(
     view.default_min = state.web.default_min(hash.as_deref());
     view.min = params.min_or(view.min_default())?;
     view.read = read_mark(params.read.as_deref())?.unwrap_or(view.read_default());
-    // 正規の形でなければ（既定と同じ値・空の値が残っているなど）、正規の URL へ移す。JavaScript が無いときの
-    // 選択のフォームは、評価の「★」（絞らない）で `rating=` や、絞り込みを外したときの `read=0` を残す
+    // 正規の形でなければ（既定と同じ値・空の値・送った画面（`from`）が残っているなど）、正規の URL へ移す
     let canonical = view.url();
     let requested = match raw.as_deref() {
         None | Some("") => "/".to_string(),
@@ -152,6 +185,7 @@ pub(super) async fn list(
         let items = db.list_articles(ListQuery {
             read: view.read,
             bookmarked: view.bookmarked,
+            rating: view.rating,
             ..list_query(web, user, hash.as_deref(), now, view.min)
         })?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
@@ -202,12 +236,6 @@ fn filtered(
 ) -> Result<String, AppError> {
     let user = me.user_id;
     let params = Params {
-        min_rating: view
-            .rating
-            .filter(|r| *r > 0)
-            .map(|r| r.to_string())
-            .unwrap_or_default(),
-        unrated: view.rating == Some(0),
         bookmarked: view.bookmarked,
         read: view.read,
         min_score: view
@@ -217,9 +245,10 @@ fn filtered(
             .unwrap_or_default(),
         ..Params::default()
     };
-    let query = params
-        .to_query(user, hash, web.list_limit)
-        .map_err(|_| AppError::BadRequest("rating must be 1..=5"))?;
+    let query = SearchQuery {
+        rating: view.rating,
+        ..params.to_query(user, hash, web.list_limit)?
+    };
     let items = db.search_articles(&query)?;
     let parts = PageParts::new(db, me, hash, web)?;
     let page = parts.page(labels);
@@ -247,7 +276,7 @@ pub(super) async fn feed(
         };
         let (user, hash) = viewer(db, me)?;
         let min = web.default_min(hash.as_deref());
-        let items = list_items(db, web, user, hash.as_deref(), now, min)?;
+        let items = list_items(db, web, user, hash.as_deref(), now, min, None)?;
         // フィード自身の URL はトークン付き（購読し直すリーダーが読めるように）
         let token = params.token.unwrap_or_default();
         let self_href = format!("{base}/feed.xml?token={token}");
@@ -861,8 +890,9 @@ mod tests {
         }
     }
 
-    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。選択のフォームは値を選べないので、
-    /// 👍 を「👍」に戻すと `rating=` や、絞り込みの `read=0` が残る。正規の形なら移らない。
+    /// 一覧の URL は正規の形に揃える（既定と同じ値・空の値を落とす）。正規の形なら移らない。
+    /// JavaScript が無いときの評価の選択は、今の条件とどちらの画面から送ったか（`from`）を送るので、一覧と絞り込みを
+    /// 行き来したときは最低点と 👁 を行き先の既定にする。
     #[tokio::test]
     async fn list_redirects_to_the_canonical_url() {
         // 既定の最低点（設定の値）は、プロファイルがあるときのもの
@@ -871,6 +901,7 @@ mod tests {
         let server = Server::start(db).await;
         for (from, to) in [
             ("/?rating=", "/"),
+            ("/?rating=hide-low", "/"),
             ("/?rating=&read=0", "/"),
             ("/?rating=&read=0&bookmarked=1", "/?read=0&bookmarked=1"),
             ("/?min=50", "/"),
@@ -880,12 +911,18 @@ mod tests {
             // 絞り込みの最低点の既定は 0（00）
             ("/?rating=4&min=0", "/?rating=4"),
             ("/?rating=4&min=60", "/?min=60&rating=4"),
-            // JavaScript が無いときの評価の「★」（絞らない）は、絞り込みの条件（最低点・既読）を一緒に送るが、
-            // 一覧へ戻るので一覧の既定にする
-            ("/?rating=&min=60", "/"),
-            ("/?rating=&min=0&read=0", "/"),
+            // 絞り込みから一覧へ戻るときは、絞り込みの最低点・既読を使わない
+            ("/?rating=hide-low&min=60&from=filtered", "/"),
+            ("/?rating=any&min=0&read=0&from=filtered", "/?rating=any"),
             // ブックマークで絞り込んだままなら、絞り込みの条件を引き継ぐ
-            ("/?rating=&min=60&bookmarked=1", "/?min=60&bookmarked=1"),
+            (
+                "/?rating=hide-low&min=60&bookmarked=1&from=filtered",
+                "/?min=60&rating=hide-low&bookmarked=1",
+            ),
+            // 一覧から絞り込みへ移るときは、一覧の最低点・既読を使わない
+            ("/?rating=4&min=60&read=any&from=list", "/?rating=4"),
+            // 一覧の中で評価を変えたなら、一覧の条件を引き継ぐ
+            ("/?rating=any&min=60&from=list", "/?min=60&rating=any"),
         ] {
             let res = server.get_raw(from).await;
             assert_eq!(res.status().as_u16(), 303, "{from}");
@@ -895,6 +932,8 @@ mod tests {
             "/",
             "/?min=0",
             "/?min=30&read=1",
+            "/?rating=any",
+            "/?rating=hide-low&bookmarked=1",
             "/?rating=4&read=0&bookmarked=1",
             "/?rating=0",
         ] {
@@ -905,7 +944,36 @@ mod tests {
             );
         }
         // 誤った値は移さずに 400 のまま
-        assert_eq!(server.get_raw("/?rating=9").await.status().as_u16(), 400);
+        for bad in ["/?rating=9", "/?rating=x&from=list", "/?from=x"] {
+            assert_eq!(server.get_raw(bad).await.status().as_u16(), 400, "{bad}");
+        }
+    }
+
+    /// 一覧の既定は ★1〜2 を付けた記事を隠す（バーの ★ の選択に見える条件）。評価で絞らない（`rating=any`）と出る。
+    /// 最低点の「すべて」（00）は点数の条件だけを外し、★1〜2 は隠したまま。
+    #[tokio::test]
+    async fn list_hides_low_ratings_by_the_rating_choice() {
+        let db = Db::open_in_memory().unwrap();
+        let (down, digest) = seed(&db, "https://e.com/down", "星二つの記事");
+        score(&db, digest, 80);
+        let (_, digest) = seed(&db, "https://e.com/kept", "評価前の記事");
+        score(&db, digest, 80);
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{down}/rating"), "value=2")
+            .await;
+        for hidden in ["/", "/?min=0"] {
+            let (_, html) = server.get(hidden).await;
+            assert!(
+                !html.contains("星二つの記事") && html.contains("評価前の記事"),
+                "{hidden}: {html}"
+            );
+        }
+        let (_, html) = server.get("/?rating=any").await;
+        assert!(
+            html.contains("星二つの記事") && html.contains("評価前の記事"),
+            "{html}"
+        );
     }
 
     /// 一覧の 👁 と 🔖 は、印のある記事だけ（1）・無い記事だけ（0）・絞らない（any）で絞る。

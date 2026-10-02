@@ -4,7 +4,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::config::Lang;
-use crate::db::{Rating, SearchOrder, SearchQuery};
+use crate::db::{Rating, RatingFilter, SearchOrder, SearchQuery};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SearchError {
@@ -18,7 +18,7 @@ pub enum SearchError {
     InvalidRating(String),
     #[error("sort must be newest or score, got {0:?}")]
     InvalidSort(String),
-    #[error("unrated and min_rating cannot be combined")]
+    #[error("only one of unrated, min_rating and hide_low can be given")]
     ConflictingRating,
 }
 
@@ -39,6 +39,8 @@ pub struct Params {
     pub bookmarked: Option<bool>,
     /// 評価の無い記事だけ
     pub unrated: bool,
+    /// 関心が無い（★1〜2）と評価した記事を隠す（未評価は残す）
+    pub hide_low: bool,
     /// この評価（1〜5）以上
     pub min_rating: String,
     pub min_score: String,
@@ -65,11 +67,14 @@ impl Params {
                 "unread" if value == "1" => p.read = Some(false),
                 "bookmarked" => p.bookmarked = flag(&value),
                 "unrated" => p.unrated = value == "1",
+                "hide_low" => p.hide_low = value == "1",
                 "min_rating" => p.min_rating = value,
-                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、空は絞らない
+                // 上部のバーの評価の選択（JavaScript が無いときに送る）。0 は評価なし、hide-low は ★1〜2 を隠す、
+                // any と空は絞らない
                 "rating" => match value.as_str() {
-                    "" => {}
+                    "" | "any" => {}
                     "0" => p.unrated = true,
+                    "hide-low" => p.hide_low = true,
                     _ => p.min_rating = value,
                 },
                 "min_score" => p.min_score = value,
@@ -111,8 +116,11 @@ impl Params {
                 q.append_pair(key, if on { "1" } else { "0" });
             }
         }
-        if self.unrated {
-            q.append_pair("unrated", "1");
+        let flags = [("unrated", self.unrated), ("hide_low", self.hide_low)];
+        for (key, on) in flags {
+            if on {
+                q.append_pair(key, "1");
+            }
         }
         let rest = [
             ("min_rating", &self.min_rating),
@@ -141,7 +149,7 @@ impl Params {
         .all(|v| v.trim().is_empty())
             && self.topics.is_empty()
             && self.sources.is_empty()
-            && !(self.translated || self.unrated)
+            && !(self.translated || self.unrated || self.hide_low)
             && self.read.is_none()
             && self.bookmarked.is_none()
     }
@@ -177,10 +185,14 @@ impl Params {
                     .ok_or_else(|| SearchError::InvalidRating(v.to_string()))
             })
             .transpose()?;
-        // 評価の無い記事と ★N 以上の記事は重ならないので、両方は指定できない
-        if self.unrated && min_rating.is_some() {
-            return Err(SearchError::ConflictingRating);
-        }
+        // 評価の条件は上部のバーの 1 つの選択なので、1 つだけ指定できる
+        let rating = match (self.unrated, self.hide_low, min_rating) {
+            (false, false, None) => RatingFilter::Any,
+            (true, false, None) => RatingFilter::Unrated,
+            (false, true, None) => RatingFilter::HideLow,
+            (false, false, Some(min)) => RatingFilter::AtLeast(min),
+            _ => return Err(SearchError::ConflictingRating),
+        };
         let order = match given(&self.sort) {
             None | Some("newest") => SearchOrder::Newest,
             Some("score") => SearchOrder::Score,
@@ -198,8 +210,7 @@ impl Params {
             translated: self.translated,
             read: self.read,
             bookmarked: self.bookmarked,
-            unrated: self.unrated,
-            min_rating,
+            rating,
             min_score,
             // 検索は一覧で隠す記事も出す
             hide: false,
@@ -366,6 +377,7 @@ mod tests {
             read: Some(false),
             bookmarked: Some(true),
             unrated: false,
+            hide_low: false,
             min_rating: "4".into(),
             min_score: "60".into(),
             sort: "score".into(),
@@ -378,14 +390,28 @@ mod tests {
         assert_eq!(q.topics, ["燃料"]);
         assert_eq!(q.sources, ["nra"]);
         assert_eq!(q.lang, Some(Lang::En));
-        assert!(q.translated && !q.unrated);
+        assert!(q.translated);
         assert_eq!((q.read, q.bookmarked), (Some(false), Some(true)));
         let unrated = Params {
             unrated: true,
             ..Params::default()
         };
-        assert!(unrated.to_query(7, None, 30).unwrap().unrated);
-        assert_eq!(q.min_rating, crate::db::Rating::new(4));
+        assert_eq!(
+            unrated.to_query(7, None, 30).unwrap().rating,
+            RatingFilter::Unrated
+        );
+        assert_eq!(
+            q.rating,
+            RatingFilter::AtLeast(crate::db::Rating::new(4).unwrap())
+        );
+        let hide_low = Params {
+            hide_low: true,
+            ..Params::default()
+        };
+        assert_eq!(
+            hide_low.to_query(7, None, 30).unwrap().rating,
+            RatingFilter::HideLow
+        );
         assert_eq!(q.min_score, Some(60));
         assert_eq!(q.order, SearchOrder::Score);
         assert!(!q.hide, "search shows what the list hides");
@@ -458,23 +484,40 @@ mod tests {
             }),
             SearchError::InvalidSort("old".into())
         );
-        // 評価なしと ★N 以上は同時には成り立たない
-        assert_eq!(
-            err(Params {
+        // 評価の条件は 1 つだけ選ぶ（評価なし・★N 以上・★1〜2 を隠す）
+        for conflicting in [
+            Params {
                 unrated: true,
                 min_rating: "4".into(),
                 ..Params::default()
-            }),
-            SearchError::ConflictingRating
-        );
+            },
+            Params {
+                hide_low: true,
+                min_rating: "4".into(),
+                ..Params::default()
+            },
+            Params {
+                hide_low: true,
+                unrated: true,
+                ..Params::default()
+            },
+        ] {
+            assert_eq!(err(conflicting), SearchError::ConflictingRating);
+        }
     }
 
-    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、空は絞らない。
+    /// 上部のバーの評価の選択（`rating`）も読む。0 は評価なし、1〜5 は ★N 以上、`hide-low` は ★1〜2 を隠す、
+    /// `any` と空は絞らない。
     #[test]
     fn reads_the_bar_rating() {
         assert!(Params::from_query("rating=0").unrated);
         assert_eq!(Params::from_query("rating=4").min_rating, "4");
         assert_eq!(Params::from_query("rating="), Params::default());
+        assert_eq!(Params::from_query("rating=any"), Params::default());
+        let hide_low = Params::from_query("rating=hide-low");
+        assert!(hide_low.hide_low && !hide_low.is_empty());
+        assert_eq!(hide_low.query_string(), "hide_low=1");
+        assert_eq!(Params::from_query("hide_low=1"), hide_low);
     }
 
     #[test]

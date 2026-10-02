@@ -294,7 +294,8 @@ mod tests {
         assert_eq!(db.query_i64("SELECT count(*) FROM ratings").unwrap(), 0);
     }
 
-    /// 評価 1〜2（不要）の記事は一覧の既定から隠れ、3 以上は残る。
+    /// 評価 1〜2（不要）の記事は一覧の既定の評価の条件（★1〜2 を隠す）で隠れ、3 以上と未評価は残る。
+    /// 最低点の「すべて」（00）は点数の条件だけを外すので、★1〜2 は隠れたまま。
     #[test]
     fn low_ratings_are_hidden_by_default() {
         let db = Db::open_in_memory().unwrap();
@@ -309,18 +310,20 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(list_ids(&db, false), [three, unrated]);
-        assert_eq!(list_ids(&db, true), [two, three, unrated]);
-        assert_eq!(
+        assert_eq!(list_ids(&db, true), [three, unrated]);
+        let hidden = |rating| {
             found(
                 &db,
                 SearchQuery {
                     hide: true,
                     hide_below: Some(60),
+                    rating,
                     ..search_query(&db)
-                }
-            ),
-            [unrated, three]
-        );
+                },
+            )
+        };
+        assert_eq!(hidden(RatingFilter::HideLow), [unrated, three]);
+        assert_eq!(hidden(RatingFilter::Any), [unrated, three, two]);
     }
 
     fn item(db: &Db, article_id: i64) -> ListItem {
@@ -577,7 +580,7 @@ mod tests {
             found(
                 &db,
                 SearchQuery {
-                    min_rating: Rating::new(4),
+                    rating: RatingFilter::AtLeast(Rating::new(4).unwrap()),
                     ..search_query(&db)
                 }
             ),

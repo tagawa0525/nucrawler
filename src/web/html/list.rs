@@ -45,9 +45,11 @@ fn mark_value(on: bool) -> &'static str {
 }
 
 /// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1`（既読だけ）・`read=0`（未読だけ）・
-/// `read=any`（絞らない）で、ブックマークは `bookmarked=1`・`bookmarked=0` で持つ（この表示の既定なら省く）。
-/// 評価（`rating=N`）・ブックマーク中だけ（`bookmarked=1`）で絞るときは、一覧の代わりに該当する記事を出す。
-/// 一覧の既読の既定は未読だけ、絞り込みは評価した（読んだことの多い）記事を探すので絞らない。
+/// `read=any`（絞らない）、評価は `rating=hide-low`（★1〜2 を隠す）・`rating=N`（★N 以上）・`rating=0`（評価の無い
+/// 記事だけ）・`rating=any`（絞らない）、ブックマークは `bookmarked=1`・`bookmarked=0` で持つ（この表示の既定なら省く）。
+/// 評価した記事（`rating=N`・`rating=0`）・ブックマーク中だけ（`bookmarked=1`）で絞るときは、一覧の代わりに全期間から
+/// 該当する記事を出す（絞り込み）。一覧の既定は未読だけ・★1〜2 を隠す、絞り込みは集めた記事を見返すので既読・評価で
+/// 絞らない。
 #[derive(Clone, Copy)]
 pub struct ListView {
     /// 表示する最低点。0 なら評価 1〜2・未採点・軽水炉と無関係の記事も出す（すべて）。`None` なら推薦点で絞らない
@@ -57,8 +59,8 @@ pub struct ListView {
     pub default_min: Option<u8>,
     /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ、`None` は絞らない）
     pub read: Option<bool>,
-    /// この評価（1〜5）以上の記事に絞る。0 なら評価の無い記事だけ
-    pub rating: Option<u8>,
+    /// 評価で絞る
+    pub rating: RatingFilter,
     /// ブックマークで絞る（`Some(true)` はブックマーク中だけで絞り込みの画面、`Some(false)` はしていない記事だけ）
     pub bookmarked: Option<bool>,
 }
@@ -70,7 +72,7 @@ impl Default for ListView {
             min,
             default_min: min,
             read: Some(false),
-            rating: None,
+            rating: RatingFilter::HideLow,
             bookmarked: None,
         }
     }
@@ -85,14 +87,26 @@ impl ListView {
         self.min == Some(0)
     }
 
-    /// 評価・ブックマーク中だけで絞っているか（一覧の代わりに全期間から探す）。
+    /// 評価した記事・ブックマーク中だけで絞っているか（一覧の代わりに全期間から探す）。
     pub fn filtered(self) -> bool {
-        self.rating.is_some() || self.bookmarked == Some(true)
+        matches!(
+            self.rating,
+            RatingFilter::AtLeast(_) | RatingFilter::Unrated
+        ) || self.bookmarked == Some(true)
     }
 
     /// この表示での既読の既定。一覧は未読だけ、絞り込みは絞らない。
     pub fn read_default(self) -> Option<bool> {
         if self.filtered() { None } else { Some(false) }
+    }
+
+    /// この表示での評価の既定。一覧は ★1〜2 を隠す、絞り込みは絞らない。
+    pub fn rating_default(self) -> RatingFilter {
+        if self.filtered() {
+            RatingFilter::Any
+        } else {
+            RatingFilter::HideLow
+        }
     }
 
     /// この表示での最低点の既定。一覧は利用者の既定（`default_min`）、絞り込みは 0（点数で絞らない）。
@@ -105,7 +119,8 @@ impl ListView {
     }
 
     /// 絞り込みを変えた表示。一覧と絞り込みを行き来するときは、既読の表示と最低点を行き先の既定に戻す。
-    fn with_filters(self, rating: Option<u8>, bookmarked: Option<bool>) -> Self {
+    /// 評価は、選び直したのでなく元の表示の既定のままなら、行き先の既定にする。
+    fn with_filters(self, rating: RatingFilter, bookmarked: Option<bool>) -> Self {
         let mut next = Self {
             rating,
             bookmarked,
@@ -114,6 +129,9 @@ impl ListView {
         if next.filtered() != self.filtered() {
             next.read = next.read_default();
             next.min = next.min_default();
+            if rating == self.rating && rating == self.rating_default() {
+                next.rating = next.rating_default();
+            }
         }
         next
     }
@@ -123,7 +141,7 @@ impl ListView {
     pub fn url(self) -> String {
         // 最低点なしは、既定が最低点なしの表示でしか選べないので、いつも省ける
         let min = self.min.map(|m| format!("min={m}")).unwrap_or_default();
-        let rating = format!("rating={}", self.rating.unwrap_or_default());
+        let rating = format!("rating={}", rating_value(self.rating));
         let read = format!("read={}", self.read.map_or("any", mark_value));
         let bookmarked = format!("bookmarked={}", self.bookmarked.map_or("", mark_value));
         let query: Vec<&str> = [
@@ -131,7 +149,7 @@ impl ListView {
                 self.min.is_some() && self.min != self.min_default(),
                 min.as_str(),
             ),
-            (self.rating.is_some(), rating.as_str()),
+            (self.rating != self.rating_default(), rating.as_str()),
             (self.read != self.read_default(), read.as_str()),
             (self.bookmarked.is_some(), bookmarked.as_str()),
         ]
@@ -143,6 +161,16 @@ impl ListView {
         } else {
             format!("/?{}", query.join("&"))
         }
+    }
+}
+
+/// 評価の条件の、URL と選択肢の値。
+fn rating_value(rating: RatingFilter) -> String {
+    match rating {
+        RatingFilter::Any => "any".to_string(),
+        RatingFilter::HideLow => "hide-low".to_string(),
+        RatingFilter::AtLeast(r) => r.get().to_string(),
+        RatingFilter::Unrated => "0".to_string(),
     }
 }
 
@@ -169,14 +197,14 @@ pub(super) trait BarView: Clone {
     fn without_min(&self) -> Option<Self> {
         None
     }
-    /// 評価の絞り込み（0 は評価の無い記事だけ）
-    fn rating(&self) -> Option<u8>;
+    /// 評価の条件
+    fn rating(&self) -> RatingFilter;
     /// 既読で絞る（`Some(true)` は既読だけ、`Some(false)` は未読だけ）
     fn read(&self) -> Option<bool>;
     /// ブックマークで絞る（`Some(true)` はブックマーク中だけ、`Some(false)` はしていない記事だけ）
     fn bookmarked(&self) -> Option<bool>;
     fn with_min(&self, min: u8) -> Self;
-    fn with_rating(&self, rating: Option<u8>) -> Self;
+    fn with_rating(&self, rating: RatingFilter) -> Self;
     fn with_read(&self, read: Option<bool>) -> Self;
     fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self;
     /// JavaScript が無いときに評価の選択と一緒に送る、今の条件（評価の選択で置き換わる欄は送らない）
@@ -211,7 +239,7 @@ impl BarView for ListView {
             .is_none()
             .then_some(ListView { min: None, ..*self })
     }
-    fn rating(&self) -> Option<u8> {
+    fn rating(&self) -> RatingFilter {
         self.rating
     }
     fn read(&self) -> Option<bool> {
@@ -226,7 +254,7 @@ impl BarView for ListView {
             ..*self
         }
     }
-    fn with_rating(&self, rating: Option<u8>) -> Self {
+    fn with_rating(&self, rating: RatingFilter) -> Self {
         self.with_filters(rating, self.bookmarked)
     }
     fn with_read(&self, read: Option<bool>) -> Self {
@@ -235,14 +263,15 @@ impl BarView for ListView {
     fn with_bookmarked(&self, bookmarked: Option<bool>) -> Self {
         self.with_filters(self.rating, bookmarked)
     }
-    /// 一覧から絞り込みへ移るときは、絞り込みでも引き継ぐ条件（ブックマーク）だけを送り、最低点と既読は
-    /// 絞り込みの既定にする（JavaScript のときの行き先 `with_filters` と同じ）
+    /// 行き先が一覧か絞り込みかは選んだ評価で決まるので、今の条件と、どちらの画面から送ったか（`from`）を送る。
+    /// 一覧と絞り込みを行き来したときに最低点と既読を行き先の既定にするのは、受け取った側で行う
+    /// （JavaScript のときの行き先 `with_filters` と同じ）
     fn rating_inputs(&self) -> String {
-        if self.filtered() {
+        let from = if self.filtered() { "filtered" } else { "list" };
+        format!(
+            "{}<input type=\"hidden\" name=\"from\" value=\"{from}\">",
             state_inputs(self, self.rating_replaces())
-        } else {
-            state_inputs(&self.with_rating(Some(1)), self.rating_replaces())
-        }
+        )
     }
     fn min_name(&self) -> &'static str {
         "min"
@@ -277,17 +306,28 @@ fn option(value: &str, target: &impl BarView, selected: bool, label: &str) -> St
     )
 }
 
-/// 「絞らない」の選択肢。開いた一覧では「-」、閉じた選択では `closed`（00・★）と書く（`BAR_SCRIPT`）。
-fn blank_option(value: &str, target: &impl BarView, selected: bool, closed: &str) -> String {
+/// 開いた一覧と閉じた選択で書き分ける選択肢。開いた一覧では `label`、閉じた選択では `closed` と書く（`BAR_SCRIPT`）。
+fn relabeled_option(
+    value: &str,
+    target: &impl BarView,
+    selected: bool,
+    label: &str,
+    closed: &str,
+) -> String {
     format!(
-        "<option value=\"{value}\" data-href=\"{}\" data-closed=\"{closed}\"{}>-</option>",
+        "<option value=\"{value}\" data-href=\"{}\" data-closed=\"{closed}\"{}>{label}</option>",
         target.bar_href(),
         if selected { " selected" } else { "" },
     )
 }
 
-/// 上部のバーの選択の「絞らない」を、閉じているときは 00・★、開いた一覧では「-」と書き分ける。
-/// JavaScript が無ければ「-」のまま。
+/// 「絞らない」の選択肢。開いた一覧では「-」、閉じた選択では `closed`（00・★）と書く。
+fn blank_option(value: &str, target: &impl BarView, selected: bool, closed: &str) -> String {
+    relabeled_option(value, target, selected, "-", closed)
+}
+
+/// 上部のバーの選択肢を、閉じているときは短く（「絞らない」は 00・★、★1〜2 を隠すは ★3+☆）、開いた一覧では
+/// 意味が分かるように（「-」・「★1〜2 を隠す」）書き分ける。JavaScript が無ければ開いた一覧の書き方のまま。
 pub(super) const BAR_SCRIPT: &str =
     concat!("<script>\n", include_str!("assets/bar.js"), "</script>");
 
@@ -334,29 +374,25 @@ fn min_select(view: &impl BarView) -> String {
 }
 
 /// 評価で絞る選択。最低点の数字と見分けられるよう ★ で示す。「-」（閉じた選択では数字の無い ★）は絞らない、
-/// ★1〜★5 は最低点と同じく小さい順で「以上」の印は付けない（★4 は ★4 以上）、最後の白抜きの「☆」は
-/// 評価の無い記事だけ。絞っているあいだは緑にする。
+/// 「★1〜2 を隠す」（閉じた選択では ★3+☆）は関心が無いと評価した記事を隠して未評価は残す（一覧の既定）、
+/// ★1〜★5 は評価した記事のうちその評価以上で、最低点と同じく小さい順で「以上」の印は付けない（★4 は ★4 以上）、
+/// 最後の白抜きの「☆」は評価の無い記事だけ。絞っているあいだは緑にする。
 /// 選ぶとすぐ表示を切り替える（JavaScript が無ければ「表示」のボタンで、`rating_inputs` の条件も送る）。
 fn rating_select(view: &impl BarView) -> String {
-    let choices = [
-        (Some(1), "★1"),
-        (Some(2), "★2"),
-        (Some(3), "★3"),
-        (Some(4), "★4"),
-        (Some(5), "★5"),
-        (Some(0), "☆"),
-    ];
-    // 絞らない（閉じた選択では数字の無い ★）
-    let blank = blank_option("", &view.with_rating(None), view.rating().is_none(), "★");
-    let options: String = std::iter::once(blank)
-        .chain(choices.iter().map(|(rating, label)| {
-            let value = rating.map(|r| r.to_string()).unwrap_or_default();
-            option(
-                &value,
-                &view.with_rating(*rating),
-                *rating == view.rating(),
-                label,
-            )
+    let rated = (Rating::MIN..=Rating::MAX)
+        .filter_map(Rating::new)
+        .map(|r| (RatingFilter::AtLeast(r), format!("★{}", r.get())))
+        .chain([(RatingFilter::Unrated, "☆".to_string())]);
+    let choice = |rating: RatingFilter| (view.with_rating(rating), view.rating() == rating);
+    let (target, selected) = choice(RatingFilter::Any);
+    let blank = blank_option("any", &target, selected, "★");
+    let (target, selected) = choice(RatingFilter::HideLow);
+    let hide_low = relabeled_option("hide-low", &target, selected, "★1〜2 を隠す", "★3+☆");
+    let options: String = [blank, hide_low]
+        .into_iter()
+        .chain(rated.map(|(rating, label)| {
+            let (target, selected) = choice(rating);
+            option(&rating_value(rating), &target, selected, &label)
         }))
         .collect();
     let inputs = view.rating_inputs();
@@ -364,7 +400,11 @@ fn rating_select(view: &impl BarView) -> String {
         "<form class=\"stars{}\" method=\"get\" action=\"{}\"><select name=\"rating\" aria-label=\"評価で絞る\" \
          title=\"評価で絞る\" onchange=\"{JUMP}\">{options}</select>{inputs}\
          <noscript><button>表示</button></noscript></form>",
-        if view.rating().is_some() { " on" } else { "" },
+        if view.rating() == RatingFilter::Any {
+            ""
+        } else {
+            " on"
+        },
         view.action(),
     )
 }
@@ -429,13 +469,37 @@ fn mark_button(
     button(href, &label, emoji, class)
 }
 
-/// 欄（`.sections`）に持たせる、印で絞る条件（`data-read`・`data-bookmarked`。1 はあり、0 はなし）。
-/// 印を付け外しして条件から外れたカードは、その場で隠す（`MARKS_SCRIPT`）。
-fn mark_conditions(read: Option<bool>, bookmarked: Option<bool>) -> String {
-    [("read", read), ("bookmarked", bookmarked)]
+/// 欄（`.sections`）に持たせる、印で絞る条件（`data-read`・`data-bookmarked`。1 はあり、0 はなし）と評価の条件
+/// （`data-hide-low`・`data-min-rating`・`data-unrated`）。印を付け外しして条件から外れたカードは、その場で隠す
+/// （`MARKS_SCRIPT`）。
+fn mark_conditions(view: ListView) -> String {
+    let marks: String = [("read", view.read), ("bookmarked", view.bookmarked)]
         .into_iter()
         .filter_map(|(name, mark)| mark.map(|on| format!(" data-{name}=\"{}\"", mark_value(on))))
-        .collect()
+        .collect();
+    let rating = match view.rating {
+        RatingFilter::Any => String::new(),
+        RatingFilter::HideLow => " data-hide-low=\"1\"".to_string(),
+        RatingFilter::AtLeast(r) => format!(" data-min-rating=\"{}\"", r.get()),
+        RatingFilter::Unrated => " data-unrated=\"1\"".to_string(),
+    };
+    marks + &rating
+}
+
+/// 絞り込みの見出し。全期間から探していることと、何で絞ったかを出す（例：ブックマーク中・★4 以上（全期間））。
+fn filtered_heading(view: ListView) -> String {
+    let rating = match view.rating {
+        RatingFilter::Any => None,
+        RatingFilter::HideLow => Some("★1〜2 を隠す".to_string()),
+        RatingFilter::AtLeast(r) => Some(format!("★{} 以上", r.get())),
+        RatingFilter::Unrated => Some("未評価".to_string()),
+    };
+    let parts: Vec<String> = (view.bookmarked == Some(true))
+        .then(|| "ブックマーク中".to_string())
+        .into_iter()
+        .chain(rating)
+        .collect();
+    format!("{}（全期間）", parts.join("・"))
 }
 
 /// 一覧のほかの画面（検索・詳細）の上部のバー。一覧の既定の表示を指し、先頭は 🏠。
@@ -451,19 +515,19 @@ pub(super) fn home_bar(page: &Page) -> String {
 /// 評価・ブックマークで絞った記事。上部のバーは一覧と同じで、検索のフォームは出さない。
 pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String {
     let mut body = bar(&view, false);
+    // 0 件でも、何で絞ったかと全期間であることは出す
+    body.push_str(&format!(
+        "<h2>{}<span class=\"count\">{} 件</span></h2>",
+        filtered_heading(view),
+        items.len(),
+    ));
     if items.is_empty() {
         body.push_str("<p class=\"meta\">該当する記事はありません</p>");
     } else {
         // 欄に絞り込みの条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
-        let marks = mark_conditions(view.read, view.bookmarked);
-        let rating = match view.rating {
-            None => String::new(),
-            Some(0) => " data-unrated=\"1\"".to_string(),
-            Some(r) => format!(" data-min-rating=\"{r}\""),
-        };
         body.push_str(&format!(
-            "<h2 class=\"count\">{} 件</h2><div class=\"sections\"{marks}{rating}>",
-            items.len()
+            "<div class=\"sections\"{}>",
+            mark_conditions(view),
         ));
         body.extend(items.iter().map(|i| card(i, true, page)));
         body.push_str("</div>");
@@ -484,7 +548,7 @@ pub fn list_page_with_explore(
     // 欄に印で絞る条件を持たせ、条件から外れたカードをその場で隠す（`MARKS_SCRIPT`）
     body.push_str(&format!(
         "<div class=\"sections\"{}>",
-        mark_conditions(view.read, view.bookmarked)
+        mark_conditions(view)
     ));
     body.push_str("<h2>前回から</h2>");
     if new.is_empty() {
@@ -666,8 +730,12 @@ pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Rating;
+    use crate::db::{Rating, RatingFilter};
     use crate::web::html::test_support::*;
+
+    fn at_least(rating: u8) -> RatingFilter {
+        RatingFilter::AtLeast(Rating::new(rating).unwrap())
+    }
 
     /// 同じ報道のグループの代表には、ほかの記事の数とソース（重ねずに）を添える。
     #[test]
@@ -831,7 +899,7 @@ mod tests {
         );
         // 既読を隠す一覧では、既読にしたカードをその場で隠し、しばらく「元に戻す」（u キー）を出す
         assert!(
-            html.contains(r#"<div class="sections" data-read="0">"#),
+            html.contains(r#"<div class="sections" data-read="0" data-hide-low="1">"#),
             "{html}"
         );
         assert!(
@@ -862,7 +930,10 @@ mod tests {
             shown,
             &Page::default(),
         );
-        assert!(html.contains(r#"<div class="sections">"#), "{html}");
+        assert!(
+            html.contains(r#"<div class="sections" data-hide-low="1">"#),
+            "{html}"
+        );
         // ←/→ で既読・ブックマーク、↓/↑ で選ぶ
         for key in ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"] {
             assert!(html.contains(key), "{key}: {html}");
@@ -981,9 +1052,10 @@ mod tests {
         assert!(!html.contains(r#"name="read""#), "{html}");
     }
 
-    /// 評価の選択は評価（★1〜5）以上、🔖 はブックマークだけに、一覧の上部のバーで絞る（検索画面へは移らない）。
-    /// 評価の選択は、最低点の数字と見分けられるよう ★ で示す。並びは最低点と同じく小さい順で、
-    /// 最低点と同じく「以上」の印（↑）は付けない。絞っているときは切り替えの ON と同じ緑にする。
+    /// 評価の選択は、★1〜2 を隠す（一覧の既定）・評価（★1〜5）以上・評価の無い記事だけから選び、🔖 はブックマークだけに、
+    /// 一覧の上部のバーで絞る（検索画面へは移らない）。評価の選択は、最低点の数字と見分けられるよう ★ で示す。
+    /// 並びは最低点と同じく小さい順で、最低点と同じく「以上」の印（↑）は付けない。絞っているときは切り替えの ON と
+    /// 同じ緑にする。★1〜2 を隠す選択肢は、開いた一覧では意味を書き、閉じた選択では短く ★3+☆ と書く。
     #[test]
     fn list_page_filters_by_rating_and_bookmark_in_the_bar() {
         assert!(
@@ -996,14 +1068,40 @@ mod tests {
         assert!(!html.contains("/search?"), "{html}");
         assert!(
             html.contains(
-                r#"<form class="stars" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="" data-href="/" data-closed="★" selected>-</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option><option value="0" data-href="/?rating=0">☆</option></select>"#
+                r#"<form class="stars on" method="get" action="/"><select name="rating" aria-label="評価で絞る" title="評価で絞る" onchange="location.href=this.selectedOptions[0].dataset.href"><option value="any" data-href="/?rating=any" data-closed="★">-</option><option value="hide-low" data-href="/" data-closed="★3+☆" selected>★1〜2 を隠す</option><option value="1" data-href="/?rating=1">★1</option><option value="2" data-href="/?rating=2">★2</option><option value="3" data-href="/?rating=3">★3</option><option value="4" data-href="/?rating=4">★4</option><option value="5" data-href="/?rating=5">★5</option><option value="0" data-href="/?rating=0">☆</option></select>"#
             ),
             "{html}"
         );
+        // ★1〜2 を付けたカードは、その場でも隠す（`MARKS_SCRIPT`）
+        assert!(
+            html.contains(r#"<div class="sections" data-read="0" data-hide-low="1">"#),
+            "{html}"
+        );
+        assert!(MARKS_SCRIPT.contains("f.hideLow"), "{MARKS_SCRIPT}");
         assert!(
             html.contains(
                 r#"<a class="btn" href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）" title="ブックマーク：絞らない（押すとブックマーク中だけ）">🔖</a>"#
             ),
+            "{html}"
+        );
+        // 絞らない一覧では欄に評価の条件を持たせない
+        let any = ListView {
+            rating: RatingFilter::Any,
+            ..ListView::default()
+        };
+        let html = list_page(&[], &[], any, &Page::default());
+        assert!(
+            html.contains(r#"<form class="stars" method="get" action="/">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<option value="hide-low" data-href="/" data-closed="★3+☆">★1〜2 を隠す</option>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<div class="sections" data-read="0">"#),
             "{html}"
         );
     }
@@ -1015,7 +1113,7 @@ mod tests {
         // 絞り込んだ画面の既定は、既読も出す
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             read: None,
             ..ListView::default()
         };
@@ -1054,10 +1152,11 @@ mod tests {
             ),
             "{html}"
         );
-        // 条件から外れたカードはその場で隠して「元に戻す」を出し、件数も合わせる（`MARKS_SCRIPT`）
+        // 全期間から探した画面だと見出しで分かるようにする。条件から外れたカードはその場で隠して「元に戻す」を出し、
+        // 件数も合わせる（`MARKS_SCRIPT`）
         assert!(
             html.contains(
-                r#"<h2 class="count">1 件</h2><div class="sections" data-min-rating="4">"#
+                r#"<h2>★4 以上（全期間）<span class="count">1 件</span></h2><div class="sections" data-min-rating="4">"#
             ),
             "{html}"
         );
@@ -1073,7 +1172,7 @@ mod tests {
 
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             bookmarked: Some(true),
             read: None,
             ..ListView::default()
@@ -1084,7 +1183,7 @@ mod tests {
             &Page::default(),
         );
         assert!(
-            html.contains(r#"<div class="sections" data-bookmarked="1" data-min-rating="4">"#),
+            html.contains(r#"<h2>ブックマーク中・★4 以上（全期間）<span class="count">1 件</span></h2><div class="sections" data-bookmarked="1" data-min-rating="4">"#),
             "{html}"
         );
         let html = filtered_page(&[], view, &Page::default());
@@ -1099,6 +1198,13 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("該当する記事はありません"), "{html}");
+        // 0 件でも、何で絞ったかと全期間であることは見出しに出す
+        assert!(
+            html.contains(
+                r#"<h2>ブックマーク中・★4 以上（全期間）<span class="count">0 件</span></h2>"#
+            ),
+            "{html}"
+        );
         let view = ListView {
             min: Some(0),
             bookmarked: Some(true),
@@ -1114,7 +1220,7 @@ mod tests {
         // 👁 を OFF にした絞り込みは、既読を隠し（その場でも隠す）、絞り込みを変えても OFF を引き継ぐ
         let view = ListView {
             min: Some(0),
-            rating: Some(4),
+            rating: at_least(4),
             ..ListView::default()
         };
         let html = filtered_page(
@@ -1158,14 +1264,19 @@ mod tests {
             html.contains(r#"href="/?bookmarked=1" aria-label="ブックマーク：絞らない（押すとブックマーク中だけ）""#),
             "{html}"
         );
-        // 一覧の評価の選択は、一覧の 👁 を絞り込みへ持ち込まない
-        let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
+        // JavaScript が無いときの評価の選択は、今の条件と、どちらの画面から送ったかを送る。行き先が一覧か絞り込みかは
+        // 選んだ評価で決まるので、行き来したときに 👁・最低点を行き先の既定に戻すのは受け取った側で行う
+        let stars = html.split(r#"<form class="stars"#).nth(1).unwrap();
         let stars = stars.split("</form>").next().unwrap();
-        assert!(!stars.contains(r#"name="read""#), "{stars}");
+        assert!(
+            stars.contains(r#"<input type="hidden" name="read" value="any">"#)
+                && stars.contains(r#"<input type="hidden" name="from" value="list">"#),
+            "{stars}"
+        );
     }
 
-    /// JavaScript が無いとき、一覧から評価の選択で絞り込みへ移っても、ブックマークなしだけの条件は引き継ぐ
-    /// （JavaScript のときの行き先と同じ）。最低点と 👁 は絞り込みの既定にするので送らない。
+    /// JavaScript が無いとき、一覧の評価の選択はブックマークなしだけの条件も送る（JavaScript のときの行き先と同じく
+    /// 引き継ぐ）。一覧の既定の最低点と 👁 は送らない。
     #[test]
     fn no_js_rating_keeps_the_bookmark_condition() {
         let view = ListView {
@@ -1173,7 +1284,7 @@ mod tests {
             ..ListView::default()
         };
         let html = list_page(&[], &[], view, &Page::default());
-        let stars = html.split(r#"<form class="stars""#).nth(1).unwrap();
+        let stars = html.split(r#"<form class="stars"#).nth(1).unwrap();
         let stars = stars.split("</form>").next().unwrap();
         assert!(
             stars.contains(r#"<input type="hidden" name="bookmarked" value="0">"#),
@@ -1186,6 +1297,17 @@ mod tests {
         assert!(
             stars.contains(r#"data-href="/?rating=4&amp;bookmarked=0""#),
             "{stars}"
+        );
+        let filtered = ListView {
+            min: Some(0),
+            read: None,
+            rating: at_least(4),
+            ..ListView::default()
+        };
+        let html = filtered_page(&[], filtered, &Page::default());
+        assert!(
+            html.contains(r#"<input type="hidden" name="from" value="filtered">"#),
+            "{html}"
         );
     }
 
@@ -1259,7 +1381,9 @@ mod tests {
         );
         // 欄の条件は印ごとに、あり（1）・なし（0）で持つ
         assert!(
-            html.contains(r#"<div class="sections" data-read="0" data-bookmarked="0">"#),
+            html.contains(
+                r#"<div class="sections" data-read="0" data-bookmarked="0" data-hide-low="1">"#
+            ),
             "{html}"
         );
         assert!(
@@ -1288,7 +1412,7 @@ mod tests {
             &[],
             ListView {
                 min: Some(0),
-                rating: Some(4),
+                rating: at_least(4),
                 read: None,
                 ..ListView::default()
             },
@@ -1304,7 +1428,7 @@ mod tests {
         let unrated = ListView {
             min: Some(0),
             read: None,
-            rating: Some(0),
+            rating: RatingFilter::Unrated,
             ..ListView::default()
         };
         let html = filtered_page(
@@ -1335,9 +1459,17 @@ mod tests {
             html.contains(r#"<form class="min on" method="get" action="/">"#),
             "{html}"
         );
-        // 一覧へ戻ると、最低点は設定の最低点に戻る
+        // 一覧へ戻ると、最低点は設定の最低点に戻る。選んだ評価の条件はそのまま
         assert!(
-            html.contains(r#"<option value="" data-href="/" data-closed="★">-</option>"#),
+            html.contains(
+                r#"<option value="any" data-href="/?rating=any" data-closed="★">-</option>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<option value="hide-low" data-href="/" data-closed="★3+☆">★1〜2 を隠す</option>"#
+            ),
             "{html}"
         );
         // 一覧から絞り込みへ移ると、最低点は 00 になる

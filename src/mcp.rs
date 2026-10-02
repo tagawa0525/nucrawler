@@ -17,7 +17,9 @@ use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
 use crate::config::WebConfig;
-use crate::db::{ArtifactVersion, Db, DbError, ListItem, Rating, SearchOrder, SearchQuery};
+use crate::db::{
+    ArtifactVersion, Db, DbError, ListItem, Rating, RatingFilter, SearchOrder, SearchQuery,
+};
 use crate::web::html::SourceLabels;
 
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +70,7 @@ pub struct SearchParams {
     pub source: Option<String>,
     /// この点数以上の記事だけ（0〜100）。既定は Web UI の一覧と同じ（設定の web.min_score。プロファイルが無ければ採点が無いので絞らない）。指定すると include_hidden でも未採点の記事は除く
     pub min_score: Option<u8>,
-    /// Web UI の「すべて表示」と同じく、評価 1〜2・閾値未満・未採点・軽水炉に関係しない記事も含める
+    /// 閾値未満・未採点・軽水炉に関係しない記事と、評価 1〜2 を付けた記事も含める
     #[serde(default)]
     pub include_hidden: bool,
     /// 最大件数。既定は Web UI の一覧と同じ（設定の web.list_limit）
@@ -274,11 +276,16 @@ fn search(
         until,
         sources: params.source.into_iter().collect(),
         min_score: params.min_score,
-        // 既定は Web UI の一覧と同じく隠す（最低点の既定も一覧と同じ）
+        // 既定は Web UI の一覧と同じく隠す（最低点・評価の条件の既定も一覧と同じ）
         hide: !params.include_hidden,
         hide_below: params
             .min_score
             .or_else(|| web.default_min(hash.as_deref())),
+        rating: if params.include_hidden {
+            RatingFilter::Any
+        } else {
+            RatingFilter::HideLow
+        },
         order: SearchOrder::Score,
         limit: params.limit.unwrap_or(web.list_limit),
         ..SearchQuery::default()
@@ -760,6 +767,7 @@ mod tests {
                 show_all: true,
                 read: None,
                 bookmarked: None,
+                rating: RatingFilter::Any,
                 limit: 10,
             })
             .unwrap()[0]

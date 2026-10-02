@@ -172,7 +172,97 @@ fn rating_value(rating: RatingFilter) -> String {
 }
 
 pub fn list_page(new: &[ListItem], earlier: &[ListItem], view: ListView, page: &Page) -> String {
-    list_page_with_explore(new, earlier, &[], view, page)
+    list_page_with_explore(new, earlier, &[], view, HiddenCounts::default(), page)
+}
+
+/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HiddenCounts {
+    /// 最低点（「すべて」にすると加わる、点数が足りない・未採点の記事）
+    pub min: usize,
+    /// 👁（既読・未読で絞らないと加わる記事）
+    pub read: usize,
+    /// ★（★1〜2 を隠さないと加わる記事）
+    pub rating: usize,
+    /// 🔖（ブックマークなしだけで絞らないと加わる記事）
+    pub bookmarked: usize,
+}
+
+/// 一覧で効いている条件（例：点数 50 以上・未読だけ・★1〜2 を隠す）。
+fn list_conditions(view: ListView) -> Vec<String> {
+    let min = view
+        .min
+        .filter(|m| *m > 0)
+        .map(|m| format!("点数 {m} 以上"));
+    let read = view
+        .read
+        .map(|read| if read { "既読だけ" } else { "未読だけ" }.to_string());
+    let rating = match view.rating {
+        RatingFilter::Any => None,
+        RatingFilter::HideLow => Some("★1〜2 を隠す".to_string()),
+        RatingFilter::AtLeast(r) => Some(format!("★{} 以上", r.get())),
+        RatingFilter::Unrated => Some("未評価だけ".to_string()),
+    };
+    let bookmarked = view.bookmarked.map(|on| {
+        if on {
+            "ブックマーク中だけ"
+        } else {
+            "ブックマークなしだけ"
+        }
+        .to_string()
+    });
+    [min, read, rating, bookmarked]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// 条件で隠れている記事の数を、条件ごとに、その条件を外した表示へのリンクにして出す。何も隠れていなければ空。
+fn hidden_note(view: ListView, hidden: HiddenCounts) -> String {
+    let min = view
+        .min
+        .filter(|m| *m > 0)
+        // 最低点を外すと、未採点（軽水炉と無関係で採点しない記事を含む）も加わる
+        .map(|m| {
+            (
+                hidden.min,
+                format!("点数 {m} 未満・未採点"),
+                view.with_min(0),
+            )
+        });
+    let read = view.read.map(|read| {
+        let label = if read { "未読" } else { "既読" };
+        (hidden.read, label.to_string(), view.with_read(None))
+    });
+    let rating = (view.rating == RatingFilter::HideLow).then(|| {
+        (
+            hidden.rating,
+            "★1〜2".to_string(),
+            view.with_rating(RatingFilter::Any),
+        )
+    });
+    let bookmarked = (view.bookmarked == Some(false)).then(|| {
+        (
+            hidden.bookmarked,
+            "ブックマーク中".to_string(),
+            view.with_bookmarked(None),
+        )
+    });
+    let links: Vec<String> = [min, read, rating, bookmarked]
+        .into_iter()
+        .flatten()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, label, target)| {
+            format!("<a href=\"{}\">{label} {count} 件</a>", target.bar_href())
+        })
+        .collect();
+    if links.is_empty() {
+        return String::new();
+    }
+    format!(
+        "<p class=\"meta\">条件で隠れている記事：{}</p>",
+        links.join("・")
+    )
 }
 
 /// 選択を選んだときに移る先。選択肢ごとに、その表示の正規の URL を `data-href` に持たせる
@@ -533,12 +623,13 @@ pub fn filtered_page(items: &[ListItem], view: ListView, page: &Page) -> String 
     layout("一覧", page, &body)
 }
 
-/// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）を添える。
+/// 一覧に、閾値未満から無作為に選んだ確認枠（`explore`）と、条件で隠れている記事の数（`hidden`）を添える。
 pub fn list_page_with_explore(
     new: &[ListItem],
     earlier: &[ListItem],
     explore: &[ListItem],
     view: ListView,
+    hidden: HiddenCounts,
     page: &Page,
 ) -> String {
     let mut body = bar(&view, false);
@@ -548,7 +639,18 @@ pub fn list_page_with_explore(
         mark_conditions(view)
     ));
     body.push_str("<h2>前回から</h2>");
-    if new.is_empty() {
+    if new.is_empty() && earlier.is_empty() {
+        // 1 件も出ないときは、何が記事を隠しているかが分かるように、効いている条件を出す
+        let conditions = list_conditions(view);
+        if conditions.is_empty() {
+            body.push_str("<p class=\"meta\">記事はありません</p>");
+        } else {
+            body.push_str(&format!(
+                "<p class=\"meta\">{} に合う記事はありません</p>",
+                conditions.join("・")
+            ));
+        }
+    } else if new.is_empty() {
         body.push_str("<p class=\"meta\">新しい記事はありません</p>");
     }
     body.extend(new.iter().map(|i| card(i, true, page)));
@@ -560,6 +662,7 @@ pub fn list_page_with_explore(
         });
         body.extend(earlier.iter().map(|i| card(i, true, page)));
     }
+    body.push_str(&hidden_note(view, hidden));
     if !explore.is_empty() {
         body.push_str(
             "<h2>確認枠</h2><p class=\"meta\">おすすめの閾値に届かなかった記事から無作為に選んでいます。\
@@ -1505,6 +1608,89 @@ mod tests {
         );
     }
 
+    /// 一覧に出ない記事があるときは、どの条件で何件隠れているかを、その条件を外した表示へのリンクにして出す。
+    /// 最低点を外すと、点数の足りない記事のほかに未採点（軽水炉と無関係で採点しない記事を含む）も加わる。
+    /// 1 件も出ないときは、「新しい記事はありません」の代わりに効いている条件を出す（何が記事を隠しているか分かるように）。
+    #[test]
+    fn list_page_explains_what_the_conditions_hide() {
+        let view = ListView {
+            min: Some(50),
+            default_min: Some(50),
+            ..ListView::default()
+        };
+        let hidden = HiddenCounts {
+            min: 32,
+            read: 12,
+            rating: 3,
+            bookmarked: 0,
+        };
+        let html = list_page_with_explore(&[], &[], &[], view, hidden, &Page::default());
+        assert!(
+            html.contains(
+                r#"<p class="meta">点数 50 以上・未読だけ・★1〜2 を隠す に合う記事はありません</p>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("新しい記事はありません"), "{html}");
+        assert!(
+            html.contains(
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満・未採点 32 件</a>・<a href="/?read=any">既読 12 件</a>・<a href="/?rating=any">★1〜2 3 件</a></p>"#
+            ),
+            "{html}"
+        );
+        // 記事が出ていれば、欄の見出しはそのままで、隠れている件数だけを後に添える
+        let html = list_page_with_explore(
+            &[],
+            &[item(1, "2026-09-26T00:00:00.000Z")],
+            &[],
+            view,
+            HiddenCounts {
+                read: 2,
+                ..HiddenCounts::default()
+            },
+            &Page::default(),
+        );
+        assert!(html.contains("新しい記事はありません"), "{html}");
+        let cards = html.find(r#"data-id="1""#).unwrap();
+        let note = html.find("条件で隠れている記事").unwrap();
+        assert!(cards < note, "{html}");
+        assert!(
+            html.contains(r#"<a href="/?read=any">既読 2 件</a></p>"#),
+            "{html}"
+        );
+        // 既読だけ・ブックマークなしだけで隠れているものも、外した表示へのリンクにする
+        let view = ListView {
+            min: Some(50),
+            default_min: Some(50),
+            read: Some(true),
+            rating: RatingFilter::Any,
+            bookmarked: Some(false),
+        };
+        let html = list_page_with_explore(
+            &[],
+            &[],
+            &[],
+            view,
+            HiddenCounts {
+                read: 5,
+                bookmarked: 1,
+                ..HiddenCounts::default()
+            },
+            &Page::default(),
+        );
+        assert!(
+            html.contains("点数 50 以上・既読だけ・ブックマークなしだけ に合う記事はありません"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/?rating=any&amp;read=any&amp;bookmarked=0">未読 5 件</a>・<a href="/?rating=any&amp;read=1">ブックマーク中 1 件</a>"#),
+            "{html}"
+        );
+        // 何も隠れていなければ出さない
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(!html.contains("条件で隠れている記事"), "{html}");
+    }
+
     #[test]
     fn list_page_names_the_earlier_section_by_whether_read_is_shown() {
         let mut read = item(2, "2026-09-26T00:00:00.000Z");
@@ -1582,6 +1768,7 @@ mod tests {
             &[],
             std::slice::from_ref(&picked),
             ListView::default(),
+            HiddenCounts::default(),
             &Page::default(),
         );
         assert!(html.contains("<h2>確認枠</h2>"), "{html}");

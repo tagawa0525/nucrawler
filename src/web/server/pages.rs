@@ -182,12 +182,14 @@ pub(super) async fn list(
         let boundary =
             db.begin_visit(user, now, Duration::minutes(web.visit_gap_minutes.into()))?;
         // 既読・ブックマークでは件数の上限より前に絞る（上位が既読で埋まっても、下の未読が出るように）
-        let items = db.list_articles(ListQuery {
+        let query = ListQuery {
             read: view.read,
             bookmarked: view.bookmarked,
             rating: view.rating,
             ..list_query(web, user, hash.as_deref(), now, view.min)
-        })?;
+        };
+        let items = db.list_articles(query)?;
+        let hidden = hidden_counts(db, query)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
         // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、
         // 閾値未満という区別も無いので出さない
@@ -217,11 +219,57 @@ pub(super) async fn list(
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);
         Ok(html::list_page_with_explore(
-            &new, &earlier, &explore, view, &page,
+            &new, &earlier, &explore, view, hidden, &page,
         ))
     })
     .await?;
     Ok(Html(page).into_response())
+}
+
+/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。外したときに出る記事の
+/// うち、今は出ていないものを数える（同じ報道のカードの代表が入れ替わるだけでも、外すと出る記事は数える）。件数の
+/// 上限は掛けずに、記事を組み立てずに数える。
+fn hidden_counts(db: &Db, query: ListQuery) -> Result<html::HiddenCounts, DbError> {
+    let shown: std::collections::HashSet<i64> = db.list_article_ids(query)?.into_iter().collect();
+    // 外す条件が効いていなければ数えない
+    let added = |effective: bool, lifted: ListQuery| -> Result<usize, DbError> {
+        if !effective {
+            return Ok(0);
+        }
+        let ids = db.list_article_ids(lifted)?;
+        Ok(ids.iter().filter(|id| !shown.contains(id)).count())
+    };
+    Ok(html::HiddenCounts {
+        min: added(
+            !query.show_all && query.min_score.is_some(),
+            ListQuery {
+                min_score: Some(0),
+                show_all: true,
+                ..query
+            },
+        )?,
+        read: added(
+            query.read.is_some(),
+            ListQuery {
+                read: None,
+                ..query
+            },
+        )?,
+        rating: added(
+            query.rating != RatingFilter::Any,
+            ListQuery {
+                rating: RatingFilter::Any,
+                ..query
+            },
+        )?,
+        bookmarked: added(
+            query.bookmarked.is_some(),
+            ListQuery {
+                bookmarked: None,
+                ..query
+            },
+        )?,
+    })
 }
 
 /// 評価・ブックマークで絞った記事を、検索と同じく全期間から新しい順に出す（既読の表示は 👁 のとおり）。
@@ -505,7 +553,7 @@ mod tests {
             .expect("explore section");
         assert!(section.contains("低い点"), "{html}");
         // 👎・無関係・未採点は候補にしない
-        for hidden in ["評価 2", "無関係", "未採点"] {
+        for hidden in ["評価 2", "無関係", "採点前の記事"] {
             assert!(!section.contains(hidden), "{hidden}: {html}");
         }
         let (_, all) = server.get("/?min=0").await;
@@ -521,12 +569,12 @@ mod tests {
         score(&db, digest, 40);
         let (_, digest) = seed(&db, "https://e.com/twenty", "二十点");
         score(&db, digest, 20);
-        seed(&db, "https://e.com/unscored", "未採点");
+        seed(&db, "https://e.com/unscored", "採点前の記事");
         let server = Server::start(db).await;
         let (status, html) = server.get("/?min=30").await;
         assert_eq!(status, 200);
         assert!(html.contains("四十点"), "{html}");
-        assert!(!html.contains("未採点"), "{html}");
+        assert!(!html.contains("採点前の記事"), "{html}");
         // 二十点は一覧に無く、確認枠（設定の 50 点未満）にだけ出うる。四十点は確認枠に重ねない
         let explore = html.split("<h2>確認枠</h2>").nth(1).unwrap_or("");
         assert!(!explore.contains("四十点"), "{html}");
@@ -544,7 +592,7 @@ mod tests {
             "{html}"
         );
         let (_, html) = server.get("/?min=0").await;
-        for title in ["四十点", "二十点", "未採点"] {
+        for title in ["四十点", "二十点", "採点前の記事"] {
             assert!(html.contains(title), "{title}: {html}");
         }
         for bad in ["x", "101", "-1"] {
@@ -683,7 +731,7 @@ mod tests {
             "{xml}"
         );
         assert_eq!(xml.matches("<entry>").count(), 1, "{xml}");
-        for hidden in ["低い点", "評価 2", "無関係", "未採点"] {
+        for hidden in ["低い点", "評価 2", "無関係", "採点前の記事"] {
             assert!(!xml.contains(hidden), "{hidden}: {xml}");
         }
         // 和訳タイトル・要約・元記事と詳細ページへのリンク・日付
@@ -819,14 +867,14 @@ mod tests {
     #[tokio::test]
     async fn list_without_a_profile_has_no_score_floor() {
         let db = Db::open_in_memory().unwrap();
-        seed(&db, "https://e.com/a", "未採点");
+        seed(&db, "https://e.com/a", "採点前の記事");
         seed_with(&db, "https://e.com/unrelated", "無関係", false);
         let server = Server::start(db).await;
 
         let (status, html) = server.get("/").await;
         assert_eq!(status, 200);
         assert!(
-            html.contains("未採点") && !html.contains("無関係"),
+            html.contains("採点前の記事") && !html.contains("無関係"),
             "{html}"
         );
         assert!(!html.contains("確認枠"), "{html}");
@@ -841,16 +889,22 @@ mod tests {
             assert_eq!(res.status().as_u16(), 200, "{canonical}");
         }
         let (_, html) = server.get("/?min=0").await;
-        assert!(html.contains("未採点") && html.contains("無関係"), "{html}");
+        assert!(
+            html.contains("採点前の記事") && html.contains("無関係"),
+            "{html}"
+        );
         let (_, html) = server.get("/?min=50").await;
-        assert!(!html.contains("未採点"), "{html}");
+        assert!(!html.contains("採点前の記事"), "{html}");
         // JavaScript が無いときの選択で送られる空の値は、既定（最低点なし）
         let res = server.get_raw("/?min=").await;
         assert_eq!(res.status().as_u16(), 303);
         assert_eq!(res.headers()["location"], "/");
 
         let (_, xml) = server.get(&server.feed_path()).await;
-        assert!(xml.contains("未採点") && !xml.contains("無関係"), "{xml}");
+        assert!(
+            xml.contains("採点前の記事") && !xml.contains("無関係"),
+            "{xml}"
+        );
         let (_, json) = server.get_json("/api/articles").await;
         assert_eq!(json["articles"].as_array().unwrap().len(), 1, "{json}");
     }
@@ -972,6 +1026,63 @@ mod tests {
         let (_, html) = server.get("/?rating=any").await;
         assert!(
             html.contains("星二つの記事") && html.contains("評価前の記事"),
+            "{html}"
+        );
+    }
+
+    /// 一覧は、条件で隠れている記事の数を、条件ごとに数えて出す（条件を 1 つ外したときに加わる記事の数）。
+    #[tokio::test]
+    async fn list_counts_what_each_condition_hides() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, digest) = seed(&db, "https://e.com/shown", "出る記事");
+        score(&db, digest, 90);
+        let (_, digest) = seed(&db, "https://e.com/low", "低い点の記事");
+        score(&db, digest, 20);
+        let (read, digest) = seed(&db, "https://e.com/read", "読んだ記事");
+        score(&db, digest, 90);
+        let (down, digest) = seed(&db, "https://e.com/down", "星二つの記事");
+        score(&db, digest, 90);
+        let server = Server::start(db).await;
+        server.post(&format!("/articles/{read}/read"), "on=1").await;
+        server
+            .post(&format!("/articles/{down}/rating"), "value=2")
+            .await;
+        let (_, html) = server.get("/").await;
+        assert!(
+            html.contains(
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満・未採点 1 件</a>・<a href="/?read=any">既読 1 件</a>・<a href="/?rating=any">★1〜2 1 件</a></p>"#
+            ),
+            "{html}"
+        );
+    }
+
+    /// 条件を外したときに出る記事のうち、今は出ていない記事を数える。同じ報道のカードの代表が入れ替わるだけでも、
+    /// 外すと出る記事は隠れている記事として数える（件数の差では 0 になる）。
+    #[tokio::test]
+    async fn list_counts_a_story_card_replaced_by_a_hidden_article() {
+        let db = Db::open_in_memory().unwrap();
+        let (kept, digest) = seed(&db, "https://e.com/kept", "取っておく記事");
+        score(&db, digest, 90);
+        let (other, digest) = seed(&db, "https://e.com/other", "同じ話の記事");
+        score(&db, digest, 70);
+        // 同じ報道のグループにする
+        db.conn()
+            .execute(
+                "UPDATE article_stories SET story_id = ?1 WHERE article_id = ?2",
+                [kept, other],
+            )
+            .unwrap();
+        let server = Server::start(db).await;
+        server
+            .post(&format!("/articles/{kept}/bookmark"), "on=1")
+            .await;
+        let (_, html) = server.get("/?bookmarked=0").await;
+        assert!(
+            html.contains("同じ話の記事") && !html.contains("取っておく記事"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/">ブックマーク中 1 件</a>"#),
             "{html}"
         );
     }

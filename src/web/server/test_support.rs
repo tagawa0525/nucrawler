@@ -84,7 +84,7 @@ pub(super) fn seed_recommended_and_hidden(db: &Db) -> i64 {
         .unwrap();
     let (_, digest) = seed_with(db, "https://e.com/unrelated", "無関係", false);
     score(db, digest, 90);
-    seed(db, "https://e.com/unscored", "未採点");
+    seed(db, "https://e.com/unscored", "採点前の記事");
     good
 }
 

@@ -45,8 +45,9 @@ pub struct ListItem {
 }
 
 impl ListItem {
+    /// 既読か。既読は「この話を読んだ」という印なので、同じ報道のグループのどれかを読んでいれば既読
     pub fn is_read(&self) -> bool {
-        self.read_at.is_some()
+        self.read_at.is_some() || self.story_read
     }
 }
 
@@ -270,8 +271,12 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.has_translation = 1");
         }
         f.rows.push_str(&q.rating.sql());
-        f.rows
-            .push_str(&mark_filter("rows.read_at", q.read, q.bookmarked));
+        // 既読は一覧と同じく、同じ報道のグループ単位で見る
+        f.rows.push_str(&mark_filter(
+            "coalesce(rows.read_at, rows.story_read_at)",
+            q.read,
+            q.bookmarked,
+        ));
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND rows.rec >= :min_score");
             f.params.push((":min_score".into(), Box::new(min)));

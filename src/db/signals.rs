@@ -107,6 +107,16 @@ impl OpenKind {
     }
 }
 
+/// 記事 `article`（SQL の式）と同じ報道のグループの記事の ID（その記事を含む）を返す SQL。
+fn story_members(article: &str) -> String {
+    format!(
+        "SELECT s2.article_id FROM article_stories AS s1
+         JOIN article_stories AS s2 ON s2.story_id = s1.story_id
+         WHERE s1.article_id = {article}
+         UNION SELECT {article}"
+    )
+}
+
 /// 既読にする（既に既読なら、最初に既読になった時刻のまま）。
 fn mark_read(
     conn: &Connection,
@@ -125,15 +135,19 @@ impl Db {
     /// 指定した記事の印を、指定した順に返す。無い記事は返さない。
     pub fn marks(&self, user_id: i64, article_ids: &[i64]) -> Result<Vec<Marks>, DbError> {
         let ids = serde_json::to_string(article_ids)?;
-        let mut stmt = self.conn.prepare(
+        // 既読は「この話を読んだ」という印なので、同じ報道のグループのどれかを読んでいれば既読
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT a.id,
                     (SELECT value FROM ratings WHERE user_id = :user AND article_id = a.id),
                     EXISTS (SELECT 1 FROM bookmarks WHERE user_id = :user AND article_id = a.id),
-                    EXISTS (SELECT 1 FROM reads WHERE user_id = :user AND article_id = a.id)
+                    EXISTS (
+                      SELECT 1 FROM reads
+                      WHERE user_id = :user AND article_id IN ({story}))
              FROM json_each(:ids) AS j
              JOIN articles AS a ON a.id = j.value
              ORDER BY j.key",
-        )?;
+            story = story_members("a.id"),
+        ))?;
         let rows = stmt.query_map(
             rusqlite::named_params! {":user": user_id, ":ids": ids},
             |r| {
@@ -168,7 +182,8 @@ impl Db {
         Ok(())
     }
 
-    /// 既読の印を付け外しする。
+    /// 既読の印を付け外しする。付けるのはその記事だけ（それでグループが既読になる）。外すときは、その話をもう一度
+    /// 一覧に戻したい意図なので、同じ報道のグループの記事すべての既読を外す。
     pub fn set_read(
         &self,
         user_id: i64,
@@ -180,7 +195,10 @@ impl Db {
             mark_read(&self.conn, user_id, article_id, now)
         } else {
             self.conn.execute(
-                "DELETE FROM reads WHERE user_id = ?1 AND article_id = ?2",
+                &format!(
+                    "DELETE FROM reads WHERE user_id = ?1 AND article_id IN ({})",
+                    story_members("?2")
+                ),
                 rusqlite::params![user_id, article_id],
             )?;
             Ok(())
@@ -404,6 +422,38 @@ mod tests {
         );
         // 開いた記録は残さない（開いたわけではない）
         assert_eq!(db.query_i64("SELECT count(*) FROM events").unwrap(), 0);
+    }
+
+    /// 既読は「この話を読んだ」という印なので、同じ報道のグループ単位で見る。どれかを読めばグループの記事は
+    /// どれも既読に見え（印の読み直しも同じ）、既読を外すとグループの記事すべての既読を外す（記事 1 件だけ外しても、
+    /// 話は既読のままで一覧に戻らないため）。
+    #[test]
+    fn read_mark_covers_the_story() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let article = |url| scored_article(&db, url, Lang::En, "2026-09-26T00:00:00.000Z", 90);
+        let a = article("https://e.com/a");
+        let b = article("https://e.com/b");
+        let other = article("https://e.com/other");
+        group(&db, &[a, b]);
+        db.set_read(owner, a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let read = |db: &Db| -> Vec<bool> {
+            db.marks(owner, &[a, b, other])
+                .unwrap()
+                .into_iter()
+                .map(|m| m.read)
+                .collect()
+        };
+        assert_eq!(read(&db), [true, true, false]);
+        assert!(item(&db, b).is_read());
+        db.set_read(owner, other, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        // グループのほかの記事のカードで外しても、話の既読がすべて外れる。ほかの話は変えない
+        db.set_read(owner, b, false, t("2026-09-27T01:00:00Z"))
+            .unwrap();
+        assert_eq!(read(&db), [false, false, true]);
+        assert!(!item(&db, a).is_read());
     }
 
     /// 評価と既読は別の印で、評価しても既読にはならない。評価なしに戻しても既読は変わらない。

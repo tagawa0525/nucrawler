@@ -45,8 +45,9 @@ pub struct ListItem {
 }
 
 impl ListItem {
+    /// 既読か。既読は「この話を読んだ」という印なので、同じ報道のグループのどれかを読んでいれば既読
     pub fn is_read(&self) -> bool {
-        self.read_at.is_some()
+        self.read_at.is_some() || self.story_read
     }
 }
 
@@ -270,8 +271,12 @@ impl SearchFilters {
             f.rows.push_str(" AND rows.has_translation = 1");
         }
         f.rows.push_str(&q.rating.sql());
-        f.rows
-            .push_str(&mark_filter("rows.read_at", q.read, q.bookmarked));
+        // 既読は一覧と同じく、同じ報道のグループ単位で見る
+        f.rows.push_str(&mark_filter(
+            "coalesce(rows.read_at, rows.story_read_at)",
+            q.read,
+            q.bookmarked,
+        ));
         if let Some(min) = q.min_score {
             f.rows.push_str(" AND rows.rec >= :min_score");
             f.params.push((":min_score".into(), Box::new(min)));
@@ -945,19 +950,6 @@ mod tests {
     use super::*;
     use crate::db::test_support::*;
 
-    /// 記事を同じ報道のグループにする（グループの ID は最小の記事 ID）。
-    fn group(db: &Db, ids: &[i64]) {
-        let story = *ids.iter().min().unwrap();
-        for id in ids {
-            db.conn()
-                .execute(
-                    "UPDATE article_stories SET story_id = ?2 WHERE article_id = ?1",
-                    [*id, story],
-                )
-                .unwrap();
-        }
-    }
-
     fn set_source(db: &Db, id: i64, source: &str) {
         db.conn()
             .execute(
@@ -1118,6 +1110,29 @@ mod tests {
             [liked, neutral]
         );
         assert_eq!(listed(RatingFilter::Unrated, false), [unrated]);
+    }
+
+    /// 検索（と全期間の絞り込み）でも、既読は同じ報道のグループ単位で絞る（一覧と同じ）。
+    #[test]
+    fn search_filters_read_by_story() {
+        let db = Db::open_in_memory().unwrap();
+        let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
+        let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
+        let other = scored_article(&db, "https://e.com/o", Lang::En, "2026-09-24T00:00:00Z", 80);
+        group(&db, &[a, b]);
+        db.set_read(db.owner_id().unwrap(), a, true, t("2026-09-27T00:00:00Z"))
+            .unwrap();
+        let read = |read| {
+            found(
+                &db,
+                SearchQuery {
+                    read: Some(read),
+                    ..search_query(&db)
+                },
+            )
+        };
+        assert_eq!(read(true), [b, a]);
+        assert_eq!(read(false), [other]);
     }
 
     /// 検索ではまとめない（グループの記事を全部出し、ほかの記事のソースは添える）。

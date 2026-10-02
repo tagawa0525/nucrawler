@@ -976,6 +976,32 @@ mod tests {
         );
     }
 
+    /// 一覧は、条件で隠れている記事の数を、条件ごとに数えて出す（条件を 1 つ外したときに加わる記事の数）。
+    #[tokio::test]
+    async fn list_counts_what_each_condition_hides() {
+        let db = Db::open_in_memory().unwrap();
+        let (_, digest) = seed(&db, "https://e.com/shown", "出る記事");
+        score(&db, digest, 90);
+        let (_, digest) = seed(&db, "https://e.com/low", "低い点の記事");
+        score(&db, digest, 20);
+        let (read, digest) = seed(&db, "https://e.com/read", "読んだ記事");
+        score(&db, digest, 90);
+        let (down, digest) = seed(&db, "https://e.com/down", "星二つの記事");
+        score(&db, digest, 90);
+        let server = Server::start(db).await;
+        server.post(&format!("/articles/{read}/read"), "on=1").await;
+        server
+            .post(&format!("/articles/{down}/rating"), "value=2")
+            .await;
+        let (_, html) = server.get("/").await;
+        assert!(
+            html.contains(
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満 1 件</a>・<a href="/?read=any">既読 1 件</a>・<a href="/?rating=any">★1〜2 1 件</a></p>"#
+            ),
+            "{html}"
+        );
+    }
+
     /// 一覧の 👁 と 🔖 は、印のある記事だけ（1）・無い記事だけ（0）・絞らない（any）で絞る。
     #[tokio::test]
     async fn list_filters_by_marks_both_ways() {

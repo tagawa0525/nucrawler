@@ -1505,6 +1505,89 @@ mod tests {
         );
     }
 
+    /// 一覧に出ない記事があるときは、どの条件で何件隠れているかを、その条件を外した表示へのリンクにして出す。
+    /// 1 件も出ないときは、「新しい記事はありません」の代わりに効いている条件を出す（何が記事を隠しているか分かるように）。
+    #[test]
+    fn list_page_explains_what_the_conditions_hide() {
+        let view = ListView {
+            min: Some(50),
+            default_min: Some(50),
+            ..ListView::default()
+        };
+        let hidden = HiddenCounts {
+            min: 32,
+            read: 12,
+            rating: 3,
+            bookmarked: 0,
+        };
+        let html = list_page_with_explore(&[], &[], &[], view, hidden, &Page::default());
+        assert!(
+            html.contains(
+                r#"<p class="meta">点数 50 以上・未読だけ・★1〜2 を隠す に合う記事はありません</p>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("新しい記事はありません"), "{html}");
+        assert!(
+            html.contains(
+                r#"<p class="meta">条件で隠れている記事：<a href="/?min=0">点数 50 未満 32 件</a>・<a href="/?read=any">既読 12 件</a>・<a href="/?rating=any">★1〜2 3 件</a></p>"#
+            ),
+            "{html}"
+        );
+        // 記事が出ていれば、欄の見出しはそのままで、隠れている件数だけを後に添える
+        let html = list_page_with_explore(
+            &[],
+            &[item(1, "2026-09-26T00:00:00.000Z")],
+            &[],
+            view,
+            HiddenCounts {
+                read: 2,
+                ..HiddenCounts::default()
+            },
+            &Page::default(),
+        );
+        assert!(html.contains("新しい記事はありません"), "{html}");
+        let cards = html.find(r#"data-id="1""#).unwrap();
+        let note = html.find("条件で隠れている記事").unwrap();
+        assert!(cards < note, "{html}");
+        assert!(
+            html.contains(r#"<a href="/?read=any">既読 2 件</a></p>"#),
+            "{html}"
+        );
+        // 既読だけ・ブックマークなしだけで隠れているものも、外した表示へのリンクにする
+        let view = ListView {
+            min: Some(50),
+            default_min: Some(50),
+            read: Some(true),
+            rating: RatingFilter::Any,
+            bookmarked: Some(false),
+            ..ListView::default()
+        };
+        let html = list_page_with_explore(
+            &[],
+            &[],
+            &[],
+            view,
+            HiddenCounts {
+                read: 5,
+                bookmarked: 1,
+                ..HiddenCounts::default()
+            },
+            &Page::default(),
+        );
+        assert!(
+            html.contains("点数 50 以上・既読だけ・ブックマークなしだけ に合う記事はありません"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<a href="/?rating=any&amp;read=any&amp;bookmarked=0">未読 5 件</a>・<a href="/?rating=any&amp;read=1">ブックマーク中 1 件</a>"#),
+            "{html}"
+        );
+        // 何も隠れていなければ出さない
+        let html = list_page(&[], &[], ListView::default(), &Page::default());
+        assert!(!html.contains("条件で隠れている記事"), "{html}");
+    }
+
     #[test]
     fn list_page_names_the_earlier_section_by_whether_read_is_shown() {
         let mut read = item(2, "2026-09-26T00:00:00.000Z");
@@ -1582,6 +1665,7 @@ mod tests {
             &[],
             std::slice::from_ref(&picked),
             ListView::default(),
+            HiddenCounts::default(),
             &Page::default(),
         );
         assert!(html.contains("<h2>確認枠</h2>"), "{html}");

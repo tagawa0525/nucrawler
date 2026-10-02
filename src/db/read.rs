@@ -1041,17 +1041,17 @@ mod tests {
         assert_eq!(unread(&db), [d]);
     }
 
-    /// 評価は、グループではなく記事ごとに判定する。グループのほかの記事に ★1〜2 があっても、記事自身が
-    /// ★3 以上か未評価なら出す。まとめる前に絞るので、カードには条件に合う記事が出る（見えている星と判定が一致する）。
+    /// 評価は、まとめたカードに出る記事（推薦点の最も高い記事）自身の評価で判定する。グループのほかの記事に ★1〜2 が
+    /// あっても、カードの記事が ★3 以上か未評価なら出す。カードの記事が ★1〜2 なら、その話を隠す（ほかの記事には
+    /// 入れ替えない。一覧でその場で隠したカードと、開き直したときが一致する）。見えている星と判定が一致する。
     #[test]
-    fn list_judges_ratings_by_each_article() {
+    fn list_judges_ratings_by_the_card_article() {
         let db = Db::open_in_memory().unwrap();
         let a = scored_article(&db, "https://e.com/a", Lang::En, "2026-09-25T00:00:00Z", 70);
         let b = scored_article(&db, "https://e.com/b", Lang::En, "2026-09-26T00:00:00Z", 90);
-        group(&db, &[a, b]);
+        let c = scored_article(&db, "https://e.com/c", Lang::En, "2026-09-24T00:00:00Z", 60);
+        group(&db, &[a, b, c]);
         let user = db.owner_id().unwrap();
-        db.rate(user, b, Rating::new(2), t("2026-09-27T00:00:00Z"))
-            .unwrap();
         let listed = |rating: RatingFilter| -> Vec<(i64, Option<Rating>)> {
             db.list_articles(ListQuery {
                 rating,
@@ -1062,11 +1062,16 @@ mod tests {
             .map(|i| (i.article_id, i.rating))
             .collect()
         };
-        assert_eq!(listed(RatingFilter::HideLow), [(a, None)]);
-        db.rate(user, a, Rating::new(3), t("2026-09-28T00:00:00Z"))
+        db.rate(user, c, Rating::new(2), t("2026-09-27T00:00:00Z"))
             .unwrap();
-        assert_eq!(listed(RatingFilter::HideLow), [(a, Rating::new(3))]);
-        // 評価で絞らなければ、推薦点の高い記事がグループを代表する
+        assert_eq!(listed(RatingFilter::HideLow), [(b, None)]);
+        db.rate(user, b, Rating::new(3), t("2026-09-28T00:00:00Z"))
+            .unwrap();
+        assert_eq!(listed(RatingFilter::HideLow), [(b, Rating::new(3))]);
+        // カードの記事を ★2 にすると、未評価の a に入れ替えずに話ごと隠す
+        db.rate(user, b, Rating::new(2), t("2026-09-29T00:00:00Z"))
+            .unwrap();
+        assert!(listed(RatingFilter::HideLow).is_empty());
         assert_eq!(listed(RatingFilter::Any), [(b, Rating::new(2))]);
     }
 

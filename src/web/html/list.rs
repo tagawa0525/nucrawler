@@ -1194,6 +1194,13 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("該当する記事はありません"), "{html}");
+        // 0 件でも、何で絞ったかと全期間であることは見出しに出す
+        assert!(
+            html.contains(
+                r#"<h2>ブックマーク中・★4 以上（全期間）<span class="count">0 件</span></h2>"#
+            ),
+            "{html}"
+        );
         let view = ListView {
             min: Some(0),
             bookmarked: Some(true),

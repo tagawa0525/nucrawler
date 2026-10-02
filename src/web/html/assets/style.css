@@ -17,6 +17,8 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin-top: 1.5rem; }
 .bar select { font-size: 1rem; height: 100%; padding: 0 0.4rem; border: 1px solid #bbb; border-radius: 0.5rem;
   background: #fff; }
 .bar .stars select { border: 2px solid #f5b400; }
+/* スマホの幅（約 390px）でもバーを 1 行に収める（ボタンの余白と間隔を詰める） */
+@media (max-width: 480px) { .bar { gap: 0.3rem; } .bar .btn { padding: 0.3rem 0.45rem; } }
 .btn { font-size: 1.3rem; padding: 0.3rem 0.7rem; border-radius: 0.5rem; border: 2px solid #bbb;
   background: #fff; text-decoration: none; }
 .btn.on, .marks button[aria-pressed=true], .bar .stars.on select, .bar .min.on select { border-color: #2e7d32; background: #e3f1e4; }

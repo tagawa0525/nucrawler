@@ -226,17 +226,18 @@ pub(super) async fn list(
     Ok(Html(page).into_response())
 }
 
-/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。件数の上限は掛けずに、
-/// 記事を組み立てずに数える。
+/// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。外したときに出る記事の
+/// うち、今は出ていないものを数える（同じ報道のカードの代表が入れ替わるだけでも、外すと出る記事は数える）。件数の
+/// 上限は掛けずに、記事を組み立てずに数える。
 fn hidden_counts(db: &Db, query: ListQuery) -> Result<html::HiddenCounts, DbError> {
-    let shown = db.count_articles(query)?;
+    let shown: std::collections::HashSet<i64> = db.list_article_ids(query)?.into_iter().collect();
     // 外す条件が効いていなければ数えない
     let added = |effective: bool, lifted: ListQuery| -> Result<usize, DbError> {
-        Ok(if effective {
-            db.count_articles(lifted)?.saturating_sub(shown)
-        } else {
-            0
-        })
+        if !effective {
+            return Ok(0);
+        }
+        let ids = db.list_article_ids(lifted)?;
+        Ok(ids.iter().filter(|id| !shown.contains(id)).count())
     };
     Ok(html::HiddenCounts {
         min: added(

@@ -203,8 +203,8 @@ enum ItemScope<'a> {
 enum Projection {
     /// 記事（`ListItem`）
     Items,
-    /// 件数（1 行 1 列）
-    Count,
+    /// 記事の ID
+    Ids,
 }
 
 /// 既読・ブックマークの印で絞る条件（組み立てた行 `rows` の条件、`AND` で始まる）。
@@ -720,8 +720,8 @@ impl Db {
         )
     }
 
-    /// 一覧の件数。件数の上限は掛けずに、一覧と同じ条件で数える（記事を組み立てない）。
-    pub fn count_articles(&self, q: ListQuery) -> Result<usize, DbError> {
+    /// 一覧の記事の ID。件数の上限は掛けずに、一覧と同じ条件・同じ並びで返す（記事を組み立てない）。
+    pub fn list_article_ids(&self, q: ListQuery) -> Result<Vec<i64>, DbError> {
         let scope = ItemScope::List {
             since: q.since,
             show_all: q.show_all,
@@ -735,16 +735,16 @@ impl Db {
             q.user_id,
             q.profile_hash,
             scope,
-            Projection::Count,
+            Projection::Ids,
             |stmt, params| {
-                let count: i64 = stmt.query_row(params, |r| r.get(0))?;
-                Ok(usize::try_from(count).unwrap_or_default())
+                let ids = stmt.query_map(params, |r| r.get(0))?;
+                Ok(ids.collect::<Result<_, _>>()?)
             },
         )
     }
 
-    /// 一覧・詳細・件数に共通の問い合わせを組み立て、`read` で結果を読む。条件と並びは `scope` で決まり、
-    /// `projection` は返すもの（記事か件数か）だけを変える。
+    /// 一覧・詳細・記事の ID に共通の問い合わせを組み立て、`read` で結果を読む。条件と並びは `scope` で決まり、
+    /// `projection` は返すもの（記事か ID か）だけを変える。
     fn run_items_query<T>(
         &self,
         user_id: i64,
@@ -822,7 +822,8 @@ impl Db {
             rows: rows_filter,
             params: filter_params,
         } = &filters;
-        // 件数では、条件（`fold` が見る評価）と同じ報道のまとめに要る列だけを選ぶ（ほかの列は計算されない）
+        // ID だけを返すときは、ID と、条件（`fold` が見る評価）・並び・同じ報道のまとめに要る列だけを選ぶ
+        // （ほかの列は計算されない）
         let (outer, columns, sort) = match projection {
             Projection::Items => (
                 "*",
@@ -841,7 +842,11 @@ impl Db {
                 ),
                 format!("ORDER BY {order}"),
             ),
-            Projection::Count => ("count(*)", "rows.rating,".to_string(), String::new()),
+            Projection::Ids => (
+                "id",
+                "rows.id, rows.rating, rows.rec, rows.at,".to_string(),
+                format!("ORDER BY {order}"),
+            ),
         };
         let sql = format!(
             "WITH items AS (
@@ -1147,12 +1152,15 @@ mod tests {
         let b = article("https://e.com/b", "2026-09-26T00:00:00Z", 90);
         let c = article("https://e.com/c", "2026-09-26T00:00:00Z", 30);
         let d = article("https://e.com/d", "2026-09-26T00:00:00Z", 85);
+        let e = article("https://e.com/e", "2026-09-26T00:00:00Z", 75);
         page_article(&db, "https://e.com/raw", "2026-09-26T00:00:00.000Z");
         group(&db, &[a, b]);
         db.rate(user, d, Rating::new(2), t("2026-09-27T00:00:00Z"))
             .unwrap();
-        db.set_read(user, c, true, t("2026-09-27T00:00:00Z"))
-            .unwrap();
+        for read in [c, e] {
+            db.set_read(user, read, true, t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
         for (show_all, read, rating) in [
             (false, None, RatingFilter::HideLow),
             (true, None, RatingFilter::HideLow),

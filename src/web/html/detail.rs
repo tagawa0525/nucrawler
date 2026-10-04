@@ -545,7 +545,7 @@ mod tests {
         };
         let html = detail_page(&d, &Notes::default(), DetailView::default(), &page);
         assert!(
-            html.contains("推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3"),
+            html.contains("推薦点 81（近さ 72）：関心分野 燃料 +6、ソース WNN +3"),
             "{html}"
         );
         // 補正が無ければ出さない

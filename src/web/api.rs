@@ -219,10 +219,14 @@ mod tests {
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));
         assert_eq!(json["excluded"], serde_json::json!(["核融合"]));
         assert_eq!(json["rating"], 4);
-        // 点数は推薦点で、LLM の点数も並べる
+        // 点数は推薦点で、補正の前の点数も並べる。`llm_score` は互換のため同じ値で残す
         assert_eq!(
-            (json["score"].clone(), json["llm_score"].clone()),
-            (80.into(), 80.into())
+            (
+                json["score"].clone(),
+                json["base_score"].clone(),
+                json["llm_score"].clone()
+            ),
+            (80.into(), 80.into(), 80.into())
         );
         assert!(json.get("feedback").is_none(), "{json}");
     }

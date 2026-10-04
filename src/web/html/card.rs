@@ -209,13 +209,13 @@ mod tests {
         adjusted.base_score = Some(72);
         let html = card(&adjusted, false, &Page::default());
         assert!(
-            html.contains(r#"<span class="score" title="LLM 72・補正 +9">81</span>"#),
+            html.contains(r#"<span class="score" title="近さ 72・補正 +9">81</span>"#),
             "{html}"
         );
         let mut lowered = adjusted.clone();
         lowered.score = Some(60);
         let html = card(&lowered, false, &Page::default());
-        assert!(html.contains(r#"title="LLM 72・補正 -12""#), "{html}");
+        assert!(html.contains(r#"title="近さ 72・補正 -12""#), "{html}");
         let html = card(
             &item(2, "2026-09-27T05:00:00.000Z"),
             false,

@@ -190,8 +190,12 @@ pub fn embedding_trial(
 /// 今の採点器のキーか：embedding（保存したものとその場で計算したもの）の、式の今の版。保存済みの LLM の
 /// 点数（計画 017 の前のもの）は今のキーにならない。
 fn is_now(key: &EvalKey) -> bool {
-    (key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND)
-        && key.prompt_version == crate::embed_score::SCORE_VERSION
+    is_embedding(key) && key.prompt_version == crate::embed_score::SCORE_VERSION
+}
+
+/// embedding の点数（保存したものとその場で計算したもの）のキーか。
+fn is_embedding(key: &EvalKey) -> bool {
+    key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND
 }
 
 /// 確認枠の評価の内訳。評価した記事のうち関心（評価 4〜5）の割合を、閾値未満での見逃し率の見積もりとして示す。
@@ -224,9 +228,15 @@ fn render_key(
     prior_strength: f64,
 ) {
     let hash: String = key.profile_hash.chars().take(8).collect();
+    // embedding は式の版、保存済みの LLM の点数はプロンプトの版
+    let version = if is_embedding(key) {
+        "formula"
+    } else {
+        "prompt"
+    };
     let _ = writeln!(
         out,
-        "profile {hash}  {}/{}  prompt v{}{role}",
+        "profile {hash}  {}/{}  {version} v{}{role}",
         key.backend, key.model, key.prompt_version,
     );
     // ラベルと突き合わせた (点数, 評価, 評価より後に採点したか)

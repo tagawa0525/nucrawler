@@ -32,6 +32,7 @@ mod auth;
 mod feedback;
 mod glossary;
 mod json;
+mod list;
 mod notes;
 mod pages;
 #[cfg(test)]
@@ -42,6 +43,7 @@ use auth::*;
 use feedback::*;
 use glossary::*;
 use json::*;
+use list::*;
 use notes::*;
 use pages::*;
 

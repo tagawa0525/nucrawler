@@ -17,6 +17,7 @@ pub(super) async fn profile_page(
             suggestions: &suggestions,
             auto_apply: db.auto_apply_profile(user)?,
             requested: db.review_requests()?.contains(&user),
+            has_evidence: !db.label_evidence(user)?.is_empty(),
         };
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);

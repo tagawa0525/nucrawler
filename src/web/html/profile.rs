@@ -19,6 +19,8 @@ pub struct ProfileView<'a> {
     pub auto_apply: bool,
     /// 見直しを頼んで、まだ案ができていない
     pub requested: bool,
+    /// 案の根拠になる評価（要約のある記事への評価）がある
+    pub has_evidence: bool,
 }
 
 /// 今のプロファイル、更新案（自動で当てるかの切り替え・今すぐ作る・待っている案の採用と見送り）、
@@ -90,6 +92,11 @@ fn suggestion_section(view: ProfileView, current: &Profile) -> String {
     );
     if view.requested {
         out.push_str("<p>案を作っています（15 分ごとの処理で作ります）。</p>");
+    } else if !view.has_evidence {
+        // 頼んでも根拠が無く、作らずに取り下げられるので、ボタンの代わりに理由を出す
+        out.push_str(
+            "<p class=\"meta\">記事に評価（★）を付けると、それを根拠に案を作れるようになります。</p>",
+        );
     } else {
         out.push_str(
             "<form method=\"post\" action=\"/settings/profile/review\">\

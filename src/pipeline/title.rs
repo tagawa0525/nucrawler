@@ -3,9 +3,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{
-    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
-};
+use super::llm_call::{Call, LlmStage, MISSING, Tally, Workers, claim_ttl, record_failures};
 use super::workers::run_workers;
 use crate::config::LlmConfig;
 use crate::db::{ArtifactKind, ClaimKey, DbError, NewArtifact, StageKey};
@@ -77,27 +75,19 @@ pub async fn translate_titles<L: Llm>(
             let prompt = prompt::title::build_prompt(&batch);
             let entries = db.glossary_entries()?;
             let system = prompt::title::system_prompt(&glossary::relevant(&entries, &prompt).terms);
-            let outcome = workers
-                .call(Call {
-                    stage: STAGE,
-                    n_items: batch.len(),
-                    req: LlmRequest {
-                        system: &system,
-                        prompt: &prompt,
-                        schema: &schema,
-                        model,
-                    },
-                })
-                .await?;
-            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-            let held = claim.renew(clock())?;
-            let Some(response) = workers.settle(
-                outcome,
-                &mut summary.tally,
-                held.iter().map(|&id| key(id)),
-                now,
-            )?
+            let call = Call {
+                stage: STAGE,
+                n_items: batch.len(),
+                req: LlmRequest {
+                    system: &system,
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
+            };
+            let Some((response, held)) = workers
+                .call_held(call, &claim, &ids, &mut summary.tally, key, now)
+                .await?
             else {
                 break;
             };
@@ -107,16 +97,12 @@ pub async fn translate_titles<L: Llm>(
                     let message = errors::error_chain(&e);
                     tracing::warn!("title output rejected: {message}");
                     summary.tally.failed +=
-                        record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
+                        record_failures(db, held.iter().map(key), &message, now)?;
                     continue;
                 }
             };
             for (id, title_ja) in &parsed.items {
-                if !held.contains(id) {
-                    tracing::warn!(
-                        article_id = *id,
-                        "{STAGE} result dropped: the claim was taken over"
-                    );
+                if !held.keeps(STAGE, *id) {
                     continue;
                 }
                 // 時点はバッチ全体ではなく、その記事の見出しに当たった訳語から決める
@@ -140,12 +126,8 @@ pub async fn translate_titles<L: Llm>(
                 db.clear_stage_failure(key(*id))?;
                 summary.translated += 1;
             }
-            summary.tally.failed += record_failures(
-                db,
-                held_missing(&parsed.missing, &held).map(key),
-                MISSING,
-                now,
-            )?;
+            summary.tally.failed +=
+                record_failures(db, held.of(&parsed.missing).map(key), MISSING, now)?;
         }
         workers.finish(&summary.tally);
         Ok::<_, TitleStageError>(summary)

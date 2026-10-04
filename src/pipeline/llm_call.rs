@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use chrono::{DateTime, Utc};
 
 use super::{Cancel, Halt};
-use crate::db::{Db, DbError, LlmCall, StageKey};
+use crate::db::{Claim, Db, DbError, LlmCall, StageKey};
 use crate::errors;
 use crate::llm::{Llm, LlmError, LlmFailure, LlmRequest, LlmResponse};
 use crate::quota::Quota;
@@ -67,9 +67,33 @@ pub fn claim_ttl(cfg: &crate::config::LlmConfig) -> chrono::Duration {
 /// 予約の期限の下限。タイムアウトを短くしても、プロンプトの組み立てや保存の分の余裕を残す。
 const MIN_CLAIM_TTL: chrono::Duration = chrono::Duration::minutes(10);
 
-/// 応答に無かった記事のうち、まだ予約を持っているもの（取り直された記事の失敗は記録しない）。
-pub fn held_missing<'a>(missing: &'a [i64], held: &'a [i64]) -> impl Iterator<Item = i64> + 'a {
-    missing.iter().copied().filter(|id| held.contains(id))
+/// 呼び出しの後も予約を持っている記事（`Workers::call_held`）。呼び出しの最中に期限が切れてほかの実行に
+/// 取り直された記事は含まない。保存も失敗の記録も、ここにある記事だけに行う（予約を持っている実行だけが書く）。
+#[derive(Debug)]
+pub struct Held(Vec<i64>);
+
+impl Held {
+    /// 予約を持っているか。持っていなければ、その記事の結果を捨てることをログに出す。
+    pub fn keeps(&self, stage: &str, article_id: i64) -> bool {
+        let keeps = self.0.contains(&article_id);
+        if !keeps {
+            tracing::warn!(
+                article_id,
+                "{stage} result dropped: the claim was taken over"
+            );
+        }
+        keeps
+    }
+
+    /// 予約を持っている記事。
+    pub fn iter(&self) -> impl Iterator<Item = i64> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// `ids`（応答に無かった記事など）のうち、予約を持っているもの。
+    pub fn of<'a>(&'a self, ids: &'a [i64]) -> impl Iterator<Item = i64> + 'a {
+        ids.iter().copied().filter(|id| self.0.contains(id))
+    }
 }
 
 /// ステージの中で同時に回す作業者が共有する状態。作業者は同じタスクの中で動くので、`RefCell` で
@@ -100,7 +124,7 @@ impl<'q> Shared<'q> {
 
 /// ステージの作業者が共有する実行環境と、周の進め方。各ステージは「対象を選ぶ・プロンプトを作る・応答を解釈して
 /// 保存する」だけを書き、周の始めの判定（`begin_round`）・呼び出し（`call`）・結果の振り分け（`settle`）・
-/// 終わり（`finish`）はここで行う。
+/// 終わり（`finish`）はここで行う。記事を予約して処理するステージは、呼び出しから振り分けまでを `call_held` で行う。
 pub struct Workers<'a, L> {
     pub db: &'a Db,
     pub llm: &'a L,
@@ -216,6 +240,31 @@ impl<'a, L: Llm> Workers<'a, L> {
                 Ok(None)
             }
         }
+    }
+
+    /// 呼び出し（`call`）、結果を書く前に予約を延長し、結果を振り分ける（`settle`）。この順序は、ほかの実行と
+    /// 同じ記事を書かないための条件なので、ステージはこれを通して呼ぶ。延長できた記事のうち `requested`（この
+    /// 呼び出しで依頼した記事）にあるものを、応答と一緒に返す。LLM の失敗はそれらの記事（`key` で失敗の記録の
+    /// キーにする）だけを失敗にする。止まるなら `None`（`settle` と同じ）。
+    pub async fn call_held<'k>(
+        &self,
+        call: Call<'_>,
+        claim: &Claim<'_>,
+        requested: &[i64],
+        tally: &mut Tally,
+        key: impl Fn(i64) -> StageKey<'k>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(LlmResponse, Held)>, DbError> {
+        let outcome = self.call(call).await?;
+        let held = Held(
+            claim
+                .renew((self.clock)())?
+                .into_iter()
+                .filter(|id| requested.contains(id))
+                .collect(),
+        );
+        let response = self.settle(outcome, tally, held.iter().map(key), now)?;
+        Ok(response.map(|response| (response, held)))
     }
 
     /// 作業者を終える。止まった作業者は、ほかの作業者も止める（空になって終わったときは止めない）。

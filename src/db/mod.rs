@@ -150,6 +150,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0034_profile_versions.sql"),
     include_str!("migrations/0035_profile_suggestions.sql"),
     include_str!("migrations/0036_profile_review_requests.sql"),
+    include_str!("migrations/0037_retire_score_stage.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

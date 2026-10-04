@@ -202,7 +202,7 @@ mod tests {
         assert!(!plain.contains("class=\"match"), "{plain}");
     }
 
-    /// 推薦点が LLM の点数と違えば、点数の title に LLM の点数と補正を出す。
+    /// 推薦点が補正の前の点数と違えば、点数の title にその点数（近さ）と補正を出す。
     #[test]
     fn card_shows_the_base_score_behind_the_recommended_score() {
         let mut adjusted = item(1, "2026-09-27T05:00:00.000Z");

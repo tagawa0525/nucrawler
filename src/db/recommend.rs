@@ -1,4 +1,4 @@
-//! 推薦点（LLM の点数に、評価から学んだ補正を足した点数。`crate::recommend`）の DB 側：
+//! 推薦点（関心プロファイルとの近さの点数に、評価から学んだ補正を足した点数。`crate::recommend`）の DB 側：
 //! SQL の関数 `recommend_score`、評価からの学習の材料の読み出し、学習したモデルの使い回し。
 
 use super::*;
@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(examples[0].base_score, 95);
     }
 
-    /// 評価が無ければ、推薦点は LLM の点数と同じ。
+    /// 評価が無ければ、推薦点は補正の前の点数と同じ。
     #[test]
     fn without_ratings_the_list_keeps_the_llm_scores() {
         let db = Db::open_in_memory().unwrap();

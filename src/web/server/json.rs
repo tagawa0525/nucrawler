@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(a["id"], good);
         assert_eq!(a["title_ja"], "A&B <C>\u{1}");
         assert_eq!(a["summary_ja"], "要約");
-        // 点数は推薦点（種に付けた評価 2 の記事と特徴を共有するので、LLM の点数から少し下がる）
+        // 点数は推薦点（種に付けた評価 2 の記事と特徴を共有するので、補正の前の点数から少し下がる）
         assert_eq!(a["llm_score"], 90);
         assert!(a["score"].as_u64().is_some_and(|s| s < 90), "{a}");
         assert_eq!(a["url"], "https://e.com/good?a=1&b=2");

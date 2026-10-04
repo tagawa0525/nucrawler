@@ -16,10 +16,10 @@ pub struct ListItem {
     pub title_ja: Option<String>,
     pub summary_ja: Option<String>,
     pub lwr_relevant: Option<bool>,
-    /// 推薦点：現在のプロファイルでの LLM の点数（最新の digest に付いたもの）に、評価から学んだ補正を
+    /// 推薦点：現在のプロファイルとの近さの点数（最新の digest に付いたもの）に、評価から学んだ補正を
     /// 足した点数（`crate::recommend`）。並び・閾値はこれで決める
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数
+    /// 補正の前の点数（関心プロファイルとの近さ）
     pub base_score: Option<u8>,
     pub reason: Option<String>,
     /// その点数が当たった関心分野（プロファイルの interest の topic）
@@ -1300,7 +1300,7 @@ mod tests {
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
-        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は LLM の点数から少し下がる
+        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は補正の前の点数から少し下がる
         assert!(h.score.is_some_and(|s| s < 90), "{h:?}");
         assert_eq!(
             (h.base_score, h.title_ja.as_deref(), h.read_at.as_deref()),

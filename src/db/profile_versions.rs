@@ -353,6 +353,31 @@ mod tests {
         );
     }
 
+    /// 保存の時刻が今の版より前でも（同時に保存して、先に時刻を読んだ側が後から書く）、時刻を今の版に
+    /// そろえて新しい版を後ろに置く。版が退く時刻が作られた時刻より前にならない。
+    #[test]
+    fn keeps_versions_in_order_when_saves_race() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.save_profile(owner, &profile("a"), t("2026-10-02T00:00:00Z"))
+            .unwrap();
+        db.save_profile(owner, &profile("b"), t("2026-10-01T00:00:00Z"))
+            .unwrap();
+        let versions = db.profile_versions(owner).unwrap();
+        assert_eq!(
+            origins(&db, owner),
+            [
+                ("b".into(), ProfileOrigin::Import, true),
+                ("a".into(), ProfileOrigin::Import, false),
+            ]
+        );
+        assert_eq!(versions[0].created_at, "2026-10-02T00:00:00.000Z");
+        assert_eq!(
+            versions[1].retired_at.as_deref(),
+            Some("2026-10-02T00:00:00.000Z")
+        );
+    }
+
     /// 戻すと、その版の中身が新しい版になる。履歴は一方向に伸び、戻したことも残る。
     #[test]
     fn reverting_saves_the_old_content_as_a_new_version() {

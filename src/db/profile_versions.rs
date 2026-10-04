@@ -89,6 +89,14 @@ impl Db {
                 },
             )
             .optional()?;
+        // 時刻は、ロックを取る前に読んだもの。先に読んだ側が後から書くこともあるので、今の版より前には戻さない
+        // （版の並びと、版が今だった期間が逆にならないように）
+        let mut now = now;
+        if let Some(current) = &current
+            && current.created_at > now
+        {
+            now = current.created_at.clone();
+        }
         if let Some(mut current) = current {
             if current.hash == hash {
                 return Ok(false);

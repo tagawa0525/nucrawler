@@ -428,7 +428,7 @@ mod tests {
         assert!(out.contains("fewer than 5"), "{out}");
         assert!(
             out.contains(&format!(
-                "profile 01234567  embedding/ruri  prompt v{SV}  (current)"
+                "profile 01234567  embedding/ruri  formula v{SV}  (current)"
             )),
             "{out}"
         );
@@ -480,7 +480,7 @@ mod tests {
         let out = render(&labels, &scores, Some("h"), None, false, 1.0);
         assert!(
             out.contains(&format!(
-                "embedding/ruri  prompt v{}  (current)",
+                "embedding/ruri  formula v{}  (current)",
                 crate::embed_score::SCORE_VERSION
             )),
             "{out}"
@@ -586,7 +586,10 @@ mod tests {
         let current_at = out.find("profile aaaaaaaa").unwrap();
         let candidate_at = out.find("profile bbbbbbbb").unwrap();
         assert!(current_at < candidate_at, "{out}");
-        assert!(out.contains(&format!("prompt v{SV}  (candidate)")), "{out}");
+        assert!(
+            out.contains(&format!("formula v{SV}  (candidate)")),
+            "{out}"
+        );
         assert!(out.contains("scored 2/2  concordance 0.00"), "{out}");
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("cccccccc"), "{out}");
@@ -619,7 +622,10 @@ mod tests {
         let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
         let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), false, 1.0);
         assert!(out.contains("no profile"), "{out}");
-        assert!(out.contains(&format!("prompt v{SV}  (candidate)")), "{out}");
+        assert!(
+            out.contains(&format!("formula v{SV}  (candidate)")),
+            "{out}"
+        );
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
     }
 

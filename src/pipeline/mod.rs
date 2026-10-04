@@ -8,6 +8,7 @@ pub mod extract;
 pub mod fetch;
 pub mod llm_call;
 pub mod lock;
+pub mod review;
 pub mod run;
 pub mod score;
 pub mod story;

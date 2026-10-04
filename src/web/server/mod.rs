@@ -248,7 +248,7 @@ impl PageParts {
             } else {
                 Vec::new()
             },
-            default_min: web.default_min(profile_hash),
+            default_min: web.default_min(db.has_scores(me.user_id, profile_hash)?),
             is_admin: me.is_admin,
         })
     }

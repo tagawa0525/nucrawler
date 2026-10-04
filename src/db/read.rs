@@ -2016,43 +2016,8 @@ mod tests {
         assert_eq!(docs(), 0);
     }
 
-    /// 同じ digest に複数のモデルの採点があれば、先回り和訳と同じく最高点を使う。
-    #[test]
-    fn list_uses_highest_score_across_scorers() {
-        let db = Db::open_in_memory().unwrap();
-        let a = scored_article(
-            &db,
-            "https://e.com/a",
-            Lang::En,
-            "2026-09-26T00:00:00.000Z",
-            90,
-        );
-        let digest: i64 = db
-            .conn()
-            .query_row("SELECT id FROM artifacts WHERE article_id = ?1", [a], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        db.insert_score(
-            ScoreKey {
-                user_id: db.owner_id().unwrap(),
-                profile_hash: "h1",
-                backend: "claude-cli",
-                model: "haiku",
-                prompt_version: 1,
-            },
-            digest,
-            50,
-            Some("低い"),
-            t("2026-09-27T00:00:00Z"),
-        )
-        .unwrap();
-        let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
-        assert_eq!(item.score, Some(90));
-    }
-
-    /// 採点のプロンプトの版を上げたら、古い版の点数ではなく最新の版の点数を使う
-    /// （版をまたいだ最高点にすると、古いプロンプトの高い点が新しい採点を隠してしまう）。
+    /// 採点の式の版を上げたら、古い版の点数ではなく最新の版の点数を使う
+    /// （版をまたいだ最高点にすると、古い式の高い点が新しい採点を隠してしまう）。
     #[test]
     fn list_prefers_latest_score_prompt_version() {
         let db = Db::open_in_memory().unwrap();

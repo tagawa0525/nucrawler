@@ -104,13 +104,7 @@ impl Db {
              candidates AS (
                SELECT b.*,
                       -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
-                      -- 採点のプロンプトの最新の版で、モデル間の最高点
-                      (SELECT s.score FROM scores AS s
-                       WHERE s.user_id = ?1 AND s.profile_hash = ?2
-                         AND s.artifact_id = b.digest_id
-                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-                         AND s.backend <> 'embedding'
-                       ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) AS score,
+                      {score} AS score,
                       (SELECT json_extract(r.payload, '$.lwr_relevant') FROM artifacts AS r
                        WHERE r.id = b.digest_id) AS relevant
                FROM base AS b
@@ -122,6 +116,7 @@ impl Db {
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
             digest_id = super::sql::latest_digest("id", "a.id", "?1"),
+            score = super::sql::list_score("score", "b.digest_id", "?1", "?2"),
             available = super::claims::available(super::claims::Available {
                 article: "a.id",
                 stage: "'translate'",

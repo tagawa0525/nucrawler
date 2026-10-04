@@ -516,8 +516,8 @@ mod tests {
             scores[0].key,
             EvalKey {
                 profile_hash: "h1".into(),
-                backend: "claude-cli".into(),
-                model: "sonnet".into(),
+                backend: EMBED_BACKEND.into(),
+                model: "m".into(),
                 prompt_version: 1,
             }
         );

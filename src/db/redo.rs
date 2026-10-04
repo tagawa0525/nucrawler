@@ -235,20 +235,19 @@ fn redo_available() -> String {
 }
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
-/// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。
+/// 付いた、現在のプロファイルの点数（一覧と同じ規則で選ぶ）で判定する。
 fn redo_filter() -> String {
     format!(
         "(:source IS NULL OR a.source_id = :source)
     AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
     AND (:ids = '[]' OR a.id IN (SELECT value FROM json_each(:ids)))
-    AND (:min_score IS NULL OR (
-      SELECT s.score FROM scores AS s
-      WHERE s.user_id = :user AND s.profile_hash = :profile
-        -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-        AND s.backend <> 'embedding'
-        AND s.artifact_id = {digest_id}
-      ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)",
-        digest_id = super::sql::latest_digest("id", "a.id", ":user"),
+    AND (:min_score IS NULL OR {score} >= :min_score)",
+        score = super::sql::list_score(
+            "score",
+            &super::sql::latest_digest("id", "a.id", ":user"),
+            ":user",
+            ":profile"
+        ),
     )
 }
 

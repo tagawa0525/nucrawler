@@ -110,8 +110,8 @@ pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
     ScoreKey {
         user_id: db.owner_id().unwrap(),
         profile_hash: "h1",
-        backend: "claude-cli",
-        model: "sonnet",
+        backend: EMBED_BACKEND,
+        model: "m",
         prompt_version: 1,
     }
 }
@@ -147,13 +147,7 @@ pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, sc
         .unwrap();
     let digest = add_digest(db, id, "sonnet", "題", true, "2026-09-26T01:00:00Z");
     db.insert_score(
-        ScoreKey {
-            user_id: db.owner_id().unwrap(),
-            profile_hash: "h1",
-            backend: "claude-cli",
-            model: "sonnet",
-            prompt_version: 1,
-        },
+        score_key(db),
         digest,
         score,
         None,
@@ -187,11 +181,7 @@ pub(super) fn embedding_scored_article(db: &Db, url: &str, published: &str, scor
     let a = page_article(db, url, published);
     let digest = add_digest(db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
     db.insert_score(
-        ScoreKey {
-            backend: EMBED_BACKEND,
-            model: "m",
-            ..score_key(db)
-        },
+        score_key(db),
         digest,
         score,
         None,

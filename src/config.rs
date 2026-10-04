@@ -402,10 +402,11 @@ pub struct WebConfig {
 }
 
 impl WebConfig {
-    /// 利用者の一覧の既定の最低点。プロファイルがあれば `min_score`、無ければ採点が無いので最低点なし
-    /// （掛けると一覧が空になる）。Web・フィード・JSON・MCP で同じ規則を使う。
-    pub fn default_min(&self, profile_hash: Option<&str>) -> Option<u8> {
-        profile_hash.map(|_| self.min_score)
+    /// 利用者の一覧の既定の最低点。今のプロファイルの点数があれば（`Db::has_scores`）`min_score`、無ければ
+    /// 最低点なし（プロファイルが無いか、変えた直後や `embed rebuild` の後で、掛けると一覧が空になる）。
+    /// Web・フィード・JSON・MCP で同じ規則を使う。
+    pub fn default_min(&self, scored: bool) -> Option<u8> {
+        scored.then_some(self.min_score)
     }
 
     /// 一覧が常に空になる値を拒否する。

@@ -305,8 +305,8 @@ mod tests {
             ScoreKey {
                 user_id: owner,
                 profile_hash: &hash,
-                backend: "claude-cli",
-                model: "sonnet",
+                backend: crate::db::EMBED_BACKEND,
+                model: "m",
                 prompt_version: 1,
             },
             digest,

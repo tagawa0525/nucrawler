@@ -264,6 +264,7 @@ fn search(
         return Err(ToolError::InvalidParams("min_score must be 0..=100".into()));
     }
     let (user, hash) = viewer(db)?;
+    let scored = db.has_scores(user, hash.as_deref())?;
     let items = db.search_articles(&SearchQuery {
         user_id: user,
         profile_hash: hash.as_deref(),
@@ -278,9 +279,7 @@ fn search(
         min_score: params.min_score,
         // 既定は Web UI の一覧と同じく隠す（最低点・評価の条件の既定も一覧と同じ）
         hide: !params.include_hidden,
-        hide_below: params
-            .min_score
-            .or_else(|| web.default_min(hash.as_deref())),
+        hide_below: params.min_score.or_else(|| web.default_min(scored)),
         rating: if params.include_hidden {
             RatingFilter::Any
         } else {
@@ -435,8 +434,8 @@ mod tests {
                 ScoreKey {
                     user_id: db.owner_id().unwrap(),
                     profile_hash: hash,
-                    backend: "claude-cli",
-                    model: "sonnet",
+                    backend: crate::db::EMBED_BACKEND,
+                    model: "m",
                     prompt_version: 1,
                 },
                 digest,

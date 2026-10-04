@@ -16,7 +16,7 @@ pub(super) async fn api_list(
     let body = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         let (user, hash) = viewer(db, me)?;
-        let min = params.min_or(web.default_min(hash.as_deref()))?;
+        let min = params.min_or(web.default_min(db.has_scores(user, hash.as_deref())?))?;
         let items = list_items(db, web, user, hash.as_deref(), now, min, params.rating()?)?;
         Ok(serde_json::to_string(&api::ArticleList::new(
             &items, labels,

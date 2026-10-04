@@ -216,6 +216,31 @@ mod tests {
         assert!(items.iter().all(|c| c.url.contains("/corporate/pr/")));
     }
 
+    /// 日本原燃の一覧は月ごとの表。日付はファイル名（20260820-1.html）から取り、年度のリンクは拾わない。
+    #[test]
+    fn jnfl_press_links_with_date_from_url() {
+        let items = parse(
+            &HtmlList {
+                date_in_url: Some(UrlDate::Yyyymmdd),
+                ..list("table.list td a")
+            },
+            include_str!("../../tests/fixtures/jnfl_press.html"),
+            &base("https://www.jnfl.co.jp/ja/release/press/"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 3, "{items:#?}");
+        assert_eq!(
+            items[0].url,
+            "https://www.jnfl.co.jp/ja/release/press/2026/detail/20260820-1.html"
+        );
+        assert_eq!(
+            items[2].title,
+            "六ヶ所ウラン濃縮工場に係る新増設等計画書に関する事前了解について"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 8, 20));
+        assert_eq!(items[2].published_at, jst_midnight(2026, 7, 24));
+    }
+
     /// 東電の見出しは会社名のラベルを含み、`<br>` で改行している。
     #[test]
     fn tepco_titles_skip_labels_and_undated_urls_have_no_date() {

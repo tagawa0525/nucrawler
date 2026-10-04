@@ -63,6 +63,27 @@ lang = "ja"
 category = "regulator"
 list = { link = "dl.news__list dd.news__title a", date = ".news__date", also = ["https://www.nra.go.jp/"] }
 
+# ニュース・規制の報告書・刊行物がまとめて載るので、ニュースだけを URL で絞る
+[[source]]
+id = "onr"
+name = "UK Office for Nuclear Regulation"
+label = "ONR"
+kind = "feed"
+url = "https://www.onr.org.uk/rss-global"
+lang = "en"
+category = "regulator"
+filter = { url_contains = ["/news/all-news/"] }
+
+# カナダ政府のニュース API の Atom。プレスリリースと公聴会などの案内が載る
+[[source]]
+id = "cnsc"
+name = "Canadian Nuclear Safety Commission"
+label = "CNSC"
+kind = "feed"
+url = "https://api.io.canada.ca/io-server/gc/news/en/v2?dept=canadiannuclearsafetycommission&sort=publishedDate&orderBy=desc&pick=50&format=atom"
+lang = "en"
+category = "regulator"
+
 # --- 業界 ---
 
 [[source]]
@@ -247,6 +268,17 @@ url = "https://www.japc.co.jp/news/index.html"
 lang = "ja"
 category = "utility"
 list = { link = "#main_cont dd > a", date_in_url = "yyyymmdd", follow = "#main_cont h3 > a" }
+
+# 再処理・濃縮・埋設などのプレスリリース。一覧は年度ごとで、/ja/release/press/ が今の年度
+[[source]]
+id = "jnfl"
+name = "日本原燃"
+label = "原燃"
+kind = "html_list"
+url = "https://www.jnfl.co.jp/ja/release/press/"
+lang = "ja"
+category = "utility"
+list = { link = "table.list td a", date_in_url = "yyyymmdd" }
 
 # --- ベンダー ---
 

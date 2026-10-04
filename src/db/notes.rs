@@ -316,8 +316,8 @@ impl Db {
                AND (:article IS NULL OR r.article_id = :article)
                AND (:reporter IS NULL OR r.user_id = :reporter)
              ORDER BY r.reported_at DESC, r.id DESC",
-            title_ja = super::read::title_ja(
-                &super::read::latest_digest("title_ja", "a.id", ":user"),
+            title_ja = super::sql::title_ja(
+                &super::sql::latest_digest("title_ja", "a.id", ":user"),
                 "a.id",
             ),
         ))?;

@@ -17,6 +17,7 @@ mod redo;
 mod score;
 mod signals;
 mod sources;
+mod sql;
 mod stages;
 mod stories;
 #[cfg(test)]
@@ -44,6 +45,8 @@ pub use translate::*;
 pub use users::*;
 pub use vocab::*;
 pub use warnings::*;
+
+use sql::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

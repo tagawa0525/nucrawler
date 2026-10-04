@@ -65,8 +65,8 @@ impl Db {
              WHERE json_extract(l.payload, '$.lwr_relevant') = 1
                AND l.article_id IN (SELECT article_id FROM ratings WHERE user_id = ?1)
              ORDER BY l.article_id",
-            latest = super::read::latest_digests("?1"),
-            topics = super::read::linked_topics("l"),
+            latest = super::sql::latest_digests("?1"),
+            topics = super::sql::linked_topics("l"),
         ))?;
         let rows = stmt.query_map(rusqlite::params![user_id, space_id], |r| {
             Ok((
@@ -204,7 +204,7 @@ impl Db {
                    AND s.backend = ?5 AND s.model = ?6 AND s.prompt_version = ?7))
              ORDER BY coalesce(a.published_at, a.fetched_at) DESC, a.id DESC
              LIMIT ?8 OFFSET ?9",
-            latest = super::read::latest_digests("?1"),
+            latest = super::sql::latest_digests("?1"),
         ))?;
         let rows = stmt.query_map(
             rusqlite::params![

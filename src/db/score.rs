@@ -90,7 +90,7 @@ impl Db {
                 max_attempts: "?6",
                 now: "?7",
             }),
-            latest = super::read::latest_digests("?1"),
+            latest = super::sql::latest_digests("?1"),
             linked = linked_topics("l"),
         ))?;
         let rows = stmt.query_map(

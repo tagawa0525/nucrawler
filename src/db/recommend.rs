@@ -104,10 +104,10 @@ impl Db {
              JOIN artifacts AS r ON r.id = x.digest_id
              JOIN articles AS a ON a.id = x.article_id
              ORDER BY x.article_id",
-            digest_id = super::read::latest_digest("id", "rt.article_id", ":user"),
-            matched = super::read::matched_topics("s.id", "interest"),
-            excluded = super::read::matched_topics("s.id", "exclude"),
-            topics = super::read::linked_topics("r"),
+            digest_id = super::sql::latest_digest("id", "rt.article_id", ":user"),
+            matched = super::sql::matched_topics("s.id", "interest"),
+            excluded = super::sql::matched_topics("s.id", "exclude"),
+            topics = super::sql::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(
             rusqlite::named_params! {":user": user_id, ":profile": profile_hash},

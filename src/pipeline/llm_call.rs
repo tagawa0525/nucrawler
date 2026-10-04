@@ -439,6 +439,144 @@ mod tests {
     use crate::llm::fake::FakeLlm;
     use crate::quota::QuotaConfig;
 
+    /// 呼び出しの最中に予約を取り直された記事は、保存の対象（`Held`）にも、LLM の失敗の記録にも入れない。
+    /// 予約していても依頼していない記事（同じ報道の判定の候補など）も入れない。
+    #[tokio::test]
+    async fn call_held_leaves_out_claims_taken_over_during_the_call() {
+        let path = crate::testutil::temp_dir("call-held").join("n.db");
+        let db = Db::open(&path).unwrap();
+        let [lost, kept, unrequested] = [0, 1, 2].map(|i| {
+            db.insert_article(&crate::db::NewArticle {
+                source_id: "wnn",
+                url: &format!("https://e.com/{i}"),
+                title: "t",
+                lang: crate::config::Lang::En,
+                published_at: None,
+            })
+            .unwrap()
+            .unwrap()
+        });
+        let claim_key = crate::db::ClaimKey {
+            stage: "digest",
+            backend: "fake",
+            model: "m",
+        };
+        let key = |article_id| StageKey {
+            article_id,
+            stage: "digest",
+            backend: "fake",
+            model: "m",
+        };
+        let steal = move |_| {
+            Db::open(&path)
+                .unwrap()
+                .conn()
+                .execute(
+                    "UPDATE work_claims SET token = 'other', expires_at = '9999-01-01T00:00:00.000Z'
+                     WHERE article_id = ?1",
+                    [lost],
+                )
+                .unwrap();
+        };
+        let schema = serde_json::json!({});
+        let call = || Call {
+            stage: "digest",
+            n_items: 2,
+            req: LlmRequest {
+                system: "s",
+                prompt: "p",
+                schema: &schema,
+                model: "m",
+            },
+        };
+        let mut quota = Quota::new(QuotaConfig::default(), None, None);
+        let cancel = Cancel::default();
+        let clock = Utc::now;
+        let now = Utc::now();
+        let requested = [lost, kept];
+
+        // 応答があれば、予約を持っている依頼した記事だけを返す
+        let llm = FakeLlm::with_hook(
+            [Ok(LlmResponse {
+                output: serde_json::json!({}),
+                usage: None,
+            })],
+            steal.clone(),
+        );
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &clock,
+        });
+        let claim = db
+            .claim(
+                claim_key,
+                &[lost, kept, unrequested],
+                now,
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        let mut tally = Tally::default();
+        let (_, held) = workers
+            .call_held(call(), &claim, &requested, &mut tally, key, now)
+            .await
+            .unwrap()
+            .expect("response");
+        assert_eq!(held.iter().collect::<Vec<_>>(), [kept]);
+        assert!(!held.keeps("digest", lost));
+        assert!(!held.keeps("digest", unrequested));
+        assert_eq!(
+            held.of(&[lost, kept, unrequested]).collect::<Vec<_>>(),
+            [kept]
+        );
+        drop(claim);
+
+        // LLM の失敗は、予約を持っている依頼した記事だけを失敗として記録する
+        db.conn().execute("DELETE FROM work_claims", []).unwrap();
+        let llm = FakeLlm::with_hook(
+            [Err(crate::llm::LlmError::Reported {
+                subtype: "error".into(),
+                message: "Not logged in".into(),
+            })],
+            steal,
+        );
+        let workers = Workers::new(LlmStage {
+            db: &db,
+            llm: &llm,
+            quota: &mut quota,
+            cancel: &cancel,
+            clock: &clock,
+        });
+        let claim = db
+            .claim(
+                claim_key,
+                &[lost, kept, unrequested],
+                now,
+                chrono::Duration::minutes(10),
+            )
+            .unwrap();
+        let mut tally = Tally::default();
+        let got = workers
+            .call_held(call(), &claim, &requested, &mut tally, key, now)
+            .await
+            .unwrap();
+        assert!(got.is_none());
+        assert_eq!(tally.failed, 1);
+        assert_eq!(
+            db.query_i64(&format!(
+                "SELECT count(*) FROM stage_errors WHERE article_id = {kept}"
+            ))
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_i64("SELECT count(*) FROM stage_errors").unwrap(),
+            1
+        );
+    }
+
     /// 端末の Ctrl-C は claude にも届くので、claude が落ちたことの方が、nucrawler が止める指示を
     /// 受け取るより先に分かることがある。その場合も失敗として記録しない。
     #[tokio::test]

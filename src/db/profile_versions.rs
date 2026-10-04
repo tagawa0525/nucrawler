@@ -202,6 +202,13 @@ pub(super) fn save_version(
             rusqlite::params![current.id, now, stats.rated as i64, stats.concordance],
         )?;
     }
+    // 待っている案は前の版を基に作って比べたものなので、新しい版を上書きしないよう置き換える
+    // （案を採用したときは、その案を先に採用済みにしてから呼ぶ）
+    tx.execute(
+        "UPDATE profile_suggestions SET status = 'superseded', decided_at = ?2
+         WHERE user_id = ?1 AND status = 'pending'",
+        rusqlite::params![user_id, now],
+    )?;
     let interests = serde_json::to_string(&profile.interests)?;
     let excludes = serde_json::to_string(&profile.exclude)?;
     tx.execute(

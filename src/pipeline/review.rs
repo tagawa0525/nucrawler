@@ -52,7 +52,16 @@ pub async fn review_profiles<L: Llm>(
     let db = env.db;
     let mut summary = ReviewSummary::default();
     let requested = db.review_requests()?;
-    for user in db.scoring_profiles()? {
+    // 頼まれた利用者を頼まれた順に先に回し、残りは利用者の順（呼び出しの上限で途中までしか進まなくても、
+    // 先に頼んだ利用者を後回しにしない）
+    let mut users = db.scoring_profiles()?;
+    users.sort_by_key(|u| {
+        requested
+            .iter()
+            .position(|&id| id == u.user_id)
+            .unwrap_or(usize::MAX)
+    });
+    for user in users {
         if env.cancel.is_requested() {
             break;
         }

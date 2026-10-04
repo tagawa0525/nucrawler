@@ -225,9 +225,22 @@ mod tests {
         assert!(!html.contains("燃料"), "{html}");
     }
 
+    /// 要約のある記事に評価を 1 件付ける（案の根拠になる）。
+    fn rate_one(db: &Db) {
+        let (article, _) = seed(db, "https://e.com/rated", "評価した記事");
+        db.rate(
+            db.owner_id().unwrap(),
+            article,
+            crate::db::Rating::new(4),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    }
+
     /// 待っている案（今との違い・根拠・今と案の一致率）を保存し、その id を返す。
     fn pending(db: &Db) -> i64 {
         let owner = db.owner_id().unwrap();
+        rate_one(db);
         db.save_profile(owner, &profile("燃料", 1.0), chrono::Utc::now())
             .unwrap();
         let reasons = vec![crate::prompt::suggest::Reason {
@@ -331,6 +344,7 @@ mod tests {
     async fn requests_a_review_and_switches_auto_apply() {
         let db = Db::open_in_memory().unwrap();
         two_versions(&db);
+        rate_one(&db);
         let server = Server::start(db).await;
         let res = server.post("/settings/profile/review", "").await;
         assert_eq!(res.status().as_u16(), 303);
@@ -352,6 +366,20 @@ mod tests {
         assert_eq!(
             server.count("SELECT auto_apply_profile FROM users WHERE id = 1"),
             1
+        );
+    }
+
+    /// 評価が無ければ案を作れないので、「今すぐ案を作る」の代わりに評価が要ると出す（頼んでも取り下げられる）。
+    #[tokio::test]
+    async fn says_ratings_are_needed_for_a_suggestion() {
+        let db = Db::open_in_memory().unwrap();
+        two_versions(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("記事に評価（★）を付けると"), "{html}");
+        assert!(
+            !html.contains("action=\"/settings/profile/review\""),
+            "{html}"
         );
     }
 }

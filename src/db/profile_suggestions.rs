@@ -268,49 +268,6 @@ impl Db {
         Ok(n as usize)
     }
 
-    /// 利用者の評価のうち、hash が `current` と `candidate` の両方のプロファイルの点数（一覧と同じ規則で
-    /// 選ぶ）がそろった記事で測った、それぞれの一致率。
-    pub fn paired_stats(
-        &self,
-        user_id: i64,
-        current: &str,
-        candidate: &str,
-    ) -> Result<(VersionStats, VersionStats), DbError> {
-        let score = |profile: &str| {
-            list_score(
-                "score",
-                &latest_digest("id", "r.article_id", "?1"),
-                "?1",
-                profile,
-            )
-        };
-        let sql = format!(
-            "SELECT r.value, {current}, {candidate} FROM ratings AS r WHERE r.user_id = ?1",
-            current = score("?2"),
-            candidate = score("?3"),
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![user_id, current, candidate], |r| {
-            Ok((
-                r.get::<_, Rating>(0)?,
-                r.get::<_, Option<u8>>(1)?,
-                r.get::<_, Option<u8>>(2)?,
-            ))
-        })?;
-        let (mut current, mut candidate) = (Vec::new(), Vec::new());
-        for row in rows {
-            if let (rating, Some(a), Some(b)) = row? {
-                current.push((a, rating));
-                candidate.push((b, rating));
-            }
-        }
-        let stats = |pairs: &[(u8, Rating)]| VersionStats {
-            rated: pairs.len(),
-            concordance: crate::eval::concordance(pairs),
-        };
-        Ok((stats(&current), stats(&candidate)))
-    }
-
     /// 待っている案を見送る。待っている案でなければ何もせず `false`。利用者の案でなければ
     /// `DbError::UnknownProfileSuggestion`。
     pub fn dismiss_suggestion(
@@ -665,57 +622,6 @@ mod tests {
         assert_eq!(db.ratings_since_review(owner).unwrap(), 0);
         rated(&db, "https://e.com/3", "h", 50, 3, "2026-10-01T04:00:00Z");
         assert_eq!(db.ratings_since_review(owner).unwrap(), 1);
-    }
-
-    /// 記事の最新の要約に、プロファイル `hash` の点数を足す。
-    fn add_score(db: &Db, article: i64, hash: &str, score: u8) {
-        let digest: i64 = db
-            .conn()
-            .query_row(
-                "SELECT id FROM artifacts WHERE article_id = ?1 AND kind = 'digest'",
-                [article],
-                |r| r.get(0),
-            )
-            .unwrap();
-        db.insert_score(
-            ScoreKey {
-                profile_hash: hash,
-                ..score_key(db)
-            },
-            digest,
-            score,
-            None,
-            t("2026-09-30T03:00:00Z"),
-        )
-        .unwrap();
-    }
-
-    /// 今と案は、評価した記事のうち両方の点数がそろった記事で、一覧と同じ規則で選んだ点数で比べる
-    /// （片方の採点に失敗した記事で、比べる集合がずれないように）。
-    #[test]
-    fn compares_profiles_on_the_same_ratings() {
-        let db = Db::open_in_memory().unwrap();
-        let owner = db.owner_id().unwrap();
-        let a = rated(&db, "https://e.com/a", "h", 80, 5, "2026-09-01T00:00:00Z");
-        let b = rated(&db, "https://e.com/b", "h", 20, 1, "2026-10-01T00:00:00Z");
-        // 案の採点に失敗した記事（今の点数だけがある）
-        rated(&db, "https://e.com/c", "h", 90, 1, "2026-10-01T00:00:00Z");
-        add_score(&db, a, "h2", 30);
-        add_score(&db, b, "h2", 70);
-        assert_eq!(
-            db.paired_stats(owner, "h", "h2").unwrap(),
-            (stats(2, 1.0), stats(2, 0.0))
-        );
-        let none = VersionStats {
-            rated: 0,
-            concordance: None,
-        };
-        assert_eq!(db.paired_stats(owner, "h", "none").unwrap(), (none, none));
-        // 同じプロファイルどうしなら、点数のある評価すべて
-        assert_eq!(
-            db.paired_stats(owner, "h", "h").unwrap(),
-            (stats(3, 0.5), stats(3, 0.5))
-        );
     }
 
     /// 見送った案は版にならない。待っている案でなければ何もしない。

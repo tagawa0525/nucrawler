@@ -1,11 +1,11 @@
 //! プロファイルの見直し（計画 016）：評価が増えた利用者について、評価を根拠に LLM が更新案を作り、
-//! 今のプロファイルと案を同じ評価で採点して比べ、案を保存する。利用者の設定が「当てる」で、案が十分に
+//! 今のプロファイルと案を同じ評価で embedding で採点して比べ（計画 017）、案を保存する。利用者の設定が「当てる」で、案が十分に
 //! 良ければ、そのまま新しい版にする（履歴から戻せる）。
 
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{LlmStage, Tally};
-use super::{score, suggest};
+use super::{embed_profiles, suggest};
 use crate::config::{Config, EmbeddingConfig};
 use crate::db::{
     DbError, NewSuggestion, ProfileOrigin, SuggestionStatus, SuggestionTrigger, VersionStats,
@@ -28,8 +28,6 @@ pub enum ReviewStageError {
     Db(#[from] DbError),
     #[error(transparent)]
     Suggest(#[from] suggest::SuggestStageError),
-    #[error(transparent)]
-    Score(#[from] score::ScoreStageError),
     #[error(transparent)]
     Embed(#[from] super::embed::EmbedStageError),
 }
@@ -54,7 +52,6 @@ pub async fn review_profiles<L: Llm>(
     requests_only: bool,
     now: DateTime<Utc>,
 ) -> Result<ReviewSummary, ReviewStageError> {
-    let _ = (embedder, embedding);
     let db = env.db;
     let mut summary = ReviewSummary::default();
     let requested = db.review_requests()?;
@@ -106,44 +103,28 @@ pub async fn review_profiles<L: Llm>(
             },
             status,
         };
+        // 今と案を、評価した記事で embedding でその場で採点して比べる（同じ時点の基準で、保存しない）
+        let Some((current, candidate)) = embed_profiles::compare_profiles(
+            db,
+            embedder,
+            embedding,
+            config.web.list_days,
+            user.user_id,
+            &user.profile,
+            &suggestion.profile,
+            env.cancel,
+            now,
+        )
+        .await?
+        else {
+            break;
+        };
         if crate::profile::diff(&user.profile, &suggestion.profile).is_empty() {
             // 変える根拠が無かったことも残し、評価の件数をここから数え直す
-            let (current, _) = db.paired_stats(user.user_id, &user.hash, &user.hash)?;
             db.save_suggestion(&new(current, current, SuggestionStatus::Unchanged), now)?;
             summary.suggested += 1;
             continue;
         }
-        // 今と案を、評価したすべての記事で採点する（採点済みの記事では LLM を呼ばない）
-        let rated: Vec<i64> = db
-            .eval_labels(user.user_id)?
-            .iter()
-            .map(|l| l.article_id)
-            .collect();
-        for profile in [&user.profile, &suggestion.profile] {
-            let scored = score::score_articles(
-                reborrow(&mut env),
-                &config.llm,
-                &config.pipeline,
-                user.user_id,
-                score::ScoreTarget::Candidate {
-                    profile,
-                    articles: &rated,
-                },
-                now,
-            )
-            .await?;
-            let stopped = scored.tally.halted.is_some() || scored.tally.cancelled;
-            summary.tally.merge(scored.tally);
-            if stopped {
-                return Ok(summary);
-            }
-        }
-        // 片方の採点に失敗した記事を除き、同じ記事の集合で比べる
-        let (current, candidate) = db.paired_stats(
-            user.user_id,
-            &user.hash,
-            &crate::profile::hash(&suggestion.profile),
-        )?;
         // 案を作る間にプロファイルが変わっていたら（取り込み・戻し）、古い案は捨てて次の実行で作り直す
         let Some(id) =
             db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?

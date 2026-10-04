@@ -73,6 +73,8 @@ impl SuggestionStatus {
 #[derive(Debug, Clone, Copy)]
 pub struct NewSuggestion<'a> {
     pub user_id: i64,
+    /// 案の基にしたプロファイルの hash（案を作り始めたときの今のプロファイル）
+    pub base_hash: &'a str,
     pub profile: &'a crate::profile::Profile,
     pub reasons: &'a [Reason],
     /// 根拠にした記事
@@ -106,12 +108,13 @@ pub struct ProfileSuggestion {
 
 impl Db {
     /// 案を保存する（作ったときの今の版を基にする）。待っている前の案は置き換える（古い評価で作った案を
-    /// 残しても判断を迷わせるだけ）。プロファイルが無ければ `DbError::NoProfileVersion`。
+    /// 残しても判断を迷わせるだけ）。案を作る間にプロファイルが変わっていたら（基にした hash が今の版と違う）、
+    /// 保存せずに `None`。プロファイルが無ければ `DbError::NoProfileVersion`。
     pub fn save_suggestion(
         &self,
         suggestion: &NewSuggestion,
         now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<i64, DbError> {
+    ) -> Result<Option<i64>, DbError> {
         use rusqlite::OptionalExtension;
         let now = timestamp(now);
         let tx = self.immediate()?;
@@ -152,7 +155,7 @@ impl Db {
         )?;
         let id = tx.last_insert_rowid();
         tx.commit()?;
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// 利用者の案（新しい順）。
@@ -312,6 +315,10 @@ mod tests {
         }]
     }
 
+    /// テストの案の基にするプロファイル `profile("a")` の hash。
+    static BASE: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| crate::profile::hash(&profile("a")));
+
     fn suggestion<'a>(
         user_id: i64,
         profile: &'a Profile,
@@ -320,6 +327,7 @@ mod tests {
     ) -> NewSuggestion<'a> {
         NewSuggestion {
             user_id,
+            base_hash: &BASE,
             profile,
             reasons,
             evidence,
@@ -352,6 +360,7 @@ mod tests {
                 &suggestion(owner, &b, &reasons, &[3, 1]),
                 t("2026-10-02T00:00:00Z"),
             )
+            .unwrap()
             .unwrap();
         let saved = db.profile_suggestions(owner).unwrap();
         assert_eq!(
@@ -378,6 +387,7 @@ mod tests {
                 },
                 t("2026-10-03T00:00:00Z"),
             )
+            .unwrap()
             .unwrap();
         let saved = db.profile_suggestions(owner).unwrap();
         let state: Vec<(i64, SuggestionTrigger, SuggestionStatus, Option<&str>)> = saved
@@ -403,6 +413,28 @@ mod tests {
         );
     }
 
+    /// 案を作る間にプロファイルが変わっていたら（基にした hash が今の版と違う）、案を保存しない。
+    #[test]
+    fn skips_suggestions_made_from_an_old_profile() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.save_profile(owner, &profile("a"), t("2026-10-01T00:00:00Z"))
+            .unwrap();
+        db.save_profile(owner, &profile("c"), t("2026-10-02T00:00:00Z"))
+            .unwrap();
+        let b = profile("b");
+        let reasons = reasons();
+        assert_eq!(
+            db.save_suggestion(
+                &suggestion(owner, &b, &reasons, &[]),
+                t("2026-10-03T00:00:00Z")
+            )
+            .unwrap(),
+            None
+        );
+        assert!(db.profile_suggestions(owner).unwrap().is_empty());
+    }
+
     /// 案を版にすると、根拠にした記事を持つ版ができ、案は採用済みになる。待っている案でなければ何もしない。
     #[test]
     fn applies_a_pending_suggestion() {
@@ -418,6 +450,7 @@ mod tests {
                 &suggestion(owner, &b, &reasons, &[7]),
                 t("2026-10-02T00:00:00Z"),
             )
+            .unwrap()
             .unwrap();
         assert!(matches!(
             db.apply_suggestion(other, id, ProfileOrigin::Suggest, t("2026-10-03T00:00:00Z")),

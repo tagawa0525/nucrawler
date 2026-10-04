@@ -70,6 +70,7 @@ pub async fn review_profiles<L: Llm>(
         let evidence_ids: Vec<i64> = evidence.iter().map(|e| e.article_id).collect();
         let new = |current: VersionStats, candidate: VersionStats, status| NewSuggestion {
             user_id: user.user_id,
+            base_hash: &user.hash,
             profile: &suggestion.profile,
             reasons: &suggestion.reasons,
             evidence: &evidence_ids,
@@ -112,7 +113,12 @@ pub async fn review_profiles<L: Llm>(
         }
         let current = db.rated_stats(user.user_id, &user.hash)?;
         let candidate = db.rated_stats(user.user_id, &crate::profile::hash(&suggestion.profile))?;
-        let id = db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?;
+        // 案を作る間にプロファイルが変わっていたら（取り込み・戻し）、古い案は捨てて次の実行で作り直す
+        let Some(id) =
+            db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?
+        else {
+            continue;
+        };
         summary.suggested += 1;
         let ratings: Vec<u8> = evidence.iter().map(|e| e.rating.get()).collect();
         if db.auto_apply_profile(user.user_id)?

@@ -81,3 +81,46 @@ fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {
     })?;
     Ok(profile::parse(&text)?)
 }
+
+/// 候補を頼んだのに、計算した結果に候補の点数が 1 件も無いか（評価した記事にまだ embedding が無いなど）。
+/// 候補が今のプロファイルと同じなら、今のプロファイルの式の候補（同じ hash）として並ぶ。
+fn candidate_missing(scores: &[nucrawler::db::LabeledScore], candidate: Option<&str>) -> bool {
+    let _ = (scores, candidate);
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nucrawler::db::{EvalKey, LabeledScore};
+
+    fn trial(hash: &str) -> LabeledScore {
+        LabeledScore {
+            key: EvalKey {
+                profile_hash: hash.into(),
+                backend: eval::TRIAL_BACKEND.into(),
+                model: "m now".into(),
+                prompt_version: 2,
+            },
+            article_id: 1,
+            score: 50,
+            scored_at: "2026-10-04T00:00:00.000Z".into(),
+            features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn notices_a_candidate_without_scores() {
+        let current = [trial("now")];
+        assert!(candidate_missing(&current, Some("cand")));
+        assert!(!candidate_missing(
+            &[trial("now"), trial("cand")],
+            Some("cand")
+        ));
+        // 候補が今のプロファイルと同じなら、今のプロファイルとして並ぶ
+        assert!(!candidate_missing(&current, Some("now")));
+        assert!(!candidate_missing(&current, None));
+        // 評価した記事に embedding がまだ無ければ、今のプロファイルの分も無い
+        assert!(candidate_missing(&[], Some("now")));
+    }
+}

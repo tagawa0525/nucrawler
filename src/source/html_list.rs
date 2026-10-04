@@ -385,6 +385,31 @@ mod tests {
         assert_eq!(items[3].published_at, jst_midnight(2026, 8, 7));
     }
 
+    /// 規制委の資料公開（N-ADRES）のトップの最新情報は、項目全体がリンクで、日付と資料の分類も
+    /// リンクの中にある（2026 年 10 月 4 日の実ページ）。
+    #[test]
+    fn nra_archive_dates_inside_the_link() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".p-top-latest__date".into()),
+                title_skip: Some(".p-top-latest__date, .p-top-latest__category".into()),
+                ..list("a.p-top-latest__item")
+            },
+            include_str!("../../tests/fixtures/nra_archive_top.html"),
+            &base("https://www.da.nra.go.jp/"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4, "{items:#?}");
+        assert_eq!(items[0].url, "https://www.da.nra.go.jp/detail/NRA100020538");
+        assert_eq!(
+            items[1].title,
+            "第1437回原子力発電所の新規制基準適合性に係る審査会合 令和8年10月02日"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 10, 2));
+        assert_eq!(items[2].published_at, jst_midnight(2026, 9, 30));
+        assert_eq!(items[3].published_at, jst_midnight(2026, 9, 28));
+    }
+
     /// 日付は、リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の中から探す。
     /// 項目に日付が無いときや読めないときは、隣の項目の日付を使わずに None にする。
     #[test]

@@ -20,8 +20,8 @@ pub(super) async fn feed(
     Query(params): Query<FeedParams>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    // 記事のリンクは絶対 URL にする。http で待ち受けているので `http://` + Host
-    let base = format!("http://{}", request_host(&headers, &state.web));
+    // 記事のリンクは絶対 URL にする
+    let base = base_url(&headers, &state.web);
     let xml = with_db_and_config(&state, move |db, web, labels| {
         let now = Utc::now();
         let Some(me) = feed_viewer(db, params.token.as_deref())? else {
@@ -206,7 +206,7 @@ pub(super) async fn settings_html(
     headers: &HeaderMap,
     notice: Option<html::PasswordNotice>,
 ) -> Result<String, AppError> {
-    let base = format!("http://{}", request_host(headers, &state.web));
+    let base = base_url(headers, &state.web);
     with_db_and_config(state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         // 購読用のフィードの URL（コピーして使うので絶対 URL）

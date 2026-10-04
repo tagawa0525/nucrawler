@@ -10,6 +10,7 @@ use crate::db::{
 
 use crate::search::Params;
 
+mod bar;
 mod detail;
 mod list;
 mod login;
@@ -25,6 +26,8 @@ pub use login::*;
 pub use reports::*;
 pub use search::*;
 pub use settings::*;
+
+use bar::*;
 
 /// HTML の特殊文字を実体参照にする。
 pub fn escape(s: &str) -> String {

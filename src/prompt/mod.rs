@@ -3,7 +3,6 @@
 //! ここには、プロンプトに埋め込む外部由来のデータ（記事の本文・見出しなど）の扱いも置く。
 
 pub mod digest;
-pub mod score;
 pub mod story;
 pub mod suggest;
 pub mod tidy;

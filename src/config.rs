@@ -202,8 +202,8 @@ pub enum LlmBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmTask {
     Digest,
-    /// 採点（`profile suggest`・`eval --profile` も採点のモデルを使う）
-    Score,
+    /// プロファイルの更新案（`review` ステージと `profile suggest`）
+    Suggest,
     Translate,
     Title,
     /// 同じ報道・関連の判定
@@ -214,7 +214,7 @@ pub enum LlmTask {
 impl LlmTask {
     pub const ALL: [LlmTask; 6] = [
         LlmTask::Digest,
-        LlmTask::Score,
+        LlmTask::Suggest,
         LlmTask::Translate,
         LlmTask::Title,
         LlmTask::Story,
@@ -228,9 +228,9 @@ pub struct LlmConfig {
     /// LLM を呼ぶバックエンドの既定。工程ごとに `*_backend` で変えられる。各工程のモデル名は、
     /// その工程のバックエンドの名前にする
     pub backend: LlmBackend,
-    /// 要約・採点・和訳・見出しの和訳・同じ報道の判定・語彙の整理のバックエンド（省けば `backend`）
+    /// 要約・更新案・和訳・見出しの和訳・同じ報道の判定・語彙の整理のバックエンド（省けば `backend`）
     pub digest_backend: Option<LlmBackend>,
-    pub score_backend: Option<LlmBackend>,
+    pub suggest_backend: Option<LlmBackend>,
     pub translate_backend: Option<LlmBackend>,
     pub title_backend: Option<LlmBackend>,
     pub story_backend: Option<LlmBackend>,
@@ -247,12 +247,8 @@ pub struct LlmConfig {
     pub digest_batch_size: usize,
     /// プロンプトに入れる本文の部分ごとの最大文字数
     pub max_input_chars: usize,
-    /// 採点に使うモデル
-    pub score_model: String,
-    /// 1 回の呼び出しで採点する記事数
-    pub score_batch_size: usize,
-    /// 要約が使い切らずに採点のために残す呼び出し回数（要約待ちが多くても推薦が止まらないように）
-    pub score_reserved_calls: u32,
+    /// プロファイルの更新案に使うモデル
+    pub suggest_model: String,
     /// 全文和訳に使うモデル
     pub translate_model: String,
     /// この点数以上の英語記事は、依頼が無くても先回りで和訳する
@@ -288,7 +284,7 @@ impl LlmConfig {
     pub fn backend_for(&self, task: LlmTask) -> LlmBackend {
         match task {
             LlmTask::Digest => self.digest_backend,
-            LlmTask::Score => self.score_backend,
+            LlmTask::Suggest => self.suggest_backend,
             LlmTask::Translate => self.translate_backend,
             LlmTask::Title => self.title_backend,
             LlmTask::Story => self.story_backend,
@@ -307,7 +303,6 @@ impl LlmConfig {
         for (name, is_zero) in [
             ("digest_batch_size", self.digest_batch_size == 0),
             ("max_input_chars", self.max_input_chars == 0),
-            ("score_batch_size", self.score_batch_size == 0),
             (
                 "translate_max_input_chars",
                 self.translate_max_input_chars == 0,
@@ -337,7 +332,7 @@ impl Default for LlmConfig {
         Self {
             backend: LlmBackend::ClaudeCli,
             digest_backend: None,
-            score_backend: None,
+            suggest_backend: None,
             translate_backend: None,
             title_backend: None,
             story_backend: None,
@@ -348,9 +343,7 @@ impl Default for LlmConfig {
             digest_model: "sonnet".into(),
             digest_batch_size: 5,
             max_input_chars: 6000,
-            score_model: "sonnet".into(),
-            score_batch_size: 20,
-            score_reserved_calls: 1,
+            suggest_model: "sonnet".into(),
             translate_model: "sonnet".into(),
             translate_min_score: 80,
             translate_max_input_chars: 20000,
@@ -839,12 +832,12 @@ mod tests {
     #[test]
     fn selects_backends_per_task() {
         let c = parse_config(
-            "[llm]\nbackend = \"copilot-cli\"\nscore_backend = \"claude-cli\"\n\
+            "[llm]\nbackend = \"copilot-cli\"\nsuggest_backend = \"claude-cli\"\n\
              [copilot_quota]\nmonthly_credits = 1500\n",
             p(),
         )
         .unwrap();
-        assert_eq!(c.llm.backend_for(LlmTask::Score), LlmBackend::ClaudeCli);
+        assert_eq!(c.llm.backend_for(LlmTask::Suggest), LlmBackend::ClaudeCli);
         for task in [
             LlmTask::Digest,
             LlmTask::Translate,
@@ -863,7 +856,7 @@ mod tests {
         // どの工程も Claude なら要らない
         let c = parse_config(
             "[llm]\nbackend = \"copilot-cli\"\ndigest_backend = \"claude-cli\"\n\
-             score_backend = \"claude-cli\"\ntranslate_backend = \"claude-cli\"\n\
+             suggest_backend = \"claude-cli\"\ntranslate_backend = \"claude-cli\"\n\
              title_backend = \"claude-cli\"\nstory_backend = \"claude-cli\"\n\
              tidy_backend = \"claude-cli\"\n",
             p(),
@@ -934,7 +927,6 @@ mod tests {
             ("[llm]\ndigest_batch_size = 0\n", "digest_batch_size"),
             ("[llm]\nmax_input_chars = 0\n", "max_input_chars"),
             ("[llm]\ntimeout_secs = 0\n", "timeout_secs"),
-            ("[llm]\nscore_batch_size = 0\n", "score_batch_size"),
             (
                 "[llm]\ntranslate_max_input_chars = 0\n",
                 "translate_max_input_chars",
@@ -960,14 +952,12 @@ mod tests {
         assert_eq!(d.backend, LlmBackend::ClaudeCli);
         assert_eq!(d.command_for(LlmBackend::ClaudeCli), "claude");
         assert_eq!(d.command_for(LlmBackend::CopilotCli), "copilot");
-        assert_eq!(d.backend_for(LlmTask::Score), LlmBackend::ClaudeCli);
+        assert_eq!(d.backend_for(LlmTask::Suggest), LlmBackend::ClaudeCli);
         assert_eq!(d.timeout_secs, 300);
         assert_eq!(d.digest_model, "sonnet");
         assert_eq!(d.digest_batch_size, 5);
         assert_eq!(d.max_input_chars, 6000);
-        assert_eq!(d.score_model, "sonnet");
-        assert_eq!(d.score_batch_size, 20);
-        assert_eq!(d.score_reserved_calls, 1);
+        assert_eq!(d.suggest_model, "sonnet");
         assert_eq!(d.translate_model, "sonnet");
         assert_eq!(d.translate_min_score, 80);
         assert_eq!(d.translate_max_input_chars, 20000);

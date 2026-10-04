@@ -20,9 +20,9 @@ extract_max_per_run = 100
 # 抑える）か "copilot-cli"（GitHub Copilot CLI、AI Credits。[copilot_quota] で抑える）
 backend = "claude-cli"
 # 工程ごとのバックエンド（省けば backend）。各工程のモデル名（下の *_model）は、その工程のバックエンドの名前にする
-# （copilot-cli なら "gpt-6-luna" など）。例：採点だけ Claude のまま、ほかを Copilot にする
+# （copilot-cli なら "gpt-6-luna" など）。例：更新案だけ Claude のまま、ほかを Copilot にする
 # backend = "copilot-cli"
-# score_backend = "claude-cli"
+# suggest_backend = "claude-cli"
 # digest_backend = "copilot-cli"
 # translate_backend = "copilot-cli"
 # title_backend = "copilot-cli"
@@ -40,11 +40,8 @@ concurrency = 2
 digest_model = "sonnet"
 digest_batch_size = 5
 max_input_chars = 6000
-# 採点に使うモデルと、1 回の呼び出しで採点する記事数
-score_model = "sonnet"
-score_batch_size = 20
-# 要約が使い切らずに採点のために残す呼び出し回数
-score_reserved_calls = 1
+# プロファイルの更新案（`review` ステージと `profile suggest`）に使うモデル
+suggest_model = "sonnet"
 # 全文和訳に使うモデル、先回りで和訳する点数、和訳に入れる本文の最大文字数
 translate_model = "sonnet"
 translate_min_score = 80
@@ -97,7 +94,8 @@ visit_gap_minutes = 30
 explore_per_day = 2
 
 [recommend]
-# 推薦点（LLM の点数に、記事に付けた評価から学んだ補正を足した点数）の補正の強さ。大きいほど LLM の点数に近いまま。
+# 推薦点（関心プロファイルとの近さの点数に、記事に付けた評価から学んだ補正を足した点数）の補正の強さ。
+# 大きいほど近さの点数に近いまま。
 # 20 では、評価 1 件で特徴を共有する記事が動くのは数点で、同じ傾向の評価が数十件そろうとはっきり効く。
 # 正の有限値（0 以下・inf・nan は設定の誤り）
 prior_strength = 20.0

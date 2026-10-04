@@ -91,7 +91,7 @@ pub async fn translate_articles<L: Llm>(
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = TranslateSummary::default();
         loop {
-            let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
+            let Some(_slot) = workers.begin_round(STAGE, &mut summary.tally).await? else {
                 break;
             };
             let claim_key = ClaimKey {

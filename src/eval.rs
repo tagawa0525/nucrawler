@@ -37,18 +37,17 @@ pub fn band(score: u8) -> u8 {
     (score.min(99) / 10) * 10
 }
 
-/// 評価の表示。`current` は現行のプロファイルの hash、`candidate` は候補のプロファイルの hash、
-/// `version` は今の score のプロンプトの版。`all` が偽なら、今の版の現行と候補のキーだけを出す。
+/// 評価の表示。`current` は現行のプロファイルの hash、`candidate` は候補のプロファイルの hash。
+/// `all` が偽なら、embedding の式の今の版の、現行と候補のキーだけを出す（保存済みの LLM の点数は計画 017 で
+/// 作らなくなったので、`all` のときだけ並べる）。
 pub fn render(
     labels: &[Label],
     scores: &[LabeledScore],
     current: Option<&str>,
     candidate: Option<&str>,
-    version: i64,
     all: bool,
     prior_strength: f64,
 ) -> String {
-    let current = current.map(|hash| (hash, version));
     let mut out = String::new();
     let per_rating: Vec<String> = Rating::all()
         .rev()
@@ -71,17 +70,13 @@ pub fn render(
             "note: fewer than {FEW_LABELS} ratings of 4-5 or of 1-2; treat the numbers as rough"
         );
     }
-    let of_current = |k: &EvalKey| {
-        current.is_some_and(|(hash, version)| {
-            k.profile_hash == hash && k.prompt_version == current_version(k, version)
-        })
-    };
+    let of_current = |k: &EvalKey| current.is_some_and(|hash| k.profile_hash == hash) && is_now(k);
     // その場で計算した式の候補は、現行のプロファイルのものを現行と分けて並べる
     let is_trial = |k: &EvalKey| k.backend == TRIAL_BACKEND && of_current(k);
     let is_current = |k: &EvalKey| k.backend != TRIAL_BACKEND && of_current(k);
-    // 候補は今の版のプロンプトで採点する。現行のプロファイルが無くても判定できるようにする
+    // 候補は今の版の式で採点する。現行のプロファイルが無くても判定できるようにする
     let is_candidate = |k: &EvalKey| {
-        k.prompt_version == current_version(k, version)
+        is_now(k)
             && candidate.is_some_and(|hash| k.profile_hash == hash)
             && !is_current(k)
             && !is_trial(k)
@@ -102,7 +97,7 @@ pub fn render(
             } else {
                 let _ = writeln!(
                     out,
-                    "no scores for the current profile and prompt version (see --all)"
+                    "no scores for the current profile and formula version (see --all)"
                 );
             }
         }
@@ -192,13 +187,11 @@ pub fn embedding_trial(
         .collect()
 }
 
-/// キーの採点器の今の版：embedding なら式の版、LLM ならプロンプトの版（`llm_version`）。
-fn current_version(key: &EvalKey, llm_version: i64) -> i64 {
-    if key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND {
-        crate::embed_score::SCORE_VERSION
-    } else {
-        llm_version
-    }
+/// 今の採点器のキーか：embedding（保存したものとその場で計算したもの）の、式の今の版。保存済みの LLM の
+/// 点数（計画 017 の前のもの）は今のキーにならない。
+fn is_now(key: &EvalKey) -> bool {
+    (key.backend == crate::db::EMBED_BACKEND || key.backend == TRIAL_BACKEND)
+        && key.prompt_version == crate::embed_score::SCORE_VERSION
 }
 
 /// 確認枠の評価の内訳。評価した記事のうち関心（評価 4〜5）の割合を、閾値未満での見逃し率の見積もりとして示す。
@@ -348,7 +341,18 @@ mod tests {
         }
     }
 
-    fn key(profile_hash: &str, prompt_version: i64) -> EvalKey {
+    /// 保存した embedding の点数の、式の今の版のキー。
+    fn key(profile_hash: &str) -> EvalKey {
+        EvalKey {
+            profile_hash: profile_hash.into(),
+            backend: crate::db::EMBED_BACKEND.into(),
+            model: "ruri".into(),
+            prompt_version: SV,
+        }
+    }
+
+    /// 保存済みの LLM の点数（計画 017 の前に作ったもの）のキー。
+    fn llm_key(profile_hash: &str, prompt_version: i64) -> EvalKey {
         EvalKey {
             profile_hash: profile_hash.into(),
             backend: "claude-cli".into(),
@@ -356,6 +360,8 @@ mod tests {
             prompt_version,
         }
     }
+
+    const SV: i64 = crate::embed_score::SCORE_VERSION;
 
     fn scored(key: &EvalKey, article_id: i64, score: u8, scored_at: &str) -> LabeledScore {
         LabeledScore {
@@ -378,7 +384,7 @@ mod tests {
     /// LLM が過大評価するトピックを低く、過小評価するトピックを高く評価していれば、推薦点のほうが当たる。
     #[test]
     fn compares_the_adjusted_score_left_out() {
-        let current = key("h", 3);
+        let current = key("h");
         let at = "2026-09-26T00:00:00.000Z";
         let mut labels = Vec::new();
         let mut scores = Vec::new();
@@ -394,7 +400,7 @@ mod tests {
                 ..scored(&current, 10 + i, 45, at)
             });
         }
-        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        let out = render(&labels, &scores, Some("h"), None, false, 1.0);
         assert!(
             out.contains("scored 10/10  concordance 0.00  adjusted 1.00 (leave-one-out)"),
             "{out}"
@@ -404,85 +410,66 @@ mod tests {
     #[test]
     fn renders_labels_and_the_current_key() {
         let labels = [label(1, 5), label(2, 4), label(3, 2)];
-        let current = key("0123456789abcdef", 1);
-        let old = key("fedcba9876543210", 1);
+        let current = key("0123456789abcdef");
+        let old = llm_key("fedcba9876543210", 1);
         let before = "2026-09-26T00:00:00.000Z";
         let scores = [
             scored(&current, 1, 95, before),
-            // 反応の後に採点し直した
-            scored(&current, 2, 72, "2026-09-28T00:00:00.000Z"),
+            scored(&current, 2, 72, before),
             scored(&current, 3, 40, before),
-            scored(&old, 1, 10, before),
+            // 反応の後に採点し直した（LLM のプロンプトの版 1 だけ注記する）
+            scored(&old, 1, 10, "2026-09-28T00:00:00.000Z"),
         ];
-        let out = render(
-            &labels,
-            &scores,
-            Some("0123456789abcdef"),
-            None,
-            1,
-            false,
-            1.0,
-        );
+        let out = render(&labels, &scores, Some("0123456789abcdef"), None, false, 1.0);
         assert!(
             out.starts_with("labels: 3 rated (★5 1, ★4 1, ★3 0, ★2 1, ★1 0)\n"),
             "{out}"
         );
         assert!(out.contains("fewer than 5"), "{out}");
         assert!(
-            out.contains("profile 01234567  claude-cli/sonnet  prompt v1  (current)"),
+            out.contains(&format!(
+                "profile 01234567  embedding/ruri  prompt v{SV}  (current)"
+            )),
             "{out}"
         );
         assert!(
             out.contains("scored 3/3  concordance 1.00  adjusted"),
             "{out}"
         );
-        assert!(out.contains("1 scored after the reaction"), "{out}");
         assert!(out.contains("  score     ★1  ★2  ★3  ★4  ★5\n"), "{out}");
         assert!(out.contains("  90-100     0   0   0   0   1\n"), "{out}");
         assert!(out.contains("  70-79      0   0   0   1   0\n"), "{out}");
         assert!(out.contains("  40-49      0   1   0   0   0\n"), "{out}");
-        // 既定では現行のキーだけ
+        // 既定では現行のキーだけ（保存済みの LLM の点数は出さない）
         assert!(!out.contains("fedcba98"), "{out}");
-        let all = render(
-            &labels,
-            &scores,
-            Some("0123456789abcdef"),
-            None,
-            1,
-            true,
-            1.0,
-        );
+        let all = render(&labels, &scores, Some("0123456789abcdef"), None, true, 1.0);
         assert!(
             all.contains("profile fedcba98  claude-cli/sonnet  prompt v1\n"),
             "{all}"
         );
         assert!(all.contains("scored 1/3  concordance -"), "{all}");
+        assert!(all.contains("1 scored after the reaction"), "{all}");
     }
 
     /// 反応の見出しをプロンプトに入れていたのは版 1 だけなので、それ以降の版には注記しない。
     #[test]
     fn notes_late_scores_only_for_prompt_v1() {
         let labels = [label(1, 4), label(2, 2)];
-        let v2 = key("h", 2);
+        let v2 = llm_key("h", 2);
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [scored(&v2, 1, 80, after), scored(&v2, 2, 20, after)];
-        let out = render(&labels, &scores, Some("h"), None, 2, false, 1.0);
+        let out = render(&labels, &scores, Some("h"), None, true, 1.0);
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
-    /// embedding の点数は、embedding の式の今の版のキーを現行として、LLM の現行のキーと並べる。その場で計算するので
-    /// いつも評価の後になるが、反応の見出しは入力に無いので注記しない。
+    /// embedding の点数は、式の今の版のキーを現行にする。保存済みの LLM の点数は現行にしない。embedding は
+    /// 評価の後に採点し直すことが多いが、反応の見出しは入力に無いので注記しない。
     #[test]
     fn shows_embedding_scores_as_current_without_the_late_note() {
         let labels = [label(1, 4), label(2, 2)];
-        let llm = key("h", 3);
-        let embedding = EvalKey {
-            backend: crate::db::EMBED_BACKEND.into(),
-            model: "ruri".into(),
-            prompt_version: crate::embed_score::SCORE_VERSION,
-            ..key("h", 0)
-        };
+        let llm = llm_key("h", 3);
+        let embedding = key("h");
         let after = "2026-09-28T00:00:00.000Z";
         let scores = [
             scored(&llm, 1, 80, after),
@@ -490,7 +477,7 @@ mod tests {
             scored(&embedding, 1, 70, after),
             scored(&embedding, 2, 30, after),
         ];
-        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        let out = render(&labels, &scores, Some("h"), None, false, 1.0);
         assert!(
             out.contains(&format!(
                 "embedding/ruri  prompt v{}  (current)",
@@ -498,10 +485,7 @@ mod tests {
             )),
             "{out}"
         );
-        assert!(
-            out.contains("claude-cli/sonnet  prompt v3  (current)"),
-            "{out}"
-        );
+        assert!(!out.contains("claude-cli"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
         // LLM の版 1 の注記は、embedding の版が 1 でも出さない
         let v1 = EvalKey {
@@ -509,7 +493,7 @@ mod tests {
             ..embedding
         };
         let scores = [scored(&v1, 1, 70, after), scored(&v1, 2, 30, after)];
-        let out = render(&labels, &scores, Some("h"), None, 3, true, 1.0);
+        let out = render(&labels, &scores, Some("h"), None, true, 1.0);
         assert!(!out.contains("after the reaction"), "{out}");
     }
 
@@ -520,8 +504,7 @@ mod tests {
         let trial = EvalKey {
             backend: TRIAL_BACKEND.into(),
             model: "ruri λ=0.5".into(),
-            prompt_version: crate::embed_score::SCORE_VERSION,
-            ..key("h", 0)
+            ..key("h")
         };
         let other = EvalKey {
             profile_hash: "old".into(),
@@ -533,13 +516,13 @@ mod tests {
             scored(&trial, 2, 30, after),
             scored(&other, 1, 70, after),
         ];
-        let out = render(&labels, &scores, Some("h"), None, 3, false, 1.0);
+        let out = render(&labels, &scores, Some("h"), None, false, 1.0);
         assert!(out.contains("embedding-trial/ruri λ=0.5"), "{out}");
         assert!(out.contains("(trial)"), "{out}");
         assert!(!out.contains("profile old"), "{out}");
         assert!(!out.contains("after the reaction"), "{out}");
         // 候補が今のプロファイルと同じでも、今のプロファイルの式の候補は trial のまま
-        let same = render(&labels, &scores, Some("h"), Some("h"), 3, false, 1.0);
+        let same = render(&labels, &scores, Some("h"), Some("h"), false, 1.0);
         assert!(same.contains("(trial)"), "{same}");
         assert!(!same.contains("(candidate)"), "{same}");
     }
@@ -565,7 +548,7 @@ mod tests {
         let reference = [vec![0.6, 0.8], vec![0.0, 1.0]];
         let trial = EvalKey {
             backend: TRIAL_BACKEND.into(),
-            ..key("h", 1)
+            ..key("h")
         };
         let scorer = Scorer::new(&preference, Formula::default(), &reference);
         let got = embedding_trial(&labeled, &scorer, &trial, "2026-10-01T00:00:00.000Z");
@@ -581,9 +564,9 @@ mod tests {
     #[test]
     fn shows_the_candidate_next_to_the_current_key() {
         let labels = [label(1, 4), label(2, 2)];
-        let current = key("aaaaaaaaaaaa", 2);
-        let candidate = key("bbbbbbbbbbbb", 2);
-        let other = key("cccccccccccc", 2);
+        let current = key("aaaaaaaaaaaa");
+        let candidate = key("bbbbbbbbbbbb");
+        let other = key("cccccccccccc");
         let at = "2026-09-26T00:00:00.000Z";
         let scores = [
             scored(&current, 1, 40, at),
@@ -597,14 +580,13 @@ mod tests {
             &scores,
             Some("aaaaaaaaaaaa"),
             Some("bbbbbbbbbbbb"),
-            2,
             false,
             1.0,
         );
         let current_at = out.find("profile aaaaaaaa").unwrap();
         let candidate_at = out.find("profile bbbbbbbb").unwrap();
         assert!(current_at < candidate_at, "{out}");
-        assert!(out.contains("prompt v2  (candidate)"), "{out}");
+        assert!(out.contains(&format!("prompt v{SV}  (candidate)")), "{out}");
         assert!(out.contains("scored 2/2  concordance 0.00"), "{out}");
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
         assert!(!out.contains("cccccccc"), "{out}");
@@ -614,14 +596,13 @@ mod tests {
     #[test]
     fn says_when_only_the_candidate_has_scores() {
         let labels = [label(1, 4)];
-        let candidate = key("bbbbbbbbbbbb", 2);
+        let candidate = key("bbbbbbbbbbbb");
         let scores = [scored(&candidate, 1, 90, "2026-09-26T00:00:00.000Z")];
         let out = render(
             &labels,
             &scores,
             Some("aaaaaaaaaaaa"),
             Some("bbbbbbbbbbbb"),
-            2,
             false,
             1.0,
         );
@@ -633,12 +614,12 @@ mod tests {
     #[test]
     fn shows_the_candidate_without_a_saved_profile() {
         let labels = [label(1, 4), label(2, 2)];
-        let candidate = key("bbbbbbbbbbbb", 2);
+        let candidate = key("bbbbbbbbbbbb");
         let at = "2026-09-26T00:00:00.000Z";
         let scores = [scored(&candidate, 1, 90, at), scored(&candidate, 2, 10, at)];
-        let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), 2, false, 1.0);
+        let out = render(&labels, &scores, None, Some("bbbbbbbbbbbb"), false, 1.0);
         assert!(out.contains("no profile"), "{out}");
-        assert!(out.contains("prompt v2  (candidate)"), "{out}");
+        assert!(out.contains(&format!("prompt v{SV}  (candidate)")), "{out}");
         assert!(out.contains("scored 2/2  concordance 1.00"), "{out}");
     }
 
@@ -669,9 +650,9 @@ mod tests {
     #[test]
     fn says_when_the_current_key_has_no_scores() {
         let labels = [label(1, 4)];
-        let out = render(&labels, &[], Some("h"), None, 1, false, 1.0);
+        let out = render(&labels, &[], Some("h"), None, false, 1.0);
         assert!(out.contains("no scores for the current profile"), "{out}");
-        let out = render(&[], &[], None, None, 1, false, 1.0);
+        let out = render(&[], &[], None, None, false, 1.0);
         assert!(out.starts_with("labels: 0 rated"), "{out}");
         assert!(out.contains("no profile"), "{out}");
     }

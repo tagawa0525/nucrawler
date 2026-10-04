@@ -429,13 +429,13 @@ mod tests {
         let backends = Backends::from_config(
             &LlmConfig {
                 backend: LlmBackend::CopilotCli,
-                score_backend: Some(LlmBackend::ClaudeCli),
+                suggest_backend: Some(LlmBackend::ClaudeCli),
                 command: Some("/opt/claude".into()),
                 ..LlmConfig::default()
             },
             data,
         );
-        let Backend::Claude(c) = backends.for_task(LlmTask::Score) else {
+        let Backend::Claude(c) = backends.for_task(LlmTask::Suggest) else {
             panic!("score runs on claude");
         };
         assert_eq!(c.command, std::path::PathBuf::from("/opt/claude"));
@@ -454,6 +454,6 @@ mod tests {
             backends.for_task(LlmTask::Translate).backend(),
             "copilot-cli"
         );
-        assert_eq!(backends.for_task(LlmTask::Score).backend(), "claude-cli");
+        assert_eq!(backends.for_task(LlmTask::Suggest).backend(), "claude-cli");
     }
 }

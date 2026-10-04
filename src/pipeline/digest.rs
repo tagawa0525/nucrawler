@@ -74,11 +74,7 @@ pub async fn digest_articles<L: Llm>(
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = DigestSummary::default();
         loop {
-            // 採点のための回数を残して止める（要約待ちが多くても推薦が止まらないように）
-            let Some(_slot) = workers
-                .begin_round(STAGE, llm_cfg.score_reserved_calls, &mut summary.tally)
-                .await?
-            else {
+            let Some(_slot) = workers.begin_round(STAGE, &mut summary.tally).await? else {
                 break;
             };
             let claim_key = ClaimKey {
@@ -256,11 +252,9 @@ mod tests {
             .to_utc()
     }
 
-    /// 採点のための予約は `leaves_reserved_calls_for_scoring` で確かめるので、ほかのテストでは 0 にする。
     fn llm_cfg(batch: usize) -> LlmConfig {
         LlmConfig {
             digest_batch_size: batch,
-            score_reserved_calls: 0,
             ..LlmConfig::default()
         }
     }
@@ -556,45 +550,6 @@ mod tests {
             summary.tally.halted,
             Some(Halt::Quota(Stop::FiveHour { .. }))
         ));
-    }
-
-    /// 採点のために残す回数に達したら、要約は止まる。
-    #[tokio::test]
-    async fn leaves_reserved_calls_for_scoring() {
-        let db = Db::open_in_memory().unwrap();
-        let ids = articles(&db, 3);
-        let llm = FakeLlm::new([ok(&ids[..1], 0.1), ok(&ids[1..2], 0.1)]);
-        let mut q = quota(3);
-        let cfg = LlmConfig {
-            score_reserved_calls: 1,
-            ..llm_cfg(1)
-        };
-        let summary = digest_articles(
-            LlmStage {
-                db: &db,
-                llm: &llm,
-                quota: &mut q,
-                cancel: &Cancel::default(),
-                clock: &now,
-            },
-            &cfg,
-            &PipelineConfig::default(),
-            &Target::Pending {
-                requests_only: false,
-            },
-            now(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(summary.tally.calls, 2);
-        assert_eq!(
-            summary.tally.halted,
-            Some(Halt::Quota(Stop::Reserved { reserved: 1 }))
-        );
-        assert!(
-            q.permit("fake", now()).is_ok(),
-            "one call is left for scoring"
-        );
     }
 
     #[tokio::test]

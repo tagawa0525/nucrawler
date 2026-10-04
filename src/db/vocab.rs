@@ -697,15 +697,6 @@ mod tests {
             serde_json::json!(["燃料", "新設・建設"]),
             "in vocabulary order"
         );
-        let inputs = db
-            .pending_score(
-                score_key(&db),
-                ScoreScope::Since(t("2026-09-10T00:00:00Z")),
-                t("2026-09-28T00:00:00Z"),
-                10,
-            )
-            .unwrap();
-        assert_eq!(inputs[0].topics, ["燃料", "新設・建設"]);
     }
 
     #[test]

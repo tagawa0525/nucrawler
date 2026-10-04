@@ -153,7 +153,7 @@ pub async fn judge_stories<L: Llm>(
     let parts = run_workers(llm_cfg.concurrency, |_| async {
         let mut summary = StorySummary::default();
         loop {
-            let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
+            let Some(_slot) = workers.begin_round(STAGE, &mut summary.tally).await? else {
                 break;
             };
             // 予約は処理を終える（この周の終わりで drop する）まで持つ

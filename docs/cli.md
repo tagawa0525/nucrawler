@@ -10,7 +10,7 @@ nucrawler mcp
 nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N] | nucrawler profile history | nucrawler profile revert VERSION
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
-nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
+nucrawler eval [--all] [--profile FILE]
 nucrawler embed rebuild
 nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler user disable LOGIN | nucrawler user rename LOGIN NEW_LOGIN | nucrawler user list
 ```
@@ -38,7 +38,7 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
 ## eval
 
 採点が利用者の評価とどれだけ合っているかを表示する。記事に付けた評価（★1〜5）を正解とし
-（ブックマーク・既読の印・開いただけの記事は使わない）、採点のキー（プロファイル・モデル・プロンプトの版）ごとに次を出す。
+（ブックマーク・既読の印・開いただけの記事は使わない）、採点のキー（プロファイル・モデル・式の版）ごとに次を出す。
 
 - 採点済みの割合
 - 一致率：評価の違う記事の組のうち、評価の高い方が高い点になっている割合。同点は半分と数え、
@@ -49,19 +49,17 @@ nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | nucrawler 
 - 確認枠（[Web UI](web-ui.md#確認枠)）に出した記事の評価の内訳。評価した記事のうち関心（★4〜5）の割合を、
   閾値未満での見逃し率の見積もりとして示す
 
-既定は今のプロファイルと版のキーだけで、`--all` で過去のキーも並べる。
+採点は embedding の点数（`embedding/<モデル>`。`embed` ステージが採点した時点の基準で保存したもの）で、既定は今の
+プロファイルと式の版のキーだけを並べる。`--all` で過去のキーと、計画 017 の前に保存した LLM の点数（`claude-cli/<モデル>`）も並べる。
 
-`[embedding]` があれば、embedding の点数（`embedding/<モデル>`。`embed` ステージが採点した時点の基準で保存したもの）も
-並べ、さらに式の候補（`embedding-trial/<モデル> now`・`λ=0.5`・`λ=0`・`mean`・`top3`）を、保存せずに今の時点・
+`[embedding]` があれば、さらに式の候補（`embedding-trial/<モデル> now`・`λ=0.5`・`λ=0`・`mean`・`top3`）を、保存せずに今の時点・
 同じ基準でその場で計算して `(trial)` として並べる。式どうしは `now` と比べる（保存した点数とは基準の時点が違う）。
 
 ### eval --profile FILE
 
-候補のプロファイル（`profile import` と同じ形式）で、正解の付いた記事を採点してから、今のプロファイルと並べて表示する。
-候補は取り込まず、その採点は候補のプロファイルのものとして残るので、一覧には影響しない
-（候補を取り込めばそのまま使われ、同じ候補で再実行しても採点済みの記事では LLM を呼ばない）。
-LLM の呼び出しの上限は `redo` と同じ。`[embedding]` があれば、候補の embedding の点数も今の式でその場で
-計算して並べる（候補の好みの文のベクトルは作って残すが、次の `embed` で使われなければ消える）。
+候補のプロファイル（`profile import` と同じ形式）で、評価した記事を embedding で今の式でその場で採点し、今のプロファイルと
+並べて表示する（`[embedding]` が要る）。候補は取り込まず、点数も保存しない。LLM は呼ばない
+（候補の好みの文のベクトルは作って残すが、次の `embed` で使われなければ消える）。
 
 ## profile suggest
 

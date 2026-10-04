@@ -6,7 +6,7 @@ README の設定例で入る user unit：
 
 | unit                       | 内容                                                         | 既定の時刻        |
 | -------------------------- | ------------------------------------------------------------ | ----------------- |
-| `nucrawler-crawl.timer`    | 取得から要約・採点・和訳まで（`crawl`）                      | 03:00 10:00 16:00 |
+| `nucrawler-crawl.timer`    | 取得から要約・採点（embedding）・和訳まで（`crawl`）         | 03:00 10:00 16:00 |
 | `nucrawler-fetch.timer`    | 取得と本文抽出だけ（`crawl --until extract`）                | 22:00             |
 | `nucrawler-requests.timer` | Web UI から依頼された和訳と見直し（`crawl --requests-only`） | 15 分ごと         |
 | `nucrawler-serve.service`  | Web UI（`serve`）                                            | 常駐              |

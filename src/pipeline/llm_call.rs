@@ -154,11 +154,10 @@ impl<'a, L: Llm> Workers<'a, L> {
 
     /// 周の始め。ほかの作業者に譲り、止まっていないか・止める指示が無いかを見て、呼び出しの枠を取り、クォータで
     /// 判定する。呼んでよければ枠を返す（判定・作業の予約・呼び出しをその中で行い、周の終わりまで持つ）。止まる
-    /// なら理由を `tally` に記録して `None`。`reserve_calls` は残す呼び出し回数（`permit` を参照）。
+    /// なら理由を `tally` に記録して `None`。
     pub async fn begin_round(
         &self,
         stage: &str,
-        reserve_calls: u32,
         tally: &mut Tally,
     ) -> Result<Option<L::Slot>, DbError> {
         // 同時に終わったほかの作業者の結果（止める旗）が伝わってから次の周に入る
@@ -186,13 +185,7 @@ impl<'a, L: Llm> Workers<'a, L> {
         if self.shared.stopped() {
             return Ok(None);
         }
-        if let Err(stop) = permit(
-            self.db,
-            &self.shared,
-            self.llm.backend(),
-            (self.clock)(),
-            reserve_calls,
-        )? {
+        if let Err(stop) = permit(self.db, &self.shared, self.llm.backend(), (self.clock)())? {
             tracing::info!("{stage} stops: {stop}");
             tally.halted = Some(Halt::Quota(stop));
             return Ok(None);
@@ -301,7 +294,7 @@ async fn reserve<L: Llm>(llm: &L, cancel: &Cancel) -> Reserved<L::Slot> {
 }
 
 /// 次の呼び出しをしてよいか。LLM を呼ぶ実行は並行して動くので、判定の前に DB の最新の使用率を
-/// 読み、ほかの実行の呼び出しも判定に入れる。`reserve` は残す呼び出し回数（`permit_reserving`）。
+/// 読み、ほかの実行の呼び出しも判定に入れる。
 /// `now` は判定する時点の時刻（`LlmStage::clock`）。ステージを始めた時刻を使うと、枠を待つ間や
 /// 長いステージの途中で時間帯が変わっても、前の時間帯の上限で判定してしまう。
 fn permit(
@@ -309,7 +302,6 @@ fn permit(
     shared: &Shared<'_>,
     backend: &str,
     now: DateTime<Utc>,
-    reserve: u32,
 ) -> Result<Result<(), crate::quota::Stop>, DbError> {
     let mut quota = shared.quota.borrow_mut();
     if quota.credits_backend() == Some(backend) {
@@ -317,7 +309,7 @@ fn permit(
     } else {
         quota.observe(db.latest_rate_limit(now)?);
     }
-    Ok(quota.permit_reserving(backend, now, reserve))
+    Ok(quota.permit(backend, now))
 }
 
 /// 依頼したのに応答に無かった、またはスキーマに合わなかった記事の失敗の理由。
@@ -747,10 +739,10 @@ mod tests {
         };
         let mut quota = Quota::with_credits(QuotaConfig::default(), credits, "copilot-cli", None);
         let shared = Shared::new(&mut quota);
-        assert_eq!(permit(&db, &shared, "copilot-cli", now, 0).unwrap(), Ok(()));
+        assert_eq!(permit(&db, &shared, "copilot-cli", now).unwrap(), Ok(()));
         record(NANO, "2026-09-15T00:00:00Z");
         assert!(matches!(
-            permit(&db, &shared, "copilot-cli", now, 0).unwrap(),
+            permit(&db, &shared, "copilot-cli", now).unwrap(),
             Err(crate::quota::Stop::MonthlyCredits { .. })
         ));
     }

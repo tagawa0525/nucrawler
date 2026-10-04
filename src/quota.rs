@@ -178,10 +178,6 @@ pub enum Stop {
     MaxCalls {
         limit: u32,
     },
-    /// 後段のステージのために残した回数に達した
-    Reserved {
-        reserved: u32,
-    },
     /// 月の消費クレジットが、月の経過に応じた許容量に達した
     MonthlyCredits {
         used: f64,
@@ -219,12 +215,6 @@ impl std::fmt::Display for Stop {
                 f,
                 "monthly AI Credits {used:.1} reached the pace allowance {limit:.1}"
             ),
-            Stop::Reserved { reserved } => {
-                write!(
-                    f,
-                    "keeping the last {reserved} llm call(s) for later stages"
-                )
-            }
         }
     }
 }
@@ -341,21 +331,6 @@ impl Quota {
             if used >= limit {
                 return Err(Stop::WeeklyPace { used, limit });
             }
-        }
-        Ok(())
-    }
-
-    /// `permit` に加え、残りの呼び出し回数が `reserve` 以下なら止める。前段のステージが
-    /// 回数を使い切って、後段（採点）がいつまでも実行されない状態を防ぐ。
-    pub fn permit_reserving(
-        &self,
-        backend: &str,
-        now: DateTime<Utc>,
-        reserve: u32,
-    ) -> Result<(), Stop> {
-        self.permit(backend, now)?;
-        if self.max_calls.saturating_sub(self.calls) <= reserve {
-            return Err(Stop::Reserved { reserved: reserve });
         }
         Ok(())
     }
@@ -679,32 +654,6 @@ mod tests {
         assert!(matches!(
             q.permit("claude-cli", now),
             Err(Stop::Weekly { .. })
-        ));
-    }
-
-    #[test]
-    fn reserving_keeps_calls_for_later_stages() {
-        let now = jst("2026-09-28T10:30:00");
-        let mut q = Quota::new(QuotaConfig::default(), None, Some(3));
-        assert!(q.permit_reserving("claude-cli", now, 1).is_ok());
-        q.record_call(None);
-        assert!(q.permit_reserving("claude-cli", now, 1).is_ok());
-        q.record_call(None);
-        assert_eq!(
-            q.permit_reserving("claude-cli", now, 1),
-            Err(Stop::Reserved { reserved: 1 })
-        );
-        // 後段は残した回数を使える
-        assert!(q.permit("claude-cli", now).is_ok());
-        // ほかの理由（5 時間枠など）で止まるときは、そちらを返す
-        let q = Quota::new(
-            QuotaConfig::default(),
-            Some(usage(0.9, 0.1, now, 5.0)),
-            Some(3),
-        );
-        assert!(matches!(
-            q.permit_reserving("claude-cli", now, 1),
-            Err(Stop::FiveHour { .. })
         ));
     }
 

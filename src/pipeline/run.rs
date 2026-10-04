@@ -7,8 +7,7 @@ use chrono::{DateTime, Utc};
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoKind, RedoSpec, Stage, Target};
 use super::{
-    digest, embed, embed_profiles, extract, fetch, review, score, story, suggest, tidy, title,
-    translate,
+    digest, embed, embed_profiles, extract, fetch, review, story, suggest, tidy, title, translate,
 };
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -27,8 +26,6 @@ pub enum RunError {
     Extract(#[from] extract::ExtractStageError),
     #[error(transparent)]
     Digest(#[from] digest::DigestStageError),
-    #[error(transparent)]
-    Score(#[from] score::ScoreStageError),
     #[error(transparent)]
     Translate(#[from] translate::TranslateStageError),
     #[error(transparent)]
@@ -132,19 +129,10 @@ pub async fn crawl<L: LlmSet>(
                 None
             }
             Stage::Digest => {
-                // 採点が計画に無ければ、採点のための予約はしない
-                let digest_cfg = LlmConfig {
-                    score_reserved_calls: super::score_reserve(
-                        stages,
-                        &config.llm,
-                        db.profile_hash(db.owner_id()?)?.is_some(),
-                    ),
-                    ..config.llm.clone()
-                };
                 let now = (env.clock)();
                 let summary = digest::digest_articles(
                     env.stage(LlmTask::Digest),
-                    &digest_cfg,
+                    &config.llm,
                     &config.pipeline,
                     &Target::Pending {
                         requests_only: false,
@@ -157,25 +145,6 @@ pub async fn crawl<L: LlmSet>(
                     failed = summary.tally.failed,
                     calls = summary.tally.calls,
                     "digest stage finished"
-                );
-                summary.tally.halted
-            }
-            Stage::Score => {
-                let now = (env.clock)();
-                let summary = score::score_articles(
-                    env.stage(LlmTask::Score),
-                    &config.llm,
-                    &config.pipeline,
-                    db.owner_id()?,
-                    score::ScoreTarget::Saved,
-                    now,
-                )
-                .await?;
-                tracing::info!(
-                    scored = summary.scored,
-                    failed = summary.tally.failed,
-                    calls = summary.tally.calls,
-                    "score stage finished"
                 );
                 summary.tally.halted
             }
@@ -248,7 +217,7 @@ pub async fn crawl<L: LlmSet>(
                 };
                 let now = (env.clock)();
                 let summary = review::review_profiles(
-                    env.stage(LlmTask::Score),
+                    env.stage(LlmTask::Suggest),
                     config,
                     &client,
                     cfg,
@@ -376,8 +345,6 @@ pub async fn redo<L: LlmSet>(
         RedoKind::Digest => {
             let cfg = LlmConfig {
                 digest_model: model,
-                // redo では採点しないので、採点のための回数は残さない
-                score_reserved_calls: 0,
                 ..config.llm.clone()
             };
             let summary = digest::digest_articles(
@@ -433,7 +400,8 @@ pub async fn suggest_profile<L: LlmSet>(
 ) -> Result<(RunReport, Suggested), RunError> {
     let mut report = RunReport::default();
     let summary =
-        suggest::suggest_profile(env.stage(LlmTask::Score), &config.llm, profile, evidence).await?;
+        suggest::suggest_profile(env.stage(LlmTask::Suggest), &config.llm, profile, evidence)
+            .await?;
     // 呼ばなかった理由（上限の種類）を利用者に示す。LLM の失敗と中断は report で知らせる
     let reason = match &summary.tally.halted {
         Some(Halt::Quota(stop)) => stop.to_string(),
@@ -456,37 +424,6 @@ pub enum Suggested {
     Profile(crate::prompt::suggest::Suggestion),
     /// 上限などで呼ばなかった。利用者に見せる理由
     NotAsked(String),
-}
-
-/// `eval --profile`：候補のプロファイルで、指定した記事のうちまだ採点していないものを採点する。
-/// 候補は保存しない。
-pub async fn eval_profile<L: LlmSet>(
-    mut env: RunEnv<'_, L>,
-    config: &Config,
-    profile: &Profile,
-    articles: &[i64],
-) -> Result<RunReport, RunError> {
-    let owner = env.db.owner_id()?;
-    let mut report = RunReport::default();
-    let now = (env.clock)();
-    let summary = score::score_articles(
-        env.stage(LlmTask::Score),
-        &config.llm,
-        &config.pipeline,
-        owner,
-        score::ScoreTarget::Candidate { profile, articles },
-        now,
-    )
-    .await?;
-    tracing::info!(
-        scored = summary.scored,
-        failed = summary.tally.failed,
-        calls = summary.tally.calls,
-        "candidate profile scored"
-    );
-    report_halt(summary.tally.halted, &mut report.llm_failure);
-    report.cancelled = env.cancel.is_requested();
-    Ok(report)
 }
 
 /// 止めた理由をログに出し、同じ実行でそのバックエンドをもう使わないほうがよいなら、止まった
@@ -566,11 +503,9 @@ mod tests {
         })
     }
 
-    fn score_ok(id: i64) -> Result<LlmResponse, LlmError> {
+    fn translate_ok() -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            output: serde_json::json!({"items": [{
-                "id": id, "score": 80, "reason": "理由", "matched": ["燃料"], "excluded": [],
-            }]}),
+            output: serde_json::json!({"body_ja": "訳文"}),
             usage: None,
         })
     }
@@ -655,13 +590,15 @@ mod tests {
         assert!(db.profile_suggestions(owner).unwrap().is_empty());
     }
 
-    /// 要約済みで採点を待つ記事と、要約を待つ記事を 1 件ずつ用意し、採点を待つ記事の id を返す。
+    /// 要約済みで和訳を頼まれた記事と、要約を待つ記事を 1 件ずつ用意し、和訳を待つ記事の id を返す。
     async fn digested_and_pending(db: &Db) -> i64 {
         save_profile(db);
         let id = article(db, 0);
         let llm = FakeLlm::new([digest_ok(id)]);
         let report = crawl_with(db, &llm, 1, &Cancel::default(), &[Stage::Digest]).await;
         assert_eq!(report, RunReport::default());
+        db.request_translation(db.owner_id().unwrap(), id, now())
+            .unwrap();
         article(db, 1);
         id
     }
@@ -700,14 +637,14 @@ mod tests {
     async fn llm_failure_skips_later_llm_stages() {
         let db = Db::open_in_memory().unwrap();
         digested_and_pending(&db).await;
-        // 採点を待つ記事があるので、飛ばさなければ採点が呼び、用意した応答が尽きて panic する
+        // 和訳を待つ記事があるので、飛ばさなければ和訳が呼び、用意した応答が尽きて panic する
         let llm = FakeLlm::new([not_logged_in()]);
         let report = crawl_with(
             &db,
             &llm,
             10,
             &Cancel::default(),
-            &[Stage::Digest, Stage::Score, Stage::Translate, Stage::Tidy],
+            &[Stage::Digest, Stage::Translate, Stage::Tidy],
         )
         .await;
         assert_eq!(llm.requests().len(), 1);
@@ -814,22 +751,22 @@ mod tests {
     #[tokio::test]
     async fn reports_embedding_failures_and_continues() {
         let db = Db::open_in_memory().unwrap();
-        let digested = digested_and_pending(&db).await;
+        digested_and_pending(&db).await;
         let report =
             crawl_config(&db, &FakeLlm::new([]), &[Stage::Embed], &Config::default()).await;
         assert_eq!(report, RunReport::default());
         let server = crate::testutil::Server::start_with(|_| crate::testutil::Route::status(503));
-        let llm = FakeLlm::new([score_ok(digested)]);
+        let llm = FakeLlm::new([translate_ok()]);
         let report = crawl_config(
             &db,
             &llm,
-            &[Stage::Embed, Stage::Score],
+            &[Stage::Embed, Stage::Translate],
             &embedding_config(&server.url("/v1/embeddings")),
         )
         .await;
         let failure = report.embedding_failure.expect("the failure is reported");
         assert!(failure.contains("503"), "{failure}");
-        assert_eq!(llm.requests().len(), 1, "score still runs");
+        assert_eq!(llm.requests().len(), 1, "translate still runs");
         assert_eq!(embedded(&db), 0);
     }
 
@@ -837,10 +774,10 @@ mod tests {
     #[tokio::test]
     async fn a_failing_backend_does_not_stop_the_others() {
         let db = Db::open_in_memory().unwrap();
-        let digested = digested_and_pending(&db).await;
+        digested_and_pending(&db).await;
         let llms = DigestApart {
             digest: FakeLlm::new([not_logged_in()]).named("claude-cli"),
-            others: FakeLlm::new([score_ok(digested)]).named("copilot-cli"),
+            others: FakeLlm::new([translate_ok()]).named("copilot-cli"),
         };
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(10));
         let mut report = RunReport::default();
@@ -852,7 +789,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &now,
             },
-            &[Stage::Digest, Stage::Score],
+            &[Stage::Digest, Stage::Translate],
             CrawlOptions::default(),
             &Config::default(),
             &[],
@@ -863,7 +800,7 @@ mod tests {
         .unwrap();
         assert_eq!(report.llm_blocked, ["claude-cli"]);
         assert!(report.llm_failure.is_some());
-        assert_eq!(llms.others.requests().len(), 1, "score still runs");
+        assert_eq!(llms.others.requests().len(), 1, "translate still runs");
     }
 
     /// ロックの単位に分けて呼んでも、前の単位で LLM が失敗していれば後の単位の LLM ステージは呼ばない。
@@ -871,7 +808,7 @@ mod tests {
     async fn llm_failure_carries_over_to_later_lock_groups() {
         let db = Db::open_in_memory().unwrap();
         digested_and_pending(&db).await;
-        // 採点を待つ記事があるので、飛ばさなければ採点が呼び、用意した応答が尽きて panic する
+        // 和訳を待つ記事があるので、飛ばさなければ和訳が呼び、用意した応答が尽きて panic する
         let llm = FakeLlm::new([not_logged_in()]);
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(10));
         let mut report = RunReport::default();
@@ -885,7 +822,15 @@ mod tests {
             &mut report,
         )
         .await;
-        crawl_part(&db, &llm, &mut quota, &cancel, &[Stage::Score], &mut report).await;
+        crawl_part(
+            &db,
+            &llm,
+            &mut quota,
+            &cancel,
+            &[Stage::Translate],
+            &mut report,
+        )
+        .await;
         assert_eq!(llm.requests().len(), 1);
         assert!(report.llm_failure.is_some());
     }
@@ -909,33 +854,35 @@ mod tests {
             &mut report,
         )
         .await;
-        crawl_part(&db, &llm, &mut quota, &cancel, &[Stage::Score], &mut report).await;
+        crawl_part(
+            &db,
+            &llm,
+            &mut quota,
+            &cancel,
+            &[Stage::Translate],
+            &mut report,
+        )
+        .await;
         assert_eq!(llm.requests().len(), 1);
     }
 
-    /// クォータで止まるのは正常な先送りなので、後続の LLM ステージは実行する。要約を待つ記事が
-    /// あっても、要約は採点のための 1 回を残して止まり、残した 1 回で採点する。
+    /// クォータで止まるのは正常な先送りなので、失敗として報告せず、後続の LLM ステージも止めない
+    /// （後続のステージも同じクォータで判定され、呼べなければ呼ばない）。
     #[tokio::test]
-    async fn quota_stop_leaves_later_llm_stages_running() {
+    async fn quota_stop_is_not_a_failure() {
         let db = Db::open_in_memory().unwrap();
-        let id = digested_and_pending(&db).await;
-        let llm = FakeLlm::new([score_ok(id)]);
+        digested_and_pending(&db).await;
+        let pending = article(&db, 2);
+        let llm = FakeLlm::new([digest_ok(pending)]);
         let report = crawl_with(
             &db,
             &llm,
             1,
             &Cancel::default(),
-            &[Stage::Digest, Stage::Score],
+            &[Stage::Digest, Stage::Translate],
         )
         .await;
-        let reqs = llm.requests();
-        assert_eq!(reqs.len(), 1);
-        assert_eq!(
-            reqs[0].schema,
-            crate::prompt::score::schema(
-                &crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap()
-            )
-        );
+        assert_eq!(llm.requests().len(), 1);
         assert_eq!(report, RunReport::default());
     }
 
@@ -962,17 +909,6 @@ mod tests {
                         "summary_ja": "原子力規制の要約", "points_ja": ["点"],
                         "implications_ja": "", "lwr_relevant": true,
                         "topics": ["規制・審査"], "new_topics": [],
-                    })
-                })
-                .collect();
-            serde_json::json!({ "items": items })
-        } else if item.get("score").is_some() {
-            let items: Vec<_> = tagged_ids(req.prompt, "article")
-                .into_iter()
-                .map(|id| {
-                    serde_json::json!({
-                        "id": id, "score": 60 + id * 13 % 40, "reason": "理由",
-                        "matched": [], "excluded": [],
                     })
                 })
                 .collect();
@@ -1029,11 +965,6 @@ mod tests {
                         || payload FROM artifacts",
             ),
             (
-                "score",
-                "SELECT r.article_id || ' ' || s.score || ' ' || s.reason FROM scores AS s
-                 JOIN artifacts AS r ON r.id = s.artifact_id",
-            ),
-            (
                 "story_link",
                 "SELECT r.article_id || ' ' || l.other_id || ' ' || l.relation FROM story_links AS l
                  JOIN artifacts AS r ON r.id = l.artifact_id",
@@ -1060,13 +991,7 @@ mod tests {
     /// 出してから次の実行で再開した結果が、どの k でも、応答の前後どちらで止まっても同じになる。
     #[tokio::test]
     async fn resuming_after_a_stop_matches_an_uninterrupted_run() {
-        const STAGES: &[Stage] = &[
-            Stage::Digest,
-            Stage::Score,
-            Stage::Translate,
-            Stage::Title,
-            Stage::Story,
-        ];
+        const STAGES: &[Stage] = &[Stage::Digest, Stage::Translate, Stage::Title, Stage::Story];
         let setup = || {
             let db = Db::open_in_memory().unwrap();
             save_profile(&db);
@@ -1127,19 +1052,18 @@ mod tests {
         let cancel = Cancel::default();
         cancel.request();
         let llm = FakeLlm::new([]);
-        let report = crawl_with(&db, &llm, 10, &cancel, &[Stage::Digest, Stage::Score]).await;
+        let report = crawl_with(&db, &llm, 10, &cancel, &[Stage::Digest, Stage::Translate]).await;
         assert!(llm.requests().is_empty());
         assert!(report.cancelled);
     }
 
-    /// redo は採点しないので、採点のための回数を残さず、指定したモデルで要約する。
+    /// redo は指定したモデルで要約する。
     #[tokio::test]
-    async fn redo_digests_with_the_given_model_without_score_reserve() {
+    async fn redo_digests_with_the_given_model() {
         let db = Db::open_in_memory().unwrap();
         save_profile(&db);
         let id = article(&db, 0);
         let llm = FakeLlm::new([digest_ok(id)]);
-        // 呼べるのは 1 回だけ。採点のための回数（既定で 1）を残せば要約できない
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(1));
         let report = redo(
             RunEnv {

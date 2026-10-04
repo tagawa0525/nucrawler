@@ -1,42 +1,42 @@
-//! `eval`：採点が利用者の反応とどれだけ合っているかを表示する。`--profile` なら、候補の
-//! プロファイルでラベルの付いた記事を採点してから、現行と並べる。
+//! `eval`：採点が利用者の評価とどれだけ合っているかを表示する。`--profile` なら、候補の
+//! プロファイルで評価した記事を embedding でその場で採点し、現行と並べる。
 
 use std::path::PathBuf;
 
 use nucrawler::cli::EvalArgs;
 use nucrawler::config;
-use nucrawler::db::Db;
 use nucrawler::embedding::Client;
 use nucrawler::eval;
-use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::embed_profiles::eval_trials;
-use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::profile;
-use nucrawler::prompt;
-use nucrawler::quota::Quota;
 
 use crate::{Error, config_dir, data_dir, open_db};
 
-use super::{finish, spawn_signal_handler};
+use super::spawn_signal_handler;
 
 pub(crate) async fn eval(
     config: Option<PathBuf>,
     data: Option<PathBuf>,
     args: EvalArgs,
 ) -> Result<(), Error> {
-    // 候補のファイルと設定の誤りは、LLM を呼ぶ前に知らせる
+    // 候補のファイルと設定の誤りは、embedding を呼ぶ前に知らせる
     let candidate = args.profile.as_deref().map(read_profile).transpose()?;
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
     let db = open_db(&data)?;
     let owner = db.owner_id()?;
-    // 候補の採点と embedding の計算で、中断の要求を 1 つに共有する
+    // 候補は embedding でその場で計算する
+    if candidate.is_some() && config.embedding.is_none() {
+        return Err(Error::CandidateNeedsEmbedding);
+    }
+    let labels = db.eval_labels(owner)?;
+    // 評価が無ければ候補と比べようがない（embedding を作っても直らないので、先に知らせる）
+    if candidate.is_some() && labels.is_empty() {
+        return Err(Error::NoLabels);
+    }
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
-    if let Some(candidate) = &candidate {
-        score_candidate(&config, &data, &db, candidate, args.max_llm_calls, &cancel).await?;
-    }
     let mut scores = db.eval_scores(owner)?;
     if let Some(cfg) = &config.embedding {
         let client = Client::from_config(cfg, |name| std::env::var(name).ok())?;
@@ -53,20 +53,24 @@ pub(crate) async fn eval(
             .await?,
         );
     }
-    // 中断されたら、途中までの結果を出さずに、候補の採点の中断と同じく中断として終える
+    // 中断されたら、途中までの結果を出さずに中断として終える
     if cancel.is_requested() {
         return Err(Error::Interrupted);
     }
     let candidate = candidate.as_ref().map(profile::hash);
+    // 評価した記事にまだ embedding が無ければ（空間が無い・embed が途中で止まったなど）候補を計算できない。
+    // 候補を黙って落とさずに失敗する
+    if candidate_missing(&scores, candidate.as_deref()) {
+        return Err(Error::NoEmbeddings);
+    }
     let current = db.profile_hash(owner)?;
     print!(
         "{}",
         eval::render(
-            &db.eval_labels(owner)?,
+            &labels,
             &scores,
             current.as_deref(),
             candidate.as_deref(),
-            prompt::score::PROMPT_VERSION,
             args.all,
             config.recommend.prior_strength,
         )
@@ -83,34 +87,48 @@ fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {
     Ok(profile::parse(&text)?)
 }
 
-/// ラベルの付いた記事を候補のプロファイルで採点する。クォータ・シグナルは `redo` と同じ。
-async fn score_candidate(
-    config: &config::Config,
-    data: &std::path::Path,
-    db: &Db,
-    candidate: &profile::Profile,
-    max_llm_calls: Option<u32>,
-    cancel: &Cancel,
-) -> Result<(), Error> {
-    let llm = Backends::from_config(&config.llm, data);
-    let mut quota = Quota::from_config(config, max_llm_calls);
-    let articles: Vec<i64> = db
-        .eval_labels(db.owner_id()?)?
-        .iter()
-        .map(|l| l.article_id)
-        .collect();
-    let report = run::eval_profile(
-        RunEnv {
-            db,
-            llm: &llm,
-            quota: &mut quota,
-            cancel,
-            clock: &chrono::Utc::now,
-        },
-        config,
-        candidate,
-        &articles,
-    )
-    .await?;
-    finish(report)
+/// 候補を頼んだのに、計算した結果に候補の点数が 1 件も無いか（評価した記事にまだ embedding が無いなど）。
+/// 候補が今のプロファイルと同じなら、今のプロファイルの式の候補（同じ hash）として並ぶ。
+fn candidate_missing(scores: &[nucrawler::db::LabeledScore], candidate: Option<&str>) -> bool {
+    candidate.is_some_and(|hash| {
+        !scores
+            .iter()
+            .any(|s| s.key.backend == eval::TRIAL_BACKEND && s.key.profile_hash == hash)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nucrawler::db::{EvalKey, LabeledScore};
+
+    fn trial(hash: &str) -> LabeledScore {
+        LabeledScore {
+            key: EvalKey {
+                profile_hash: hash.into(),
+                backend: eval::TRIAL_BACKEND.into(),
+                model: "m now".into(),
+                prompt_version: 2,
+            },
+            article_id: 1,
+            score: 50,
+            scored_at: "2026-10-04T00:00:00.000Z".into(),
+            features: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn notices_a_candidate_without_scores() {
+        let current = [trial("now")];
+        assert!(candidate_missing(&current, Some("cand")));
+        assert!(!candidate_missing(
+            &[trial("now"), trial("cand")],
+            Some("cand")
+        ));
+        // 候補が今のプロファイルと同じなら、今のプロファイルとして並ぶ
+        assert!(!candidate_missing(&current, Some("now")));
+        assert!(!candidate_missing(&current, None));
+        // 評価した記事に embedding がまだ無ければ、今のプロファイルの分も無い
+        assert!(candidate_missing(&[], Some("now")));
+    }
 }

@@ -150,6 +150,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0034_profile_versions.sql"),
     include_str!("migrations/0035_profile_suggestions.sql"),
     include_str!("migrations/0036_profile_review_requests.sql"),
+    include_str!("migrations/0037_retire_score_stage.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -649,6 +650,44 @@ mod tests {
             )
             .unwrap(),
             ["1|1", "2|1", "3|3"]
+        );
+    }
+
+    /// LLM の採点をやめた（計画 017）ので、採点のステージの失敗と作業の予約を消す（消すステージが無く、
+    /// `status` に残り続けるため）。ほかのステージの分は残す。
+    #[test]
+    fn migration_retires_score_stage_records() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("stage LIKE 'score:%'"))
+            .expect("a migration retires the score stage");
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO articles (id, source_id, url, title, lang, fetched_at)
+               VALUES (1, 's', 'https://e.example/1', 't', 'en', '2026-09-27T00:00:00.000Z');
+             INSERT INTO stage_errors
+               (article_id, stage, backend, model, attempts, last_error, next_retry_at)
+               VALUES (1, 'score:1:h:v3', 'claude-cli', 'sonnet', 3, 'e', '2026-09-28T00:00:00.000Z'),
+                      (1, 'digest', 'claude-cli', 'sonnet', 1, 'e', '2026-09-28T00:00:00.000Z');
+             INSERT INTO work_claims (article_id, stage, backend, model, token, expires_at)
+               VALUES (1, 'score:1:h:v3', 'claude-cli', 'sonnet', 't', '2026-09-28T00:00:00.000Z'),
+                      (1, 'translate', 'claude-cli', 'sonnet', 't', '2026-09-28T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings("SELECT stage FROM stage_errors").unwrap(),
+            ["digest"]
+        );
+        assert_eq!(
+            db.query_strings("SELECT stage FROM work_claims").unwrap(),
+            ["translate"]
         );
     }
 

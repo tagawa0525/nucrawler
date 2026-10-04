@@ -37,7 +37,7 @@ pub enum ParseError {
     ServeUsage,
     #[error("usage: nucrawler embed rebuild")]
     EmbedUsage,
-    #[error("usage: nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]")]
+    #[error("usage: nucrawler eval [--all] [--profile FILE]")]
     EvalUsage,
     #[error(
         "usage: nucrawler user add LOGIN NAME | nucrawler user reset-password LOGIN | \
@@ -93,7 +93,7 @@ commands:
   profile   関心プロファイルの取り込み・書き出し・更新案・履歴（profile import FILE / profile export / profile suggest --out FILE / profile history / profile revert VERSION）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
-  eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
+  eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE]）
   embed     embedding を作り直す（embed rebuild：モデルや設定を替えた後、次の crawl で全件を作り直す）
   user      Web UI の利用者の管理（user add LOGIN NAME / reset-password LOGIN / disable LOGIN / rename LOGIN NEW_LOGIN / list）
   help      このヘルプを表示
@@ -294,12 +294,10 @@ pub fn parse_serve_args(args: &[String]) -> Result<ServeArgs, ParseError> {
 /// `eval` サブコマンドの引数。
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct EvalArgs {
-    /// 現行のキーだけでなく、過去のプロファイル・プロンプトの版の採点も並べる
+    /// 現行のキーだけでなく、過去のプロファイル・式の版と保存済みの LLM の点数も並べる
     pub all: bool,
-    /// 候補のプロファイル。ラベルの付いた記事をこれで採点してから、現行と並べる
+    /// 候補のプロファイル。評価した記事をこれで embedding でその場で採点し、現行と並べる
     pub profile: Option<PathBuf>,
-    /// 候補で採点するときの LLM の呼び出しの上限
-    pub max_llm_calls: Option<u32>,
 }
 
 pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
@@ -312,16 +310,8 @@ pub fn parse_eval_args(args: &[String]) -> Result<EvalArgs, ParseError> {
                 let file = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
                 parsed.profile = Some(PathBuf::from(file));
             }
-            "--max-llm-calls" => {
-                let n = option_value(&mut it).ok_or(ParseError::EvalUsage)?;
-                parsed.max_llm_calls = Some(n.parse().map_err(|_| ParseError::EvalUsage)?);
-            }
             _ => return Err(ParseError::EvalUsage),
         }
-    }
-    // 上限は候補で採点するときだけ意味がある
-    if parsed.max_llm_calls.is_some() && parsed.profile.is_none() {
-        return Err(ParseError::EvalUsage);
     }
     Ok(parsed)
 }
@@ -547,26 +537,17 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_eval_args(&args(&[
-                "--profile",
-                "p.toml",
-                "--max-llm-calls",
-                "3",
-                "--all"
-            ]))
-            .unwrap(),
+            parse_eval_args(&args(&["--profile", "p.toml", "--all"])).unwrap(),
             EvalArgs {
                 all: true,
                 profile: Some("p.toml".into()),
-                max_llm_calls: Some(3),
             }
         );
         for bad in [
             &["--bogus"][..],
             &["--profile"],
-            &["--max-llm-calls", "x"],
-            // 上限は候補で採点するときだけ意味がある
-            &["--max-llm-calls", "3"],
+            // LLM で採点しなくなったので、呼び出しの上限は無い
+            &["--profile", "p.toml", "--max-llm-calls", "3"],
         ] {
             assert!(
                 matches!(parse_eval_args(&args(bad)), Err(ParseError::EvalUsage)),

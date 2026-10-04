@@ -10,7 +10,6 @@ pub mod llm_call;
 pub mod lock;
 pub mod review;
 pub mod run;
-pub mod score;
 pub mod story;
 pub mod suggest;
 pub mod tidy;
@@ -122,7 +121,6 @@ pub enum Stage {
     Digest,
     /// 要約の embedding（LLM を使わない）
     Embed,
-    Score,
     Translate,
     /// 本文が無く要約できない英語記事の見出しの和訳
     Title,
@@ -140,7 +138,6 @@ impl Stage {
         Stage::Extract,
         Stage::Digest,
         Stage::Embed,
-        Stage::Score,
         Stage::Translate,
         Stage::Title,
         Stage::Story,
@@ -154,12 +151,11 @@ impl Stage {
         match self {
             Stage::Fetch | Stage::Extract | Stage::Embed => None,
             Stage::Digest => Some(LlmTask::Digest),
-            Stage::Score => Some(LlmTask::Score),
             Stage::Translate => Some(LlmTask::Translate),
             Stage::Title => Some(LlmTask::Title),
             Stage::Story => Some(LlmTask::Story),
             // 案を作るモデルも、比べる採点も、採点の工程のもの
-            Stage::Review => Some(LlmTask::Score),
+            Stage::Review => Some(LlmTask::Suggest),
             Stage::Tidy => Some(LlmTask::Tidy),
         }
     }
@@ -170,7 +166,6 @@ impl Stage {
             Stage::Extract => "extract",
             Stage::Digest => "digest",
             Stage::Embed => "embed",
-            Stage::Score => "score",
             Stage::Translate => "translate",
             Stage::Title => "title",
             Stage::Story => "story",
@@ -188,10 +183,9 @@ impl Stage {
     pub fn lock(self) -> LockKind {
         match self {
             Stage::Fetch | Stage::Extract => LockKind::Fetch,
-            // embed は LLM を呼ばないが、要約と採点の間で続けて動けるよう、LLM のステージと同じ単位で動かす
+            // embed は LLM を呼ばないが、要約の後に続けて動けるよう、LLM のステージと同じ単位で動かす
             Stage::Digest
             | Stage::Embed
-            | Stage::Score
             | Stage::Translate
             | Stage::Title
             | Stage::Story
@@ -211,16 +205,6 @@ pub fn lock_groups(stages: &[Stage]) -> Vec<(LockKind, Vec<Stage>)> {
         }
     }
     groups
-}
-
-/// 要約が採点のために残す呼び出し回数。採点が計画に無いか、プロファイルが無くて採点が
-/// 何もしないときは、残しても使われないので 0。
-pub fn score_reserve(stages: &[Stage], cfg: &crate::config::LlmConfig, has_profile: bool) -> u32 {
-    if has_profile && stages.contains(&Stage::Score) {
-        cfg.score_reserved_calls
-    } else {
-        0
-    }
 }
 
 /// `until` を指定すれば最初からそのステージまで、`only` を指定すればそのステージだけ。
@@ -243,7 +227,8 @@ pub fn plan(until: Option<Stage>, only: Option<Stage>) -> Vec<Stage> {
 mod tests {
     use super::*;
 
-    /// プロファイルの見直しは、採点と一覧に出す処理（和訳・同じ報道）の後、語彙の整理の前に流す。
+    /// LLM の採点は無い（ランキングは embed の点数。計画 017）。プロファイルの見直しは、一覧に出す処理
+    /// （和訳・同じ報道）の後、語彙の整理の前に流す。
     #[test]
     fn reviews_profiles_after_the_list_is_ready() {
         let names: Vec<&str> = plan(None, None).iter().map(|s| s.name()).collect();
@@ -254,7 +239,6 @@ mod tests {
                 "extract",
                 "digest",
                 "embed",
-                "score",
                 "translate",
                 "title",
                 "story",
@@ -270,29 +254,6 @@ mod tests {
             assert_eq!(Stage::from_name(s.name()), Some(s));
         }
         assert_eq!(Stage::from_name("nope"), None);
-    }
-
-    #[test]
-    fn reserves_calls_only_when_scoring_is_planned() {
-        let cfg = crate::config::LlmConfig {
-            score_reserved_calls: 2,
-            ..crate::config::LlmConfig::default()
-        };
-        assert_eq!(score_reserve(&plan(None, None), &cfg, true), 2);
-        assert_eq!(
-            score_reserve(&plan(Some(Stage::Digest), None), &cfg, true),
-            0
-        );
-        assert_eq!(
-            score_reserve(&plan(None, Some(Stage::Digest)), &cfg, true),
-            0
-        );
-        assert_eq!(
-            score_reserve(&plan(None, Some(Stage::Score)), &cfg, true),
-            2
-        );
-        // プロファイルが無ければ採点は何もしないので、残しても使われない
-        assert_eq!(score_reserve(&plan(None, None), &cfg, false), 0);
     }
 
     #[test]
@@ -349,7 +310,6 @@ mod tests {
                     vec![
                         Stage::Digest,
                         Stage::Embed,
-                        Stage::Score,
                         Stage::Translate,
                         Stage::Title,
                         Stage::Story,

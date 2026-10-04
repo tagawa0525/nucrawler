@@ -26,7 +26,7 @@ pub struct SuggestSummary {
     pub tally: Tally,
 }
 
-/// モデルは採点と同じ `llm.score_model`（点数の付け方を知っているモデルに、その元を見直させる）。
+/// モデルは `llm.suggest_model`。
 pub async fn suggest_profile<L: Llm>(
     env: LlmStage<'_, L>,
     cfg: &LlmConfig,
@@ -37,7 +37,7 @@ pub async fn suggest_profile<L: Llm>(
     let clock = workers.clock;
     let mut summary = SuggestSummary::default();
     // 呼び出しの枠を先に取り、判定と呼び出しをその中で行う
-    let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
+    let Some(_slot) = workers.begin_round(STAGE, &mut summary.tally).await? else {
         return Ok(summary);
     };
     let prompt = prompt::suggest::build_prompt(profile, evidence);
@@ -50,7 +50,7 @@ pub async fn suggest_profile<L: Llm>(
                 system: prompt::suggest::system_prompt(),
                 prompt: &prompt,
                 schema: &schema,
-                model: &cfg.score_model,
+                model: &cfg.suggest_model,
             },
         })
         .await?;
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(summary.tally.calls, 1);
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].model, LlmConfig::default().score_model);
+        assert_eq!(reqs[0].model, LlmConfig::default().suggest_model);
         assert_eq!(reqs[0].system, crate::prompt::suggest::system_prompt());
         assert_eq!(
             reqs[0].prompt,

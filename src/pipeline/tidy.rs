@@ -45,7 +45,7 @@ pub async fn tidy_topics<L: Llm>(
         return Ok(summary);
     }
     // 呼び出しの枠を先に取り、判定と呼び出しをその中で行う
-    let Some(_slot) = workers.begin_round(STAGE, 0, &mut summary.tally).await? else {
+    let Some(_slot) = workers.begin_round(STAGE, &mut summary.tally).await? else {
         return Ok(summary);
     };
     let prompt = prompt::tidy::build_prompt(&usage);

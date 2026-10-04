@@ -16,7 +16,7 @@ use nucrawler::profile;
 use nucrawler::prompt;
 use nucrawler::quota::Quota;
 
-use crate::{Error, config_dir, data_dir};
+use crate::{Error, config_dir, data_dir, open_db};
 
 use super::{finish, spawn_signal_handler};
 
@@ -29,7 +29,7 @@ pub(crate) async fn eval(
     let candidate = args.profile.as_deref().map(read_profile).transpose()?;
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let db = Db::open(&data.join("nucrawler.db"))?;
+    let db = open_db(&data)?;
     let owner = db.owner_id()?;
     // 候補の採点と embedding の計算で、中断の要求を 1 つに共有する
     let cancel = Cancel::default();

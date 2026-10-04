@@ -5,7 +5,6 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use nucrawler::config;
-use nucrawler::db::Db;
 use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::run::{self, RunEnv, Suggested};
@@ -13,7 +12,7 @@ use nucrawler::profile;
 use nucrawler::quota::Quota;
 use nucrawler::suggest;
 
-use crate::{Error, config_dir, data_dir};
+use crate::{Error, config_dir, data_dir, open_db};
 
 use super::{finish, spawn_signal_handler};
 
@@ -32,7 +31,7 @@ pub(crate) async fn suggest(
     }
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let db = Db::open(&data.join("nucrawler.db"))?;
+    let db = open_db(&data)?;
     let owner = db.owner_id()?;
     let (current, _) = db.load_profile(owner)?.ok_or(Error::NoProfile)?;
     let evidence = db.label_evidence(owner)?;

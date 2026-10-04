@@ -239,19 +239,19 @@ pub(super) fn save_version(
 }
 
 /// 版が今のプロファイルだった期間と、一致率の集計に要るもの。
-pub(super) struct Period {
-    pub(super) id: i64,
-    pub(super) hash: String,
-    pub(super) created_at: String,
+struct Period {
+    id: i64,
+    hash: String,
+    created_at: String,
     /// 今の版なら `None`
-    pub(super) retired_at: Option<String>,
+    retired_at: Option<String>,
     /// 根拠にした記事の id（JSON 配列）
-    pub(super) evidence: String,
+    evidence: String,
 }
 
 /// 版の期間に付けた評価（根拠にした記事を除く）を、一覧と同じ規則で選んだその版の点数で測った一致率。
 /// 点数の付いていない記事は数えない。
-pub(super) fn version_stats(
+fn version_stats(
     conn: &rusqlite::Connection,
     user_id: i64,
     period: &Period,

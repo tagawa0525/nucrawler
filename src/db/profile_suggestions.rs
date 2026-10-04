@@ -3,7 +3,7 @@
 
 use super::*;
 
-use super::profile_versions::{Period, save_version, version_stats};
+use super::profile_versions::save_version;
 use crate::prompt::suggest::Reason;
 
 /// 案を作ったきっかけ。
@@ -261,22 +261,6 @@ impl Db {
         Ok(n as usize)
     }
 
-    /// 利用者の評価すべてを、hash が `profile_hash` のプロファイルの点数（一覧と同じ規則で選ぶ）で測った
-    /// 一致率。点数の付いていない記事は数えない。
-    pub fn rated_stats(&self, user_id: i64, profile_hash: &str) -> Result<VersionStats, DbError> {
-        version_stats(
-            &self.conn,
-            user_id,
-            &Period {
-                id: 0,
-                hash: profile_hash.to_string(),
-                created_at: String::new(),
-                retired_at: None,
-                evidence: "[]".to_string(),
-            },
-        )
-    }
-
     /// 利用者の評価のうち、hash が `current` と `candidate` の両方のプロファイルの点数（一覧と同じ規則で
     /// 選ぶ）がそろった記事で測った、それぞれの一致率。
     pub fn paired_stats(
@@ -285,8 +269,39 @@ impl Db {
         current: &str,
         candidate: &str,
     ) -> Result<(VersionStats, VersionStats), DbError> {
-        let _ = (user_id, current, candidate);
-        todo!()
+        let score = |profile: &str| {
+            list_score(
+                "score",
+                &latest_digest("id", "r.article_id", "?1"),
+                "?1",
+                profile,
+            )
+        };
+        let sql = format!(
+            "SELECT r.value, {current}, {candidate} FROM ratings AS r WHERE r.user_id = ?1",
+            current = score("?2"),
+            candidate = score("?3"),
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![user_id, current, candidate], |r| {
+            Ok((
+                r.get::<_, Rating>(0)?,
+                r.get::<_, Option<u8>>(1)?,
+                r.get::<_, Option<u8>>(2)?,
+            ))
+        })?;
+        let (mut current, mut candidate) = (Vec::new(), Vec::new());
+        for row in rows {
+            if let (rating, Some(a), Some(b)) = row? {
+                current.push((a, rating));
+                candidate.push((b, rating));
+            }
+        }
+        let stats = |pairs: &[(u8, Rating)]| VersionStats {
+            rated: pairs.len(),
+            concordance: crate::eval::concordance(pairs),
+        };
+        Ok((stats(&current), stats(&candidate)))
     }
 
     /// 案を自動で当てるか（利用者の設定。既定は当てる）。

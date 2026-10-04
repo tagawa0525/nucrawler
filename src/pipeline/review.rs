@@ -81,7 +81,7 @@ pub async fn review_profiles<L: Llm>(
         };
         if crate::profile::diff(&user.profile, &suggestion.profile).is_empty() {
             // 変える根拠が無かったことも残し、評価の件数をここから数え直す
-            let current = db.rated_stats(user.user_id, &user.hash)?;
+            let (current, _) = db.paired_stats(user.user_id, &user.hash, &user.hash)?;
             db.save_suggestion(&new(current, current, SuggestionStatus::Unchanged), now)?;
             summary.suggested += 1;
             continue;
@@ -111,8 +111,12 @@ pub async fn review_profiles<L: Llm>(
                 return Ok(summary);
             }
         }
-        let current = db.rated_stats(user.user_id, &user.hash)?;
-        let candidate = db.rated_stats(user.user_id, &crate::profile::hash(&suggestion.profile))?;
+        // 片方の採点に失敗した記事を除き、同じ記事の集合で比べる
+        let (current, candidate) = db.paired_stats(
+            user.user_id,
+            &user.hash,
+            &crate::profile::hash(&suggestion.profile),
+        )?;
         // 案を作る間にプロファイルが変わっていたら（取り込み・戻し）、古い案は捨てて次の実行で作り直す
         let Some(id) =
             db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?

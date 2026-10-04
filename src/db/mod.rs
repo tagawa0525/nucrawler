@@ -11,6 +11,7 @@ mod embed_scores;
 mod embeddings;
 mod eval;
 mod notes;
+mod profile_suggestions;
 mod profile_versions;
 mod read;
 mod recommend;
@@ -35,6 +36,7 @@ pub use embed_scores::*;
 pub use embeddings::*;
 pub use eval::*;
 pub use notes::*;
+pub use profile_suggestions::*;
 pub use profile_versions::*;
 pub use read::*;
 pub use redo::*;
@@ -91,6 +93,12 @@ pub enum DbError {
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
+    /// 利用者の案に無い
+    #[error("unknown profile suggestion {0}")]
+    UnknownProfileSuggestion(i64),
+    /// プロファイルがまだ無い（案の基にする版が無い）
+    #[error("no profile version yet")]
+    NoProfileVersion,
     /// 利用者のプロファイルの版に無い
     #[error("unknown profile version {0}")]
     UnknownProfileVersion(i64),
@@ -140,6 +148,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0032_embeddings.sql"),
     include_str!("migrations/0033_text_embeddings.sql"),
     include_str!("migrations/0034_profile_versions.sql"),
+    include_str!("migrations/0035_profile_suggestions.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

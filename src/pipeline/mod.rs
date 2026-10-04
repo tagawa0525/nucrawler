@@ -8,6 +8,7 @@ pub mod extract;
 pub mod fetch;
 pub mod llm_call;
 pub mod lock;
+pub mod review;
 pub mod run;
 pub mod score;
 pub mod story;
@@ -127,6 +128,8 @@ pub enum Stage {
     Title,
     /// 同じ報道・関連の判定（一覧で同じ報道を 1 件にまとめる）
     Story,
+    /// プロファイルの見直し。評価が増えた利用者について更新案を作り、十分に良ければ当てる（計画 016）
+    Review,
     /// 語彙の整理。前回から `llm.tidy_interval_days` 日たったときだけ実行する
     Tidy,
 }
@@ -141,6 +144,7 @@ impl Stage {
         Stage::Translate,
         Stage::Title,
         Stage::Story,
+        Stage::Review,
         Stage::Tidy,
     ];
 
@@ -154,6 +158,8 @@ impl Stage {
             Stage::Translate => Some(LlmTask::Translate),
             Stage::Title => Some(LlmTask::Title),
             Stage::Story => Some(LlmTask::Story),
+            // 案を作るモデルも、比べる採点も、採点の工程のもの
+            Stage::Review => Some(LlmTask::Score),
             Stage::Tidy => Some(LlmTask::Tidy),
         }
     }
@@ -168,6 +174,7 @@ impl Stage {
             Stage::Translate => "translate",
             Stage::Title => "title",
             Stage::Story => "story",
+            Stage::Review => "review",
             Stage::Tidy => "tidy",
         }
     }
@@ -187,7 +194,8 @@ impl Stage {
             | Stage::Score
             | Stage::Translate
             | Stage::Title
-            | Stage::Story => LockKind::Llm,
+            | Stage::Story
+            | Stage::Review => LockKind::Llm,
             Stage::Tidy => LockKind::Tidy,
         }
     }
@@ -234,6 +242,27 @@ pub fn plan(until: Option<Stage>, only: Option<Stage>) -> Vec<Stage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// プロファイルの見直しは、採点と一覧に出す処理（和訳・同じ報道）の後、語彙の整理の前に流す。
+    #[test]
+    fn reviews_profiles_after_the_list_is_ready() {
+        let names: Vec<&str> = plan(None, None).iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "fetch",
+                "extract",
+                "digest",
+                "embed",
+                "score",
+                "translate",
+                "title",
+                "story",
+                "review",
+                "tidy"
+            ]
+        );
+    }
 
     #[test]
     fn stage_names_round_trip() {
@@ -323,7 +352,8 @@ mod tests {
                         Stage::Score,
                         Stage::Translate,
                         Stage::Title,
-                        Stage::Story
+                        Stage::Story,
+                        Stage::Review
                     ]
                 ),
                 (LockKind::Tidy, vec![Stage::Tidy]),

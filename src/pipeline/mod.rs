@@ -236,6 +236,27 @@ pub fn plan(until: Option<Stage>, only: Option<Stage>) -> Vec<Stage> {
 mod tests {
     use super::*;
 
+    /// プロファイルの見直しは、採点と一覧に出す処理（和訳・同じ報道）の後、語彙の整理の前に流す。
+    #[test]
+    fn reviews_profiles_after_the_list_is_ready() {
+        let names: Vec<&str> = plan(None, None).iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "fetch",
+                "extract",
+                "digest",
+                "embed",
+                "score",
+                "translate",
+                "title",
+                "story",
+                "review",
+                "tidy"
+            ]
+        );
+    }
+
     #[test]
     fn stage_names_round_trip() {
         for &s in Stage::ALL {

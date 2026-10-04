@@ -586,6 +586,52 @@ mod tests {
         .unwrap();
     }
 
+    /// crawl の見直しのステージは、評価の増えた利用者のプロファイルの案を作って保存する。
+    #[tokio::test]
+    async fn crawl_reviews_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let early = DateTime::parse_from_rfc3339("2026-09-27T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let profile = crate::profile::parse(include_str!("../../examples/profile.toml")).unwrap();
+        db.save_profile(owner, &profile, early).unwrap();
+        let mut responses = Vec::new();
+        for n in 0..10 {
+            let id = article(&db, n);
+            responses.push(digest_ok(id));
+            db.rate(
+                owner,
+                id,
+                crate::db::Rating::new(if n < 5 { 5 } else { 1 }),
+                now(),
+            )
+            .unwrap();
+        }
+        let llm = FakeLlm::new(responses);
+        crawl_with(&db, &llm, 10, &Cancel::default(), &[Stage::Digest]).await;
+        // 案が今と同じなら採点せずに残す（LLM の呼び出しは案の 1 回だけ）
+        let same = serde_json::json!({
+            "interests": profile.interests.iter().map(|i| serde_json::json!({
+                "topic": i.topic, "weight": i.weight, "note": i.note.clone().unwrap_or_default(),
+            })).collect::<Vec<_>>(),
+            "exclude": profile.exclude,
+            "reasons": [],
+        });
+        let llm = FakeLlm::new([Ok(LlmResponse {
+            output: same,
+            usage: None,
+        })]);
+        let review = Stage::from_name("review").expect("review stage");
+        let report = crawl_with(&db, &llm, 10, &Cancel::default(), &[review]).await;
+        assert_eq!(report, RunReport::default());
+        assert_eq!(llm.requests().len(), 1);
+        assert_eq!(
+            db.profile_suggestions(owner).unwrap()[0].status,
+            crate::db::SuggestionStatus::Unchanged
+        );
+    }
+
     /// 要約済みで採点を待つ記事と、要約を待つ記事を 1 件ずつ用意し、採点を待つ記事の id を返す。
     async fn digested_and_pending(db: &Db) -> i64 {
         save_profile(db);

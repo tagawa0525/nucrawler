@@ -33,7 +33,9 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
             .and_then(|x| x.payload[key].as_str())
             .map(str::to_string)
     };
-    let title = display_title(field("title_ja").as_deref(), i).to_string();
+    let title = i
+        .display_title_with(field("title_ja").as_deref())
+        .to_string();
     // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）
     let mut body = super::list::home_bar(page);
     body.push_str(&format!("<h1>{}</h1>", escape(&title)));

@@ -2,6 +2,7 @@
 //! JavaScript は一覧の印の付け外し（`MARKS_SCRIPT`）、上部のバーの選択肢の書き分け
 //! （`BAR_SCRIPT`）と検索の期間のカレンダー（`CALENDAR_SCRIPT`）にだけ使い、無くても読める。
 
+use crate::config::SourceLabels;
 use crate::db::{
     ArticleDetail, Comment, ListItem, Rating, RatingFilter, Report, ReportFilter, ReportKind,
     ReportStatus, TopicUsage, Visibility, Warning,
@@ -42,9 +43,6 @@ pub fn escape(s: &str) -> String {
 }
 
 const STYLE: &str = concat!("\n", include_str!("assets/style.css"));
-
-/// ソースの ID から画面に出す名前へ（`Source::display_name`）。
-pub type SourceLabels = std::collections::BTreeMap<String, String>;
 
 /// どのページにも共通の表示の材料。
 #[derive(Debug, Clone, Copy)]
@@ -169,14 +167,6 @@ fn button(href: &str, name: &str, emoji: &str, class: &str) -> String {
     format!(
         "<a class=\"btn{class}\" href=\"{href}\" aria-label=\"{name}\" title=\"{name}\">{emoji}</a>"
     )
-}
-
-/// 見出し。空だとリンクが押せなくなるので、和文の見出し、原題、URL の順に空でないものを使う。
-pub(crate) fn display_title<'a>(title_ja: Option<&'a str>, i: &'a ListItem) -> &'a str {
-    [title_ja.unwrap_or(""), &i.title]
-        .into_iter()
-        .find(|t| !t.trim().is_empty())
-        .unwrap_or(&i.url)
 }
 
 #[cfg(test)]

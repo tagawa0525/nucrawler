@@ -49,6 +49,19 @@ impl ListItem {
     pub fn is_read(&self) -> bool {
         self.read_at.is_some() || self.story_read
     }
+
+    /// 見出し。空だとリンクが押せなくなるので、和文の見出し、原題、URL の順に空でないものを使う。
+    pub fn display_title(&self) -> &str {
+        self.display_title_with(self.title_ja.as_deref())
+    }
+
+    /// 和文の見出しを `title_ja`（記事の詳細で選んだ版の見出し）に替えた `display_title`。
+    pub fn display_title_with<'a>(&'a self, title_ja: Option<&'a str>) -> &'a str {
+        [title_ja.unwrap_or(""), &self.title]
+            .into_iter()
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or(&self.url)
+    }
 }
 
 /// 一覧の条件。

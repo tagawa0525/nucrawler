@@ -1,4 +1,4 @@
-//! テスト用の最小限の HTTP サーバ（std のみ）。
+//! テストの補助：最小限の HTTP サーバ（std のみ）と一時ディレクトリ。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -169,4 +169,12 @@ pub fn fixture(name: &str) -> Vec<u8> {
         .join("tests/fixtures")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// テストごとに独立した一時ディレクトリ（前回の残りは消す）。
+pub fn temp_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("nucrawler-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }

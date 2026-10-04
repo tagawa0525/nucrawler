@@ -277,7 +277,7 @@ fn hidden_counts(db: &Db, query: ListQuery) -> Result<html::HiddenCounts, DbErro
 fn filtered(
     db: &Db,
     web: &WebConfig,
-    labels: &html::SourceLabels,
+    labels: &crate::config::SourceLabels,
     me: crate::db::Viewer,
     hash: Option<&str>,
     view: html::ListView,

@@ -5,6 +5,7 @@
 pub mod claude_cli;
 pub mod copilot_cli;
 mod process;
+pub mod slot;
 
 use serde::Serialize;
 
@@ -89,7 +90,7 @@ pub enum LlmError {
     #[error("failed to talk to the llm process")]
     Io(#[source] std::io::Error),
     #[error("failed to take a call slot")]
-    Slot(#[source] crate::pipeline::lock::LockError),
+    Slot(#[source] crate::filelock::LockError),
     #[error("llm call timed out after {secs}s")]
     Timeout { secs: u64 },
     #[error("llm process exited with {status}: {stderr}")]
@@ -173,7 +174,7 @@ pub enum Backend {
 }
 
 impl Llm for Backend {
-    type Slot = crate::pipeline::lock::Slot;
+    type Slot = slot::Slot;
 
     fn backend(&self) -> &'static str {
         match self {

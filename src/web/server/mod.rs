@@ -22,7 +22,8 @@ use crate::db::{
 
 use crate::search::Params;
 
-use crate::web::html::{self, DetailView, Page, SourceLabels};
+use crate::config::SourceLabels;
+use crate::web::html::{self, DetailView, Page};
 
 use crate::web::{api, feed};
 

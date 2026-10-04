@@ -58,14 +58,14 @@ impl CopilotCli {
 }
 
 impl Llm for CopilotCli {
-    type Slot = crate::pipeline::lock::Slot;
+    type Slot = crate::llm::slot::Slot;
 
     fn backend(&self) -> &'static str {
         BACKEND
     }
 
     async fn reserve(&self) -> Result<Self::Slot, LlmError> {
-        crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
+        crate::llm::slot::acquire_slot(&self.slots, self.concurrency)
             .await
             .map_err(LlmError::Slot)
     }

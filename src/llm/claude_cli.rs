@@ -35,14 +35,14 @@ impl ClaudeCli {
 }
 
 impl Llm for ClaudeCli {
-    type Slot = crate::pipeline::lock::Slot;
+    type Slot = crate::llm::slot::Slot;
 
     fn backend(&self) -> &'static str {
         "claude-cli"
     }
 
     async fn reserve(&self) -> Result<Self::Slot, LlmError> {
-        crate::pipeline::lock::acquire_slot(&self.slots, self.concurrency)
+        crate::llm::slot::acquire_slot(&self.slots, self.concurrency)
             .await
             .map_err(LlmError::Slot)
     }
@@ -547,9 +547,7 @@ mod tests {
             slots: slots.clone(),
             concurrency: 1,
         };
-        let held = crate::pipeline::lock::acquire_slot(&slots, 1)
-            .await
-            .unwrap();
+        let held = crate::llm::slot::acquire_slot(&slots, 1).await.unwrap();
         let reserve = cli.reserve();
         tokio::pin!(reserve);
         let short = Duration::from_millis(300);

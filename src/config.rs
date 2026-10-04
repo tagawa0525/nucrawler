@@ -472,6 +472,19 @@ pub struct Sources {
     pub sources: Vec<Source>,
 }
 
+/// ソースの ID から画面に出す名前へ（`Source::display_name`）。
+pub type SourceLabels = std::collections::BTreeMap<String, String>;
+
+impl Sources {
+    /// 各ソースの表示名。
+    pub fn labels(&self) -> SourceLabels {
+        self.sources
+            .iter()
+            .map(|s| (s.id.clone(), s.display_name().to_string()))
+            .collect()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
@@ -729,6 +742,7 @@ pub fn default_data_dir(env: impl Fn(&str) -> Option<OsString>) -> Result<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::temp_dir;
 
     fn p() -> &'static Path {
         Path::new("test.toml")
@@ -1268,14 +1282,6 @@ mod tests {
         parse_config(include_str!("../examples/config.toml"), p()).unwrap();
         let s = parse_sources(include_str!("../examples/sources.toml"), p()).unwrap();
         assert!(!s.sources.is_empty());
-    }
-
-    /// テストごとに独立した一時ディレクトリ。
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nucrawler-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]

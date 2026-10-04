@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod errors;
 pub mod eval;
 pub mod extract;
+pub mod filelock;
 pub mod glossary;
 pub mod http;
 pub mod jst;

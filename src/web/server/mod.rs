@@ -126,6 +126,16 @@ pub fn router(state: AppState) -> axum::Router {
             "/settings/profile/versions/{id}/revert",
             post(revert_profile_version),
         )
+        .route("/settings/profile/auto-apply", post(set_auto_apply))
+        .route("/settings/profile/review", post(request_review))
+        .route(
+            "/settings/profile/suggestions/{id}/apply",
+            post(apply_suggestion),
+        )
+        .route(
+            "/settings/profile/suggestions/{id}/dismiss",
+            post(dismiss_suggestion),
+        )
         // 外側の層から順に掛かる：Origin の確認（ログインを含むすべての書き込み）→ ログインの確認
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

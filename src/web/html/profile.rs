@@ -2,11 +2,31 @@
 
 use super::*;
 
-use crate::db::{ProfileOrigin, ProfileVersion};
+use crate::db::{
+    ProfileOrigin, ProfileSuggestion, ProfileVersion, SuggestionStatus, SuggestionTrigger,
+    VersionStats,
+};
 use crate::profile::{Change, Profile};
 
-/// 今のプロファイル（`versions` の先頭）と版の履歴（新しい順）。今でない版には「この版に戻す」を出す。
-pub fn profile_page(versions: &[ProfileVersion], page: &Page) -> String {
+/// 興味プロファイルの画面の材料。
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileView<'a> {
+    /// 版（新しい順。先頭が今のプロファイル）
+    pub versions: &'a [ProfileVersion],
+    /// 利用者の案（新しい順）
+    pub suggestions: &'a [ProfileSuggestion],
+    /// 案を自動で当てるか
+    pub auto_apply: bool,
+    /// 見直しを頼んで、まだ案ができていない
+    pub requested: bool,
+    /// 案の根拠になる評価（要約のある記事への評価）がある
+    pub has_evidence: bool,
+}
+
+/// 今のプロファイル、更新案（自動で当てるかの切り替え・今すぐ作る・待っている案の採用と見送り）、
+/// 版の履歴（新しい順。今でない版には「この版に戻す」）。
+pub fn profile_page(view: ProfileView, page: &Page) -> String {
+    let versions = view.versions;
     let mut body = String::from(
         "<p class=\"meta\"><a href=\"/settings\">← 設定</a></p><h1>興味プロファイル</h1>",
     );
@@ -16,6 +36,7 @@ pub fn profile_page(versions: &[ProfileVersion], page: &Page) -> String {
     };
     body.push_str("<h2>今のプロファイル</h2>");
     body.push_str(&profile_contents(&current.profile));
+    body.push_str(&suggestion_section(view, &current.profile));
     body.push_str(
         "<h2>履歴</h2>\
          <p class=\"meta\">一致率は、その版が使われていた間に付けた評価で、評価の高い記事ほど点数が高い組の割合\
@@ -55,6 +76,106 @@ pub fn profile_page(versions: &[ProfileVersion], page: &Page) -> String {
         ));
     }
     layout("興味プロファイル", page, &body)
+}
+
+/// 更新案の節。
+fn suggestion_section(view: ProfileView, current: &Profile) -> String {
+    let checked = if view.auto_apply { " checked" } else { "" };
+    let mut out = format!(
+        "<h2>更新案</h2>\
+         <p class=\"meta\">評価が 10 件増えるたびに、評価を根拠に LLM が案を作り、今のプロファイルと同じ評価で\
+         一致率を比べます。</p>\
+         <form method=\"post\" action=\"/settings/profile/auto-apply\">\
+         <label><input type=\"checkbox\" name=\"auto\" value=\"on\"{checked}> \
+         案の一致率が十分に高ければ、自動で当てる（当てても履歴から戻せます）</label> \
+         <button>保存</button></form>"
+    );
+    if view.requested {
+        out.push_str("<p>案を作っています（15 分ごとの処理で作ります）。</p>");
+    } else if !view.has_evidence {
+        // 頼んでも根拠が無く、作らずに取り下げられるので、ボタンの代わりに理由を出す
+        out.push_str(
+            "<p class=\"meta\">記事に評価（★）を付けると、それを根拠に案を作れるようになります。</p>",
+        );
+    } else {
+        out.push_str(
+            "<form method=\"post\" action=\"/settings/profile/review\">\
+             <button>今すぐ案を作る</button></form>",
+        );
+    }
+    let pending = view
+        .suggestions
+        .iter()
+        .find(|s| s.status == SuggestionStatus::Pending);
+    match (pending, view.suggestions.first()) {
+        (Some(s), _) => out.push_str(&pending_suggestion(s, current)),
+        (None, Some(last)) => out.push_str(&format!(
+            "<p class=\"meta\">前回の見直し：{}（{}・{}）</p>",
+            crate::jst::format_local(&last.created_at),
+            trigger_label(last.trigger),
+            status_label(last.status),
+        )),
+        (None, None) => {}
+    }
+    out
+}
+
+/// 待っている案：今との違い・根拠・今と案の一致率、採用と見送り。
+fn pending_suggestion(s: &ProfileSuggestion, current: &Profile) -> String {
+    let changes: String = crate::profile::diff(current, &s.profile)
+        .iter()
+        .map(|c| format!("<li>{}</li>", escape(&change_text(c))))
+        .collect();
+    let reasons: String = s
+        .reasons
+        .iter()
+        .map(|r| {
+            format!(
+                "<li>{}：<span class=\"meta\">{}</span></li>",
+                escape(&r.change),
+                escape(&r.evidence)
+            )
+        })
+        .collect();
+    format!(
+        "<h3>待っている案 <span class=\"meta\">{}・{}</span></h3>\
+         <p>一致率：今 {} → 案 {}<br><span class=\"meta\">案の値は、案の根拠にした評価で測るので甘めに出ます。\
+         </span></p>\
+         <ul>{changes}</ul><p>根拠</p><ul>{reasons}</ul>\
+         <form method=\"post\" action=\"/settings/profile/suggestions/{id}/apply\">\
+         <button>採用する</button></form>\
+         <form method=\"post\" action=\"/settings/profile/suggestions/{id}/dismiss\">\
+         <button>見送る</button></form>",
+        crate::jst::format_local(&s.created_at),
+        trigger_label(s.trigger),
+        stats_text(s.current),
+        stats_text(s.candidate),
+        id = s.id,
+    )
+}
+
+fn stats_text(stats: VersionStats) -> String {
+    match stats.concordance {
+        Some(c) => format!("{c:.2}（評価 {} 件）", stats.rated),
+        None => format!("-（評価 {} 件）", stats.rated),
+    }
+}
+
+fn trigger_label(trigger: SuggestionTrigger) -> &'static str {
+    match trigger {
+        SuggestionTrigger::Auto => "評価が増えたので作成",
+        SuggestionTrigger::Manual => "頼まれて作成",
+    }
+}
+
+fn status_label(status: SuggestionStatus) -> &'static str {
+    match status {
+        SuggestionStatus::Pending => "待っている",
+        SuggestionStatus::Applied => "当てた",
+        SuggestionStatus::Dismissed => "見送った",
+        SuggestionStatus::Superseded => "新しい案に置き換えた",
+        SuggestionStatus::Unchanged => "変える根拠なし",
+    }
 }
 
 /// 関心分野（重みと補足）と推薦しない話題。

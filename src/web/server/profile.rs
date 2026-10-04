@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::db::ProfileOrigin;
+
 pub(super) async fn profile_page(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
@@ -9,9 +11,17 @@ pub(super) async fn profile_page(
     let page = with_db_and_config(&state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         let versions = db.profile_versions(user)?;
+        let suggestions = db.profile_suggestions(user)?;
+        let view = html::ProfileView {
+            versions: &versions,
+            suggestions: &suggestions,
+            auto_apply: db.auto_apply_profile(user)?,
+            requested: db.review_requests()?.contains(&user),
+            has_evidence: !db.label_evidence(user)?.is_empty(),
+        };
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);
-        Ok(html::profile_page(&versions, &page))
+        Ok(html::profile_page(view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -34,9 +44,74 @@ pub(super) async fn revert_profile_version(
     Ok(Redirect::to("/settings/profile"))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct AutoApplyForm {
+    /// チェックしたときだけ送られる
+    auto: Option<String>,
+}
+
+pub(super) async fn set_auto_apply(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Form(form): Form<AutoApplyForm>,
+) -> Result<Redirect, AppError> {
+    let on = form.auto.is_some();
+    with_db(&state, move |db| {
+        Ok(db.set_auto_apply_profile(me.user_id, on)?)
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn request_review(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        Ok(db.request_review(me.user_id, Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn apply_suggestion(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Path(id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        suggestion_result(db.apply_suggestion(me.user_id, id, ProfileOrigin::Suggest, Utc::now()))
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn dismiss_suggestion(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Path(id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        suggestion_result(db.dismiss_suggestion(me.user_id, id, Utc::now()))
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+/// ほかの利用者の案も、無い案と同じに扱う。もう待っていない案（別の画面で採用したなど）は何もしない。
+fn suggestion_result(result: Result<bool, DbError>) -> Result<(), AppError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(DbError::UnknownProfileSuggestion(_)) => Err(AppError::NotFound),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::db::{Db, ProfileOrigin};
+    use crate::db::{
+        Db, NewSuggestion, ProfileOrigin, SuggestionStatus, SuggestionTrigger, VersionStats,
+    };
     use crate::profile::{Interest, Profile};
     use crate::web::server::test_support::*;
 
@@ -149,5 +224,163 @@ mod tests {
         assert_eq!(status, 200);
         assert!(html.contains("プロファイルはまだありません"), "{html}");
         assert!(!html.contains("燃料"), "{html}");
+    }
+
+    /// 要約のある記事に評価を 1 件付ける（案の根拠になる）。
+    fn rate_one(db: &Db) {
+        let (article, _) = seed(db, "https://e.com/rated", "評価した記事");
+        db.rate(
+            db.owner_id().unwrap(),
+            article,
+            crate::db::Rating::new(4),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    }
+
+    /// 待っている案（今との違い・根拠・今と案の一致率）を保存し、その id を返す。
+    fn pending(db: &Db) -> i64 {
+        let owner = db.owner_id().unwrap();
+        rate_one(db);
+        db.save_profile(owner, &profile("燃料", 1.0), chrono::Utc::now())
+            .unwrap();
+        let reasons = vec![crate::prompt::suggest::Reason {
+            change: "燃料の重みを下げた".into(),
+            evidence: "不要 8 件".into(),
+        }];
+        db.save_suggestion(
+            &NewSuggestion {
+                user_id: owner,
+                base_hash: &crate::profile::hash(&profile("燃料", 1.0)),
+                profile: &profile("燃料", 0.4),
+                reasons: &reasons,
+                evidence: &[],
+                current: VersionStats {
+                    rated: 41,
+                    concordance: Some(0.44),
+                },
+                candidate: VersionStats {
+                    rated: 41,
+                    concordance: Some(0.64),
+                },
+                trigger: SuggestionTrigger::Auto,
+                status: SuggestionStatus::Pending,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// 待っている案を、今との違い・根拠・一致率と、採用・見送りのボタンで出す。自動で当てるかの切り替え
+    /// （既定は当てる）と「今すぐ案を作る」も出す。
+    #[tokio::test]
+    async fn shows_a_pending_suggestion_and_the_controls() {
+        let db = Db::open_in_memory().unwrap();
+        let id = pending(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings/profile").await;
+        let suggestion = html.split("<h2>更新案</h2>").nth(1).expect("suggestion");
+        assert!(suggestion.contains("燃料の重み 1 → 0.4"), "{html}");
+        assert!(suggestion.contains("燃料の重みを下げた"), "{html}");
+        assert!(suggestion.contains("不要 8 件"), "{html}");
+        assert!(suggestion.contains("0.44"), "{html}");
+        assert!(suggestion.contains("0.64"), "{html}");
+        assert!(
+            suggestion.contains(&format!(
+                "action=\"/settings/profile/suggestions/{id}/apply\""
+            )),
+            "{html}"
+        );
+        assert!(
+            suggestion.contains(&format!(
+                "action=\"/settings/profile/suggestions/{id}/dismiss\""
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/settings/profile/review\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/settings/profile/auto-apply\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("name=\"auto\" value=\"on\" checked"),
+            "{html}"
+        );
+    }
+
+    /// 案を採用すると版になり（出どころは採用）、見送ると版にならない。ほかの利用者の案は扱えない。
+    #[tokio::test]
+    async fn applies_or_dismisses_a_suggestion() {
+        for (action, status, origin) in [
+            ("apply", "applied", "suggest"),
+            ("dismiss", "dismissed", "import"),
+        ] {
+            let db = Db::open_in_memory().unwrap();
+            let id = pending(&db);
+            let other = other_user(&db, "o@example.com");
+            insert_session(&db, other, "other-session");
+            let server = Server::start(db).await;
+            let path = format!("/settings/profile/suggestions/{id}/{action}");
+            assert_eq!(server.post_as("other-session", &path, "").await, 404);
+            let res = server.form(&path, "").send().await.unwrap();
+            assert_eq!(res.status().as_u16(), 303, "{action}");
+            assert_eq!(res.headers()["location"], "/settings/profile");
+            assert_eq!(
+                server.strings("SELECT status FROM profile_suggestions"),
+                [status]
+            );
+            assert_eq!(
+                server.strings("SELECT origin FROM profile_versions ORDER BY id DESC LIMIT 1"),
+                [origin]
+            );
+        }
+    }
+
+    /// 「今すぐ案を作る」は依頼を残し、画面は作成中と出す。自動で当てるかは切り替えられる。
+    #[tokio::test]
+    async fn requests_a_review_and_switches_auto_apply() {
+        let db = Db::open_in_memory().unwrap();
+        two_versions(&db);
+        rate_one(&db);
+        let server = Server::start(db).await;
+        let res = server.post("/settings/profile/review", "").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.count("SELECT count(*) FROM profile_review_requests"),
+            1
+        );
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("案を作っています"), "{html}");
+        let res = server.post("/settings/profile/auto-apply", "").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.count("SELECT auto_apply_profile FROM users WHERE id = 1"),
+            0
+        );
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("name=\"auto\" value=\"on\">"), "{html}");
+        server.post("/settings/profile/auto-apply", "auto=on").await;
+        assert_eq!(
+            server.count("SELECT auto_apply_profile FROM users WHERE id = 1"),
+            1
+        );
+    }
+
+    /// 評価が無ければ案を作れないので、「今すぐ案を作る」の代わりに評価が要ると出す（頼んでも取り下げられる）。
+    #[tokio::test]
+    async fn says_ratings_are_needed_for_a_suggestion() {
+        let db = Db::open_in_memory().unwrap();
+        two_versions(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("記事に評価（★）を付けると"), "{html}");
+        assert!(
+            !html.contains("action=\"/settings/profile/review\""),
+            "{html}"
+        );
     }
 }

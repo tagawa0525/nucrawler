@@ -411,6 +411,30 @@ mod tests {
         assert_eq!(items[3].published_at, jst_midnight(2026, 9, 28));
     }
 
+    /// N-ADRES の検索結果は、項目ごとに PC 用とスマホ用の 2 つのリンクを持つ。PC 用だけを読み、
+    /// 日付は同じ項目の最初の識別子（2 つ目は資料の ID）から取る（2026 年 10 月 4 日の実ページ）。
+    #[test]
+    fn nra_archive_search_results_with_date_from_the_item() {
+        let items = parse(
+            &HtmlList {
+                date: Some(".c-list-item-pc__identity".into()),
+                ..list("a.c-list-item-pc__link")
+            },
+            include_str!("../../tests/fixtures/nra_archive_search.html"),
+            &base("https://www.da.nra.go.jp/search?ftxt=1&q=type_id%20eq%20%2712%27&sf=sort_date_d&rows=50"),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 3, "{items:#?}");
+        assert_eq!(items[1].url, "https://www.da.nra.go.jp/detail/NRA100020743");
+        assert_eq!(
+            items[2].title,
+            "九州電力(株)に玄海原子力発電所第3号機及び第4号機の設計及び工事の計画等を認可"
+        );
+        assert_eq!(items[0].published_at, jst_midnight(2026, 10, 2));
+        assert_eq!(items[1].published_at, jst_midnight(2026, 10, 1));
+        assert_eq!(items[2].published_at, jst_midnight(2026, 9, 24));
+    }
+
     /// 日付は、リンクを含む項目（ほかのリンクを含まない最も大きいまとまり）の中から探す。
     /// 項目に日付が無いときや読めないときは、隣の項目の日付を使わずに None にする。
     #[test]

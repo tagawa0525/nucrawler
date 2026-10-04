@@ -323,6 +323,61 @@ mod tests {
         assert_eq!(r.interest, Some(0));
     }
 
+    /// 共通の向きに寄った単位ベクトル（どの文どうしも類似度が高いモデルを模す）。
+    fn tilted(x: f32, y: f32) -> Vec<f32> {
+        let norm = (1.0 + x * x + y * y).sqrt();
+        vec![1.0 / norm, x / norm, y / norm]
+    }
+
+    /// どの文どうしも類似度が高いモデルでは、推薦しない話題との類似度が関心分野との類似度と同じ程度になる。
+    /// 類似度を基準の要約での平均と標準偏差で標準化してから組み合わせ、関心分野に寄った記事を 0 点に落とさない。
+    #[test]
+    fn standardizes_similarities_against_the_reference() {
+        let p = Preference {
+            interests: vec![Interest {
+                topic: "i".into(),
+                weight: 0.9,
+                vector: tilted(0.3, 0.0),
+            }],
+            excludes: vec![Exclude {
+                topic: "x".into(),
+                vector: tilted(0.0, 0.3),
+            }],
+        };
+        let reference = [
+            tilted(0.3, 0.0),
+            tilted(0.0, 0.3),
+            tilted(0.0, 0.0),
+            tilted(-0.3, 0.0),
+            tilted(0.0, -0.3),
+        ];
+        let scorer = Scorer::new(&p, Formula::default(), &reference);
+        // 関心分野に寄った記事は基準の中で最も高い（ほかの 4 件より上で、自分と同じ値が 1 件）
+        let near_interest = scorer.score(&tilted(0.3, 0.0));
+        assert_eq!(near_interest.score, 90, "{near_interest:?}");
+        assert_eq!(near_interest.interest.as_deref(), Some("i"));
+        assert_eq!(near_interest.exclude, None);
+        // 推薦しない話題に寄った記事は 0 点で、その話題が特徴になる
+        let near_exclude = scorer.score(&tilted(0.0, 0.3));
+        assert_eq!(near_exclude.score, 0, "{near_exclude:?}");
+        assert_eq!(near_exclude.exclude.as_deref(), Some("x"));
+    }
+
+    /// 基準の類似度がばらつかない（基準が 1 件以下か、全部同じ）ときは、標準化せずに類似度をそのまま使う。
+    #[test]
+    fn keeps_raw_similarities_without_spread() {
+        let p = Preference {
+            interests: vec![interest("i", 1.0, 0.0)],
+            excludes: vec![],
+        };
+        for reference in [vec![], vec![at(30.0)], vec![at(30.0), at(30.0)]] {
+            let scorer = Scorer::new(&p, Formula::default(), &reference);
+            let scored = scorer.score(&at(0.0));
+            assert_eq!(scored.interest.as_deref(), Some("i"), "{reference:?}");
+            assert!(scored.score > 0, "{reference:?}: {scored:?}");
+        }
+    }
+
     /// 百分位：基準の中で小さい値の数と、同じ値の半分の数の割合。0 以下は 0 点、基準が無ければ 50 点。
     #[test]
     fn percentiles() {

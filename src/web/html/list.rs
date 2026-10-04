@@ -32,6 +32,23 @@ fn mark_value(on: bool) -> &'static str {
     if on { "1" } else { "0" }
 }
 
+/// `mark_value` の逆。1・0 でなければ `None`。
+pub fn parse_mark(value: &str) -> Option<bool> {
+    match value {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// 既読で絞る値（`read=`）。`mark_value` の値か、絞らない（`any`。`Some(None)`）。不正な値なら `None`。
+pub fn parse_read(value: &str) -> Option<Option<bool>> {
+    match value {
+        "any" => Some(None),
+        v => parse_mark(v).map(Some),
+    }
+}
+
 /// 一覧の表示の選択。最低点は `min=N`（既定の最低点なら省く）、既読は `read=1`（既読だけ）・`read=0`（未読だけ）・
 /// `read=any`（絞らない）、評価は `rating=hide-low`（★1〜2 を隠す）・`rating=N`（★N 以上）・`rating=0`（評価の無い
 /// 記事だけ）・`rating=any`（絞らない）、ブックマークは `bookmarked=1`・`bookmarked=0` で持つ（この表示の既定なら省く）。
@@ -156,6 +173,20 @@ pub(super) fn rating_value(rating: RatingFilter) -> String {
         RatingFilter::HideLow => "hide-low".to_string(),
         RatingFilter::AtLeast(r) => r.get().to_string(),
         RatingFilter::Unrated => "0".to_string(),
+    }
+}
+
+/// `rating_value` の逆。不正な値なら `None`。
+pub fn parse_rating(value: &str) -> Option<RatingFilter> {
+    match value {
+        "any" => Some(RatingFilter::Any),
+        "hide-low" => Some(RatingFilter::HideLow),
+        "0" => Some(RatingFilter::Unrated),
+        v => v
+            .parse()
+            .ok()
+            .and_then(crate::db::Rating::new)
+            .map(RatingFilter::AtLeast),
     }
 }
 

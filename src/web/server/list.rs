@@ -77,20 +77,11 @@ impl ListParams {
         let Some(value) = self.rating.as_deref().filter(|v| !v.is_empty()) else {
             return Ok(None);
         };
-        let rating = match value {
-            "any" => RatingFilter::Any,
-            "hide-low" => RatingFilter::HideLow,
-            "0" => RatingFilter::Unrated,
-            v => v
-                .parse()
-                .ok()
-                .and_then(crate::db::Rating::new)
-                .map(RatingFilter::AtLeast)
-                .ok_or(AppError::BadRequest(
-                    "rating must be any, hide-low or 0..=5",
-                ))?,
-        };
-        Ok(Some(rating))
+        html::parse_rating(value)
+            .map(Some)
+            .ok_or(AppError::BadRequest(
+                "rating must be any, hide-low or 0..=5",
+            ))
     }
 
     /// JavaScript が無いときの評価の選択を、絞り込み（`Some(true)`）と一覧（`Some(false)`）のどちらから送ったか。
@@ -106,23 +97,16 @@ impl ListParams {
 
 /// 一覧の既読で絞る値。`1` は既読だけ、`0` は未読だけ、`any` は絞らない（`Some(None)`）。無ければ `None`（既定）。
 fn read_mark(value: Option<&str>) -> Result<Option<Option<bool>>, AppError> {
-    match value {
-        None => Ok(None),
-        Some("1") => Ok(Some(Some(true))),
-        Some("0") => Ok(Some(Some(false))),
-        Some("any") => Ok(Some(None)),
-        Some(_) => Err(AppError::BadRequest("read must be 1, 0 or any")),
-    }
+    value
+        .map(|v| html::parse_read(v).ok_or(AppError::BadRequest("read must be 1, 0 or any")))
+        .transpose()
 }
 
 /// 一覧のブックマークで絞る値。`1` はブックマーク中だけ、`0` はしていない記事だけ。無ければ絞らない。
 fn bookmark_mark(value: Option<&str>) -> Result<Option<bool>, AppError> {
-    match value {
-        None => Ok(None),
-        Some("1") => Ok(Some(true)),
-        Some("0") => Ok(Some(false)),
-        Some(_) => Err(AppError::BadRequest("bookmarked must be 1 or 0")),
-    }
+    value
+        .map(|v| html::parse_mark(v).ok_or(AppError::BadRequest("bookmarked must be 1 or 0")))
+        .transpose()
 }
 
 pub(super) async fn list(

@@ -12,7 +12,7 @@ pub(super) struct ModelCache {
     model: Model,
 }
 
-/// SQL の関数 `recommend_score(base_score, weight_sum)` を登録する。LLM 点が NULL（未採点）なら NULL。
+/// SQL の関数 `recommend_score(base_score, weight_sum)` を登録する。補正の前の点数が NULL（未採点）なら NULL。
 pub(super) fn register_functions(conn: &Connection) -> Result<(), DbError> {
     use rusqlite::functions::FunctionFlags;
     conn.create_scalar_function(
@@ -53,8 +53,8 @@ pub(super) fn recommend_score_sql() -> &'static str {
 }
 
 impl Db {
-    /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = LLM 点）。
-    /// 学習の材料（評価した記事ごとの LLM 点・特徴・評価）を毎回読み、前に学習したときと違えば学習し直す。
+    /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = 補正の前の点数）。
+    /// 学習の材料（評価した記事ごとの補正の前の点数・特徴・評価）を毎回読み、前に学習したときと違えば学習し直す。
     /// 材料は評価した記事の分だけなので軽く、評価・採点・最新の要約・トピックの統合のどの変化も漏らさない。
     pub(super) fn recommend_model(
         &self,
@@ -83,7 +83,7 @@ impl Db {
     }
 
     /// 学習の材料：評価した記事ごとに、一覧と同じ採点（閲覧できる最新の digest の、最新のプロンプトの版で
-    /// 最高点の採点）の LLM 点と特徴、評価。そのプロファイルで採点されていない記事は使わない。
+    /// 最高点の採点）の 補正の前の点数と特徴、評価。そのプロファイルで採点されていない記事は使わない。
     fn recommend_examples(
         &self,
         user_id: i64,
@@ -148,7 +148,7 @@ mod tests {
     use crate::db::test_support::*;
     use crate::recommend::{Feature, FeatureKind};
 
-    /// 関心分野 `interests` に当たったとして LLM が `llm` 点を付けた記事。
+    /// 関心分野 `interests` に当たったとして `llm` 点が付いた記事。
     fn article_with(db: &Db, url: &str, llm: u8, interests: &[&str]) -> i64 {
         let a = page_article(db, url, "2026-09-26T00:00:00.000Z");
         let digest = add_digest(db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
@@ -168,7 +168,7 @@ mod tests {
         a
     }
 
-    /// LLM が「市場」を高く付けても低く評価し、「燃料」を低く付けても高く評価してきた。
+    /// 採点が「市場」を高く付けても低く評価し、「燃料」を低く付けても高く評価してきた。
     fn rate_training(db: &Db) {
         let owner = db.owner_id().unwrap();
         for i in 0..10 {

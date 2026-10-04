@@ -1,9 +1,9 @@
 //! 推薦点：関心プロファイルとの近さの点数（embedding。計画 017）に、利用者の評価から学んだ補正を足した点数（計画 004）。
 //!
-//! 記事ごとに `z = x + Σ w_f`（x は LLM 点の logit、f は記事の特徴）を求め、`100·σ(z)` を推薦点にする。
+//! 記事ごとに `z = x + Σ w_f`（x は補正の前の点数の logit、f は記事の特徴）を求め、`100·σ(z)` を推薦点にする。
 //! 評価 1〜5 を 0〜1 に写した値を目標に、交差エントロピーと L2 の正則化で特徴ごとの重み w を学ぶ。正則化は
-//! 今の振る舞い（w = 0：推薦点 = LLM 点）を中心に置くので、評価が少ないうちは補正が小さい。
-//! 全記事に効く係数（LLM 点の傾きや全体のずれ）は学ばない。学ぶと評価 1 件で全記事の点数が動いてしまい、
+//! 今の振る舞い（w = 0：推薦点 = 補正の前の点数）を中心に置くので、評価が少ないうちは補正が小さい。
+//! 全記事に効く係数（補正の前の点数の傾きや全体のずれ）は学ばない。学ぶと評価 1 件で全記事の点数が動いてしまい、
 //! 評価した記事と特徴を共有しない記事まで補正されるため。
 //! I/O を持たない。
 
@@ -31,7 +31,7 @@ pub struct Feature {
     pub key: String,
 }
 
-/// 学習の 1 件：評価した記事の LLM 点と特徴、評価。
+/// 学習の 1 件：評価した記事の 補正の前の点数と特徴、評価。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Example {
     pub base_score: u8,
@@ -45,7 +45,7 @@ pub struct Model {
     pub weights: BTreeMap<Feature, f64>,
 }
 
-/// LLM 点を確率とみなすときの端（0 点・100 点で logit が無限にならないように）
+/// 補正の前の点数を確率とみなすときの端（0 点・100 点で logit が無限にならないように）
 const EDGE: f64 = 0.005;
 /// Newton 法の打ち切り
 const MAX_ITERATIONS: usize = 100;
@@ -55,7 +55,7 @@ fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + (-z).exp())
 }
 
-/// LLM 点（0〜100）の logit。
+/// 補正の前の点数（0〜100）の logit。
 fn base_logit(base_score: u8) -> f64 {
     let p = (f64::from(base_score) / 100.0).clamp(EDGE, 1.0 - EDGE);
     (p / (1.0 - p)).ln()
@@ -78,7 +78,7 @@ fn distinct(features: &[Feature]) -> BTreeSet<&Feature> {
 }
 
 impl Model {
-    /// 今の振る舞い（推薦点 = LLM 点）。
+    /// 今の振る舞い（推薦点 = 補正の前の点数）。
     pub fn identity() -> Self {
         Self {
             weights: BTreeMap::new(),
@@ -100,7 +100,7 @@ impl Model {
             .collect();
         let index: BTreeMap<&Feature, usize> =
             features.iter().enumerate().map(|(i, f)| (*f, i)).collect();
-        // 1 件ごとの (LLM 点の logit, 値が 1 の特徴の列, 目標)
+        // 1 件ごとの (補正の前の点数の logit, 値が 1 の特徴の列, 目標)
         let rows: Vec<(f64, Vec<usize>, f64)> = examples
             .iter()
             .map(|e| {
@@ -112,7 +112,7 @@ impl Model {
             })
             .collect();
         let n = features.len();
-        // 事前の中心は w = 0（推薦点 = LLM 点）
+        // 事前の中心は w = 0（推薦点 = 補正の前の点数）
         let mut theta = vec![0.0; n];
         let z = |theta: &[f64], (x, cols, _): &(f64, Vec<usize>, f64)| {
             x + cols.iter().map(|&c| theta[c]).sum::<f64>()
@@ -216,7 +216,7 @@ impl Model {
     }
 }
 
-/// 推薦点を、LLM 点と特徴の重みの和から求める（SQL の `recommend_score` と `Model::score` で共有する）。
+/// 推薦点を、補正の前の点数と特徴の重みの和から求める（SQL の `recommend_score` と `Model::score` で共有する）。
 pub fn score_from(base_score: u8, weight_sum: f64) -> u8 {
     points(sigmoid(base_logit(base_score) + weight_sum))
 }
@@ -332,7 +332,7 @@ mod tests {
         std::iter::repeat_n(e, n).collect()
     }
 
-    /// 評価が 0 件なら、推薦点は LLM 点と同じ（今の振る舞い）。0 と 100 だけは端を丸めて 1 と 100。
+    /// 評価が 0 件なら、推薦点は補正の前の点数と同じ（今の振る舞い）。0 と 100 だけは端を丸めて 1 と 100。
     #[test]
     fn without_ratings_the_score_is_the_llm_score() {
         let model = Model::fit(&[], 1.0);
@@ -366,7 +366,7 @@ mod tests {
     }
 
     /// 1 件ずつ外して学習し、外した 1 件を予測する。外した評価を使わないので、学習に使った場合より控えめになる。
-    /// 1 件だけなら、外すと評価が無いので LLM 点のまま。
+    /// 1 件だけなら、外すと評価が無いので 補正の前の点数のまま。
     #[test]
     fn leave_one_out_predicts_without_the_held_out_rating() {
         let market = topic("電力市場");
@@ -389,7 +389,7 @@ mod tests {
         Model::fit(&[], f64::INFINITY);
     }
 
-    /// LLM が高く付けたのに低く評価したトピックは下げ、低く付けたのに高く評価したトピックは上げる。
+    /// 採点が高く付けたのに低く評価したトピックは下げ、低く付けたのに高く評価したトピックは上げる。
     #[test]
     fn learns_topics_the_llm_misjudges() {
         let market = topic("電力市場");
@@ -425,7 +425,7 @@ mod tests {
         assert!(drop(3, 10.0) < three, "stronger prior shrinks more");
     }
 
-    /// 評価 3 は「どちらでもない」で、LLM 点が 50 なら補正しない（予測と目標が一致する）。
+    /// 評価 3 は「どちらでもない」で、補正の前の点数が 50 なら補正しない（予測と目標が一致する）。
     #[test]
     fn a_neutral_rating_at_the_midpoint_changes_nothing() {
         let t = topic("規制・審査");
@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(model.score(50, std::slice::from_ref(&t)), 50);
     }
 
-    /// 補正は特徴ごとにだけ学ぶ。評価した記事と特徴を共有しない記事の推薦点は、評価がいくつあっても LLM 点のまま
+    /// 補正は特徴ごとにだけ学ぶ。評価した記事と特徴を共有しない記事の推薦点は、評価がいくつあっても 補正の前の点数のまま
     /// （全体の傾きやずれを学ぶと、評価 1 件で全記事の点数が動いてしまう）。
     #[test]
     fn ratings_do_not_move_articles_without_their_features() {

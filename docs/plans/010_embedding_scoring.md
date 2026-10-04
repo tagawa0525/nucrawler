@@ -109,6 +109,9 @@ DB が持つベクトルの空間は常に 1 つにする。
 
 ### 採点器と最低点（段階 3）
 
+> 2026-10-04：段階 3 は計画 017 で置き換えた。採点器の選択は作らず、所有者も含めてランキングを embedding に一本化し、
+> LLM の採点をやめる。下の「判断の手順」の「LLM と同じ程度なら」という基準も使わない（[017](017_embedding_ranking.md)）。
+
 - 利用者ごとに採点器を決める：`llm` か `embedding`。所有者以外は `embedding` だけ。所有者は設定で選ぶ（既定 `llm`）。
   `llm` は LLM の点数を優先し、無い記事（プロファイルの変更の直後、`backlog_days` より古い記事、LLM の枠が尽きたとき）を embedding の点数で補う
 - 点数を選ぶ 4 か所の SQL（`list_articles`・`pending_translate`・`recommend_examples`・`redo --min-score`）を 1 つの断片にまとめる

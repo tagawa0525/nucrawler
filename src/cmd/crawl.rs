@@ -22,7 +22,8 @@ pub(crate) async fn crawl(
     args: &cli::CrawlArgs,
 ) -> Result<(), Error> {
     let stages = if args.requests_only {
-        vec![Stage::Translate]
+        // Web から頼まれた和訳と、プロファイルの見直し
+        vec![Stage::Translate, Stage::Review]
     } else {
         pipeline::plan(args.until, args.only)
     };

@@ -40,26 +40,32 @@ pub struct ReviewSummary {
     pub tally: Tally,
 }
 
-/// 評価が `NEW_RATINGS` 件以上増えた利用者のプロファイルを見直す。LLM が止まったら（上限・失敗・中断）、
-/// その利用者の案は保存せずに終える（評価の件数は前の案から数えるので、次の実行で作り直す）。
+/// 評価が `NEW_RATINGS` 件以上増えた利用者と、見直しを頼んだ利用者のプロファイルを見直す（`requests_only`
+/// なら頼んだ利用者だけ）。LLM が止まったら（上限・失敗・中断）、その利用者の案は保存せずに終える
+/// （評価の件数は前の案から数え、依頼は案を保存するまで残るので、次の実行で作り直す）。
 pub async fn review_profiles<L: Llm>(
     mut env: LlmStage<'_, L>,
     config: &Config,
     requests_only: bool,
     now: DateTime<Utc>,
 ) -> Result<ReviewSummary, ReviewStageError> {
-    let _ = requests_only;
     let db = env.db;
     let mut summary = ReviewSummary::default();
+    let requested = db.review_requests()?;
     for user in db.scoring_profiles()? {
         if env.cancel.is_requested() {
             break;
         }
-        if db.ratings_since_review(user.user_id)? < NEW_RATINGS {
+        let manual = requested.contains(&user.user_id);
+        if !manual && (requests_only || db.ratings_since_review(user.user_id)? < NEW_RATINGS) {
             continue;
         }
         let evidence = db.label_evidence(user.user_id)?;
         if evidence.is_empty() {
+            // 根拠が無いので案を作れない。頼まれていても取り下げる（画面には評価が要ると出す）
+            if manual {
+                db.drop_review_request(user.user_id)?;
+            }
             continue;
         }
         let suggested =
@@ -78,7 +84,11 @@ pub async fn review_profiles<L: Llm>(
             evidence: &evidence_ids,
             current,
             candidate,
-            trigger: SuggestionTrigger::Auto,
+            trigger: if manual {
+                SuggestionTrigger::Manual
+            } else {
+                SuggestionTrigger::Auto
+            },
             status,
         };
         if crate::profile::diff(&user.profile, &suggestion.profile).is_empty() {

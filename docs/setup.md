@@ -4,12 +4,12 @@
 
 README の設定例で入る user unit：
 
-| unit                       | 内容                                                 | 既定の時刻        |
-| -------------------------- | ---------------------------------------------------- | ----------------- |
-| `nucrawler-crawl.timer`    | 取得から要約・採点・和訳まで（`crawl`）              | 03:00 10:00 16:00 |
-| `nucrawler-fetch.timer`    | 取得と本文抽出だけ（`crawl --until extract`）        | 22:00             |
-| `nucrawler-requests.timer` | Web UI から依頼された和訳（`crawl --requests-only`） | 15 分ごと         |
-| `nucrawler-serve.service`  | Web UI（`serve`）                                    | 常駐              |
+| unit                       | 内容                                                         | 既定の時刻        |
+| -------------------------- | ------------------------------------------------------------ | ----------------- |
+| `nucrawler-crawl.timer`    | 取得から要約・採点・和訳まで（`crawl`）                      | 03:00 10:00 16:00 |
+| `nucrawler-fetch.timer`    | 取得と本文抽出だけ（`crawl --until extract`）                | 22:00             |
+| `nucrawler-requests.timer` | Web UI から依頼された和訳と見直し（`crawl --requests-only`） | 15 分ごと         |
+| `nucrawler-serve.service`  | Web UI（`serve`）                                            | 常駐              |
 
 - 時刻は `services.nucrawler.schedule` で変えられる（systemd の OnCalendar）。
   LLM をどれだけ使うかは時刻ではなく `[quota]` の時間帯ごとの上限で決まる。

@@ -308,7 +308,16 @@ mod tests {
     }
 
     async fn run_with(db: &Db, llm: &FakeLlm, requests_only: bool) -> ReviewSummary {
-        let mut quota = Quota::new(QuotaConfig::default(), None, Some(100));
+        run_limited(db, llm, requests_only, 100).await
+    }
+
+    async fn run_limited(
+        db: &Db,
+        llm: &FakeLlm,
+        requests_only: bool,
+        max_calls: u32,
+    ) -> ReviewSummary {
+        let mut quota = Quota::new(QuotaConfig::default(), None, Some(max_calls));
         review_profiles(
             LlmStage {
                 db,
@@ -432,6 +441,28 @@ mod tests {
         assert_eq!(run_with(&db, &llm, true).await, ReviewSummary::default());
         assert_eq!(llm.requests().len(), calls);
         assert!(db.review_requests().unwrap().is_empty());
+    }
+
+    /// 頼まれた見直しは頼まれた順に処理する（呼び出しの上限で途中までしか進まなくても、先に頼んだ
+    /// 利用者が後回しにならない）。
+    #[tokio::test]
+    async fn serves_requests_in_order() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let liked = setup(&db, 1);
+        let other = db.add_user("o@example.com", "O", "h").unwrap();
+        db.save_profile(other, &profile("今の関心"), now()).unwrap();
+        db.rate(other, liked[0], Rating::new(5), now()).unwrap();
+        db.request_review(other, now()).unwrap();
+        db.request_review(owner, now() + chrono::Duration::minutes(1))
+            .unwrap();
+        // 案が今と同じなら採点しないので、呼び出しは利用者ごとに 1 回
+        let llm = llm("今の関心", &[], liked);
+        let summary = run_limited(&db, &llm, true, 1).await;
+        assert_eq!(summary.suggested, 1);
+        assert_eq!(db.profile_suggestions(other).unwrap().len(), 1);
+        assert!(db.profile_suggestions(owner).unwrap().is_empty());
+        assert_eq!(db.review_requests().unwrap(), [owner]);
     }
 
     #[test]

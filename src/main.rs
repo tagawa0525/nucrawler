@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use nucrawler::auth::{self, AuthError};
@@ -208,11 +208,15 @@ fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Error> {
     Ok(dir)
 }
 
+/// データディレクトリ `data` の DB を開く。
+fn open_db(data: &Path) -> Result<Db, Error> {
+    Ok(Db::open(&data.join("nucrawler.db"))?)
+}
+
 /// 検索して 1 行 1 件で出す。オーナーとして閲覧判定し、閲覧としては記録しない。
 fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> Result<(), Error> {
     let (config, _) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
-        .with_prior_strength(config.recommend.prior_strength);
+    let db = open_db(&data_dir(data)?)?.with_prior_strength(config.recommend.prior_strength);
     let owner = db.owner_id()?;
     let hash = db.profile_hash(owner)?;
     let limit = args.limit.unwrap_or(config.web.list_limit);
@@ -225,7 +229,7 @@ fn search(config: Option<PathBuf>, data: Option<PathBuf>, args: SearchArgs) -> R
 
 /// Web UI の利用者を管理する（CLI を使えるのは稼働ホストに入れる管理者だけ）。パスワードは CLI が作って 1 回だけ表示する。
 fn user(data: Option<PathBuf>, args: UserArgs) -> Result<(), Error> {
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = open_db(&data_dir(data)?)?;
     let new_password = || -> Result<(String, String), Error> {
         let password = auth::initial_password()?;
         let hash = auth::hash_password(&password)?;
@@ -275,7 +279,7 @@ fn user(data: Option<PathBuf>, args: UserArgs) -> Result<(), Error> {
 }
 
 fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = open_db(&data_dir(data)?)?;
     match args {
         TopicsArgs::Import { file } => {
             let text = std::fs::read_to_string(&file).map_err(|source| Error::ReadFile {
@@ -293,7 +297,7 @@ fn topics(data: Option<PathBuf>, args: TopicsArgs) -> Result<(), Error> {
 
 /// 実行中の crawl が古い空間に保存しようとしても、空間の世代が変わっているので保存されない。
 fn embed(data: Option<PathBuf>, args: cli::EmbedArgs) -> Result<(), Error> {
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = open_db(&data_dir(data)?)?;
     match args {
         cli::EmbedArgs::Rebuild => {
             db.rebuild_embeddings()?;
@@ -310,7 +314,7 @@ async fn profile(
     args: ProfileArgs,
 ) -> Result<(), Error> {
     let open = |data| -> Result<(Db, i64), Error> {
-        let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+        let db = open_db(&data_dir(data)?)?;
         let owner = db.owner_id()?;
         Ok((db, owner))
     };
@@ -348,8 +352,7 @@ async fn serve(
     args: cli::ServeArgs,
 ) -> Result<(), Error> {
     let (config, sources) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
-        .with_prior_strength(config.recommend.prior_strength);
+    let db = open_db(&data_dir(data)?)?.with_prior_strength(config.recommend.prior_strength);
     let addr = args.addr.unwrap_or(config.web.bind);
     let state = server::AppState::new(db, config.web, sources.labels());
     server::run(addr, state, shutdown_signal()).await?;
@@ -379,15 +382,14 @@ async fn shutdown_signal() {
 /// MCP の stdio サーバー。一覧の既定値とソースの表示名は Web UI と同じ設定を使う。
 async fn mcp(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
     let (config, sources) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
-        .with_prior_strength(config.recommend.prior_strength);
+    let db = open_db(&data_dir(data)?)?.with_prior_strength(config.recommend.prior_strength);
     mcp::run(mcp::Server::new(db, config.web, sources.labels())).await?;
     Ok(())
 }
 
 fn status(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error> {
     let (_, sources) = config::load(&config_dir(config)?)?;
-    let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?;
+    let db = open_db(&data_dir(data)?)?;
     print!(
         "{}",
         status::render(&sources.sources, &db.source_overview()?)

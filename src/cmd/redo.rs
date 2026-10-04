@@ -4,13 +4,12 @@ use std::path::PathBuf;
 
 use nucrawler::cli::RedoArgs;
 use nucrawler::config;
-use nucrawler::db::Db;
 use nucrawler::llm::Backends;
 use nucrawler::pipeline::Cancel;
 use nucrawler::pipeline::run::{self, RunEnv};
 use nucrawler::quota::Quota;
 
-use crate::{Error, config_dir, data_dir};
+use crate::{Error, config_dir, data_dir, open_db};
 
 use super::{finish, spawn_signal_handler};
 
@@ -22,7 +21,7 @@ pub(crate) async fn redo(
 ) -> Result<(), Error> {
     let (config, _) = config::load(&config_dir(config)?)?;
     let data = data_dir(data)?;
-    let db = Db::open(&data.join("nucrawler.db"))?;
+    let db = open_db(&data)?;
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let llm = Backends::from_config(&config.llm, &data);

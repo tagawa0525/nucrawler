@@ -215,24 +215,17 @@ fn session_cookie_header(token: &str, max_age: i64) -> String {
     format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
 }
 
-/// ログイン後に戻る先。`next` を、ブラウザと同じ規則（WHATWG URL）で `http://{host}/` を基準に解釈し、
+/// ログイン後に戻る先。`next` を、ブラウザと同じ規則（WHATWG URL）でサイトの URL（`base_url`）を基準に解釈し、
 /// 自分のホストを指すときだけ使う。文字列の形で判定すると、`/\evil.example` のような値でブラウザの解釈とずれる。
 /// 返すのは絶対 URL（パスだけを返すと、`//evil.example` のようなパスをブラウザが別のホストとして読む）。
-fn return_to(host: &str, next: Option<&str>) -> String {
-    let Ok(base) = url::Url::parse(&format!("http://{host}/")) else {
+fn return_to(site: &str, next: Option<&str>) -> String {
+    let Ok(base) = url::Url::parse(&format!("{site}/")) else {
         return "/".to_string();
     };
     next.and_then(|n| base.join(n).ok())
         .filter(|u| u.origin() == base.origin())
         .unwrap_or_else(|| base.clone())
         .to_string()
-}
-
-pub(super) fn request_host(headers: &HeaderMap, web: &WebConfig) -> String {
-    headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map_or_else(|| web.bind.to_string(), str::to_string)
 }
 
 #[derive(serde::Deserialize)]
@@ -314,7 +307,7 @@ pub(super) async fn login(
         Ok(result) => match result? {
             None => Ok(login_failed(next.as_deref(), &state.labels)),
             Some(token) => {
-                let to = return_to(&request_host(&headers, &state.web), next.as_deref());
+                let to = return_to(&base_url(&headers, &state.web), next.as_deref());
                 let max_age = auth::SESSION_DAYS * 24 * 60 * 60;
                 Ok((
                     [(header::SET_COOKIE, session_cookie_header(&token, max_age))],

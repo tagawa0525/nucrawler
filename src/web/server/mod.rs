@@ -256,6 +256,16 @@ fn find_article(db: &Db, user: i64, id: i64) -> Result<crate::db::ArticleDetail,
     db.article_detail(user, None, id)?.ok_or(AppError::NotFound)
 }
 
+/// 外から見たサイトの URL（末尾の `/` なし）。http で待ち受けているので `http://` + Host（無ければ待ち受けの
+/// アドレス）。
+fn base_url(headers: &HeaderMap, web: &WebConfig) -> String {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map_or_else(|| web.bind.to_string(), str::to_string);
+    format!("http://{host}")
+}
+
 /// 記事への書き込み（評価・印・和訳の依頼・指摘・コメント）の後に戻る詳細。`back=1` を付け、詳細はそれを
 /// 開いたとは数えない（数えると、外した既読が付き直り、開いた記録も戻るたびに増える）。
 /// `translation` なら和訳の表示に戻る。`extra` は足すクエリ（末尾に `&`）、`fragment` は `#` から。

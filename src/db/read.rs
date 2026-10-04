@@ -20,7 +20,7 @@ pub struct ListItem {
     /// 足した点数（`crate::recommend`）。並び・閾値はこれで決める
     pub score: Option<u8>,
     /// 補正の前の LLM の点数
-    pub llm_score: Option<u8>,
+    pub base_score: Option<u8>,
     pub reason: Option<String>,
     /// その点数が当たった関心分野（プロファイルの interest の topic）
     pub matched: Vec<String>,
@@ -435,7 +435,7 @@ impl Db {
             .is_empty();
         let digests = self.versions(user_id, article_id, ArtifactKind::Digest)?;
         // 補正の内訳は、一覧と同じ特徴（採点した最新の digest のトピック）で求める
-        let adjustments = match item.llm_score {
+        let adjustments = match item.base_score {
             Some(llm) => {
                 let topics: Vec<String> = digests
                     .first()
@@ -870,7 +870,7 @@ fn read_items(
             summary_ja: r.get(8)?,
             lwr_relevant: r.get(9)?,
             score: r.get(10)?,
-            llm_score: r.get(20)?,
+            base_score: r.get(20)?,
             reason: r.get(11)?,
             matched: Vec::new(),
             excluded: Vec::new(),
@@ -957,8 +957,8 @@ mod tests {
         let b = llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
         let items = db.list_articles(list_query(&db, true)).unwrap();
         let find = |id| items.iter().find(|i| i.article_id == id).unwrap();
-        assert_eq!((find(a).score, find(a).llm_score), (Some(90), Some(90)));
-        assert_eq!((find(b).score, find(b).llm_score), (None, None));
+        assert_eq!((find(a).score, find(a).base_score), (Some(90), Some(90)));
+        assert_eq!((find(b).score, find(b).base_score), (None, None));
     }
 
     /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。
@@ -1303,7 +1303,7 @@ mod tests {
         // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は LLM の点数から少し下がる
         assert!(h.score.is_some_and(|s| s < 90), "{h:?}");
         assert_eq!(
-            (h.llm_score, h.title_ja.as_deref(), h.read_at.as_deref()),
+            (h.base_score, h.title_ja.as_deref(), h.read_at.as_deref()),
             (Some(90), Some("題"), None)
         );
     }

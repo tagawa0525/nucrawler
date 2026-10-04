@@ -73,7 +73,7 @@ pub(super) fn score_badge(i: &ListItem) -> String {
     let Some(score) = i.score else {
         return "<span class=\"score\" role=\"img\" aria-label=\"未採点\" title=\"未採点\">&nbsp;</span>".to_string();
     };
-    match i.llm_score.filter(|llm| *llm != score) {
+    match i.base_score.filter(|llm| *llm != score) {
         Some(llm) => format!(
             "<span class=\"score\" title=\"LLM {llm}・補正 {:+}\">{score}</span>",
             i32::from(score) - i32::from(llm)
@@ -206,7 +206,7 @@ mod tests {
     fn card_shows_the_llm_score_behind_the_recommended_score() {
         let mut adjusted = item(1, "2026-09-27T05:00:00.000Z");
         adjusted.score = Some(81);
-        adjusted.llm_score = Some(72);
+        adjusted.base_score = Some(72);
         let html = card(&adjusted, false, &Page::default());
         assert!(
             html.contains(r#"<span class="score" title="LLM 72・補正 +9">81</span>"#),

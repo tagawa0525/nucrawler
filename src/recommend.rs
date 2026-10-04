@@ -34,7 +34,7 @@ pub struct Feature {
 /// 学習の 1 件：評価した記事の LLM 点と特徴、評価。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Example {
-    pub llm_score: u8,
+    pub base_score: u8,
     pub features: Vec<Feature>,
     pub rating: Rating,
 }
@@ -56,8 +56,8 @@ fn sigmoid(z: f64) -> f64 {
 }
 
 /// LLM 点（0〜100）の logit。
-fn llm_logit(llm_score: u8) -> f64 {
-    let p = (f64::from(llm_score) / 100.0).clamp(EDGE, 1.0 - EDGE);
+fn base_logit(base_score: u8) -> f64 {
+    let p = (f64::from(base_score) / 100.0).clamp(EDGE, 1.0 - EDGE);
     (p / (1.0 - p)).ln()
 }
 
@@ -108,7 +108,7 @@ impl Model {
                     .into_iter()
                     .map(|f| index[f])
                     .collect();
-                (llm_logit(e.llm_score), cols, target(e.rating))
+                (base_logit(e.base_score), cols, target(e.rating))
             })
             .collect();
         let n = features.len();
@@ -184,8 +184,8 @@ impl Model {
     }
 
     /// 推薦点（0〜100）。
-    pub fn score(&self, llm_score: u8, features: &[Feature]) -> u8 {
-        score_from(llm_score, self.weight_sum(features))
+    pub fn score(&self, base_score: u8, features: &[Feature]) -> u8 {
+        score_from(base_score, self.weight_sum(features))
     }
 
     /// 重みを、特徴のキー（`feature_key`）から重みへの JSON のオブジェクトにする（SQL に渡す）。
@@ -200,14 +200,14 @@ impl Model {
 
     /// 補正の内訳：特徴ごとに、その特徴が無かったときの推薦点からどれだけ動かしたか（点）。
     /// 動かしていない特徴は除き、大きく効いたものから並べる。
-    pub fn contributions(&self, llm_score: u8, features: &[Feature]) -> Vec<(Feature, i32)> {
-        let all = i32::from(self.score(llm_score, features));
+    pub fn contributions(&self, base_score: u8, features: &[Feature]) -> Vec<(Feature, i32)> {
+        let all = i32::from(self.score(base_score, features));
         let mut parts: Vec<(Feature, i32)> = distinct(features)
             .into_iter()
             .filter(|f| self.weights.contains_key(*f))
             .map(|f| {
                 let others: Vec<Feature> = features.iter().filter(|g| *g != f).cloned().collect();
-                (f.clone(), all - i32::from(self.score(llm_score, &others)))
+                (f.clone(), all - i32::from(self.score(base_score, &others)))
             })
             .filter(|(_, p)| *p != 0)
             .collect();
@@ -217,8 +217,8 @@ impl Model {
 }
 
 /// 推薦点を、LLM 点と特徴の重みの和から求める（SQL の `recommend_score` と `Model::score` で共有する）。
-pub fn score_from(llm_score: u8, weight_sum: f64) -> u8 {
-    points(sigmoid(llm_logit(llm_score) + weight_sum))
+pub fn score_from(base_score: u8, weight_sum: f64) -> u8 {
+    points(sigmoid(base_logit(base_score) + weight_sum))
 }
 
 /// 特徴を SQL で突き合わせるキー（`topic:燃料` など）。
@@ -269,7 +269,7 @@ pub fn leave_one_out(examples: &[Example], prior_strength: f64) -> Vec<u8> {
                 .map(|(_, e)| e.clone())
                 .collect();
             let e = &examples[i];
-            Model::fit(&others, prior_strength).score(e.llm_score, &e.features)
+            Model::fit(&others, prior_strength).score(e.base_score, &e.features)
         })
         .collect()
 }
@@ -319,9 +319,9 @@ mod tests {
         }
     }
 
-    fn example(llm_score: u8, features: &[Feature], rating: u8) -> Example {
+    fn example(base_score: u8, features: &[Feature], rating: u8) -> Example {
         Example {
-            llm_score,
+            base_score,
             features: features.to_vec(),
             rating: Rating::new(rating).unwrap(),
         }

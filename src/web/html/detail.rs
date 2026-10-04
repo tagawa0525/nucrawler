@@ -269,7 +269,7 @@ fn report_summary(r: &Report) -> String {
 /// 推薦点の補正の内訳（例：`推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
 fn adjustments(d: &ArticleDetail, page: &Page) -> String {
     use crate::recommend::FeatureKind;
-    let (Some(score), Some(llm)) = (d.item.score, d.item.llm_score) else {
+    let (Some(score), Some(llm)) = (d.item.score, d.item.base_score) else {
         return String::new();
     };
     if d.adjustments.is_empty() {
@@ -521,7 +521,7 @@ mod tests {
         use crate::recommend::{Feature, FeatureKind};
         let mut d = detail();
         d.item.score = Some(81);
-        d.item.llm_score = Some(72);
+        d.item.base_score = Some(72);
         d.adjustments = vec![
             (
                 Feature {

@@ -12,7 +12,7 @@ pub(super) struct ModelCache {
     model: Model,
 }
 
-/// SQL の関数 `recommend_score(llm_score, weight_sum)` を登録する。LLM 点が NULL（未採点）なら NULL。
+/// SQL の関数 `recommend_score(base_score, weight_sum)` を登録する。LLM 点が NULL（未採点）なら NULL。
 pub(super) fn register_functions(conn: &Connection) -> Result<(), DbError> {
     use rusqlite::functions::FunctionFlags;
     conn.create_scalar_function(
@@ -126,14 +126,14 @@ impl Db {
             },
         )?;
         rows.map(|row| {
-            let (rating, llm_score, source, topics, matched, excluded) = row?;
+            let (rating, base_score, source, topics, matched, excluded) = row?;
             let [topics, matched, excluded]: [Vec<String>; 3] = [
                 serde_json::from_str(&topics)?,
                 serde_json::from_str(&matched)?,
                 serde_json::from_str(&excluded)?,
             ];
             Ok(Example {
-                llm_score,
+                base_score,
                 features: crate::recommend::features(&source, &topics, &matched, &excluded),
                 rating,
             })
@@ -202,7 +202,7 @@ mod tests {
         }
         let examples = db.recommend_examples(owner, "h1").unwrap();
         assert_eq!(examples.len(), 1);
-        assert_eq!(examples[0].llm_score, 95);
+        assert_eq!(examples[0].base_score, 95);
     }
 
     /// 評価が無ければ、推薦点は LLM の点数と同じ。
@@ -211,7 +211,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let a = article_with(&db, "https://e.com/a", 72, &["市場"]);
         let i = item(&db, a);
-        assert_eq!((i.score, i.llm_score), (Some(72), Some(72)));
+        assert_eq!((i.score, i.base_score), (Some(72), Some(72)));
     }
 
     /// 一覧の並び・閾値は推薦点で決まる。評価を付けると、次の読み出しから効く。
@@ -234,7 +234,7 @@ mod tests {
 
         rate_training(&db);
         let (m, f) = (item(&db, market), item(&db, fuel));
-        assert_eq!((m.llm_score, f.llm_score), (Some(80), Some(55)));
+        assert_eq!((m.base_score, f.base_score), (Some(80), Some(55)));
         assert!(
             m.score.unwrap() < 60 && f.score.unwrap() >= 60,
             "{m:?} {f:?}"

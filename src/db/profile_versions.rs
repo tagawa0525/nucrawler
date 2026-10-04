@@ -67,77 +67,12 @@ impl Db {
         evidence: &[i64],
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        use rusqlite::OptionalExtension;
-        let hash = crate::profile::hash(profile);
-        let now = timestamp(now);
         // 今の版を読んでから退かせるので、読む前に書き込みのロックを取る（Web と CLI が同時に保存しても、
         // 古い版を読んだ側が書けずに失敗しないように）
         let tx = self.immediate()?;
-        let current: Option<Period> = tx
-            .query_row(
-                "SELECT id, hash, created_at, evidence FROM profile_versions
-                 WHERE user_id = ?1 AND retired_at IS NULL",
-                [user_id],
-                |r| {
-                    Ok(Period {
-                        id: r.get(0)?,
-                        hash: r.get(1)?,
-                        created_at: r.get(2)?,
-                        retired_at: None,
-                        evidence: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?;
-        // 時刻は、ロックを取る前に読んだもの。先に読んだ側が後から書くこともあるので、今の版より前には戻さない
-        // （版の並びと、版が今だった期間が逆にならないように）
-        let mut now = now;
-        if let Some(current) = &current
-            && current.created_at > now
-        {
-            now = current.created_at.clone();
-        }
-        if let Some(mut current) = current {
-            if current.hash == hash {
-                return Ok(false);
-            }
-            // 退く時点の一致率で固める（後で評価を付け直したり、点数が作り直されたりしても動かさない）
-            current.retired_at = Some(now.clone());
-            let stats = version_stats(&tx, user_id, &current)?;
-            tx.execute(
-                "UPDATE profile_versions SET retired_at = ?2, rated = ?3, concordance = ?4
-                 WHERE id = ?1",
-                rusqlite::params![current.id, now, stats.rated as i64, stats.concordance],
-            )?;
-        }
-        let interests = serde_json::to_string(&profile.interests)?;
-        let excludes = serde_json::to_string(&profile.exclude)?;
-        tx.execute(
-            "INSERT INTO profile_versions
-               (user_id, interests, excludes, hash, origin, evidence, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                user_id,
-                interests,
-                excludes,
-                hash,
-                origin.as_str(),
-                serde_json::to_string(evidence)?,
-                now,
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (user_id) DO UPDATE SET
-               interests = excluded.interests,
-               excludes = excluded.excludes,
-               hash = excluded.hash,
-               updated_at = excluded.updated_at",
-            rusqlite::params![user_id, interests, excludes, hash, now],
-        )?;
+        let saved = save_version(&tx, user_id, profile, origin, evidence, now)?;
         tx.commit()?;
-        Ok(true)
+        Ok(saved)
     }
 
     /// 利用者のプロファイルの版（新しい順）。
@@ -218,20 +153,98 @@ impl Db {
     }
 }
 
+/// 版を追記して今のプロファイルにする（`Db::save_profile_version` の中身。呼び出し側の取引の中で行う）。
+pub(super) fn save_version(
+    tx: &rusqlite::Connection,
+    user_id: i64,
+    profile: &crate::profile::Profile,
+    origin: ProfileOrigin,
+    evidence: &[i64],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, DbError> {
+    use rusqlite::OptionalExtension;
+    let hash = crate::profile::hash(profile);
+    let now = timestamp(now);
+    let current: Option<Period> = tx
+        .query_row(
+            "SELECT id, hash, created_at, evidence FROM profile_versions
+             WHERE user_id = ?1 AND retired_at IS NULL",
+            [user_id],
+            |r| {
+                Ok(Period {
+                    id: r.get(0)?,
+                    hash: r.get(1)?,
+                    created_at: r.get(2)?,
+                    retired_at: None,
+                    evidence: r.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    // 時刻は、ロックを取る前に読んだもの。先に読んだ側が後から書くこともあるので、今の版より前には戻さない
+    // （版の並びと、版が今だった期間が逆にならないように）
+    let mut now = now;
+    if let Some(current) = &current
+        && current.created_at > now
+    {
+        now = current.created_at.clone();
+    }
+    if let Some(mut current) = current {
+        if current.hash == hash {
+            return Ok(false);
+        }
+        // 退く時点の一致率で固める（後で評価を付け直したり、点数が作り直されたりしても動かさない）
+        current.retired_at = Some(now.clone());
+        let stats = version_stats(tx, user_id, &current)?;
+        tx.execute(
+            "UPDATE profile_versions SET retired_at = ?2, rated = ?3, concordance = ?4
+             WHERE id = ?1",
+            rusqlite::params![current.id, now, stats.rated as i64, stats.concordance],
+        )?;
+    }
+    let interests = serde_json::to_string(&profile.interests)?;
+    let excludes = serde_json::to_string(&profile.exclude)?;
+    tx.execute(
+        "INSERT INTO profile_versions
+           (user_id, interests, excludes, hash, origin, evidence, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            user_id,
+            interests,
+            excludes,
+            hash,
+            origin.as_str(),
+            serde_json::to_string(evidence)?,
+            now,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (user_id) DO UPDATE SET
+           interests = excluded.interests,
+           excludes = excluded.excludes,
+           hash = excluded.hash,
+           updated_at = excluded.updated_at",
+        rusqlite::params![user_id, interests, excludes, hash, now],
+    )?;
+    Ok(true)
+}
+
 /// 版が今のプロファイルだった期間と、一致率の集計に要るもの。
-struct Period {
-    id: i64,
-    hash: String,
-    created_at: String,
+pub(super) struct Period {
+    pub(super) id: i64,
+    pub(super) hash: String,
+    pub(super) created_at: String,
     /// 今の版なら `None`
-    retired_at: Option<String>,
+    pub(super) retired_at: Option<String>,
     /// 根拠にした記事の id（JSON 配列）
-    evidence: String,
+    pub(super) evidence: String,
 }
 
 /// 版の期間に付けた評価（根拠にした記事を除く）を、一覧と同じ規則で選んだその版の点数で測った一致率。
 /// 点数の付いていない記事は数えない。
-fn version_stats(
+pub(super) fn version_stats(
     conn: &rusqlite::Connection,
     user_id: i64,
     period: &Period,

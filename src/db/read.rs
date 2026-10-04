@@ -735,7 +735,8 @@ impl Db {
         };
         let sql = format!(
             "WITH {weights},
-             items AS (
+             -- 最新の要約（digest_id）を参照する所ごとに副問い合わせが流れ直さないよう、実体化する（計画 015）
+             items AS MATERIALIZED (
                SELECT a.id, a.source_id, a.url, a.title, a.lang,
                       coalesce(a.published_at, a.fetched_at) AS at, a.fetched_at,
                       {digest_id} AS digest_id

@@ -65,6 +65,11 @@ enum Error {
     },
     #[error("no profile yet; run `nucrawler profile import FILE` first")]
     NoProfile,
+    /// `eval --profile` は候補を embedding で計算する
+    #[error("eval --profile scores the candidate by embedding; add [embedding] to config.toml")]
+    CandidateNeedsEmbedding,
+    #[error("no embeddings yet; run `nucrawler crawl --only embed` first")]
+    NoEmbeddings,
     #[error("no ratings yet; rate articles (★1-5) in the web UI first")]
     NoLabels,
     #[error(

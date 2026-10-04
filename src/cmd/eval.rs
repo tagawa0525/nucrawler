@@ -26,6 +26,15 @@ pub(crate) async fn eval(
     let data = data_dir(data)?;
     let db = open_db(&data)?;
     let owner = db.owner_id()?;
+    // 候補は embedding でその場で計算するので、計算できなければ候補を黙って落とさずに失敗する
+    if candidate.is_some() {
+        if config.embedding.is_none() {
+            return Err(Error::CandidateNeedsEmbedding);
+        }
+        if db.embedding_space()?.is_none() {
+            return Err(Error::NoEmbeddings);
+        }
+    }
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let mut scores = db.eval_scores(owner)?;

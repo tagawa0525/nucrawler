@@ -55,7 +55,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     if i.score.is_some() {
         body.push_str(&format!(
             "<p>{}{}</p>",
-            super::list::matches(i),
+            matches(i),
             escape(i.reason.as_deref().unwrap_or(""))
         ));
     }
@@ -84,7 +84,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
         ));
     }
     // 一覧のカードと同じく 点数・評価・既読・ブックマーク の順
-    body.push_str(&super::list::marks(i, &super::list::score_badge(i)));
+    body.push_str(&marks(i, &score_badge(i)));
     body.push_str(&story_section("同じ報道", &d.story, page));
     body.push_str(&story_section("関連記事", &d.related, page));
     if d.digests.len() > 1 {
@@ -104,7 +104,7 @@ pub fn detail_page(d: &ArticleDetail, notes: &Notes, view: DetailView, page: &Pa
     body.push_str(&comment_section(id, notes.comments, view));
     body.push_str(&report_section(id, notes.reports, has_japanese, view));
     // 評価・印は一覧と同じく、ページを移らずにその場で付け外しする
-    body.push_str(super::list::MARKS_SCRIPT);
+    body.push_str(MARKS_SCRIPT);
     layout(&title, page, &body)
 }
 

@@ -68,7 +68,7 @@ enum Error {
     /// `eval --profile` は候補を embedding で計算する
     #[error("eval --profile scores the candidate by embedding; add [embedding] to config.toml")]
     CandidateNeedsEmbedding,
-    #[error("no embeddings yet; run `nucrawler crawl --only embed` first")]
+    #[error("no rated article has an embedding yet; run `nucrawler crawl --only embed` first")]
     NoEmbeddings,
     #[error("no ratings yet; rate articles (★1-5) in the web UI first")]
     NoLabels,

@@ -26,14 +26,9 @@ pub(crate) async fn eval(
     let data = data_dir(data)?;
     let db = open_db(&data)?;
     let owner = db.owner_id()?;
-    // 候補は embedding でその場で計算するので、計算できなければ候補を黙って落とさずに失敗する
-    if candidate.is_some() {
-        if config.embedding.is_none() {
-            return Err(Error::CandidateNeedsEmbedding);
-        }
-        if db.embedding_space()?.is_none() {
-            return Err(Error::NoEmbeddings);
-        }
+    // 候補は embedding でその場で計算する
+    if candidate.is_some() && config.embedding.is_none() {
+        return Err(Error::CandidateNeedsEmbedding);
     }
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
@@ -58,6 +53,11 @@ pub(crate) async fn eval(
         return Err(Error::Interrupted);
     }
     let candidate = candidate.as_ref().map(profile::hash);
+    // 評価した記事にまだ embedding が無ければ（空間が無い・embed が途中で止まったなど）候補を計算できない。
+    // 候補を黙って落とさずに失敗する
+    if candidate_missing(&scores, candidate.as_deref()) {
+        return Err(Error::NoEmbeddings);
+    }
     let current = db.profile_hash(owner)?;
     print!(
         "{}",
@@ -85,8 +85,11 @@ fn read_profile(file: &std::path::Path) -> Result<profile::Profile, Error> {
 /// 候補を頼んだのに、計算した結果に候補の点数が 1 件も無いか（評価した記事にまだ embedding が無いなど）。
 /// 候補が今のプロファイルと同じなら、今のプロファイルの式の候補（同じ hash）として並ぶ。
 fn candidate_missing(scores: &[nucrawler::db::LabeledScore], candidate: Option<&str>) -> bool {
-    let _ = (scores, candidate);
-    false
+    candidate.is_some_and(|hash| {
+        !scores
+            .iter()
+            .any(|s| s.key.backend == eval::TRIAL_BACKEND && s.key.profile_hash == hash)
+    })
 }
 
 #[cfg(test)]

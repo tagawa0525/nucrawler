@@ -277,6 +277,18 @@ impl Db {
         )
     }
 
+    /// 利用者の評価のうち、hash が `current` と `candidate` の両方のプロファイルの点数（一覧と同じ規則で
+    /// 選ぶ）がそろった記事で測った、それぞれの一致率。
+    pub fn paired_stats(
+        &self,
+        user_id: i64,
+        current: &str,
+        candidate: &str,
+    ) -> Result<(VersionStats, VersionStats), DbError> {
+        let _ = (user_id, current, candidate);
+        todo!()
+    }
+
     /// 案を自動で当てるか（利用者の設定。既定は当てる）。
     pub fn auto_apply_profile(&self, user_id: i64) -> Result<bool, DbError> {
         Ok(self.conn.query_row(
@@ -563,28 +575,54 @@ mod tests {
         assert_eq!(db.ratings_since_review(owner).unwrap(), 1);
     }
 
-    /// 比較の一致率は、評価すべてを一覧と同じ規則で選んだ点数で測る。点数の無い記事は数えない。
+    /// 記事の最新の要約に、プロファイル `hash` の点数を足す。
+    fn add_score(db: &Db, article: i64, hash: &str, score: u8) {
+        let digest: i64 = db
+            .conn()
+            .query_row(
+                "SELECT id FROM artifacts WHERE article_id = ?1 AND kind = 'digest'",
+                [article],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.insert_score(
+            ScoreKey {
+                profile_hash: hash,
+                ..score_key(db)
+            },
+            digest,
+            score,
+            None,
+            t("2026-09-30T03:00:00Z"),
+        )
+        .unwrap();
+    }
+
+    /// 今と案は、評価した記事のうち両方の点数がそろった記事で、一覧と同じ規則で選んだ点数で比べる
+    /// （片方の採点に失敗した記事で、比べる集合がずれないように）。
     #[test]
-    fn measures_all_ratings_with_a_profile() {
+    fn compares_profiles_on_the_same_ratings() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
-        rated(&db, "https://e.com/a", "h", 80, 5, "2026-09-01T00:00:00Z");
-        rated(&db, "https://e.com/b", "h", 20, 1, "2026-10-01T00:00:00Z");
-        rated(
-            &db,
-            "https://e.com/c",
-            "other",
-            90,
-            1,
-            "2026-10-01T00:00:00Z",
-        );
-        assert_eq!(db.rated_stats(owner, "h").unwrap(), stats(2, 1.0));
+        let a = rated(&db, "https://e.com/a", "h", 80, 5, "2026-09-01T00:00:00Z");
+        let b = rated(&db, "https://e.com/b", "h", 20, 1, "2026-10-01T00:00:00Z");
+        // 案の採点に失敗した記事（今の点数だけがある）
+        rated(&db, "https://e.com/c", "h", 90, 1, "2026-10-01T00:00:00Z");
+        add_score(&db, a, "h2", 30);
+        add_score(&db, b, "h2", 70);
         assert_eq!(
-            db.rated_stats(owner, "none").unwrap(),
-            VersionStats {
-                rated: 0,
-                concordance: None
-            }
+            db.paired_stats(owner, "h", "h2").unwrap(),
+            (stats(2, 1.0), stats(2, 0.0))
+        );
+        let none = VersionStats {
+            rated: 0,
+            concordance: None,
+        };
+        assert_eq!(db.paired_stats(owner, "h", "none").unwrap(), (none, none));
+        // 同じプロファイルどうしなら、点数のある評価すべて
+        assert_eq!(
+            db.paired_stats(owner, "h", "h").unwrap(),
+            (stats(3, 0.5), stats(3, 0.5))
         );
     }
 

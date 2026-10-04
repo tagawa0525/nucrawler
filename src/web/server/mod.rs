@@ -35,6 +35,7 @@ mod json;
 mod list;
 mod notes;
 mod pages;
+mod profile;
 #[cfg(test)]
 mod test_support;
 

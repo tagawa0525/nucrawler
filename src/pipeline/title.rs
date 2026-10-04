@@ -91,7 +91,7 @@ pub async fn translate_titles<L: Llm>(
                 .await?;
             // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
             // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let held = claim.renew(clock())?;
             let Some(response) = workers.settle(
                 outcome,
                 &mut summary.tally,

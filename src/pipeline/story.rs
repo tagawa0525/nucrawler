@@ -240,7 +240,7 @@ pub async fn judge_stories<L: Llm>(
                 })
                 .await?;
             // 結果を書く前に予約を延長する。取り直された記事は、以降は保存も失敗の記録もしない
-            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
+            let held = claim.renew(clock())?;
             let judged_ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
             let Some(response) = workers.settle(
                 outcome,

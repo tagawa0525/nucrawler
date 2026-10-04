@@ -56,6 +56,8 @@ pub struct Claim<'a> {
     backend: String,
     model: String,
     token: String,
+    /// 予約した期限の長さ。延長も同じ長さで行う
+    ttl: chrono::Duration,
     ids: Vec<i64>,
 }
 
@@ -72,18 +74,14 @@ impl Claim<'_> {
         &self.ids
     }
 
-    /// 予約を `now + ttl` まで延長し、延長できた（まだ自分の予約である）記事を返す。期限が切れて
-    /// ほかの実行に取り直された記事は延長できない。
-    pub fn renew(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-        ttl: chrono::Duration,
-    ) -> Result<Vec<i64>, DbError> {
+    /// 予約を `now` から、予約したときと同じ期限の長さだけ延長し、延長できた（まだ自分の予約である）記事を返す。
+    /// 期限が切れてほかの実行に取り直された記事は延長できない。
+    pub fn renew(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<i64>, DbError> {
         let mut stmt = self.db.conn.prepare(
             "UPDATE work_claims SET expires_at = ?1
              WHERE article_id = ?2 AND stage = ?3 AND backend = ?4 AND model = ?5 AND token = ?6",
         )?;
-        let expires_at = timestamp(now + ttl);
+        let expires_at = timestamp(now + self.ttl);
         let mut held = Vec::new();
         for &id in &self.ids {
             let changed = stmt.execute(rusqlite::params![
@@ -159,6 +157,7 @@ impl Db {
             backend: key.backend.to_string(),
             model: key.model.to_string(),
             token,
+            ttl,
             ids: claimed,
         })
     }
@@ -353,7 +352,7 @@ mod tests {
             .unwrap();
         let later = t("2026-09-27T00:10:00Z");
         let _successor = db.claim(KEY, &[b], later, ttl()).unwrap();
-        assert_eq!(held.renew(later, ttl()).unwrap(), [a]);
+        assert_eq!(held.renew(later).unwrap(), [a]);
         // 延長した予約は、延長した時刻から期限まで取られない
         let still = t("2026-09-27T00:19:59Z");
         assert!(db.claim(KEY, &[a], still, ttl()).unwrap().ids().is_empty());

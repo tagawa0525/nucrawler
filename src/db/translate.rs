@@ -191,12 +191,13 @@ mod tests {
         .collect()
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）先回りの和訳に使わない。
+    /// 先回りの和訳は embedding の点数で選び、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn pending_translate_ignores_embedding_scores_for_now() {
+    fn pending_translate_uses_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
-        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
-        assert!(translate_ids(&db, false, "2026-09-27T00:00:00Z").is_empty());
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
+        assert_eq!(translate_ids(&db, false, "2026-09-27T00:00:00Z"), [a]);
     }
 
     #[test]

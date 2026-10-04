@@ -949,18 +949,16 @@ mod tests {
         assert_eq!(limited, [b, other]);
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）一覧では使わない。
+    /// 一覧は embedding の点数で並べ、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn list_ignores_embedding_scores_for_now() {
+    fn list_ranks_by_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
         let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 90);
-        let item = db
-            .list_articles(list_query(&db, true))
-            .unwrap()
-            .into_iter()
-            .find(|i| i.article_id == a)
-            .unwrap();
-        assert_eq!((item.score, item.llm_score), (None, None));
+        let b = llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
+        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let find = |id| items.iter().find(|i| i.article_id == id).unwrap();
+        assert_eq!((find(a).score, find(a).llm_score), (Some(90), Some(90)));
+        assert_eq!((find(b).score, find(b).llm_score), (None, None));
     }
 
     /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。

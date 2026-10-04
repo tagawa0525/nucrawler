@@ -449,6 +449,22 @@ mod tests {
         assert!(!html.contains("見出しA"), "{html}");
     }
 
+    /// プロファイルがあっても、今のプロファイルの点数が 1 件も無ければ（プロファイルを変えた直後や
+    /// `embed rebuild` の後）、既定の一覧は推薦点で絞らない（絞ると一覧が空になる）。フィードと JSON も同じ。
+    #[tokio::test]
+    async fn list_without_scores_has_no_score_floor() {
+        let db = Db::open_in_memory().unwrap();
+        give_profile(&db);
+        seed(&db, "https://e.com/a", "採点前の記事");
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/").await;
+        assert!(html.contains("採点前の記事"), "{html}");
+        let (_, xml) = server.get(&server.feed_path()).await;
+        assert!(xml.contains("採点前の記事"), "{xml}");
+        let (_, json) = server.get_json("/api/articles").await;
+        assert_eq!(json["articles"].as_array().map(Vec::len), Some(1), "{json}");
+    }
+
     /// プロファイルが無ければ採点が無いので、既定の一覧は推薦点で絞らず、未採点の記事を新しい順に出す
     /// （評価 1〜2 と軽水炉と無関係の記事は隠す）。確認枠は出さない。フィードと JSON の一覧も同じ既定。
     /// `?min=0`（すべて）と `?min=N`（N 点以上）は既定と別の表示で、URL もそのまま残る。

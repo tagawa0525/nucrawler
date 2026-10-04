@@ -303,16 +303,17 @@ mod tests {
             .collect()
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）`--min-score` に使わない。
+    /// `--min-score` は embedding の点数で判定し、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn redo_min_score_ignores_embedding_scores_for_now() {
+    fn redo_min_score_uses_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
-        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
         let filter = RedoFilter {
             min_score: Some(50),
             ..RedoFilter::default()
         };
-        assert!(redo_digest_ids(&db, "haiku", &filter).is_empty());
+        assert_eq!(redo_digest_ids(&db, "haiku", &filter), [a]);
     }
 
     #[test]

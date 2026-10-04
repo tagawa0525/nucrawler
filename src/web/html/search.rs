@@ -1,6 +1,6 @@
 //! 検索の画面。
 
-use super::list::BarView;
+use super::bar::BarView;
 use super::*;
 
 /// 検索の画面の上部のバーが指す検索。点数・評価・既読・ブックマークはバーの条件で、変えるとほかの条件は
@@ -100,7 +100,7 @@ pub fn search_page(
     page: &Page,
 ) -> String {
     // 上部は一覧と同じバー（先頭の 🏠 で一覧へ戻る）で、点数・評価・既読・ブックマークの検索の条件を持つ
-    let mut body = super::list::bar(&SearchView(params.clone()), true);
+    let mut body = bar(&SearchView(params.clone()), true);
     body.push_str("<h1>検索</h1>");
     if let Some(error) = error {
         body.push_str(&format!("<div class=\"warn\">{}</div>", escape(error)));

@@ -304,6 +304,46 @@ impl Db {
         Ok((stats(&current), stats(&candidate)))
     }
 
+    /// 待っている案を見送る。待っている案でなければ何もせず `false`。利用者の案でなければ
+    /// `DbError::UnknownProfileSuggestion`。
+    pub fn dismiss_suggestion(
+        &self,
+        user_id: i64,
+        suggestion_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, DbError> {
+        let _ = (user_id, suggestion_id, now);
+        todo!()
+    }
+
+    /// 案を自動で当てるかを変える。
+    pub fn set_auto_apply_profile(&self, user_id: i64, on: bool) -> Result<(), DbError> {
+        let _ = (user_id, on);
+        todo!()
+    }
+
+    /// 案を今すぐ作るよう頼む（評価の件数によらず、次の `crawl --requests-only` か `crawl` で作る）。
+    /// 頼んだまま案を作る前なら、頼んだ時刻を変えない。
+    pub fn request_review(
+        &self,
+        user_id: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DbError> {
+        let _ = (user_id, now);
+        todo!()
+    }
+
+    /// 案を頼んで、まだ作っていない利用者（頼んだ順）。
+    pub fn review_requests(&self) -> Result<Vec<i64>, DbError> {
+        todo!()
+    }
+
+    /// 頼まれた案を作らずに終える（評価が無くて案を作れないとき）。
+    pub fn drop_review_request(&self, user_id: i64) -> Result<(), DbError> {
+        let _ = user_id;
+        todo!()
+    }
+
     /// 案を自動で当てるか（利用者の設定。既定は当てる）。
     pub fn auto_apply_profile(&self, user_id: i64) -> Result<bool, DbError> {
         Ok(self.conn.query_row(
@@ -639,6 +679,93 @@ mod tests {
             db.paired_stats(owner, "h", "h").unwrap(),
             (stats(3, 0.5), stats(3, 0.5))
         );
+    }
+
+    /// 見送った案は版にならない。待っている案でなければ何もしない。
+    #[test]
+    fn dismisses_a_pending_suggestion() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let other = db.add_user("o@example.com", "O", "h").unwrap();
+        db.save_profile(owner, &profile("a"), t("2026-10-01T00:00:00Z"))
+            .unwrap();
+        let b = profile("b");
+        let reasons = reasons();
+        let id = db
+            .save_suggestion(
+                &suggestion(owner, &b, &reasons, &[]),
+                t("2026-10-02T00:00:00Z"),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            db.dismiss_suggestion(other, id, t("2026-10-03T00:00:00Z")),
+            Err(DbError::UnknownProfileSuggestion(i)) if i == id
+        ));
+        assert!(
+            db.dismiss_suggestion(owner, id, t("2026-10-03T00:00:00Z"))
+                .unwrap()
+        );
+        assert!(
+            !db.dismiss_suggestion(owner, id, t("2026-10-04T00:00:00Z"))
+                .unwrap()
+        );
+        assert!(
+            !db.apply_suggestion(owner, id, ProfileOrigin::Suggest, t("2026-10-04T00:00:00Z"))
+                .unwrap()
+        );
+        let saved = &db.profile_suggestions(owner).unwrap()[0];
+        assert_eq!(
+            (saved.status, saved.decided_at.as_deref()),
+            (
+                SuggestionStatus::Dismissed,
+                Some("2026-10-03T00:00:00.000Z")
+            )
+        );
+        assert_eq!(db.load_profile(owner).unwrap().unwrap().0, profile("a"));
+    }
+
+    /// 頼んだ案は、手動の案を保存すると片付く（自動の案では片付かない）。評価が無ければ取り下げる。
+    #[test]
+    fn manual_suggestions_settle_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let other = db.add_user("o@example.com", "O", "h").unwrap();
+        db.save_profile(owner, &profile("a"), t("2026-10-01T00:00:00Z"))
+            .unwrap();
+        db.request_review(other, t("2026-10-02T00:00:00Z")).unwrap();
+        db.request_review(owner, t("2026-10-02T01:00:00Z")).unwrap();
+        db.request_review(other, t("2026-10-02T02:00:00Z")).unwrap();
+        assert_eq!(db.review_requests().unwrap(), [other, owner]);
+        let b = profile("b");
+        let reasons = reasons();
+        db.save_suggestion(
+            &suggestion(owner, &b, &reasons, &[]),
+            t("2026-10-03T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(db.review_requests().unwrap(), [other, owner]);
+        db.save_suggestion(
+            &NewSuggestion {
+                trigger: SuggestionTrigger::Manual,
+                ..suggestion(owner, &b, &reasons, &[])
+            },
+            t("2026-10-03T01:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(db.review_requests().unwrap(), [other]);
+        db.drop_review_request(other).unwrap();
+        assert!(db.review_requests().unwrap().is_empty());
+    }
+
+    #[test]
+    fn switches_auto_apply() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.set_auto_apply_profile(owner, false).unwrap();
+        assert!(!db.auto_apply_profile(owner).unwrap());
+        db.set_auto_apply_profile(owner, true).unwrap();
+        assert!(db.auto_apply_profile(owner).unwrap());
     }
 
     /// 案を自動で当てるかの既定は「当てる」。

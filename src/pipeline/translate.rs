@@ -143,33 +143,24 @@ pub async fn translate_articles<L: Llm>(
             let prompt = prompt::translate::build_prompt(&input, llm_cfg.translate_max_input_chars);
             let relevant = glossary::relevant(&db.glossary_entries()?, &prompt);
             let system = prompt::translate::system_prompt(&relevant.terms);
-            let outcome = workers
-                .call(Call {
-                    stage: STAGE,
-                    n_items: 1,
-                    req: LlmRequest {
-                        system: &system,
-                        prompt: &prompt,
-                        schema: &schema,
-                        model,
-                    },
-                })
-                .await?;
-            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-            let held = claim
-                .renew(clock(), claim_ttl(llm_cfg))?
-                .contains(&input.article_id);
-            let Some(response) =
-                workers.settle(outcome, &mut summary.tally, held.then_some(key), now)?
+            let call = Call {
+                stage: STAGE,
+                n_items: 1,
+                req: LlmRequest {
+                    system: &system,
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
+            };
+            let requested = [input.article_id];
+            let Some((response, held)) = workers
+                .call_held(call, &claim, &requested, &mut summary.tally, |_| key, now)
+                .await?
             else {
                 break;
             };
-            if !held {
-                tracing::warn!(
-                    article_id = input.article_id,
-                    "{STAGE} result dropped: the claim was taken over"
-                );
+            if !held.keeps(STAGE, input.article_id) {
                 continue;
             }
             let body_ja = match prompt::translate::parse(&response.output) {

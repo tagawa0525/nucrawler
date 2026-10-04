@@ -6,9 +6,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
-use super::llm_call::{
-    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
-};
+use super::llm_call::{Call, LlmStage, MISSING, Tally, Workers, claim_ttl, record_failures};
 use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
@@ -227,27 +225,20 @@ pub async fn judge_stories<L: Llm>(
                 })
                 .collect();
             let prompt = p::build_prompt(&requested);
-            let outcome = workers
-                .call(Call {
-                    stage: STAGE,
-                    n_items: requested.len(),
-                    req: LlmRequest {
-                        system: &system,
-                        prompt: &prompt,
-                        schema: &schema,
-                        model,
-                    },
-                })
-                .await?;
-            // 結果を書く前に予約を延長する。取り直された記事は、以降は保存も失敗の記録もしない
-            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let judged_ids: Vec<i64> = requested.iter().map(|t| t.article.article_id).collect();
-            let Some(response) = workers.settle(
-                outcome,
-                &mut summary.tally,
-                held_missing(&judged_ids, &held).map(key),
-                now,
-            )?
+            let call = Call {
+                stage: STAGE,
+                n_items: requested.len(),
+                req: LlmRequest {
+                    system: &system,
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
+            };
+            let Some((response, held)) = workers
+                .call_held(call, &claim, &judged_ids, &mut summary.tally, key, now)
+                .await?
             else {
                 break;
             };
@@ -256,21 +247,13 @@ pub async fn judge_stories<L: Llm>(
                 Err(e) => {
                     let message = errors::error_chain(&e);
                     tracing::warn!("story output rejected: {message}");
-                    summary.tally.failed += record_failures(
-                        db,
-                        held_missing(&judged_ids, &held).map(key),
-                        &message,
-                        now,
-                    )?;
+                    summary.tally.failed +=
+                        record_failures(db, held.iter().map(key), &message, now)?;
                     continue;
                 }
             };
             for j in &parsed.items {
-                if !held.contains(&j.target) {
-                    tracing::warn!(
-                        article_id = j.target,
-                        "{STAGE} result dropped: the claim was taken over"
-                    );
+                if !held.keeps(STAGE, j.target) {
                     continue;
                 }
                 let Some((_, candidates)) = targets.iter().find(|(id, _)| *id == j.target) else {
@@ -282,12 +265,8 @@ pub async fn judge_stories<L: Llm>(
                 db.clear_stage_failure(key(j.target))?;
                 summary.judged += 1;
             }
-            summary.tally.failed += record_failures(
-                db,
-                held_missing(&parsed.missing, &held).map(key),
-                MISSING,
-                now,
-            )?;
+            summary.tally.failed +=
+                record_failures(db, held.of(&parsed.missing).map(key), MISSING, now)?;
             rebuild(db)?;
         }
         workers.finish(&summary.tally);

@@ -7,9 +7,7 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 
 use super::Target;
-use super::llm_call::{
-    Call, LlmStage, MISSING, Tally, Workers, claim_ttl, held_missing, record_failures,
-};
+use super::llm_call::{Call, LlmStage, MISSING, Tally, Workers, claim_ttl, record_failures};
 use super::workers::run_workers;
 use crate::config::{LlmConfig, PipelineConfig};
 use crate::db::{
@@ -131,33 +129,25 @@ pub async fn digest_articles<L: Llm>(
             let system =
                 prompt::digest::system_prompt(&vocab, &glossary::relevant(&entries, &prompt).terms);
             let schema = prompt::digest::schema(&vocab);
-            let outcome = workers
-                .call(Call {
-                    stage: STAGE,
-                    n_items: batch.len(),
-                    req: LlmRequest {
-                        system: &system,
-                        prompt: &prompt,
-                        schema: &schema,
-                        model,
-                    },
-                })
-                .await?;
-            // 結果を書く前に予約を延長する。呼び出しの最中に期限が切れてほかの実行に取り直された記事は
-            // 延長できないので、以降は保存も失敗の記録もしない（予約を持っている実行だけが書く）
-            let held = claim.renew(clock(), claim_ttl(llm_cfg))?;
             let key = |article_id| StageKey {
                 article_id,
                 stage: STAGE,
                 backend,
                 model,
             };
-            let Some(response) = workers.settle(
-                outcome,
-                &mut summary.tally,
-                held.iter().map(|&id| key(id)),
-                now,
-            )?
+            let call = Call {
+                stage: STAGE,
+                n_items: batch.len(),
+                req: LlmRequest {
+                    system: &system,
+                    prompt: &prompt,
+                    schema: &schema,
+                    model,
+                },
+            };
+            let Some((response, held)) = workers
+                .call_held(call, &claim, &ids, &mut summary.tally, key, now)
+                .await?
             else {
                 break;
             };
@@ -167,16 +157,12 @@ pub async fn digest_articles<L: Llm>(
                     let message = errors::error_chain(&e);
                     tracing::warn!("digest output rejected: {message}");
                     summary.tally.failed +=
-                        record_failures(db, held.iter().map(|&id| key(id)), &message, now)?;
+                        record_failures(db, held.iter().map(key), &message, now)?;
                     continue;
                 }
             };
             for (id, payload) in &parsed.items {
-                if !held.contains(id) {
-                    tracing::warn!(
-                        article_id = *id,
-                        "{STAGE} result dropped: the claim was taken over"
-                    );
+                if !held.keeps(STAGE, *id) {
                     continue;
                 }
                 let input = batch.iter().find(|b| b.article_id == *id);
@@ -207,12 +193,8 @@ pub async fn digest_articles<L: Llm>(
                 db.clear_stage_failure(key(*id))?;
                 summary.digested += 1;
             }
-            summary.tally.failed += record_failures(
-                db,
-                held_missing(&parsed.missing, &held).map(key),
-                MISSING,
-                now,
-            )?;
+            summary.tally.failed +=
+                record_failures(db, held.of(&parsed.missing).map(key), MISSING, now)?;
         }
         workers.finish(&summary.tally);
         Ok::<_, DigestStageError>(summary)

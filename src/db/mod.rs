@@ -11,6 +11,7 @@ mod embed_scores;
 mod embeddings;
 mod eval;
 mod notes;
+mod profile_versions;
 mod read;
 mod recommend;
 mod redo;
@@ -34,6 +35,7 @@ pub use embed_scores::*;
 pub use embeddings::*;
 pub use eval::*;
 pub use notes::*;
+pub use profile_versions::*;
 pub use read::*;
 pub use redo::*;
 pub use score::*;
@@ -89,6 +91,9 @@ pub enum DbError {
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
+    /// 利用者のプロファイルの版に無い
+    #[error("unknown profile version {0}")]
+    UnknownProfileVersion(i64),
     /// ログイン ID がほかの利用者と重なった
     #[error("login {0:?} is already taken")]
     LoginTaken(String),

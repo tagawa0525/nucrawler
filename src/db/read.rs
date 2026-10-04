@@ -351,45 +351,7 @@ fn fts_phrase(term: &str) -> String {
     format!("\"{}\"", term.replace('"', "\"\""))
 }
 
-/// 入力に使う本文の部分の範囲。
-#[derive(Debug, Clone, Copy)]
-pub(super) enum ContentSet {
-    All,
-    Body,
-}
-
 impl Db {
-    /// 記事の公開の本文の部分。`All` は概要から本文まで（要約の入力）、`Body` は本文だけ（和訳の入力）。
-    pub(super) fn public_contents(
-        &self,
-        article_id: i64,
-        set: ContentSet,
-    ) -> Result<Vec<InputContent>, DbError> {
-        let sql = match set {
-            ContentSet::All => {
-                "SELECT id, kind, text FROM contents
-                 WHERE article_id = ?1 AND access_membership_id IS NULL
-                 ORDER BY CASE kind WHEN 'lead' THEN 0 WHEN 'abstract' THEN 1
-                                    WHEN 'body' THEN 2 ELSE 3 END, id"
-            }
-            ContentSet::Body => {
-                "SELECT id, kind, text FROM contents
-                 WHERE article_id = ?1 AND kind IN ('body', 'fulltext')
-                   AND access_membership_id IS NULL
-                 ORDER BY CASE kind WHEN 'fulltext' THEN 0 ELSE 1 END, id"
-            }
-        };
-        let mut stmt = self.conn.prepare_cached(sql)?;
-        let rows = stmt.query_map([article_id], |r| {
-            Ok(InputContent {
-                id: r.get(0)?,
-                kind: r.get(1)?,
-                text: r.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
     /// 一覧を見た時刻を記録し、この訪問の区切り（前の訪問で最後に見た時刻。初回は None）を返す。
     /// 最後に見てから `gap` 以内の閲覧は同じ訪問とみなし、区切りを変えない。
     pub fn begin_visit(

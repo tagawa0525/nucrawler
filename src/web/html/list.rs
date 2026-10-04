@@ -473,6 +473,30 @@ mod tests {
         RatingFilter::AtLeast(Rating::new(rating).unwrap())
     }
 
+    /// URL に書いた値は、読み取ると同じ条件に戻る（書き出しと読み取りを食い違わせない）。
+    #[test]
+    fn list_url_values_parse_back() {
+        let ratings = [
+            RatingFilter::Any,
+            RatingFilter::HideLow,
+            RatingFilter::Unrated,
+        ]
+        .into_iter()
+        .chain((1..=5).map(at_least));
+        for rating in ratings {
+            assert_eq!(parse_rating(&rating_value(rating)), Some(rating));
+        }
+        for on in [true, false] {
+            assert_eq!(parse_mark(mark_value(on)), Some(on));
+            assert_eq!(parse_read(mark_value(on)), Some(Some(on)));
+        }
+        assert_eq!(parse_read("any"), Some(None));
+        for bad in ["", "6", "-1", "yes", "any "] {
+            assert_eq!(parse_rating(bad), None, "{bad}");
+            assert_eq!(parse_mark(bad), None, "{bad}");
+        }
+    }
+
     #[test]
     fn splits_new_and_earlier_unread() {
         let read_at = |id: i64, at: &str| {

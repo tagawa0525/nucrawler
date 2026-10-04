@@ -118,14 +118,17 @@ impl Db {
         use rusqlite::OptionalExtension;
         let now = timestamp(now);
         let tx = self.immediate()?;
-        let base: i64 = tx
+        let (base, hash): (i64, String) = tx
             .query_row(
-                "SELECT id FROM profile_versions WHERE user_id = ?1 AND retired_at IS NULL",
+                "SELECT id, hash FROM profile_versions WHERE user_id = ?1 AND retired_at IS NULL",
                 [suggestion.user_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?
             .ok_or(DbError::NoProfileVersion)?;
+        if hash != suggestion.base_hash {
+            return Ok(None);
+        }
         tx.execute(
             "UPDATE profile_suggestions SET status = 'superseded', decided_at = ?2
              WHERE user_id = ?1 AND status = 'pending'",

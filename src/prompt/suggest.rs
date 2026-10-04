@@ -18,7 +18,7 @@ pub enum SuggestError {
 }
 
 /// 変更ごとの根拠。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reason {
     /// 何を変えたか
     pub change: String,

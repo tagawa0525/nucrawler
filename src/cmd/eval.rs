@@ -30,6 +30,11 @@ pub(crate) async fn eval(
     if candidate.is_some() && config.embedding.is_none() {
         return Err(Error::CandidateNeedsEmbedding);
     }
+    let labels = db.eval_labels(owner)?;
+    // 評価が無ければ候補と比べようがない（embedding を作っても直らないので、先に知らせる）
+    if candidate.is_some() && labels.is_empty() {
+        return Err(Error::NoLabels);
+    }
     let cancel = Cancel::default();
     spawn_signal_handler(cancel.clone());
     let mut scores = db.eval_scores(owner)?;
@@ -62,7 +67,7 @@ pub(crate) async fn eval(
     print!(
         "{}",
         eval::render(
-            &db.eval_labels(owner)?,
+            &labels,
             &scores,
             current.as_deref(),
             candidate.as_deref(),

@@ -67,14 +67,119 @@ impl Db {
         evidence: &[i64],
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        let _ = (user_id, profile, origin, evidence, now);
-        todo!()
+        use rusqlite::OptionalExtension;
+        let hash = crate::profile::hash(profile);
+        let now = timestamp(now);
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<Period> = tx
+            .query_row(
+                "SELECT id, hash, created_at, evidence FROM profile_versions
+                 WHERE user_id = ?1 AND retired_at IS NULL",
+                [user_id],
+                |r| {
+                    Ok(Period {
+                        id: r.get(0)?,
+                        hash: r.get(1)?,
+                        created_at: r.get(2)?,
+                        retired_at: None,
+                        evidence: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(mut current) = current {
+            if current.hash == hash {
+                return Ok(false);
+            }
+            // 退く時点の一致率で固める（後で評価を付け直したり、点数が作り直されたりしても動かさない）
+            current.retired_at = Some(now.clone());
+            let stats = version_stats(&tx, user_id, &current)?;
+            tx.execute(
+                "UPDATE profile_versions SET retired_at = ?2, rated = ?3, concordance = ?4
+                 WHERE id = ?1",
+                rusqlite::params![current.id, now, stats.rated as i64, stats.concordance],
+            )?;
+        }
+        let interests = serde_json::to_string(&profile.interests)?;
+        let excludes = serde_json::to_string(&profile.exclude)?;
+        tx.execute(
+            "INSERT INTO profile_versions
+               (user_id, interests, excludes, hash, origin, evidence, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                user_id,
+                interests,
+                excludes,
+                hash,
+                origin.as_str(),
+                serde_json::to_string(evidence)?,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (user_id) DO UPDATE SET
+               interests = excluded.interests,
+               excludes = excluded.excludes,
+               hash = excluded.hash,
+               updated_at = excluded.updated_at",
+            rusqlite::params![user_id, interests, excludes, hash, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// 利用者のプロファイルの版（新しい順）。
     pub fn profile_versions(&self, user_id: i64) -> Result<Vec<ProfileVersion>, DbError> {
-        let _ = user_id;
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT id, interests, excludes, hash, origin, evidence, created_at, retired_at,
+                    rated, concordance
+             FROM profile_versions WHERE user_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map([user_id], |r| {
+            Ok((
+                Period {
+                    id: r.get(0)?,
+                    hash: r.get(3)?,
+                    created_at: r.get(6)?,
+                    retired_at: r.get(7)?,
+                    evidence: r.get(5)?,
+                },
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(8)?,
+                r.get::<_, Option<f64>>(9)?,
+            ))
+        })?;
+        let mut versions = Vec::new();
+        for row in rows {
+            let (period, interests, excludes, origin, rated, concordance) = row?;
+            let stats = match rated {
+                Some(rated) => VersionStats {
+                    rated: rated as usize,
+                    concordance,
+                },
+                None => version_stats(&self.conn, user_id, &period)?,
+            };
+            versions.push(ProfileVersion {
+                id: period.id,
+                profile: crate::profile::Profile {
+                    interests: serde_json::from_str(&interests)?,
+                    exclude: serde_json::from_str(&excludes)?,
+                },
+                hash: period.hash,
+                origin: ProfileOrigin::parse(&origin).ok_or_else(|| {
+                    DbError::UnexpectedValue(format!("profile origin {origin:?}"))
+                })?,
+                created_at: period.created_at,
+                retired_at: period.retired_at,
+                stats,
+            });
+        }
+        Ok(versions)
     }
 
     /// 版 `version_id` の中身を新しい版として保存し、今のプロファイルにする。今のプロファイルと同じ中身なら
@@ -85,9 +190,74 @@ impl Db {
         version_id: i64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        let _ = (user_id, version_id, now);
-        todo!()
+        use rusqlite::OptionalExtension;
+        let (interests, excludes): (String, String) = self
+            .conn
+            .query_row(
+                "SELECT interests, excludes FROM profile_versions WHERE id = ?1 AND user_id = ?2",
+                [version_id, user_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(DbError::UnknownProfileVersion(version_id))?;
+        let profile = crate::profile::Profile {
+            interests: serde_json::from_str(&interests)?,
+            exclude: serde_json::from_str(&excludes)?,
+        };
+        self.save_profile_version(user_id, &profile, ProfileOrigin::Revert, &[], now)
     }
+}
+
+/// 版が今のプロファイルだった期間と、一致率の集計に要るもの。
+struct Period {
+    id: i64,
+    hash: String,
+    created_at: String,
+    /// 今の版なら `None`
+    retired_at: Option<String>,
+    /// 根拠にした記事の id（JSON 配列）
+    evidence: String,
+}
+
+/// 版の期間に付けた評価（根拠にした記事を除く）を、一覧と同じ規則で選んだその版の点数で測った一致率。
+/// 点数の付いていない記事は数えない。
+fn version_stats(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    period: &Period,
+) -> Result<VersionStats, DbError> {
+    let sql = format!(
+        "SELECT r.value, {score} FROM ratings AS r
+         WHERE r.user_id = ?1 AND r.rated_at >= ?3 AND (?4 IS NULL OR r.rated_at < ?4)
+           AND r.article_id NOT IN (SELECT value FROM json_each(?5))",
+        score = list_score(
+            "score",
+            &latest_digest("id", "r.article_id", "?1"),
+            "?1",
+            "?2"
+        ),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            user_id,
+            period.hash,
+            period.created_at,
+            period.retired_at,
+            period.evidence,
+        ],
+        |r| Ok((r.get::<_, Rating>(0)?, r.get::<_, Option<u8>>(1)?)),
+    )?;
+    let mut pairs = Vec::new();
+    for row in rows {
+        if let (rating, Some(score)) = row? {
+            pairs.push((score, rating));
+        }
+    }
+    Ok(VersionStats {
+        rated: pairs.len(),
+        concordance: crate::eval::concordance(&pairs),
+    })
 }
 
 #[cfg(test)]

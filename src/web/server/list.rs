@@ -185,31 +185,15 @@ pub(super) async fn list(
         let items = db.list_articles(query)?;
         let hidden = hidden_counts(db, query)?;
         let (new, earlier) = html::split_sections(items, boundary.as_deref());
-        // 「すべて」では閾値未満も並んでいるので、確認枠は出さない。既定の最低点が無ければ（プロファイルが無い）、
-        // 閾値未満という区別も無いので出さない
-        let explore = if let Some(floor) = view.default_min.filter(|_| !view.shows_all()) {
-            // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく既定の最低点
-            let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
-            let picks = db.explore(
-                list_query(web, user, hash.as_deref(), now, Some(floor)),
-                web.explore_per_day as usize,
-                &today.to_string(),
-            )?;
-            // 最低点を下げて一覧に既に出ている記事は、同じ報道のグループごと重ねない
-            let listed: std::collections::HashSet<i64> =
-                new.iter().chain(&earlier).map(|i| i.story_id).collect();
-            let picks = picks
-                .into_iter()
-                .filter(|i| !listed.contains(&i.story_id))
-                .collect();
-            // 一覧と同じく、既読・ブックマークで絞る
-            html::filter_read(picks, view.read)
-                .into_iter()
-                .filter(|i| view.bookmarked.is_none_or(|b| i.bookmarked == b))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let explore = explore_picks(
+            db,
+            web,
+            user,
+            hash.as_deref(),
+            now,
+            view,
+            new.iter().chain(&earlier),
+        )?;
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);
         Ok(html::list_page_with_explore(
@@ -218,6 +202,40 @@ pub(super) async fn list(
     })
     .await?;
     Ok(Html(page).into_response())
+}
+
+/// 一覧の確認枠に出す記事（閾値未満から日ごとに選ぶ）。「すべて」では閾値未満も並んでいるので出さない。既定の
+/// 最低点が無ければ（プロファイルが無い）、閾値未満という区別も無いので出さない。
+fn explore_picks<'a>(
+    db: &Db,
+    web: &WebConfig,
+    user: i64,
+    hash: Option<&str>,
+    now: chrono::DateTime<Utc>,
+    view: html::ListView,
+    listed: impl IntoIterator<Item = &'a crate::db::ListItem>,
+) -> Result<Vec<crate::db::ListItem>, DbError> {
+    let Some(floor) = view.default_min.filter(|_| !view.shows_all()) else {
+        return Ok(Vec::new());
+    };
+    // 見逃し率を偏りなく測るため、選ぶ基準は画面で選んだ最低点ではなく既定の最低点
+    let today = now.with_timezone(&crate::jst::offset()).format("%Y-%m-%d");
+    let picks = db.explore(
+        list_query(web, user, hash, now, Some(floor)),
+        web.explore_per_day as usize,
+        &today.to_string(),
+    )?;
+    // 最低点を下げて一覧に既に出ている記事は、同じ報道のグループごと重ねない
+    let listed: std::collections::HashSet<i64> = listed.into_iter().map(|i| i.story_id).collect();
+    let picks = picks
+        .into_iter()
+        .filter(|i| !listed.contains(&i.story_id))
+        .collect();
+    // 一覧と同じく、既読・ブックマークで絞る
+    Ok(html::filter_read(picks, view.read)
+        .into_iter()
+        .filter(|i| view.bookmarked.is_none_or(|b| i.bookmarked == b))
+        .collect())
 }
 
 /// 一覧の条件をそれぞれ 1 つだけ外したときに加わる記事の数（その条件で隠れている記事の数）。外したときに出る記事の

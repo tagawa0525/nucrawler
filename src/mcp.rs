@@ -105,11 +105,12 @@ pub struct ArticleSummary {
     pub summary_ja: Option<String>,
     /// 公開日時（無ければ取得日時）。UTC の RFC 3339
     pub date: String,
-    /// 推薦点（0〜100）：関心プロファイルでの LLM の点数に、利用者の評価から学んだ補正を足した点数
+    /// 推薦点（0〜100）：関心プロファイルとの embedding の近さの点数に、利用者の評価から学んだ補正を足した点数
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数（0〜100）
-    #[serde(rename = "llm_score")]
+    /// 補正の前の点数（0〜100、関心プロファイルとの近さ）
     pub base_score: Option<u8>,
+    /// `base_score` と同じ値（以前の名前。使う側が `base_score` に移ったら消す）
+    pub llm_score: Option<u8>,
     /// 点数の理由
     pub reason: Option<String>,
     /// 点数が当たった関心分野（関心プロファイルの語）
@@ -336,6 +337,7 @@ fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
         date: item.at,
         score: item.score,
         base_score: item.base_score,
+        llm_score: item.base_score,
         reason: item.reason,
         matched: item.matched,
         excluded: item.excluded,

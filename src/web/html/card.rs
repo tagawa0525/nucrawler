@@ -67,16 +67,17 @@ pub(super) fn matches(i: &ListItem) -> String {
     matched.chain(excluded).collect()
 }
 
-/// 推薦点の印。LLM の点数と違えば、title に LLM の点数と補正を出す（例：`LLM 72・補正 +9`）。
+/// 推薦点の印。補正の前の点数（関心プロファイルとの近さ）と違えば、title にその点数と補正を出す
+/// （例：`近さ 72・補正 +9`）。
 pub(super) fn score_badge(i: &ListItem) -> String {
     // 未採点も、数字の無い印を置いてカードの並びをそろえる（色だけでは伝わらないので読み上げの名前を付ける）
     let Some(score) = i.score else {
         return "<span class=\"score\" role=\"img\" aria-label=\"未採点\" title=\"未採点\">&nbsp;</span>".to_string();
     };
-    match i.base_score.filter(|llm| *llm != score) {
-        Some(llm) => format!(
-            "<span class=\"score\" title=\"LLM {llm}・補正 {:+}\">{score}</span>",
-            i32::from(score) - i32::from(llm)
+    match i.base_score.filter(|base| *base != score) {
+        Some(base) => format!(
+            "<span class=\"score\" title=\"近さ {base}・補正 {:+}\">{score}</span>",
+            i32::from(score) - i32::from(base)
         ),
         None => format!("<span class=\"score\">{score}</span>"),
     }
@@ -203,7 +204,7 @@ mod tests {
 
     /// 推薦点が LLM の点数と違えば、点数の title に LLM の点数と補正を出す。
     #[test]
-    fn card_shows_the_llm_score_behind_the_recommended_score() {
+    fn card_shows_the_base_score_behind_the_recommended_score() {
         let mut adjusted = item(1, "2026-09-27T05:00:00.000Z");
         adjusted.score = Some(81);
         adjusted.base_score = Some(72);

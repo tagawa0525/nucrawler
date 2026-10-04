@@ -266,10 +266,10 @@ fn report_summary(r: &Report) -> String {
     }
 }
 
-/// 推薦点の補正の内訳（例：`推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
+/// 推薦点の補正の内訳（例：`推薦点 81（近さ 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
 fn adjustments(d: &ArticleDetail, page: &Page) -> String {
     use crate::recommend::FeatureKind;
-    let (Some(score), Some(llm)) = (d.item.score, d.item.base_score) else {
+    let (Some(score), Some(base)) = (d.item.score, d.item.base_score) else {
         return String::new();
     };
     if d.adjustments.is_empty() {
@@ -289,7 +289,7 @@ fn adjustments(d: &ArticleDetail, page: &Page) -> String {
         })
         .collect();
     format!(
-        "<p class=\"meta\">推薦点 {score}（LLM {llm}）：{}</p>",
+        "<p class=\"meta\">推薦点 {score}（近さ {base}）：{}</p>",
         parts.join("、")
     )
 }

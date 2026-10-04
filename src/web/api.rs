@@ -68,11 +68,12 @@ pub struct Article<'a> {
     pub title_ja: Option<&'a str>,
     pub summary_ja: Option<&'a str>,
     pub lwr_relevant: Option<bool>,
-    /// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）
+    /// 推薦点（関心プロファイルとの embedding の近さの点数に、評価から学んだ補正を足した点数）
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数
-    #[serde(rename = "llm_score")]
+    /// 補正の前の点数（関心プロファイルとの近さ）
     pub base_score: Option<u8>,
+    /// `base_score` と同じ値（以前の名前。使う側が `base_score` に移ったら消す）
+    pub llm_score: Option<u8>,
     pub reason: Option<&'a str>,
     /// 点数が当たった関心分野（プロファイルの語）
     pub matched: &'a [String],
@@ -103,6 +104,7 @@ impl<'a> Article<'a> {
             lwr_relevant: i.lwr_relevant,
             score: i.score,
             base_score: i.base_score,
+            llm_score: i.base_score,
             reason: i.reason.as_deref(),
             matched: &i.matched,
             excluded: &i.excluded,

@@ -5,6 +5,7 @@
 # category: regulator | industry | research | utility | vendor | paper
 # label:    画面に出す短い名前。省略時は name
 # enabled:  省略時 true
+# body_selector: 記事ページの本文の要素の CSS セレクタ。省略時は readability で推定する
 # filter:   原子力関連に絞り込む。keywords（タイトル・概要に含む）か url_contains（URL に含む）の
 #           いずれかに一致したものだけを取り込む。省略時はすべて取り込む。
 #           title_excludes（タイトルに含む）のいずれかに一致したものは、ほかの条件によらず除く
@@ -62,6 +63,20 @@ url = "https://www.nra.go.jp/news/index.html"
 lang = "ja"
 category = "regulator"
 list = { link = "dl.news__list dd.news__title a", date = ".news__date", also = ["https://www.nra.go.jp/"] }
+
+# 規制委の資料公開（N-ADRES）。トップの最新情報（最新 10 件）に、審査会合・委員会・ブリーフィング・
+# 事故トラブル情報・情報通知文書（NIN）などが載る。項目全体がリンクで、日付と分類はリンクの中にある。
+# 資料の PDF は JavaScript から開くので、本文は詳細ページの見出しと各欄（開催案内・資料名・対象施設など）にする
+[[source]]
+id = "nra-archive"
+name = "原子力規制委員会 資料公開（N-ADRES）"
+label = "N-ADRES"
+kind = "html_list"
+url = "https://www.da.nra.go.jp/"
+lang = "ja"
+category = "regulator"
+list = { link = "a.p-top-latest__item", date = ".p-top-latest__date", title_skip = ".p-top-latest__date, .p-top-latest__category" }
+body_selector = ".p-details-title__label, .u-container"
 
 # ニュース・規制の報告書・刊行物がまとめて載るので、ニュースだけを URL で絞る
 [[source]]

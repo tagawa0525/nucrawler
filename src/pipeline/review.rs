@@ -7,7 +7,9 @@ use chrono::{DateTime, Utc};
 use super::llm_call::{LlmStage, Tally};
 use super::{score, suggest};
 use crate::config::Config;
-use crate::db::{DbError, VersionStats};
+use crate::db::{
+    DbError, NewSuggestion, ProfileOrigin, SuggestionStatus, SuggestionTrigger, VersionStats,
+};
 use crate::llm::Llm;
 
 pub const STAGE: &str = "review";
@@ -38,21 +40,115 @@ pub struct ReviewSummary {
     pub tally: Tally,
 }
 
-/// 評価が `NEW_RATINGS` 件以上増えた利用者のプロファイルを見直す。
+/// 評価が `NEW_RATINGS` 件以上増えた利用者のプロファイルを見直す。LLM が止まったら（上限・失敗・中断）、
+/// その利用者の案は保存せずに終える（評価の件数は前の案から数えるので、次の実行で作り直す）。
 pub async fn review_profiles<L: Llm>(
-    env: LlmStage<'_, L>,
+    mut env: LlmStage<'_, L>,
     config: &Config,
     now: DateTime<Utc>,
 ) -> Result<ReviewSummary, ReviewStageError> {
-    let _ = (env, config, now);
-    todo!()
+    let db = env.db;
+    let mut summary = ReviewSummary::default();
+    for user in db.scoring_profiles()? {
+        if env.cancel.is_requested() {
+            break;
+        }
+        if db.ratings_since_review(user.user_id)? < NEW_RATINGS {
+            continue;
+        }
+        let evidence = db.label_evidence(user.user_id)?;
+        if evidence.is_empty() {
+            continue;
+        }
+        let suggested =
+            suggest::suggest_profile(reborrow(&mut env), &config.llm, &user.profile, &evidence)
+                .await?;
+        summary.tally.merge(suggested.tally);
+        let Some(suggestion) = suggested.suggestion else {
+            break;
+        };
+        let evidence_ids: Vec<i64> = evidence.iter().map(|e| e.article_id).collect();
+        let new = |current: VersionStats, candidate: VersionStats, status| NewSuggestion {
+            user_id: user.user_id,
+            profile: &suggestion.profile,
+            reasons: &suggestion.reasons,
+            evidence: &evidence_ids,
+            current,
+            candidate,
+            trigger: SuggestionTrigger::Auto,
+            status,
+        };
+        if crate::profile::diff(&user.profile, &suggestion.profile).is_empty() {
+            // 変える根拠が無かったことも残し、評価の件数をここから数え直す
+            let current = db.rated_stats(user.user_id, &user.hash)?;
+            db.save_suggestion(&new(current, current, SuggestionStatus::Unchanged), now)?;
+            summary.suggested += 1;
+            continue;
+        }
+        // 今と案を、評価したすべての記事で採点する（採点済みの記事では LLM を呼ばない）
+        let rated: Vec<i64> = db
+            .eval_labels(user.user_id)?
+            .iter()
+            .map(|l| l.article_id)
+            .collect();
+        for profile in [&user.profile, &suggestion.profile] {
+            let scored = score::score_articles(
+                reborrow(&mut env),
+                &config.llm,
+                &config.pipeline,
+                user.user_id,
+                score::ScoreTarget::Candidate {
+                    profile,
+                    articles: &rated,
+                },
+                now,
+            )
+            .await?;
+            let stopped = scored.tally.halted.is_some() || scored.tally.cancelled;
+            summary.tally.merge(scored.tally);
+            if stopped {
+                return Ok(summary);
+            }
+        }
+        let current = db.rated_stats(user.user_id, &user.hash)?;
+        let candidate = db.rated_stats(user.user_id, &crate::profile::hash(&suggestion.profile))?;
+        let id = db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?;
+        summary.suggested += 1;
+        let ratings: Vec<u8> = evidence.iter().map(|e| e.rating.get()).collect();
+        if db.auto_apply_profile(user.user_id)?
+            && worth_applying(current, candidate, &ratings)
+            && db.apply_suggestion(user.user_id, id, ProfileOrigin::Auto, now)?
+        {
+            summary.applied += 1;
+        }
+    }
+    Ok(summary)
+}
+
+/// 同じ工程の環境を、続けて呼ぶ処理に貸す（クォータは共有する）。
+fn reborrow<'b, L>(env: &'b mut LlmStage<'_, L>) -> LlmStage<'b, L> {
+    LlmStage {
+        db: env.db,
+        llm: env.llm,
+        quota: &mut *env.quota,
+        cancel: env.cancel,
+        clock: env.clock,
+    }
 }
 
 /// 案を自動で当てる条件：案の一致率が今より `MIN_GAIN` 以上高く、評価に高いものと低いものがそれぞれ
 /// `MIN_EACH` 件以上ある。
 pub fn worth_applying(current: VersionStats, candidate: VersionStats, ratings: &[u8]) -> bool {
-    let _ = (current, candidate, ratings);
-    todo!()
+    let (Some(current), Some(candidate)) = (current.concordance, candidate.concordance) else {
+        return false;
+    };
+    let count = |f: fn(u8) -> bool| ratings.iter().filter(|&&r| f(r)).count();
+    let high = count(|r| r >= 4);
+    let low = match count(|r| r <= 2) {
+        0 => count(|r| r <= 3),
+        n => n,
+    };
+    candidate - current >= MIN_GAIN && high >= MIN_EACH && low >= MIN_EACH
 }
 
 #[cfg(test)]

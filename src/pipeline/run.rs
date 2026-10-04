@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use super::llm_call::LlmStage;
 use super::{Cancel, Halt, RedoKind, RedoSpec, Stage, Target};
 use super::{
-    digest, embed, embed_profiles, extract, fetch, score, story, suggest, tidy, title, translate,
+    digest, embed, embed_profiles, extract, fetch, review, score, story, suggest, tidy, title,
+    translate,
 };
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
@@ -38,6 +39,8 @@ pub enum RunError {
     Story(#[from] story::StoryStageError),
     #[error(transparent)]
     Suggest(#[from] suggest::SuggestStageError),
+    #[error(transparent)]
+    Review(#[from] review::ReviewStageError),
 }
 
 /// 1 回の実行で共有する環境。クォータは実行全体に効くので、ステージ間で引き継ぐ。
@@ -223,6 +226,18 @@ pub async fn crawl<L: LlmSet>(
                     failed = summary.tally.failed,
                     calls = summary.tally.calls,
                     "story stage finished"
+                );
+                summary.tally.halted
+            }
+            Stage::Review => {
+                let now = (env.clock)();
+                let summary =
+                    review::review_profiles(env.stage(LlmTask::Score), config, now).await?;
+                tracing::info!(
+                    suggested = summary.suggested,
+                    applied = summary.applied,
+                    calls = summary.tally.calls,
+                    "review stage finished"
                 );
                 summary.tally.halted
             }

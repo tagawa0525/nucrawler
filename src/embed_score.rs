@@ -1,14 +1,15 @@
 //! embedding の近さから点数を出す式（計画 010）。I/O を持たない。
 //!
-//! 記事と関心分野 i の類似度 s_i、推薦しない話題 j の類似度 t_j（どちらも 0 未満は 0 に切り詰める）から、
-//! 関心の強さ a（既定は重み付きの最大）と見たくなさ b = max_j t_j を求め、生の値 a − λb を、直近の記事の
-//! 生の値の中での百分位にして 0〜100 点にする。モデルごとに類似度の分布が違う（0.75〜0.9 に集まるモデルもある）
-//! ので、百分位にして一覧の最低点の意味をそろえる。
+//! 記事と関心分野 i の類似度 s_i、推薦しない話題 j の類似度 t_j を、それぞれの文と直近の記事の類似度の平均と
+//! 標準偏差で標準化し（0 未満は 0 に切り詰める）、関心の強さ a（既定は重み付きの最大）と見たくなさ
+//! b = max_j t_j を求め、生の値 a − λb を、直近の記事の生の値の中での百分位にして 0〜100 点にする。
+//! モデルによってはどの文どうしも類似度が高く（ruri-v3 は 0.73〜0.86 に集まる）、標準化しないと t_j が s_i と
+//! 同じ程度になって a − λb の符号が誤差で決まる。百分位は、一覧の最低点の意味をモデルによらずそろえる。
 
 use crate::embedding::dot;
 
 /// 式（まとめ方・λ・百分位の基準の取り方）と入力の組み立て方の版。変えたら上げる。
-pub const SCORE_VERSION: i64 = 1;
+pub const SCORE_VERSION: i64 = 2;
 
 /// 百分位の基準にする直近の要約の上限（期間の設定や記事の増え方で計算量が膨らまないように）。
 pub const REFERENCE_LIMIT: usize = 3000;
@@ -73,13 +74,79 @@ pub struct Raw {
     pub exclude: Option<usize>,
 }
 
+/// 好みの文 1 つと、基準の要約との類似度の平均と標準偏差。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Spread {
+    mean: f32,
+    sd: f32,
+}
+
+impl Spread {
+    /// 標準化しない（類似度をそのまま使う）。
+    const NONE: Spread = Spread { mean: 0.0, sd: 1.0 };
+
+    /// 基準の類似度がばらつかない（基準が 1 件以下か、全部同じ）ときは標準化しない。
+    fn of(vector: &[f32], reference: &[Vec<f32>]) -> Spread {
+        if reference.len() < 2 {
+            return Spread::NONE;
+        }
+        let similarities: Vec<f64> = reference.iter().map(|r| dot(vector, r) as f64).collect();
+        let n = similarities.len() as f64;
+        let mean = similarities.iter().sum::<f64>() / n;
+        let sd = (similarities.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / n).sqrt();
+        if sd < 1e-6 {
+            return Spread::NONE;
+        }
+        Spread {
+            mean: mean as f32,
+            sd: sd as f32,
+        }
+    }
+
+    /// 標準化した類似度。0 未満は 0 に切り詰める（負のままでは、推薦しない話題が加点になり、重みの小さい分野ほど
+    /// 積が大きくなる）。
+    fn similarity(self, vector: &[f32], article: &[f32]) -> f32 {
+        ((dot(vector, article) - self.mean) / self.sd).max(0.0)
+    }
+}
+
+/// 好みの文ごとの類似度の基準（`Preference` と同じ並び）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Baseline {
+    interests: Vec<Spread>,
+    excludes: Vec<Spread>,
+}
+
+impl Baseline {
+    /// `reference`（基準の要約のベクトル、正規化済み）との類似度の平均と標準偏差。
+    pub fn new(preference: &Preference, reference: &[Vec<f32>]) -> Self {
+        Self {
+            interests: preference
+                .interests
+                .iter()
+                .map(|i| Spread::of(&i.vector, reference))
+                .collect(),
+            excludes: preference
+                .excludes
+                .iter()
+                .map(|e| Spread::of(&e.vector, reference))
+                .collect(),
+        }
+    }
+
+    /// 標準化しない基準。
+    pub fn none(preference: &Preference) -> Self {
+        Self::new(preference, &[])
+    }
+}
+
 /// 記事のベクトル（正規化済み）の生の値。
-pub fn raw(preference: &Preference, article: &[f32], formula: Formula) -> Raw {
-    let similarity = |v: &[f32]| dot(v, article).max(0.0);
+pub fn raw(preference: &Preference, baseline: &Baseline, article: &[f32], formula: Formula) -> Raw {
     let weighted: Vec<f32> = preference
         .interests
         .iter()
-        .map(|i| i.weight * similarity(&i.vector))
+        .zip(&baseline.interests)
+        .map(|(i, spread)| i.weight * spread.similarity(&i.vector, article))
         .collect();
     let strongest = argmax(&weighted);
     let a = match formula.aggregate {
@@ -106,7 +173,8 @@ pub fn raw(preference: &Preference, article: &[f32], formula: Formula) -> Raw {
     let excluded: Vec<f32> = preference
         .excludes
         .iter()
-        .map(|e| similarity(&e.vector))
+        .zip(&baseline.excludes)
+        .map(|(e, spread)| spread.similarity(&e.vector, article))
         .collect();
     let closest = argmax(&excluded);
     let b = closest.map_or(0.0, |j| excluded[j]);
@@ -145,6 +213,7 @@ pub struct Scored {
 pub struct Scorer<'a> {
     preference: &'a Preference,
     formula: Formula,
+    baseline: Baseline,
     /// 基準の要約の生の値
     reference: Vec<f32>,
 }
@@ -152,19 +221,22 @@ pub struct Scorer<'a> {
 impl<'a> Scorer<'a> {
     /// `reference` は基準にする要約のベクトル（正規化済み）。
     pub fn new(preference: &'a Preference, formula: Formula, reference: &[Vec<f32>]) -> Self {
+        let baseline = Baseline::new(preference, reference);
+        let values = reference
+            .iter()
+            .map(|v| raw(preference, &baseline, v, formula).value)
+            .collect();
         Self {
             preference,
             formula,
-            reference: reference
-                .iter()
-                .map(|v| raw(preference, v, formula).value)
-                .collect(),
+            baseline,
+            reference: values,
         }
     }
 
     /// 記事のベクトル（正規化済み）の点数。
     pub fn score(&self, article: &[f32]) -> Scored {
-        let r = raw(self.preference, article, self.formula);
+        let r = raw(self.preference, &self.baseline, article, self.formula);
         Scored {
             score: percentile(r.value, &self.reference),
             interest: r
@@ -227,8 +299,8 @@ mod tests {
             interests: vec![interest("heavy", 1.0, 0.0), interest("light", 0.4, 90.0)],
             excludes: vec![],
         };
-        let near_heavy = raw(&p, &at(0.0), Formula::default());
-        let near_light = raw(&p, &at(90.0), Formula::default());
+        let near_heavy = raw(&p, &Baseline::none(&p), &at(0.0), Formula::default());
+        let near_light = raw(&p, &Baseline::none(&p), &at(90.0), Formula::default());
         assert!(close(near_heavy.value, 1.0), "{near_heavy:?}");
         assert!(close(near_light.value, 0.4), "{near_light:?}");
         assert_eq!(near_heavy.interest, Some(0));
@@ -244,24 +316,30 @@ mod tests {
             excludes: vec![exclude("x", 60.0)],
         };
         // 関心 cos 60° = 0.5、減点 cos 0° = 1
-        let near_exclude = raw(&p, &at(60.0), Formula::default());
+        let near_exclude = raw(&p, &Baseline::none(&p), &at(60.0), Formula::default());
         assert!(close(near_exclude.value, 0.5 - 1.0), "{near_exclude:?}");
         assert_eq!(near_exclude.exclude, Some(0));
         // 関心 1、減点 0.5：関心が上回るので、推薦しない話題は特徴にしない
-        let near_interest = raw(&p, &at(0.0), Formula::default());
+        let near_interest = raw(&p, &Baseline::none(&p), &at(0.0), Formula::default());
         assert!(close(near_interest.value, 0.5), "{near_interest:?}");
         assert_eq!(near_interest.exclude, None);
         let lighter = Formula {
             lambda: 0.5,
             ..Formula::default()
         };
-        assert!(close(raw(&p, &at(60.0), lighter).value, 0.0));
+        assert!(close(
+            raw(&p, &Baseline::none(&p), &at(60.0), lighter).value,
+            0.0
+        ));
         // 減点しない式（λ = 0）では、推薦しない話題を特徴にしない（関心が 0 の記事でも）
         let no_penalty = Formula {
             lambda: 0.0,
             ..Formula::default()
         };
-        assert_eq!(raw(&p, &at(150.0), no_penalty).exclude, None);
+        assert_eq!(
+            raw(&p, &Baseline::none(&p), &at(150.0), no_penalty).exclude,
+            None
+        );
     }
 
     /// 類似度は 0 未満を 0 に切り詰める。推薦しない話題と反対向きの記事も加点されず、関心と反対向きの記事で
@@ -272,7 +350,7 @@ mod tests {
             interests: vec![interest("heavy", 1.0, 0.0), interest("light", 0.4, 10.0)],
             excludes: vec![exclude("x", 0.0)],
         };
-        let opposite = raw(&p, &at(180.0), Formula::default());
+        let opposite = raw(&p, &Baseline::none(&p), &at(180.0), Formula::default());
         assert!(close(opposite.value, 0.0), "{opposite:?}");
         assert_eq!((opposite.interest, opposite.exclude), (None, None));
     }
@@ -285,14 +363,25 @@ mod tests {
             excludes: vec![],
         };
         assert!(close(
-            raw(&only_interest, &at(0.0), Formula::default()).value,
+            raw(
+                &only_interest,
+                &Baseline::none(&only_interest),
+                &at(0.0),
+                Formula::default()
+            )
+            .value,
             0.7
         ));
         let only_exclude = Preference {
             interests: vec![],
             excludes: vec![exclude("x", 0.0)],
         };
-        let r = raw(&only_exclude, &at(0.0), Formula::default());
+        let r = raw(
+            &only_exclude,
+            &Baseline::none(&only_exclude),
+            &at(0.0),
+            Formula::default(),
+        );
         assert!(close(r.value, -1.0), "{r:?}");
         assert_eq!(r.interest, None);
     }
@@ -313,14 +402,75 @@ mod tests {
             ..Formula::default()
         };
         // (1×1 + 0.5×1) / (1 + 0.5)。重み 0 の分野は除く
-        assert!(close(raw(&p, &at(0.0), mean).value, 1.0));
+        assert!(close(
+            raw(&p, &Baseline::none(&p), &at(0.0), mean).value,
+            1.0
+        ));
         let top2 = Formula {
             aggregate: Aggregate::TopK(2),
             ..Formula::default()
         };
-        assert!(close(raw(&p, &at(0.0), top2).value, 0.75));
-        let r = raw(&p, &at(0.0), top2);
+        assert!(close(
+            raw(&p, &Baseline::none(&p), &at(0.0), top2).value,
+            0.75
+        ));
+        let r = raw(&p, &Baseline::none(&p), &at(0.0), top2);
         assert_eq!(r.interest, Some(0));
+    }
+
+    /// 共通の向きに寄った単位ベクトル（どの文どうしも類似度が高いモデルを模す）。
+    fn tilted(x: f32, y: f32) -> Vec<f32> {
+        let norm = (1.0 + x * x + y * y).sqrt();
+        vec![1.0 / norm, x / norm, y / norm]
+    }
+
+    /// どの文どうしも類似度が高いモデルでは、推薦しない話題との類似度が関心分野との類似度と同じ程度になる。
+    /// 類似度を基準の要約での平均と標準偏差で標準化してから組み合わせ、関心分野に寄った記事を 0 点に落とさない。
+    #[test]
+    fn standardizes_similarities_against_the_reference() {
+        let p = Preference {
+            interests: vec![Interest {
+                topic: "i".into(),
+                weight: 0.9,
+                vector: tilted(0.3, 0.0),
+            }],
+            excludes: vec![Exclude {
+                topic: "x".into(),
+                vector: tilted(0.0, 0.3),
+            }],
+        };
+        let reference = [
+            tilted(0.3, 0.0),
+            tilted(0.0, 0.3),
+            tilted(0.0, 0.0),
+            tilted(-0.3, 0.0),
+            tilted(0.0, -0.3),
+        ];
+        let scorer = Scorer::new(&p, Formula::default(), &reference);
+        // 関心分野に寄った記事は基準の中で最も高い（ほかの 4 件より上で、自分と同じ値が 1 件）
+        let near_interest = scorer.score(&tilted(0.3, 0.0));
+        assert_eq!(near_interest.score, 90, "{near_interest:?}");
+        assert_eq!(near_interest.interest.as_deref(), Some("i"));
+        assert_eq!(near_interest.exclude, None);
+        // 推薦しない話題に寄った記事は 0 点で、その話題が特徴になる
+        let near_exclude = scorer.score(&tilted(0.0, 0.3));
+        assert_eq!(near_exclude.score, 0, "{near_exclude:?}");
+        assert_eq!(near_exclude.exclude.as_deref(), Some("x"));
+    }
+
+    /// 基準の類似度がばらつかない（基準が 1 件以下か、全部同じ）ときは、標準化せずに類似度をそのまま使う。
+    #[test]
+    fn keeps_raw_similarities_without_spread() {
+        let p = Preference {
+            interests: vec![interest("i", 1.0, 0.0)],
+            excludes: vec![],
+        };
+        for reference in [vec![], vec![at(30.0)], vec![at(30.0), at(30.0)]] {
+            let scorer = Scorer::new(&p, Formula::default(), &reference);
+            let scored = scorer.score(&at(0.0));
+            assert_eq!(scored.interest.as_deref(), Some("i"), "{reference:?}");
+            assert!(scored.score > 0, "{reference:?}: {scored:?}");
+        }
     }
 
     /// 百分位：基準の中で小さい値の数と、同じ値の半分の数の割合。0 以下は 0 点、基準が無ければ 50 点。

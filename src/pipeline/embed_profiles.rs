@@ -604,7 +604,8 @@ mod tests {
         let summary = run(&db, &embedder).await.unwrap();
         assert_eq!((summary.users, summary.scored), (1, 3));
         let got: HashMap<i64, i64> = scores(&db, owner).into_iter().collect();
-        // 生の値：heavy cos10° ≈ 0.98、light 0.4 × cos10° ≈ 0.39、avoid は減点が上回り負
+        // 類似度は基準の 3 件での平均と標準偏差で標準化する。heavy は「重い」、light は「軽い」で平均を上回り、
+        // avoid はどの関心分野でも平均以下で、「避けたい」で平均を上回るので負
         assert_eq!(got[&heavy], 83); // (2 + 0.5) / 3
         assert_eq!(got[&light], 50); // (1 + 0.5) / 3
         assert_eq!(got[&avoid], 0);
@@ -617,9 +618,7 @@ mod tests {
             [
                 format!("{heavy}:interest:重い"),
                 format!("{light}:interest:軽い"),
-                // 関心も少しはあるが、減点が上回る
                 format!("{avoid}:exclude:避けたい"),
-                format!("{avoid}:interest:軽い"),
             ]
         );
         let (model, version): (String, i64) = db
@@ -952,11 +951,12 @@ mod tests {
             .collect();
         expected.sort();
         assert_eq!(keys, expected.iter().collect::<Vec<_>>());
-        // 基準は 2 件：liked（cos 10°）は上、disliked（cos 80°）は下。候補では逆になる
-        assert_eq!(got[&(hash, model("now"))], [(liked, 75), (disliked, 25)]);
+        // 基準は 2 件：liked（cos 10°）は関心分野との類似度が平均を上回り、disliked（cos 80°）は下回るので 0 点。
+        // 候補では逆になる
+        assert_eq!(got[&(hash, model("now"))], [(liked, 75), (disliked, 0)]);
         assert_eq!(
             got[&(crate::profile::hash(&candidate), model("now"))],
-            [(liked, 25), (disliked, 75)]
+            [(liked, 0), (disliked, 75)]
         );
         assert_eq!(db.query_i64("SELECT count(*) FROM scores").unwrap(), 0);
     }

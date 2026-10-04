@@ -2,7 +2,7 @@
 //! 要約のベクトルを作った後に動く。
 //!
 //! 好みの文（関心分野ごとの「名前と note」、推薦しない話題）は、文そのものをキーにベクトルを持つ。点数は
-//! `embed_score` の式で求め、採点した時点の直近の要約の中での百分位にして、LLM の採点と同じ `scores` 表に保存する。
+//! `embed_score` の式で求め、採点した時点の直近の要約の中での百分位にして、`scores` 表に保存する（一覧などはこの点数で並べる。計画 017）。
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,7 +13,7 @@ use super::embed::{Checked, EmbedStageError, check_space, embed_checked};
 use crate::config::EmbeddingConfig;
 use crate::db::{
     CandidateFilter, Db, EMBED_BACKEND, EmbeddingScore, EmbeddingSpace, EvalKey, LabeledScore,
-    ScoreKey, ScoringProfile, timestamp,
+    Rating, ScoreKey, ScoringProfile, VersionStats, timestamp,
 };
 use crate::embed_score::{self, Formula, Preference, REFERENCE_LIMIT, SCORE_VERSION, Scorer};
 use crate::embedding::{Embedder, FINGERPRINT_TEXTS, Role, input};
@@ -194,6 +194,58 @@ pub async fn eval_trials(
         ));
     }
     Ok(trials)
+}
+
+/// 利用者が評価した記事を、今のプロファイル `current` と案 `candidate` の両方で、今の式でその場で採点し、
+/// それぞれの一致率を返す（保存しない。計画 017 の見直しの比較）。百分位の基準は、どちらも今の時点の
+/// 一覧の期間（`list_days`）の要約。好みの文のベクトルが無ければ作る。空間がまだ無いか、中断されたか、
+/// 途中で空間が作り直されたら `None`。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eval_trials と同じ材料に、利用者と 2 つのプロファイルを足す"
+)]
+pub async fn compare_profiles(
+    db: &Db,
+    embedder: &impl Embedder,
+    cfg: &EmbeddingConfig,
+    list_days: u32,
+    user_id: i64,
+    current: &Profile,
+    candidate: &Profile,
+    cancel: &Cancel,
+    now: DateTime<Utc>,
+) -> Result<Option<(VersionStats, VersionStats)>, EmbedStageError> {
+    let Some(space) = db.embedding_space()? else {
+        return Ok(None);
+    };
+    check_space(&space, cfg)?;
+    let labeled = db.eval_embedding_inputs(user_id, space.id)?;
+    let ratings: HashMap<i64, Rating> = db
+        .eval_labels(user_id)?
+        .into_iter()
+        .map(|l| (l.article_id, l.rating))
+        .collect();
+    let reference = reference_vectors(db, user_id, space.id, list_days, now)?;
+    let mut stats = Vec::with_capacity(2);
+    for profile in [current, candidate] {
+        let Some(preference) = preference_of(db, embedder, cfg, &space, profile, cancel).await?
+        else {
+            return Ok(None);
+        };
+        let scorer = Scorer::new(&preference, Formula::default(), &reference);
+        let pairs: Vec<(u8, Rating)> = labeled
+            .iter()
+            .filter_map(|l| {
+                let rating = *ratings.get(&l.article_id)?;
+                Some((scorer.score(&l.vector).score, rating))
+            })
+            .collect();
+        stats.push(VersionStats {
+            rated: pairs.len(),
+            concordance: crate::eval::concordance(&pairs),
+        });
+    }
+    Ok(Some((stats[0], stats[1])))
 }
 
 /// 前の版で取り込んだプロファイルは、今の条件（件数・長さ・重みが正の関心分野）を満たさないことがある。
@@ -910,6 +962,56 @@ mod tests {
 
     fn model(name: &str) -> String {
         format!("{} {name}", config().model)
+    }
+
+    /// 見直しの比較：評価した記事を、今のプロファイルと案の両方でその場で採点し、それぞれの一致率を返す。
+    /// 点数は保存しない。
+    #[tokio::test]
+    async fn compares_two_profiles_on_rated_articles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let current = Profile {
+            interests: vec![interest("関心", 1.0, None)],
+            exclude: vec![],
+        };
+        db.save_profile(owner, &current, now()).unwrap();
+        let candidate = Profile {
+            interests: vec![interest("候補", 1.0, None)],
+            exclude: vec![],
+        };
+        let (_, liked_text) = rated(&db, "liked", 5);
+        let (_, disliked_text) = rated(&db, "disliked", 1);
+        let embedder = FakeEmbedder::default();
+        {
+            let mut fixed = embedder.fixed.lock().unwrap();
+            fixed.insert(query("関心"), at(0.0));
+            fixed.insert(query("候補"), at(90.0));
+            fixed.insert(liked_text, at(10.0));
+            fixed.insert(disliked_text, at(80.0));
+        }
+        embed_articles(&db, &embedder, &config(), &Cancel::default(), &now)
+            .await
+            .unwrap();
+        let (now_stats, candidate_stats) = compare_profiles(
+            &db,
+            &embedder,
+            &config(),
+            7,
+            owner,
+            &current,
+            &candidate,
+            &Cancel::default(),
+            now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stats = |c: f64| VersionStats {
+            rated: 2,
+            concordance: Some(c),
+        };
+        assert_eq!((now_stats, candidate_stats), (stats(1.0), stats(0.0)));
+        assert_eq!(db.query_i64("SELECT count(*) FROM scores").unwrap(), 0);
     }
 
     /// 評価した記事を、今のプロファイルでは式の候補ごとに、候補のプロファイルでは今の式で採点する。

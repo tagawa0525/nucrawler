@@ -113,7 +113,7 @@ mod tests {
             summary_ja: None,
             lwr_relevant: Some(true),
             score: Some(80),
-            llm_score: Some(80),
+            base_score: Some(80),
             reason: None,
             matched: Vec::new(),
             excluded: Vec::new(),

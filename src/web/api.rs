@@ -68,9 +68,11 @@ pub struct Article<'a> {
     pub title_ja: Option<&'a str>,
     pub summary_ja: Option<&'a str>,
     pub lwr_relevant: Option<bool>,
-    /// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）
+    /// 推薦点（関心プロファイルとの embedding の近さの点数に、評価から学んだ補正を足した点数）
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数
+    /// 補正の前の点数（関心プロファイルとの近さ）
+    pub base_score: Option<u8>,
+    /// `base_score` と同じ値（以前の名前。使う側が `base_score` に移ったら消す）
     pub llm_score: Option<u8>,
     pub reason: Option<&'a str>,
     /// 点数が当たった関心分野（プロファイルの語）
@@ -101,7 +103,8 @@ impl<'a> Article<'a> {
             summary_ja: i.summary_ja.as_deref(),
             lwr_relevant: i.lwr_relevant,
             score: i.score,
-            llm_score: i.llm_score,
+            base_score: i.base_score,
+            llm_score: i.base_score,
             reason: i.reason.as_deref(),
             matched: &i.matched,
             excluded: &i.excluded,
@@ -199,7 +202,7 @@ mod tests {
             summary_ja: None,
             lwr_relevant: Some(true),
             score: Some(80),
-            llm_score: Some(80),
+            base_score: Some(80),
             reason: Some("理由".into()),
             matched: vec!["燃料".into()],
             excluded: vec!["核融合".into()],
@@ -218,10 +221,14 @@ mod tests {
         assert_eq!(json["matched"], serde_json::json!(["燃料"]));
         assert_eq!(json["excluded"], serde_json::json!(["核融合"]));
         assert_eq!(json["rating"], 4);
-        // 点数は推薦点で、LLM の点数も並べる
+        // 点数は推薦点で、補正の前の点数も並べる。`llm_score` は互換のため同じ値で残す
         assert_eq!(
-            (json["score"].clone(), json["llm_score"].clone()),
-            (80.into(), 80.into())
+            (
+                json["score"].clone(),
+                json["base_score"].clone(),
+                json["llm_score"].clone()
+            ),
+            (80.into(), 80.into(), 80.into())
         );
         assert!(json.get("feedback").is_none(), "{json}");
     }

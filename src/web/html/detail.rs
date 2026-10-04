@@ -266,10 +266,10 @@ fn report_summary(r: &Report) -> String {
     }
 }
 
-/// 推薦点の補正の内訳（例：`推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
+/// 推薦点の補正の内訳（例：`推薦点 81（近さ 72）：関心分野 燃料 +6、ソース WNN +3`）。補正が無ければ空。
 fn adjustments(d: &ArticleDetail, page: &Page) -> String {
     use crate::recommend::FeatureKind;
-    let (Some(score), Some(llm)) = (d.item.score, d.item.llm_score) else {
+    let (Some(score), Some(base)) = (d.item.score, d.item.base_score) else {
         return String::new();
     };
     if d.adjustments.is_empty() {
@@ -289,7 +289,7 @@ fn adjustments(d: &ArticleDetail, page: &Page) -> String {
         })
         .collect();
     format!(
-        "<p class=\"meta\">推薦点 {score}（LLM {llm}）：{}</p>",
+        "<p class=\"meta\">推薦点 {score}（近さ {base}）：{}</p>",
         parts.join("、")
     )
 }
@@ -521,7 +521,7 @@ mod tests {
         use crate::recommend::{Feature, FeatureKind};
         let mut d = detail();
         d.item.score = Some(81);
-        d.item.llm_score = Some(72);
+        d.item.base_score = Some(72);
         d.adjustments = vec![
             (
                 Feature {
@@ -545,7 +545,7 @@ mod tests {
         };
         let html = detail_page(&d, &Notes::default(), DetailView::default(), &page);
         assert!(
-            html.contains("推薦点 81（LLM 72）：関心分野 燃料 +6、ソース WNN +3"),
+            html.contains("推薦点 81（近さ 72）：関心分野 燃料 +6、ソース WNN +3"),
             "{html}"
         );
         // 補正が無ければ出さない

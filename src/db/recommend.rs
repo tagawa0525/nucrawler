@@ -1,4 +1,4 @@
-//! 推薦点（LLM の点数に、評価から学んだ補正を足した点数。`crate::recommend`）の DB 側：
+//! 推薦点（関心プロファイルとの近さの点数に、評価から学んだ補正を足した点数。`crate::recommend`）の DB 側：
 //! SQL の関数 `recommend_score`、評価からの学習の材料の読み出し、学習したモデルの使い回し。
 
 use super::*;
@@ -12,7 +12,7 @@ pub(super) struct ModelCache {
     model: Model,
 }
 
-/// SQL の関数 `recommend_score(llm_score, weight_sum)` を登録する。LLM 点が NULL（未採点）なら NULL。
+/// SQL の関数 `recommend_score(base_score, weight_sum)` を登録する。補正の前の点数が NULL（未採点）なら NULL。
 pub(super) fn register_functions(conn: &Connection) -> Result<(), DbError> {
     use rusqlite::functions::FunctionFlags;
     conn.create_scalar_function(
@@ -53,8 +53,8 @@ pub(super) fn recommend_score_sql() -> &'static str {
 }
 
 impl Db {
-    /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = LLM 点）。
-    /// 学習の材料（評価した記事ごとの LLM 点・特徴・評価）を毎回読み、前に学習したときと違えば学習し直す。
+    /// 利用者の推薦点のモデル。プロファイルが無ければ今の振る舞い（推薦点 = 補正の前の点数）。
+    /// 学習の材料（評価した記事ごとの補正の前の点数・特徴・評価）を毎回読み、前に学習したときと違えば学習し直す。
     /// 材料は評価した記事の分だけなので軽く、評価・採点・最新の要約・トピックの統合のどの変化も漏らさない。
     pub(super) fn recommend_model(
         &self,
@@ -83,7 +83,7 @@ impl Db {
     }
 
     /// 学習の材料：評価した記事ごとに、一覧と同じ採点（閲覧できる最新の digest の、最新のプロンプトの版で
-    /// 最高点の採点）の LLM 点と特徴、評価。そのプロファイルで採点されていない記事は使わない。
+    /// 最高点の採点）の 補正の前の点数と特徴、評価。そのプロファイルで採点されていない記事は使わない。
     fn recommend_examples(
         &self,
         user_id: i64,
@@ -96,13 +96,7 @@ impl Db {
                FROM ratings AS rt WHERE rt.user_id = :user),
              scored AS (
                SELECT rated.*,
-                      (SELECT s.id FROM scores AS s
-                       WHERE s.user_id = :user AND s.profile_hash = :profile
-                         AND s.artifact_id = rated.digest_id
-                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-                         AND s.backend <> 'embedding'
-                       ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
-                       LIMIT 1) AS score_id
+                      {score_id} AS score_id
                FROM rated)
              SELECT x.value, s.score, a.source_id, {topics},
                     {matched},
@@ -113,6 +107,7 @@ impl Db {
              JOIN articles AS a ON a.id = x.article_id
              ORDER BY x.article_id",
             digest_id = super::sql::latest_digest("id", "rt.article_id", ":user"),
+            score_id = super::sql::list_score("id", "rated.digest_id", ":user", ":profile"),
             matched = super::sql::matched_topics("s.id", "interest"),
             excluded = super::sql::matched_topics("s.id", "exclude"),
             topics = super::sql::linked_topics("r"),
@@ -131,14 +126,14 @@ impl Db {
             },
         )?;
         rows.map(|row| {
-            let (rating, llm_score, source, topics, matched, excluded) = row?;
+            let (rating, base_score, source, topics, matched, excluded) = row?;
             let [topics, matched, excluded]: [Vec<String>; 3] = [
                 serde_json::from_str(&topics)?,
                 serde_json::from_str(&matched)?,
                 serde_json::from_str(&excluded)?,
             ];
             Ok(Example {
-                llm_score,
+                base_score,
                 features: crate::recommend::features(&source, &topics, &matched, &excluded),
                 rating,
             })
@@ -153,7 +148,7 @@ mod tests {
     use crate::db::test_support::*;
     use crate::recommend::{Feature, FeatureKind};
 
-    /// 関心分野 `interests` に当たったとして LLM が `llm` 点を付けた記事。
+    /// 関心分野 `interests` に当たったとして `llm` 点が付いた記事。
     fn article_with(db: &Db, url: &str, llm: u8, interests: &[&str]) -> i64 {
         let a = page_article(db, url, "2026-09-26T00:00:00.000Z");
         let digest = add_digest(db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
@@ -173,7 +168,7 @@ mod tests {
         a
     }
 
-    /// LLM が「市場」を高く付けても低く評価し、「燃料」を低く付けても高く評価してきた。
+    /// 採点が「市場」を高く付けても低く評価し、「燃料」を低く付けても高く評価してきた。
     fn rate_training(db: &Db) {
         let owner = db.owner_id().unwrap();
         for i in 0..10 {
@@ -194,24 +189,29 @@ mod tests {
             .unwrap()
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）補正の学習に使わない。
+    /// 補正は embedding の点数から学び、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn examples_ignore_embedding_scores_for_now() {
+    fn examples_use_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
         let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
-        db.rate(owner, a, Rating::new(5), t("2026-09-27T00:00:00Z"))
-            .unwrap();
-        assert!(db.recommend_examples(owner, "h1").unwrap().is_empty());
+        let b = llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 30);
+        for id in [a, b] {
+            db.rate(owner, id, Rating::new(5), t("2026-09-27T00:00:00Z"))
+                .unwrap();
+        }
+        let examples = db.recommend_examples(owner, "h1").unwrap();
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].base_score, 95);
     }
 
-    /// 評価が無ければ、推薦点は LLM の点数と同じ。
+    /// 評価が無ければ、推薦点は補正の前の点数と同じ。
     #[test]
     fn without_ratings_the_list_keeps_the_llm_scores() {
         let db = Db::open_in_memory().unwrap();
         let a = article_with(&db, "https://e.com/a", 72, &["市場"]);
         let i = item(&db, a);
-        assert_eq!((i.score, i.llm_score), (Some(72), Some(72)));
+        assert_eq!((i.score, i.base_score), (Some(72), Some(72)));
     }
 
     /// 一覧の並び・閾値は推薦点で決まる。評価を付けると、次の読み出しから効く。
@@ -234,7 +234,7 @@ mod tests {
 
         rate_training(&db);
         let (m, f) = (item(&db, market), item(&db, fuel));
-        assert_eq!((m.llm_score, f.llm_score), (Some(80), Some(55)));
+        assert_eq!((m.base_score, f.base_score), (Some(80), Some(55)));
         assert!(
             m.score.unwrap() < 60 && f.score.unwrap() >= 60,
             "{m:?} {f:?}"

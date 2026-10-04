@@ -16,11 +16,11 @@ pub struct ListItem {
     pub title_ja: Option<String>,
     pub summary_ja: Option<String>,
     pub lwr_relevant: Option<bool>,
-    /// 推薦点：現在のプロファイルでの LLM の点数（最新の digest に付いたもの）に、評価から学んだ補正を
+    /// 推薦点：現在のプロファイルとの近さの点数（最新の digest に付いたもの）に、評価から学んだ補正を
     /// 足した点数（`crate::recommend`）。並び・閾値はこれで決める
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数
-    pub llm_score: Option<u8>,
+    /// 補正の前の点数（関心プロファイルとの近さ）
+    pub base_score: Option<u8>,
     pub reason: Option<String>,
     /// その点数が当たった関心分野（プロファイルの interest の topic）
     pub matched: Vec<String>,
@@ -435,7 +435,7 @@ impl Db {
             .is_empty();
         let digests = self.versions(user_id, article_id, ArtifactKind::Digest)?;
         // 補正の内訳は、一覧と同じ特徴（採点した最新の digest のトピック）で求める
-        let adjustments = match item.llm_score {
+        let adjustments = match item.base_score {
             Some(llm) => {
                 let topics: Vec<String> = digests
                     .first()
@@ -870,7 +870,7 @@ fn read_items(
             summary_ja: r.get(8)?,
             lwr_relevant: r.get(9)?,
             score: r.get(10)?,
-            llm_score: r.get(20)?,
+            base_score: r.get(20)?,
             reason: r.get(11)?,
             matched: Vec::new(),
             excluded: Vec::new(),
@@ -949,18 +949,16 @@ mod tests {
         assert_eq!(limited, [b, other]);
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）一覧では使わない。
+    /// 一覧は embedding の点数で並べ、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn list_ignores_embedding_scores_for_now() {
+    fn list_ranks_by_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
         let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 90);
-        let item = db
-            .list_articles(list_query(&db, true))
-            .unwrap()
-            .into_iter()
-            .find(|i| i.article_id == a)
-            .unwrap();
-        assert_eq!((item.score, item.llm_score), (None, None));
+        let b = llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
+        let items = db.list_articles(list_query(&db, true)).unwrap();
+        let find = |id| items.iter().find(|i| i.article_id == id).unwrap();
+        assert_eq!((find(a).score, find(a).base_score), (Some(90), Some(90)));
+        assert_eq!((find(b).score, find(b).base_score), (None, None));
     }
 
     /// 未読だけの一覧では、グループのどれかを読んだらグループごと出さない。
@@ -1302,10 +1300,10 @@ mod tests {
         let d = items.iter().find(|i| i.article_id == disliked).unwrap();
         assert_eq!(d.rating, Rating::new(2));
         let h = items.iter().find(|i| i.article_id == high).unwrap();
-        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は LLM の点数から少し下がる
+        // 評価 2 の記事と特徴（ソース・トピック）を共有するので、推薦点は補正の前の点数から少し下がる
         assert!(h.score.is_some_and(|s| s < 90), "{h:?}");
         assert_eq!(
-            (h.llm_score, h.title_ja.as_deref(), h.read_at.as_deref()),
+            (h.base_score, h.title_ja.as_deref(), h.read_at.as_deref()),
             (Some(90), Some("題"), None)
         );
     }
@@ -2018,43 +2016,8 @@ mod tests {
         assert_eq!(docs(), 0);
     }
 
-    /// 同じ digest に複数のモデルの採点があれば、先回り和訳と同じく最高点を使う。
-    #[test]
-    fn list_uses_highest_score_across_scorers() {
-        let db = Db::open_in_memory().unwrap();
-        let a = scored_article(
-            &db,
-            "https://e.com/a",
-            Lang::En,
-            "2026-09-26T00:00:00.000Z",
-            90,
-        );
-        let digest: i64 = db
-            .conn()
-            .query_row("SELECT id FROM artifacts WHERE article_id = ?1", [a], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        db.insert_score(
-            ScoreKey {
-                user_id: db.owner_id().unwrap(),
-                profile_hash: "h1",
-                backend: "claude-cli",
-                model: "haiku",
-                prompt_version: 1,
-            },
-            digest,
-            50,
-            Some("低い"),
-            t("2026-09-27T00:00:00Z"),
-        )
-        .unwrap();
-        let item = &db.list_articles(list_query(&db, false)).unwrap()[0];
-        assert_eq!(item.score, Some(90));
-    }
-
-    /// 採点のプロンプトの版を上げたら、古い版の点数ではなく最新の版の点数を使う
-    /// （版をまたいだ最高点にすると、古いプロンプトの高い点が新しい採点を隠してしまう）。
+    /// 採点の式の版を上げたら、古い版の点数ではなく最新の版の点数を使う
+    /// （版をまたいだ最高点にすると、古い式の高い点が新しい採点を隠してしまう）。
     #[test]
     fn list_prefers_latest_score_prompt_version() {
         let db = Db::open_in_memory().unwrap();

@@ -110,8 +110,8 @@ pub(super) fn score_key(db: &Db) -> ScoreKey<'static> {
     ScoreKey {
         user_id: db.owner_id().unwrap(),
         profile_hash: "h1",
-        backend: "claude-cli",
-        model: "sonnet",
+        backend: EMBED_BACKEND,
+        model: "m",
         prompt_version: 1,
     }
 }
@@ -147,13 +147,7 @@ pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, sc
         .unwrap();
     let digest = add_digest(db, id, "sonnet", "題", true, "2026-09-26T01:00:00Z");
     db.insert_score(
-        ScoreKey {
-            user_id: db.owner_id().unwrap(),
-            profile_hash: "h1",
-            backend: "claude-cli",
-            model: "sonnet",
-            prompt_version: 1,
-        },
+        score_key(db),
         digest,
         score,
         None,
@@ -163,16 +157,31 @@ pub(super) fn scored_article(db: &Db, url: &str, lang: Lang, published: &str, sc
     id
 }
 
+/// LLM の点数（プロファイル "h1"）だけが付いた、軽水炉に関係する記事（計画 017 の前に保存した点数）。
+pub(super) fn llm_scored_article(db: &Db, url: &str, published: &str, score: u8) -> i64 {
+    let a = page_article(db, url, published);
+    let digest = add_digest(db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
+    db.insert_score(
+        ScoreKey {
+            backend: "claude-cli",
+            model: "sonnet",
+            ..score_key(db)
+        },
+        digest,
+        score,
+        None,
+        t("2026-09-26T02:00:00Z"),
+    )
+    .unwrap();
+    a
+}
+
 /// embedding の点数（プロファイル "h1"）だけが付いた、軽水炉に関係する記事。
 pub(super) fn embedding_scored_article(db: &Db, url: &str, published: &str, score: u8) -> i64 {
     let a = page_article(db, url, published);
     let digest = add_digest(db, a, "sonnet", "題", true, "2026-09-26T01:00:00Z");
     db.insert_score(
-        ScoreKey {
-            backend: EMBED_BACKEND,
-            model: "m",
-            ..score_key(db)
-        },
+        score_key(db),
         digest,
         score,
         None,

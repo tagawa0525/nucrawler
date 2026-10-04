@@ -63,8 +63,8 @@ pub(super) fn score(db: &Db, digest: i64, score: u8) {
     let key = crate::db::ScoreKey {
         user_id: owner,
         profile_hash: &hash,
-        backend: "claude-cli",
-        model: "sonnet",
+        backend: crate::db::EMBED_BACKEND,
+        model: "m",
         prompt_version: 1,
     };
     db.insert_score(key, digest, score, Some("理由"), chrono::Utc::now())

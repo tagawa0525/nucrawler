@@ -235,20 +235,19 @@ fn redo_available() -> String {
 }
 
 /// `RedoFilter` の条件。省略した条件は常に真になる。点数は、利用者が閲覧できる最新の digest に
-/// 付いた、現在のプロファイルの採点のうち、採点のプロンプトの最新の版の最高点で判定する。
+/// 付いた、現在のプロファイルの点数（一覧と同じ規則で選ぶ）で判定する。
 fn redo_filter() -> String {
     format!(
         "(:source IS NULL OR a.source_id = :source)
     AND (:since IS NULL OR coalesce(a.published_at, a.fetched_at) >= :since)
     AND (:ids = '[]' OR a.id IN (SELECT value FROM json_each(:ids)))
-    AND (:min_score IS NULL OR (
-      SELECT s.score FROM scores AS s
-      WHERE s.user_id = :user AND s.profile_hash = :profile
-        -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-        AND s.backend <> 'embedding'
-        AND s.artifact_id = {digest_id}
-      ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)",
-        digest_id = super::sql::latest_digest("id", "a.id", ":user"),
+    AND (:min_score IS NULL OR {score} >= :min_score)",
+        score = super::sql::list_score(
+            "score",
+            &super::sql::latest_digest("id", "a.id", ":user"),
+            ":user",
+            ":profile"
+        ),
     )
 }
 
@@ -303,16 +302,17 @@ mod tests {
             .collect()
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）`--min-score` に使わない。
+    /// `--min-score` は embedding の点数で判定し、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn redo_min_score_ignores_embedding_scores_for_now() {
+    fn redo_min_score_uses_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
-        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
         let filter = RedoFilter {
             min_score: Some(50),
             ..RedoFilter::default()
         };
-        assert!(redo_digest_ids(&db, "haiku", &filter).is_empty());
+        assert_eq!(redo_digest_ids(&db, "haiku", &filter), [a]);
     }
 
     #[test]

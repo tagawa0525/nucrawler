@@ -104,13 +104,7 @@ impl Db {
              candidates AS (
                SELECT b.*,
                       -- プロファイルが無い（?2 が NULL）なら点数は付かず、依頼だけが残る
-                      -- 採点のプロンプトの最新の版で、モデル間の最高点
-                      (SELECT s.score FROM scores AS s
-                       WHERE s.user_id = ?1 AND s.profile_hash = ?2
-                         AND s.artifact_id = b.digest_id
-                         -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-                         AND s.backend <> 'embedding'
-                       ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) AS score,
+                      {score} AS score,
                       (SELECT json_extract(r.payload, '$.lwr_relevant') FROM artifacts AS r
                        WHERE r.id = b.digest_id) AS relevant
                FROM base AS b
@@ -122,6 +116,7 @@ impl Db {
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
             digest_id = super::sql::latest_digest("id", "a.id", "?1"),
+            score = super::sql::list_score("score", "b.digest_id", "?1", "?2"),
             available = super::claims::available(super::claims::Available {
                 article: "a.id",
                 stage: "'translate'",
@@ -191,12 +186,13 @@ mod tests {
         .collect()
     }
 
-    /// embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）先回りの和訳に使わない。
+    /// 先回りの和訳は embedding の点数で選び、LLM の点数（計画 017 の前に保存したもの）は使わない。
     #[test]
-    fn pending_translate_ignores_embedding_scores_for_now() {
+    fn pending_translate_uses_embedding_scores() {
         let db = Db::open_in_memory().unwrap();
-        embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
-        assert!(translate_ids(&db, false, "2026-09-27T00:00:00Z").is_empty());
+        let a = embedding_scored_article(&db, "https://e.com/a", "2026-09-26T00:00:00.000Z", 95);
+        llm_scored_article(&db, "https://e.com/b", "2026-09-26T00:00:00.000Z", 95);
+        assert_eq!(translate_ids(&db, false, "2026-09-27T00:00:00Z"), [a]);
     }
 
     #[test]

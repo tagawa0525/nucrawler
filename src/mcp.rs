@@ -105,9 +105,11 @@ pub struct ArticleSummary {
     pub summary_ja: Option<String>,
     /// 公開日時（無ければ取得日時）。UTC の RFC 3339
     pub date: String,
-    /// 推薦点（0〜100）：関心プロファイルでの LLM の点数に、利用者の評価から学んだ補正を足した点数
+    /// 推薦点（0〜100）：関心プロファイルとの embedding の近さの点数に、利用者の評価から学んだ補正を足した点数
     pub score: Option<u8>,
-    /// 補正の前の LLM の点数（0〜100）
+    /// 補正の前の点数（0〜100、関心プロファイルとの近さ）
+    pub base_score: Option<u8>,
+    /// `base_score` と同じ値（以前の名前。使う側が `base_score` に移ったら消す）
     pub llm_score: Option<u8>,
     /// 点数の理由
     pub reason: Option<String>,
@@ -264,6 +266,7 @@ fn search(
         return Err(ToolError::InvalidParams("min_score must be 0..=100".into()));
     }
     let (user, hash) = viewer(db)?;
+    let scored = db.has_scores(user, hash.as_deref())?;
     let items = db.search_articles(&SearchQuery {
         user_id: user,
         profile_hash: hash.as_deref(),
@@ -278,9 +281,7 @@ fn search(
         min_score: params.min_score,
         // 既定は Web UI の一覧と同じく隠す（最低点・評価の条件の既定も一覧と同じ）
         hide: !params.include_hidden,
-        hide_below: params
-            .min_score
-            .or_else(|| web.default_min(hash.as_deref())),
+        hide_below: params.min_score.or_else(|| web.default_min(scored)),
         rating: if params.include_hidden {
             RatingFilter::Any
         } else {
@@ -335,7 +336,8 @@ fn summary(item: ListItem, labels: &SourceLabels) -> ArticleSummary {
         summary_ja: item.summary_ja,
         date: item.at,
         score: item.score,
-        llm_score: item.llm_score,
+        base_score: item.base_score,
+        llm_score: item.base_score,
         reason: item.reason,
         matched: item.matched,
         excluded: item.excluded,
@@ -435,8 +437,8 @@ mod tests {
                 ScoreKey {
                     user_id: db.owner_id().unwrap(),
                     profile_hash: hash,
-                    backend: "claude-cli",
-                    model: "sonnet",
+                    backend: crate::db::EMBED_BACKEND,
+                    model: "m",
                     prompt_version: 1,
                 },
                 digest,

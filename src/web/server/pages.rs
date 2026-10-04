@@ -28,7 +28,7 @@ pub(super) async fn feed(
             return Ok(None);
         };
         let (user, hash) = viewer(db, me)?;
-        let min = web.default_min(hash.as_deref());
+        let min = web.default_min(db.has_scores(user, hash.as_deref())?);
         let items = list_items(db, web, user, hash.as_deref(), now, min, None)?;
         // フィード自身の URL はトークン付き（購読し直すリーダーが読めるように）
         let token = params.token.unwrap_or_default();

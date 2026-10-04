@@ -1,15 +1,16 @@
 //! プロファイルの見直し（計画 016）：評価が増えた利用者について、評価を根拠に LLM が更新案を作り、
-//! 今のプロファイルと案を同じ評価で採点して比べ、案を保存する。利用者の設定が「当てる」で、案が十分に
+//! 今のプロファイルと案を同じ評価で embedding で採点して比べ（計画 017）、案を保存する。利用者の設定が「当てる」で、案が十分に
 //! 良ければ、そのまま新しい版にする（履歴から戻せる）。
 
 use chrono::{DateTime, Utc};
 
 use super::llm_call::{LlmStage, Tally};
-use super::{score, suggest};
-use crate::config::Config;
+use super::{embed_profiles, suggest};
+use crate::config::{Config, EmbeddingConfig};
 use crate::db::{
     DbError, NewSuggestion, ProfileOrigin, SuggestionStatus, SuggestionTrigger, VersionStats,
 };
+use crate::embedding::Embedder;
 use crate::llm::Llm;
 
 pub const STAGE: &str = "review";
@@ -28,7 +29,7 @@ pub enum ReviewStageError {
     #[error(transparent)]
     Suggest(#[from] suggest::SuggestStageError),
     #[error(transparent)]
-    Score(#[from] score::ScoreStageError),
+    Embed(#[from] super::embed::EmbedStageError),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -46,6 +47,8 @@ pub struct ReviewSummary {
 pub async fn review_profiles<L: Llm>(
     mut env: LlmStage<'_, L>,
     config: &Config,
+    embedder: &impl Embedder,
+    embedding: &EmbeddingConfig,
     requests_only: bool,
     now: DateTime<Utc>,
 ) -> Result<ReviewSummary, ReviewStageError> {
@@ -100,44 +103,28 @@ pub async fn review_profiles<L: Llm>(
             },
             status,
         };
+        // 今と案を、評価した記事で embedding でその場で採点して比べる（同じ時点の基準で、保存しない）
+        let Some((current, candidate)) = embed_profiles::compare_profiles(
+            db,
+            embedder,
+            embedding,
+            config.web.list_days,
+            user.user_id,
+            &user.profile,
+            &suggestion.profile,
+            env.cancel,
+            now,
+        )
+        .await?
+        else {
+            break;
+        };
         if crate::profile::diff(&user.profile, &suggestion.profile).is_empty() {
             // 変える根拠が無かったことも残し、評価の件数をここから数え直す
-            let (current, _) = db.paired_stats(user.user_id, &user.hash, &user.hash)?;
             db.save_suggestion(&new(current, current, SuggestionStatus::Unchanged), now)?;
             summary.suggested += 1;
             continue;
         }
-        // 今と案を、評価したすべての記事で採点する（採点済みの記事では LLM を呼ばない）
-        let rated: Vec<i64> = db
-            .eval_labels(user.user_id)?
-            .iter()
-            .map(|l| l.article_id)
-            .collect();
-        for profile in [&user.profile, &suggestion.profile] {
-            let scored = score::score_articles(
-                reborrow(&mut env),
-                &config.llm,
-                &config.pipeline,
-                user.user_id,
-                score::ScoreTarget::Candidate {
-                    profile,
-                    articles: &rated,
-                },
-                now,
-            )
-            .await?;
-            let stopped = scored.tally.halted.is_some() || scored.tally.cancelled;
-            summary.tally.merge(scored.tally);
-            if stopped {
-                return Ok(summary);
-            }
-        }
-        // 片方の採点に失敗した記事を除き、同じ記事の集合で比べる
-        let (current, candidate) = db.paired_stats(
-            user.user_id,
-            &user.hash,
-            &crate::profile::hash(&suggestion.profile),
-        )?;
         // 案を作る間にプロファイルが変わっていたら（取り込み・戻し）、古い案は捨てて次の実行で作り直す
         let Some(id) =
             db.save_suggestion(&new(current, candidate, SuggestionStatus::Pending), now)?
@@ -191,9 +178,12 @@ mod tests {
         ArtifactKind, ContentKind, ContentOrigin, Db, NewArticle, NewArtifact, ProfileOrigin,
         Rating, SuggestionStatus,
     };
+    use crate::embedding::fake::{FakeEmbedder, cfg};
+    use crate::embedding::{Role, input};
     use crate::llm::fake::FakeLlm;
     use crate::llm::{LlmError, LlmRequest, LlmResponse};
     use crate::pipeline::Cancel;
+    use crate::pipeline::embed::embed_articles;
     use crate::profile::{Interest, Profile};
     use crate::quota::{Quota, QuotaConfig};
 
@@ -278,64 +268,96 @@ mod tests {
         liked
     }
 
-    /// 案は `suggested` のプロファイル。採点は、`good` を含むプロファイルなら好きな記事に高い点、
-    /// そうでなければ逆に付ける。
-    fn llm(suggested: &'static str, good: &'static [&'static str], liked: Vec<i64>) -> FakeLlm {
-        FakeLlm::responding(std::time::Duration::ZERO, move |req: &LlmRequest<'_>| {
-            if req.system == crate::prompt::suggest::system_prompt() {
-                return Ok(LlmResponse {
-                    output: serde_json::json!({
-                        "interests": [{"topic": suggested, "weight": 1.0, "note": ""}],
-                        "exclude": [],
-                        "reasons": [{"change": "変えた", "evidence": "★5 が 5 件"}],
-                    }),
-                    usage: None,
-                });
-            }
-            let fits = good.iter().any(|g| req.system.contains(g));
-            let items: Vec<serde_json::Value> = req
-                .prompt
-                .split("<article id=\"")
-                .skip(1)
-                .map(|rest| {
-                    let id: i64 = rest[..rest.find('"').unwrap()].parse().unwrap();
-                    let score = if liked.contains(&id) == fits { 90 } else { 10 };
-                    serde_json::json!({
-                        "id": id, "score": score, "reason": "理由", "matched": [], "excluded": [],
-                    })
-                })
-                .collect();
+    /// LLM は案（`suggested` のプロファイル）を作るだけで、採点には呼ばない。比較は embedding で、
+    /// `good` の関心分野は好きな記事（★5）に近く、ほかの関心分野は嫌いな記事（★1）に近い。
+    struct Fakes {
+        llm: FakeLlm,
+        embedder: FakeEmbedder,
+    }
+
+    impl std::ops::Deref for Fakes {
+        type Target = FakeLlm;
+
+        fn deref(&self) -> &FakeLlm {
+            &self.llm
+        }
+    }
+
+    /// 単位ベクトル（角度 θ 度）。
+    fn at(degrees: f32) -> Vec<f32> {
+        let r = degrees.to_radians();
+        let mut v = vec![0.0; 16];
+        v[0] = r.cos();
+        v[1] = r.sin();
+        v
+    }
+
+    fn llm(suggested: &'static str, good: &'static [&'static str]) -> Fakes {
+        let llm = FakeLlm::responding(std::time::Duration::ZERO, move |req: &LlmRequest<'_>| {
+            assert_eq!(req.system, crate::prompt::suggest::system_prompt());
             Ok::<_, LlmError>(LlmResponse {
-                output: serde_json::json!({ "items": items }),
+                output: serde_json::json!({
+                    "interests": [{"topic": suggested, "weight": 1.0, "note": ""}],
+                    "exclude": [],
+                    "reasons": [{"change": "変えた", "evidence": "★5 が 5 件"}],
+                }),
                 usage: None,
             })
-        })
+        });
+        let embedder = FakeEmbedder::default();
+        {
+            let cfg = embedding();
+            let mut fixed = embedder.fixed.lock().unwrap();
+            for topic in ["今の関心", "新しい関心"] {
+                let angle = if good.contains(&topic) { 0.0 } else { 90.0 };
+                fixed.insert(input(&cfg, Role::Query, topic), at(angle));
+            }
+            // `rated` の記事：100 未満と 200 は好きな記事、ほかは嫌いな記事
+            for n in 0..=201 {
+                let liked = n < 100 || n == 200;
+                let text = format!("記事{n}\n要約");
+                fixed.insert(
+                    input(&cfg, Role::Document, &text),
+                    at(if liked { 10.0 } else { 80.0 }),
+                );
+            }
+        }
+        Fakes { llm, embedder }
     }
 
-    async fn run(db: &Db, llm: &FakeLlm) -> ReviewSummary {
-        run_with(db, llm, false).await
+    fn embedding() -> EmbeddingConfig {
+        cfg("http://unused/e")
     }
 
-    async fn run_with(db: &Db, llm: &FakeLlm, requests_only: bool) -> ReviewSummary {
-        run_limited(db, llm, requests_only, 100).await
+    async fn run(db: &Db, fakes: &Fakes) -> ReviewSummary {
+        run_with(db, fakes, false).await
+    }
+
+    async fn run_with(db: &Db, fakes: &Fakes, requests_only: bool) -> ReviewSummary {
+        run_limited(db, fakes, requests_only, 100).await
     }
 
     async fn run_limited(
         db: &Db,
-        llm: &FakeLlm,
+        fakes: &Fakes,
         requests_only: bool,
         max_calls: u32,
     ) -> ReviewSummary {
+        embed_articles(db, &fakes.embedder, &embedding(), &Cancel::default(), &now)
+            .await
+            .unwrap();
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(max_calls));
         review_profiles(
             LlmStage {
                 db,
-                llm,
+                llm: &fakes.llm,
                 quota: &mut quota,
                 cancel: &Cancel::default(),
                 clock: &now,
             },
             &Config::default(),
+            &fakes.embedder,
+            &embedding(),
             requests_only,
             now(),
         )
@@ -348,8 +370,8 @@ mod tests {
     async fn applies_a_better_suggestion() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
-        let liked = setup(&db, 5);
-        let llm = llm("新しい関心", &["新しい関心"], liked);
+        setup(&db, 5);
+        let llm = llm("新しい関心", &["新しい関心"]);
         let summary = run(&db, &llm).await;
         assert_eq!((summary.suggested, summary.applied), (1, 1));
         let current = &db.profile_versions(owner).unwrap()[0];
@@ -381,13 +403,13 @@ mod tests {
         ] {
             let db = Db::open_in_memory().unwrap();
             let owner = db.owner_id().unwrap();
-            let liked = setup(&db, 5);
+            setup(&db, 5);
             if !auto {
                 db.conn()
                     .execute("UPDATE users SET auto_apply_profile = 0", [])
                     .unwrap();
             }
-            let summary = run(&db, &llm("新しい関心", good, liked)).await;
+            let summary = run(&db, &llm("新しい関心", good)).await;
             assert_eq!((summary.suggested, summary.applied), (1, 0), "{auto}");
             assert_eq!(
                 db.load_profile(owner).unwrap().unwrap().0,
@@ -405,8 +427,8 @@ mod tests {
     async fn skips_until_ratings_grow_and_records_no_change() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
-        let liked = setup(&db, 4);
-        let llm = llm("今の関心", &[], liked);
+        setup(&db, 4);
+        let llm = llm("今の関心", &[]);
         assert_eq!(run(&db, &llm).await, ReviewSummary::default());
         assert!(llm.requests().is_empty());
         rated(&db, 200, 5);
@@ -426,8 +448,8 @@ mod tests {
     async fn reviews_requested_profiles() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
-        let liked = setup(&db, 5);
-        let llm = llm("新しい関心", &["新しい関心"], liked.clone());
+        setup(&db, 5);
+        let llm = llm("新しい関心", &["新しい関心"]);
         // 評価は 10 件あるが、頼まれた利用者だけを見る
         assert_eq!(run_with(&db, &llm, true).await, ReviewSummary::default());
         assert!(llm.requests().is_empty());
@@ -466,7 +488,7 @@ mod tests {
         db.request_review(owner, now() + chrono::Duration::minutes(1))
             .unwrap();
         // 案が今と同じなら採点しないので、呼び出しは利用者ごとに 1 回
-        let llm = llm("今の関心", &[], liked);
+        let llm = llm("今の関心", &[]);
         let summary = run_limited(&db, &llm, true, 1).await;
         assert_eq!(summary.suggested, 1);
         assert_eq!(db.profile_suggestions(other).unwrap().len(), 1);

@@ -155,12 +155,12 @@ impl EmbeddingConfig {
     }
 }
 
-/// 推薦点（LLM の点数に、評価から学んだ補正を足した点数）の設定。
+/// 推薦点（関心プロファイルとの近さの点数に、評価から学んだ補正を足した点数）の設定。
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecommendConfig {
-    /// 補正の正則化の強さ。大きいほど LLM の点数に近いまま。ある特徴の補正が半分の強さに達するのは、その特徴の
-    /// 評価がおよそ「強さ ÷ p(1−p)」件（p は LLM 点を確率とみなした値。50 点付近で強さの 4 倍）そろったとき。
+    /// 補正の正則化の強さ。大きいほど補正の前の点数に近いまま。ある特徴の補正が半分の強さに達するのは、その特徴の
+    /// 評価がおよそ「強さ ÷ p(1−p)」件（p は補正の前の点数を確率とみなした値。50 点付近で強さの 4 倍）そろったとき。
     /// 1 件の評価は記事の特徴（ソース・トピック・関心分野など）のすべてに効くので、既定の 20 では、評価 1 件で
     /// 特徴を共有する記事が動くのは数点に収まる
     pub prior_strength: f64,
@@ -402,10 +402,11 @@ pub struct WebConfig {
 }
 
 impl WebConfig {
-    /// 利用者の一覧の既定の最低点。プロファイルがあれば `min_score`、無ければ採点が無いので最低点なし
-    /// （掛けると一覧が空になる）。Web・フィード・JSON・MCP で同じ規則を使う。
-    pub fn default_min(&self, profile_hash: Option<&str>) -> Option<u8> {
-        profile_hash.map(|_| self.min_score)
+    /// 利用者の一覧の既定の最低点。今のプロファイルの点数があれば（`Db::has_scores`）`min_score`、無ければ
+    /// 最低点なし（プロファイルが無いか、変えた直後や `embed rebuild` の後で、掛けると一覧が空になる）。
+    /// Web・フィード・JSON・MCP で同じ規則を使う。
+    pub fn default_min(&self, scored: bool) -> Option<u8> {
+        scored.then_some(self.min_score)
     }
 
     /// 一覧が常に空になる値を拒否する。

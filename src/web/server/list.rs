@@ -139,8 +139,13 @@ pub(super) async fn list(
         ..params
     };
     // 正規の URL がプロファイルの有無で変わる（一覧の既定の最低点）ので、利用者を先に引く
-    let (user, hash) = with_db(&state, move |db| Ok(viewer(db, me)?)).await?;
-    view.default_min = state.web.default_min(hash.as_deref());
+    let (user, hash, scored) = with_db(&state, move |db| {
+        let (user, hash) = viewer(db, me)?;
+        let scored = db.has_scores(user, hash.as_deref())?;
+        Ok((user, hash, scored))
+    })
+    .await?;
+    view.default_min = state.web.default_min(scored);
     view.min = params.min_or(view.min_default())?;
     view.read = read_mark(params.read.as_deref())?.unwrap_or(view.read_default());
     // 正規の形でなければ（既定と同じ値・空の値・送った画面（`from`）が残っているなど）、正規の URL へ移す
@@ -434,7 +439,8 @@ mod tests {
     #[tokio::test]
     async fn list_shows_articles_and_starts_a_visit() {
         let db = Db::open_in_memory().unwrap();
-        give_profile(&db);
+        let (_, digest) = seed(&db, "https://e.com/scored", "採点済み");
+        score(&db, digest, 90);
         seed(&db, "https://e.com/a", "見出しA");
         let server = Server::start(db).await;
         let (status, html) = server.get("/?min=0").await;
@@ -444,9 +450,25 @@ mod tests {
             server.count("SELECT count(*) FROM users WHERE last_seen_at IS NOT NULL"),
             1
         );
-        // プロファイルがあれば、未採点の記事は既定の一覧には出ない
+        // 今のプロファイルの点数があれば、未採点の記事は既定の一覧には出ない
         let (_, html) = server.get("/").await;
         assert!(!html.contains("見出しA"), "{html}");
+    }
+
+    /// プロファイルがあっても、今のプロファイルの点数が 1 件も無ければ（プロファイルを変えた直後や
+    /// `embed rebuild` の後）、既定の一覧は推薦点で絞らない（絞ると一覧が空になる）。フィードと JSON も同じ。
+    #[tokio::test]
+    async fn list_without_scores_has_no_score_floor() {
+        let db = Db::open_in_memory().unwrap();
+        give_profile(&db);
+        seed(&db, "https://e.com/a", "採点前の記事");
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/").await;
+        assert!(html.contains("採点前の記事"), "{html}");
+        let (_, xml) = server.get(&server.feed_path()).await;
+        assert!(xml.contains("採点前の記事"), "{xml}");
+        let (_, json) = server.get_json("/api/articles").await;
+        assert_eq!(json["articles"].as_array().map(Vec::len), Some(1), "{json}");
     }
 
     /// プロファイルが無ければ採点が無いので、既定の一覧は推薦点で絞らず、未採点の記事を新しい順に出す
@@ -518,9 +540,10 @@ mod tests {
     /// 行き来したときは最低点と 👁 を行き先の既定にする。
     #[tokio::test]
     async fn list_redirects_to_the_canonical_url() {
-        // 既定の最低点（設定の値）は、プロファイルがあるときのもの
+        // 既定の最低点（設定の値）は、今のプロファイルの点数があるときのもの
         let db = Db::open_in_memory().unwrap();
-        give_profile(&db);
+        let (_, digest) = seed(&db, "https://e.com/scored", "採点済み");
+        score(&db, digest, 90);
         let server = Server::start(db).await;
         for (from, to) in [
             ("/?rating=", "/"),

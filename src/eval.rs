@@ -255,7 +255,7 @@ fn render_key(
     let examples: Vec<Example> = labeled
         .iter()
         .map(|(s, rating, _)| Example {
-            llm_score: s.score,
+            base_score: s.score,
             features: s.features.clone(),
             rating: *rating,
         })

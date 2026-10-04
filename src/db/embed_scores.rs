@@ -91,6 +91,21 @@ impl Db {
         .collect()
     }
 
+    /// 利用者の、hash が `profile_hash` のプロファイルの点数が 1 件でもあるか（一覧の既定の最低点を掛けるか）。
+    /// プロファイルが無ければ `false`。
+    pub fn has_scores(&self, user_id: i64, profile_hash: Option<&str>) -> Result<bool, DbError> {
+        let Some(hash) = profile_hash else {
+            return Ok(false);
+        };
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+               SELECT 1 FROM scores
+               WHERE user_id = ?1 AND profile_hash = ?2 AND backend = ?3)",
+            rusqlite::params![user_id, hash, EMBED_BACKEND],
+            |r| r.get(0),
+        )?)
+    }
+
     /// プロファイルのある利用者（利用者の id 順）。
     pub fn scoring_profiles(&self) -> Result<Vec<ScoringProfile>, DbError> {
         let mut stmt = self

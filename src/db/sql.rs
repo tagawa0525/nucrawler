@@ -40,19 +40,20 @@ pub(super) fn title_ja(digest_title: &str, article: &str) -> String {
     )
 }
 
-/// 一覧が記事の順位に使う点数の列 `column`：要約（式 `digest`）を、利用者 `user` の、hash が `profile` の
-/// プロファイルで採点したもの（無ければ NULL）。プロファイルの版の一致率も同じ点数で測る（計画 016）。
+/// 記事の順位に使う点数の列 `column`：要約（式 `digest`）を、利用者 `user` の、hash が `profile` の
+/// プロファイルで embedding で採点したもの（無ければ NULL）。一覧・検索・和訳の先回り・補正の学習・
+/// `redo --min-score`・プロファイルの版の一致率は、すべてこの点数を読む（計画 017。保存済みの LLM の点数は
+/// `eval` の比較にだけ使う）。
 pub(super) fn list_score(column: &str, digest: &str, user: &str, profile: &str) -> String {
     format!(
         "(SELECT s.{column} FROM scores AS s
           WHERE s.user_id = {user} AND s.profile_hash = {profile}
             AND s.artifact_id = {digest}
-            -- embedding の点数は、採点器を選べるようになるまで（計画 010 の段階 3）使わない
-            AND s.backend <> 'embedding'
-          -- 採点のプロンプトの最新の版を使い、その版で複数のモデルの採点があれば、
-          -- 先回り和訳と同じく最高点を使う
-          ORDER BY s.prompt_version DESC, s.score DESC, s.created_at DESC, s.id DESC
-          LIMIT 1)"
+            AND s.backend = '{backend}'
+          -- 式の最新の版
+          ORDER BY s.prompt_version DESC, s.created_at DESC, s.id DESC
+          LIMIT 1)",
+        backend = super::EMBED_BACKEND,
     )
 }
 

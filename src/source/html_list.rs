@@ -113,7 +113,8 @@ fn title(a: ElementRef, skip: Option<&Selector>) -> String {
 }
 
 /// リンク `a` を含む項目の中の、`date` に一致する最初の要素が表す日付（日本時間の 0 時）。
-/// 項目は、`a` の祖先を内側からたどり、ほかのリンク（`link` に一致する要素）を含む手前まで。
+/// 項目は、`a` 自身から祖先を内側へたどり、ほかのリンク（`link` に一致する要素）を含む手前まで
+/// （項目全体がリンクで、日付がリンクの中にあるページもある）。
 /// 項目に日付の要素が無いときや読めないときは None（隣の項目の日付を使わない）。
 fn date_in_item(a: ElementRef, link: &Selector, date: &Selector) -> Option<DateTime<Utc>> {
     fn matching<'a>(scope: ElementRef<'a>, sel: &Selector) -> impl Iterator<Item = ElementRef<'a>> {
@@ -122,7 +123,7 @@ fn date_in_item(a: ElementRef, link: &Selector, date: &Selector) -> Option<DateT
             .filter_map(ElementRef::wrap)
             .filter(move |el| sel.matches(el))
     }
-    for scope in a.ancestors().filter_map(ElementRef::wrap) {
+    for scope in std::iter::once(a).chain(a.ancestors().filter_map(ElementRef::wrap)) {
         if matching(scope, link).nth(1).is_some() {
             return None;
         }

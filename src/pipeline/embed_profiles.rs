@@ -13,7 +13,7 @@ use super::embed::{Checked, EmbedStageError, check_space, embed_checked};
 use crate::config::EmbeddingConfig;
 use crate::db::{
     CandidateFilter, Db, EMBED_BACKEND, EmbeddingScore, EmbeddingSpace, EvalKey, LabeledScore,
-    ScoreKey, ScoringProfile, VersionStats, timestamp,
+    Rating, ScoreKey, ScoringProfile, VersionStats, timestamp,
 };
 use crate::embed_score::{self, Formula, Preference, REFERENCE_LIMIT, SCORE_VERSION, Scorer};
 use crate::embedding::{Embedder, FINGERPRINT_TEXTS, Role, input};
@@ -215,10 +215,37 @@ pub async fn compare_profiles(
     cancel: &Cancel,
     now: DateTime<Utc>,
 ) -> Result<Option<(VersionStats, VersionStats)>, EmbedStageError> {
-    let _ = (
-        db, embedder, cfg, list_days, user_id, current, candidate, cancel, now,
-    );
-    todo!()
+    let Some(space) = db.embedding_space()? else {
+        return Ok(None);
+    };
+    check_space(&space, cfg)?;
+    let labeled = db.eval_embedding_inputs(user_id, space.id)?;
+    let ratings: HashMap<i64, Rating> = db
+        .eval_labels(user_id)?
+        .into_iter()
+        .map(|l| (l.article_id, l.rating))
+        .collect();
+    let reference = reference_vectors(db, user_id, space.id, list_days, now)?;
+    let mut stats = Vec::with_capacity(2);
+    for profile in [current, candidate] {
+        let Some(preference) = preference_of(db, embedder, cfg, &space, profile, cancel).await?
+        else {
+            return Ok(None);
+        };
+        let scorer = Scorer::new(&preference, Formula::default(), &reference);
+        let pairs: Vec<(u8, Rating)> = labeled
+            .iter()
+            .filter_map(|l| {
+                let rating = *ratings.get(&l.article_id)?;
+                Some((scorer.score(&l.vector).score, rating))
+            })
+            .collect();
+        stats.push(VersionStats {
+            rated: pairs.len(),
+            concordance: crate::eval::concordance(&pairs),
+        });
+    }
+    Ok(Some((stats[0], stats[1])))
 }
 
 /// 前の版で取り込んだプロファイルは、今の条件（件数・長さ・重みが正の関心分野）を満たさないことがある。

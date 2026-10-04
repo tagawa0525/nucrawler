@@ -154,7 +154,8 @@ pub fn worth_applying(current: VersionStats, candidate: VersionStats, ratings: &
         0 => count(|r| r <= 3),
         n => n,
     };
-    candidate - current >= MIN_GAIN && high >= MIN_EACH && low >= MIN_EACH
+    // 一致率の差は浮動小数で誤差が出るので、ちょうど `MIN_GAIN` の上げ幅を落とさないよう許容幅を持たせる
+    candidate - current + 1e-9 >= MIN_GAIN && high >= MIN_EACH && low >= MIN_EACH
 }
 
 #[cfg(test)]

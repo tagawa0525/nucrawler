@@ -1,5 +1,39 @@
 //! 興味プロファイルの画面：今のプロファイルと版の履歴、前の版に戻す（計画 016）。
 
+use super::*;
+
+pub(super) async fn profile_page(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+) -> Result<Html<String>, AppError> {
+    let page = with_db_and_config(&state, move |db, web, labels| {
+        let (user, hash) = viewer(db, me)?;
+        let versions = db.profile_versions(user)?;
+        let parts = PageParts::new(db, me, hash.as_deref(), web)?;
+        let page = parts.page(labels);
+        Ok(html::profile_page(&versions, &page))
+    })
+    .await?;
+    Ok(Html(page))
+}
+
+pub(super) async fn revert_profile_version(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Path(id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        match db.revert_profile(me.user_id, id, Utc::now()) {
+            Ok(_) => Ok(()),
+            // ほかの利用者の版も、無い版と同じに扱う
+            Err(DbError::UnknownProfileVersion(_)) => Err(AppError::NotFound),
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::{Db, ProfileOrigin};

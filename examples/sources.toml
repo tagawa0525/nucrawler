@@ -78,6 +78,19 @@ category = "regulator"
 list = { link = "a.p-top-latest__item", date = ".p-top-latest__date", title_skip = ".p-top-latest__date, .p-top-latest__category" }
 body_selector = ".p-details-title__label, .u-container"
 
+# N-ADRES の検索結果のうち、申請（12）・許認可（14）・交付（16）の新しい順。トップの最新情報には載らない。
+# 日付は受理日・認可日などで、1 日に 1〜2 件。面談・ヒアリングは数が多く中身が薄いので含めない
+[[source]]
+id = "nra-licensing"
+name = "原子力規制委員会 申請・許認可（N-ADRES）"
+label = "規制委 許認可"
+kind = "html_list"
+url = "https://www.da.nra.go.jp/search?ftxt=1&q=type_id%20eq%20%2712%27%20OR%20type_id%20eq%20%2714%27%20OR%20type_id%20eq%20%2716%27&sf=sort_date_d&rows=50"
+lang = "ja"
+category = "regulator"
+list = { link = "a.c-list-item-pc__link", date = ".c-list-item-pc__identity" }
+body_selector = ".p-details-title__label, .u-container"
+
 # ニュース・規制の報告書・刊行物がまとめて載るので、ニュースだけを URL で絞る
 [[source]]
 id = "onr"

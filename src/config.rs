@@ -907,6 +907,27 @@ mod tests {
         }
     }
 
+    /// 更新案づくりのバックエンドとモデルは `suggest_*`。LLM の採点の設定（計画 017 でやめた）は受け付けない。
+    #[test]
+    fn names_the_suggestion_settings() {
+        let c = parse_config(
+            "[llm]\nsuggest_backend = \"claude-cli\"\nsuggest_model = \"opus\"\n",
+            p(),
+        );
+        assert!(c.is_ok(), "{c:?}");
+        for removed in [
+            "score_backend = \"claude-cli\"",
+            "score_model = \"opus\"",
+            "score_batch_size = 20",
+            "score_reserved_calls = 1",
+        ] {
+            assert!(
+                parse_config(&format!("[llm]\n{removed}\n"), p()).is_err(),
+                "{removed}"
+            );
+        }
+    }
+
     #[test]
     fn rejects_non_positive_llm_settings() {
         for (toml, needle) in [

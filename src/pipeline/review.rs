@@ -388,6 +388,8 @@ mod tests {
         };
         let balanced = [5, 5, 4, 4, 4, 2, 2, 1, 1, 1];
         assert!(worth_applying(stats(0.4), stats(0.46), &balanced));
+        // ちょうど 0.05 も含む（0.45 - 0.4 は浮動小数では 0.05 をわずかに下回る）
+        assert!(worth_applying(stats(0.4), stats(0.45), &balanced));
         assert!(!worth_applying(stats(0.4), stats(0.44), &balanced));
         // 低い評価が ★1〜2 に無ければ ★3 以下で数える
         assert!(worth_applying(

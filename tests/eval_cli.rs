@@ -20,6 +20,8 @@ fn eval_profile_needs_embedding() {
     let candidate = config.join("candidate.toml");
     std::fs::write(&candidate, "[[interest]]\ntopic = \"燃料\"\nweight = 1.0\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_nucrawler"))
+        // エラーはログで出すので、テストを流す環境の RUST_LOG（ビルドのサンドボックスなど）に左右されないようにする
+        .env("RUST_LOG", "info")
         .arg("--config-dir")
         .arg(&config)
         .arg("--data-dir")
@@ -30,7 +32,7 @@ fn eval_profile_needs_embedding() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[embedding]"), "{stderr}");
+    assert!(stderr.contains("[embedding]"), "{output:?}");
 }
 
 /// 評価がまだ無ければ、embedding の有無より先に評価が要ると知らせる（`crawl --only embed` では直らない）。
@@ -45,6 +47,8 @@ fn eval_profile_needs_ratings_first() {
     let candidate = config.join("candidate.toml");
     std::fs::write(&candidate, "[[interest]]\ntopic = \"燃料\"\nweight = 1.0\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_nucrawler"))
+        // エラーはログで出すので、テストを流す環境の RUST_LOG（ビルドのサンドボックスなど）に左右されないようにする
+        .env("RUST_LOG", "info")
         .arg("--config-dir")
         .arg(&config)
         .arg("--data-dir")
@@ -55,5 +59,5 @@ fn eval_profile_needs_ratings_first() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("no ratings yet"), "{stderr}");
+    assert!(stderr.contains("no ratings yet"), "{output:?}");
 }

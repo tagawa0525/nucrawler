@@ -36,7 +36,9 @@ pub(super) async fn revert_profile_version(
 
 #[cfg(test)]
 mod tests {
-    use crate::db::{Db, ProfileOrigin};
+    use crate::db::{
+        Db, NewSuggestion, ProfileOrigin, SuggestionStatus, SuggestionTrigger, VersionStats,
+    };
     use crate::profile::{Interest, Profile};
     use crate::web::server::test_support::*;
 
@@ -149,5 +151,135 @@ mod tests {
         assert_eq!(status, 200);
         assert!(html.contains("プロファイルはまだありません"), "{html}");
         assert!(!html.contains("燃料"), "{html}");
+    }
+
+    /// 待っている案（今との違い・根拠・今と案の一致率）を保存し、その id を返す。
+    fn pending(db: &Db) -> i64 {
+        let owner = db.owner_id().unwrap();
+        db.save_profile(owner, &profile("燃料", 1.0), chrono::Utc::now())
+            .unwrap();
+        let reasons = vec![crate::prompt::suggest::Reason {
+            change: "燃料の重みを下げた".into(),
+            evidence: "不要 8 件".into(),
+        }];
+        db.save_suggestion(
+            &NewSuggestion {
+                user_id: owner,
+                base_hash: &crate::profile::hash(&profile("燃料", 1.0)),
+                profile: &profile("燃料", 0.4),
+                reasons: &reasons,
+                evidence: &[],
+                current: VersionStats {
+                    rated: 41,
+                    concordance: Some(0.44),
+                },
+                candidate: VersionStats {
+                    rated: 41,
+                    concordance: Some(0.64),
+                },
+                trigger: SuggestionTrigger::Auto,
+                status: SuggestionStatus::Pending,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    /// 待っている案を、今との違い・根拠・一致率と、採用・見送りのボタンで出す。自動で当てるかの切り替え
+    /// （既定は当てる）と「今すぐ案を作る」も出す。
+    #[tokio::test]
+    async fn shows_a_pending_suggestion_and_the_controls() {
+        let db = Db::open_in_memory().unwrap();
+        let id = pending(&db);
+        let server = Server::start(db).await;
+        let (_, html) = server.get("/settings/profile").await;
+        let suggestion = html.split("<h2>更新案</h2>").nth(1).expect("suggestion");
+        assert!(suggestion.contains("燃料の重み 1 → 0.4"), "{html}");
+        assert!(suggestion.contains("燃料の重みを下げた"), "{html}");
+        assert!(suggestion.contains("不要 8 件"), "{html}");
+        assert!(suggestion.contains("0.44"), "{html}");
+        assert!(suggestion.contains("0.64"), "{html}");
+        assert!(
+            suggestion.contains(&format!(
+                "action=\"/settings/profile/suggestions/{id}/apply\""
+            )),
+            "{html}"
+        );
+        assert!(
+            suggestion.contains(&format!(
+                "action=\"/settings/profile/suggestions/{id}/dismiss\""
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/settings/profile/review\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("action=\"/settings/profile/auto-apply\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("name=\"auto\" value=\"on\" checked"),
+            "{html}"
+        );
+    }
+
+    /// 案を採用すると版になり（出どころは採用）、見送ると版にならない。ほかの利用者の案は扱えない。
+    #[tokio::test]
+    async fn applies_or_dismisses_a_suggestion() {
+        for (action, status, origin) in [
+            ("apply", "applied", "suggest"),
+            ("dismiss", "dismissed", "import"),
+        ] {
+            let db = Db::open_in_memory().unwrap();
+            let id = pending(&db);
+            let other = other_user(&db, "o@example.com");
+            insert_session(&db, other, "other-session");
+            let server = Server::start(db).await;
+            let path = format!("/settings/profile/suggestions/{id}/{action}");
+            assert_eq!(server.post_as("other-session", &path, "").await, 404);
+            let res = server.form(&path, "").send().await.unwrap();
+            assert_eq!(res.status().as_u16(), 303, "{action}");
+            assert_eq!(res.headers()["location"], "/settings/profile");
+            assert_eq!(
+                server.strings("SELECT status FROM profile_suggestions"),
+                [status]
+            );
+            assert_eq!(
+                server.strings("SELECT origin FROM profile_versions ORDER BY id DESC LIMIT 1"),
+                [origin]
+            );
+        }
+    }
+
+    /// 「今すぐ案を作る」は依頼を残し、画面は作成中と出す。自動で当てるかは切り替えられる。
+    #[tokio::test]
+    async fn requests_a_review_and_switches_auto_apply() {
+        let db = Db::open_in_memory().unwrap();
+        two_versions(&db);
+        let server = Server::start(db).await;
+        let res = server.post("/settings/profile/review", "").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.count("SELECT count(*) FROM profile_review_requests"),
+            1
+        );
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("案を作っています"), "{html}");
+        let res = server.post("/settings/profile/auto-apply", "").await;
+        assert_eq!(res.status().as_u16(), 303);
+        assert_eq!(
+            server.count("SELECT auto_apply_profile FROM users WHERE id = 1"),
+            0
+        );
+        let (_, html) = server.get("/settings/profile").await;
+        assert!(html.contains("name=\"auto\" value=\"on\">"), "{html}");
+        server.post("/settings/profile/auto-apply", "auto=on").await;
+        assert_eq!(
+            server.count("SELECT auto_apply_profile FROM users WHERE id = 1"),
+            1
+        );
     }
 }

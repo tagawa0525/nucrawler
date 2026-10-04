@@ -231,8 +231,13 @@ pub async fn crawl<L: LlmSet>(
             }
             Stage::Review => {
                 let now = (env.clock)();
-                let summary =
-                    review::review_profiles(env.stage(LlmTask::Score), config, now).await?;
+                let summary = review::review_profiles(
+                    env.stage(LlmTask::Score),
+                    config,
+                    opts.requests_only,
+                    now,
+                )
+                .await?;
                 tracing::info!(
                     suggested = summary.suggested,
                     applied = summary.applied,

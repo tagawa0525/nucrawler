@@ -45,8 +45,10 @@ pub struct ReviewSummary {
 pub async fn review_profiles<L: Llm>(
     mut env: LlmStage<'_, L>,
     config: &Config,
+    requests_only: bool,
     now: DateTime<Utc>,
 ) -> Result<ReviewSummary, ReviewStageError> {
+    let _ = requests_only;
     let db = env.db;
     let mut summary = ReviewSummary::default();
     for user in db.scoring_profiles()? {
@@ -292,6 +294,10 @@ mod tests {
     }
 
     async fn run(db: &Db, llm: &FakeLlm) -> ReviewSummary {
+        run_with(db, llm, false).await
+    }
+
+    async fn run_with(db: &Db, llm: &FakeLlm, requests_only: bool) -> ReviewSummary {
         let mut quota = Quota::new(QuotaConfig::default(), None, Some(100));
         review_profiles(
             LlmStage {
@@ -302,6 +308,7 @@ mod tests {
                 clock: &now,
             },
             &Config::default(),
+            requests_only,
             now(),
         )
         .await
@@ -383,6 +390,38 @@ mod tests {
             db.profile_suggestions(owner).unwrap()[0].status,
             SuggestionStatus::Unchanged
         );
+    }
+
+    /// 頼まれた利用者は、評価の件数によらず案を作る（手動の案。依頼は片付く）。`requests_only` なら
+    /// 頼まれた利用者だけを見る。評価が無ければ依頼を取り下げる。
+    #[tokio::test]
+    async fn reviews_requested_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        let liked = setup(&db, 5);
+        let llm = llm("新しい関心", &["新しい関心"], liked.clone());
+        // 評価は 10 件あるが、頼まれた利用者だけを見る
+        assert_eq!(run_with(&db, &llm, true).await, ReviewSummary::default());
+        assert!(llm.requests().is_empty());
+        db.request_review(owner, now()).unwrap();
+        let summary = run_with(&db, &llm, true).await;
+        assert_eq!((summary.suggested, summary.applied), (1, 1));
+        let s = &db.profile_suggestions(owner).unwrap()[0];
+        assert_eq!(s.trigger, crate::db::SuggestionTrigger::Manual);
+        assert!(db.review_requests().unwrap().is_empty());
+        // 前の案の後に評価が無くても、頼まれれば作る
+        db.request_review(owner, now()).unwrap();
+        let calls = llm.requests().len();
+        assert_eq!(run_with(&db, &llm, false).await.suggested, 1);
+        assert!(llm.requests().len() > calls);
+        // 評価が無い利用者の依頼は、LLM を呼ばずに取り下げる
+        let other = db.add_user("o@example.com", "O", "h").unwrap();
+        db.save_profile(other, &profile("今の関心"), now()).unwrap();
+        db.request_review(other, now()).unwrap();
+        let calls = llm.requests().len();
+        assert_eq!(run_with(&db, &llm, true).await, ReviewSummary::default());
+        assert_eq!(llm.requests().len(), calls);
+        assert!(db.review_requests().unwrap().is_empty());
     }
 
     #[test]

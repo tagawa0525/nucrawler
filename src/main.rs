@@ -343,6 +343,7 @@ async fn profile(
         ProfileArgs::Suggest { out, max_llm_calls } => {
             cmd::suggest(config, data, &out, max_llm_calls).await
         }
+        ProfileArgs::History | ProfileArgs::Revert { .. } => todo!(),
     }
 }
 

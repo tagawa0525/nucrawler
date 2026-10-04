@@ -337,6 +337,10 @@ pub enum ProfileArgs {
         out: PathBuf,
         max_llm_calls: Option<u32>,
     },
+    /// `profile history`：版の一覧（新しい順）
+    History,
+    /// `profile revert VERSION`：版 `version` の中身を新しい版として今のプロファイルにする
+    Revert { version: i64 },
 }
 
 pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
@@ -854,10 +858,22 @@ mod tests {
                 max_llm_calls: Some(1),
             }
         );
+        assert_eq!(
+            parse_profile_args(&args(&["history"])).unwrap(),
+            ProfileArgs::History
+        );
+        assert_eq!(
+            parse_profile_args(&args(&["revert", "3"])).unwrap(),
+            ProfileArgs::Revert { version: 3 }
+        );
         for bad in [
             &[][..],
             &["import"][..],
             &["export", "x"][..],
+            &["history", "x"][..],
+            &["revert"][..],
+            &["revert", "x"][..],
+            &["revert", "1", "2"][..],
             // 案の書き出し先は必須
             &["suggest"][..],
             &["suggest", "--out"][..],

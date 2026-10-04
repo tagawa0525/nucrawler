@@ -243,6 +243,13 @@ impl std::fmt::Display for Change {
     }
 }
 
+/// `profile history` の表示：版ごとに番号・時刻（日本時間）・出どころ・使われていた間の一致率と、
+/// 1 つ前の版からの変更。新しい順に受け取り、そのまま並べる。
+pub fn render_versions(versions: &[crate::db::ProfileVersion]) -> String {
+    let _ = versions;
+    todo!()
+}
+
 /// 内容から決まるハッシュ（16 進 16 桁）。採点はこの値ごとに記録するので、内容が変われば
 /// 採点し直しの対象になる。Rust のバージョンで値が変わらないよう FNV-1a を使う。
 pub fn hash(profile: &Profile) -> String {
@@ -258,6 +265,72 @@ pub fn hash(profile: &Profile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn version(
+        id: i64,
+        weight: f64,
+        origin: crate::db::ProfileOrigin,
+        created_at: &str,
+        retired_at: Option<&str>,
+        stats: crate::db::VersionStats,
+    ) -> crate::db::ProfileVersion {
+        let profile = Profile {
+            interests: vec![Interest {
+                topic: "燃料".into(),
+                weight,
+                note: None,
+            }],
+            exclude: vec![],
+        };
+        crate::db::ProfileVersion {
+            id,
+            hash: hash(&profile),
+            profile,
+            origin,
+            created_at: created_at.into(),
+            retired_at: retired_at.map(Into::into),
+            stats,
+        }
+    }
+
+    /// 版ごとに番号・時刻・出どころ・一致率と件数を出し、1 つ前の版からの変更を添える。今の版に印を付ける。
+    #[test]
+    fn renders_versions_with_their_changes() {
+        use crate::db::{ProfileOrigin, VersionStats};
+        let text = render_versions(&[
+            version(
+                2,
+                0.5,
+                ProfileOrigin::Auto,
+                "2026-10-04T05:00:00.000Z",
+                None,
+                VersionStats {
+                    rated: 3,
+                    concordance: Some(2.0 / 3.0),
+                },
+            ),
+            version(
+                1,
+                1.0,
+                ProfileOrigin::Import,
+                "2026-09-27T00:00:00.000Z",
+                Some("2026-10-04T05:00:00.000Z"),
+                VersionStats {
+                    rated: 0,
+                    concordance: None,
+                },
+            ),
+        ]);
+        assert_eq!(
+            text,
+            "#2  2026-10-04 14:00  auto  (current)  3 rated, concordance 0.67\n\
+             \x20   weight 燃料: 1.0 → 0.5\n\
+             #1  2026-09-27 09:00  import  0 rated\n\
+             \x20   (first version)\n\
+             \nrevert with `nucrawler profile revert VERSION`\n"
+        );
+        assert_eq!(render_versions(&[]), "no profile versions\n");
+    }
 
     fn interest(topic: &str, weight: f64, note: Option<&str>) -> Interest {
         Interest {

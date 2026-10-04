@@ -157,6 +157,13 @@ impl Db {
             ],
         )?;
         let id = tx.last_insert_rowid();
+        // 頼まれた案を作ったので、依頼を片付ける
+        if suggestion.trigger == SuggestionTrigger::Manual {
+            tx.execute(
+                "DELETE FROM profile_review_requests WHERE user_id = ?1",
+                [suggestion.user_id],
+            )?;
+        }
         tx.commit()?;
         Ok(Some(id))
     }
@@ -312,14 +319,33 @@ impl Db {
         suggestion_id: i64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        let _ = (user_id, suggestion_id, now);
-        todo!()
+        let n = self.conn.execute(
+            "UPDATE profile_suggestions SET status = 'dismissed', decided_at = ?3
+             WHERE id = ?1 AND user_id = ?2 AND status = 'pending'",
+            rusqlite::params![suggestion_id, user_id, timestamp(now)],
+        )?;
+        if n > 0 {
+            return Ok(true);
+        }
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM profile_suggestions WHERE id = ?1 AND user_id = ?2)",
+            [suggestion_id, user_id],
+            |r| r.get(0),
+        )?;
+        if exists {
+            Ok(false)
+        } else {
+            Err(DbError::UnknownProfileSuggestion(suggestion_id))
+        }
     }
 
     /// 案を自動で当てるかを変える。
     pub fn set_auto_apply_profile(&self, user_id: i64, on: bool) -> Result<(), DbError> {
-        let _ = (user_id, on);
-        todo!()
+        self.conn.execute(
+            "UPDATE users SET auto_apply_profile = ?2 WHERE id = ?1",
+            rusqlite::params![user_id, on],
+        )?;
+        Ok(())
     }
 
     /// 案を今すぐ作るよう頼む（評価の件数によらず、次の `crawl --requests-only` か `crawl` で作る）。
@@ -329,19 +355,30 @@ impl Db {
         user_id: i64,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        let _ = (user_id, now);
-        todo!()
+        self.conn.execute(
+            "INSERT INTO profile_review_requests (user_id, requested_at) VALUES (?1, ?2)
+             ON CONFLICT (user_id) DO NOTHING",
+            rusqlite::params![user_id, timestamp(now)],
+        )?;
+        Ok(())
     }
 
     /// 案を頼んで、まだ作っていない利用者（頼んだ順）。
     pub fn review_requests(&self) -> Result<Vec<i64>, DbError> {
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT user_id FROM profile_review_requests ORDER BY requested_at, user_id",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// 頼まれた案を作らずに終える（評価が無くて案を作れないとき）。
     pub fn drop_review_request(&self, user_id: i64) -> Result<(), DbError> {
-        let _ = user_id;
-        todo!()
+        self.conn.execute(
+            "DELETE FROM profile_review_requests WHERE user_id = ?1",
+            [user_id],
+        )?;
+        Ok(())
     }
 
     /// 案を自動で当てるか（利用者の設定。既定は当てる）。

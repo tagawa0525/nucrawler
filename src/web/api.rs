@@ -4,8 +4,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::config::SourceLabels;
 use crate::db::{ArticleDetail, ArtifactVersion, ListItem, Marks, Rating};
-use crate::web::html::SourceLabels;
 
 /// 記事の一覧（`GET /api/articles`）。
 #[derive(Debug, Serialize)]

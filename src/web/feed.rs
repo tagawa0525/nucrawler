@@ -4,8 +4,9 @@
 //! `rel` で区別して書け、日付が DB と同じ RFC 3339 で済み、`summary` がプレーンテキストだと
 //! 決まっている（RSS の `description` は HTML かどうかが曖昧）ため。
 
+use crate::config::SourceLabels;
 use crate::db::ListItem;
-use crate::web::html::{SourceLabels, display_title};
+use crate::web::html::display_title;
 
 /// XML の特殊文字を実体参照にし、XML 1.0 に書けない文字（タブ・改行・復帰以外の制御文字など）は
 /// 実体参照にもできないので落とす。

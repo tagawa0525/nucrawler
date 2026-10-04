@@ -351,12 +351,7 @@ async fn serve(
     let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
         .with_prior_strength(config.recommend.prior_strength);
     let addr = args.addr.unwrap_or(config.web.bind);
-    let labels = sources
-        .sources
-        .iter()
-        .map(|s| (s.id.clone(), s.display_name().to_string()))
-        .collect();
-    let state = server::AppState::new(db, config.web, labels);
+    let state = server::AppState::new(db, config.web, sources.labels());
     server::run(addr, state, shutdown_signal()).await?;
     Ok(())
 }
@@ -386,12 +381,7 @@ async fn mcp(config: Option<PathBuf>, data: Option<PathBuf>) -> Result<(), Error
     let (config, sources) = config::load(&config_dir(config)?)?;
     let db = Db::open(&data_dir(data)?.join("nucrawler.db"))?
         .with_prior_strength(config.recommend.prior_strength);
-    let labels = sources
-        .sources
-        .iter()
-        .map(|s| (s.id.clone(), s.display_name().to_string()))
-        .collect();
-    mcp::run(mcp::Server::new(db, config.web, labels)).await?;
+    mcp::run(mcp::Server::new(db, config.web, sources.labels())).await?;
     Ok(())
 }
 

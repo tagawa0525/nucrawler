@@ -258,7 +258,7 @@ pub(super) struct LoginForm {
 
 /// 失敗の応答。ID が無い・パスワードが違う・待ち時間中・パスワードが無い・長すぎる、のどれでも同じにする
 /// （応答の違いから ID の有無を調べられないように）。
-fn login_failed(next: Option<&str>, labels: &html::SourceLabels) -> Response {
+fn login_failed(next: Option<&str>, labels: &crate::config::SourceLabels) -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Html(html::login_page(next, true, labels)),

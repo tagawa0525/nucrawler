@@ -840,7 +840,7 @@ mod tests {
     /// 同じ報道のグループの代表には、ほかの記事の数とソース（重ねずに）を添える。
     #[test]
     fn card_mentions_other_reports_of_the_story() {
-        let labels = crate::web::html::SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
+        let labels = crate::config::SourceLabels::from([("wnn".to_string(), "WNN".to_string())]);
         let page = Page {
             labels: &labels,
             ..Page::default()

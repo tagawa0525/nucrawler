@@ -472,6 +472,19 @@ pub struct Sources {
     pub sources: Vec<Source>,
 }
 
+/// ソースの ID から画面に出す名前へ（`Source::display_name`）。
+pub type SourceLabels = std::collections::BTreeMap<String, String>;
+
+impl Sources {
+    /// 各ソースの表示名。
+    pub fn labels(&self) -> SourceLabels {
+        self.sources
+            .iter()
+            .map(|s| (s.id.clone(), s.display_name().to_string()))
+            .collect()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {

@@ -16,11 +16,11 @@ use rmcp::schemars::{self, JsonSchema};
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
+use crate::config::SourceLabels;
 use crate::config::WebConfig;
 use crate::db::{
     ArtifactVersion, Db, DbError, ListItem, Rating, RatingFilter, SearchOrder, SearchQuery,
 };
-use crate::web::html::SourceLabels;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {

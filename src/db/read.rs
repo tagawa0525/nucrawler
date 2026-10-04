@@ -734,7 +734,8 @@ impl Db {
             ),
         };
         let sql = format!(
-            "WITH items AS (
+            "WITH {weights},
+             items AS (
                SELECT a.id, a.source_id, a.url, a.title, a.lang,
                       coalesce(a.published_at, a.fetched_at) AS at, a.fetched_at,
                       {digest_id} AS digest_id
@@ -830,6 +831,7 @@ impl Db {
             digest_id = latest_digest("id", "a.id", ":user"),
             title_ja = title_ja("d.title_ja", "i.id"),
             viewable_t = viewable("t", ":user"),
+            weights = super::recommend::rec_weights_cte(),
             rec = super::recommend::recommend_score_sql(),
         );
         let model = self.recommend_model(user_id, profile_hash)?;

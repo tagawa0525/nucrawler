@@ -29,19 +29,27 @@ pub(super) fn register_functions(conn: &Connection) -> Result<(), DbError> {
     Ok(())
 }
 
+/// 重み（`:rec_weights`、`Model::weights_json`）を 1 回だけ展開した表 `weights`（キーと重み）の CTE
+/// （`WITH` の後に置く）。`recommend_score_sql` の式が参照する。
+pub(super) fn rec_weights_cte() -> &'static str {
+    "weights AS MATERIALIZED (SELECT key, value FROM json_each(:rec_weights))"
+}
+
 /// 別名 `rows`（記事と `source_id`・`digest_id`）と `s`（採点）の行の推薦点を求める SQL の式。
-/// 重みは `:rec_weights`（`Model::weights_json`）で渡す。
-/// 重みは、キーが記事の特徴（`crate::recommend::feature_key`）に当たるものを 1 回ずつ足す。
+/// 重みは `rec_weights_cte` の表 `weights` から引く。
+/// 記事の特徴のキー（`crate::recommend::feature_key`）を重複なく並べ、当たる重みを 1 回ずつ足す。重みの側から
+/// 特徴を当てると、相関する副問い合わせが重みの数だけ流れ直す（計画 015）。
 pub(super) fn recommend_score_sql() -> &'static str {
     "recommend_score(s.score, (
-       SELECT total(w.value) FROM json_each(:rec_weights) AS w
-       WHERE w.key = 'source:' || rows.source_id
-          OR w.key IN (
-            SELECT 'topic:' || t.name FROM artifact_topics AS at
-            JOIN topics AS t ON t.id = at.topic_id
-            WHERE at.artifact_id = rows.digest_id)
-          OR w.key IN (
-            SELECT kind || ':' || topic FROM score_matches WHERE score_id = s.id)))"
+       SELECT total(w.value) FROM (
+         SELECT 'source:' || rows.source_id AS key
+         UNION
+         SELECT 'topic:' || t.name FROM artifact_topics AS at
+         JOIN topics AS t ON t.id = at.topic_id
+         WHERE at.artifact_id = rows.digest_id
+         UNION
+         SELECT kind || ':' || topic FROM score_matches WHERE score_id = s.id) AS f
+       JOIN weights AS w ON w.key = f.key))"
 }
 
 impl Db {

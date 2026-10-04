@@ -230,10 +230,28 @@ pub async fn crawl<L: LlmSet>(
                 summary.tally.halted
             }
             Stage::Review => {
+                // 案は embedding で比べる（ランキングが embedding なので、設定が無ければ比べる意味が無い）
+                let Some(cfg) = &config.embedding else {
+                    tracing::debug!("review stage skipped: no [embedding] settings");
+                    continue;
+                };
+                let client = match crate::embedding::Client::from_config(cfg, |name| {
+                    std::env::var(name).ok()
+                }) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let message = crate::errors::error_chain(&e);
+                        tracing::error!("review stage stopped: {message}");
+                        report.embedding_failure = Some(message);
+                        continue;
+                    }
+                };
                 let now = (env.clock)();
                 let summary = review::review_profiles(
                     env.stage(LlmTask::Score),
                     config,
+                    &client,
+                    cfg,
                     opts.requests_only,
                     now,
                 )
@@ -606,9 +624,9 @@ mod tests {
         .unwrap();
     }
 
-    /// crawl の見直しのステージは、評価の増えた利用者のプロファイルの案を作って保存する。
+    /// 見直しは案を embedding で比べるので、`[embedding]` の設定が無ければ流さない（LLM も呼ばない）。
     #[tokio::test]
-    async fn crawl_reviews_profiles() {
+    async fn crawl_skips_reviews_without_embedding() {
         let db = Db::open_in_memory().unwrap();
         let owner = db.owner_id().unwrap();
         let early = DateTime::parse_from_rfc3339("2026-09-27T00:00:00Z")
@@ -630,26 +648,11 @@ mod tests {
         }
         let llm = FakeLlm::new(responses);
         crawl_with(&db, &llm, 10, &Cancel::default(), &[Stage::Digest]).await;
-        // 案が今と同じなら採点せずに残す（LLM の呼び出しは案の 1 回だけ）
-        let same = serde_json::json!({
-            "interests": profile.interests.iter().map(|i| serde_json::json!({
-                "topic": i.topic, "weight": i.weight, "note": i.note.clone().unwrap_or_default(),
-            })).collect::<Vec<_>>(),
-            "exclude": profile.exclude,
-            "reasons": [],
-        });
-        let llm = FakeLlm::new([Ok(LlmResponse {
-            output: same,
-            usage: None,
-        })]);
-        let review = Stage::from_name("review").expect("review stage");
-        let report = crawl_with(&db, &llm, 10, &Cancel::default(), &[review]).await;
+        let llm = FakeLlm::new([]);
+        let report = crawl_with(&db, &llm, 10, &Cancel::default(), &[Stage::Review]).await;
         assert_eq!(report, RunReport::default());
-        assert_eq!(llm.requests().len(), 1);
-        assert_eq!(
-            db.profile_suggestions(owner).unwrap()[0].status,
-            crate::db::SuggestionStatus::Unchanged
-        );
+        assert!(llm.requests().is_empty());
+        assert!(db.profile_suggestions(owner).unwrap().is_empty());
     }
 
     /// 要約済みで採点を待つ記事と、要約を待つ記事を 1 件ずつ用意し、採点を待つ記事の id を返す。

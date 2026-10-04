@@ -70,7 +70,9 @@ impl Db {
         use rusqlite::OptionalExtension;
         let hash = crate::profile::hash(profile);
         let now = timestamp(now);
-        let tx = self.conn.unchecked_transaction()?;
+        // 今の版を読んでから退かせるので、読む前に書き込みのロックを取る（Web と CLI が同時に保存しても、
+        // 古い版を読んだ側が書けずに失敗しないように）
+        let tx = self.immediate()?;
         let current: Option<Period> = tx
             .query_row(
                 "SELECT id, hash, created_at, evidence FROM profile_versions

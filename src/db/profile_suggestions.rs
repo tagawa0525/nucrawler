@@ -3,6 +3,7 @@
 
 use super::*;
 
+use super::profile_versions::{Period, save_version, version_stats};
 use crate::prompt::suggest::Reason;
 
 /// 案を作ったきっかけ。
@@ -111,14 +112,91 @@ impl Db {
         suggestion: &NewSuggestion,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<i64, DbError> {
-        let _ = (suggestion, now);
-        todo!()
+        use rusqlite::OptionalExtension;
+        let now = timestamp(now);
+        let tx = self.immediate()?;
+        let base: i64 = tx
+            .query_row(
+                "SELECT id FROM profile_versions WHERE user_id = ?1 AND retired_at IS NULL",
+                [suggestion.user_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(DbError::NoProfileVersion)?;
+        tx.execute(
+            "UPDATE profile_suggestions SET status = 'superseded', decided_at = ?2
+             WHERE user_id = ?1 AND status = 'pending'",
+            rusqlite::params![suggestion.user_id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO profile_suggestions
+               (user_id, base_version_id, interests, excludes, reasons, evidence,
+                current_rated, current_concordance, candidate_rated, candidate_concordance,
+                trigger, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                suggestion.user_id,
+                base,
+                serde_json::to_string(&suggestion.profile.interests)?,
+                serde_json::to_string(&suggestion.profile.exclude)?,
+                serde_json::to_string(suggestion.reasons)?,
+                serde_json::to_string(suggestion.evidence)?,
+                suggestion.current.rated as i64,
+                suggestion.current.concordance,
+                suggestion.candidate.rated as i64,
+                suggestion.candidate.concordance,
+                suggestion.trigger.as_str(),
+                suggestion.status.as_str(),
+                now,
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
     }
 
     /// 利用者の案（新しい順）。
     pub fn profile_suggestions(&self, user_id: i64) -> Result<Vec<ProfileSuggestion>, DbError> {
-        let _ = user_id;
-        todo!()
+        let mut stmt = self.conn.prepare(
+            "SELECT id, base_version_id, interests, excludes, reasons, evidence,
+                    current_rated, current_concordance, candidate_rated, candidate_concordance,
+                    trigger, status, created_at, decided_at
+             FROM profile_suggestions WHERE user_id = ?1
+             ORDER BY created_at DESC, id DESC",
+        )?;
+        let mut rows = stmt.query([user_id])?;
+        let mut suggestions = Vec::new();
+        while let Some(r) = rows.next()? {
+            let stats = |rated: usize, concordance: usize| -> rusqlite::Result<VersionStats> {
+                Ok(VersionStats {
+                    rated: r.get::<_, i64>(rated)? as usize,
+                    concordance: r.get(concordance)?,
+                })
+            };
+            let trigger: String = r.get(10)?;
+            let status: String = r.get(11)?;
+            suggestions.push(ProfileSuggestion {
+                id: r.get(0)?,
+                base_version_id: r.get(1)?,
+                profile: crate::profile::Profile {
+                    interests: serde_json::from_str(&r.get::<_, String>(2)?)?,
+                    exclude: serde_json::from_str(&r.get::<_, String>(3)?)?,
+                },
+                reasons: serde_json::from_str(&r.get::<_, String>(4)?)?,
+                evidence: serde_json::from_str(&r.get::<_, String>(5)?)?,
+                current: stats(6, 7)?,
+                candidate: stats(8, 9)?,
+                trigger: SuggestionTrigger::parse(&trigger).ok_or_else(|| {
+                    DbError::UnexpectedValue(format!("suggestion trigger {trigger:?}"))
+                })?,
+                status: SuggestionStatus::parse(&status).ok_or_else(|| {
+                    DbError::UnexpectedValue(format!("suggestion status {status:?}"))
+                })?,
+                created_at: r.get(12)?,
+                decided_at: r.get(13)?,
+            });
+        }
+        Ok(suggestions)
     }
 
     /// 待っている案を、`origin`（自動なら `Auto`、人が採用したなら `Suggest`）の版にする。案の根拠にした
@@ -131,27 +209,75 @@ impl Db {
         origin: ProfileOrigin,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, DbError> {
-        let _ = (user_id, suggestion_id, origin, now);
-        todo!()
+        use rusqlite::OptionalExtension;
+        let tx = self.immediate()?;
+        let (interests, excludes, evidence, status): (String, String, String, String) = tx
+            .query_row(
+                "SELECT interests, excludes, evidence, status FROM profile_suggestions
+                 WHERE id = ?1 AND user_id = ?2",
+                [suggestion_id, user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .ok_or(DbError::UnknownProfileSuggestion(suggestion_id))?;
+        if status != SuggestionStatus::Pending.as_str() {
+            return Ok(false);
+        }
+        let profile = crate::profile::Profile {
+            interests: serde_json::from_str(&interests)?,
+            exclude: serde_json::from_str(&excludes)?,
+        };
+        let evidence: Vec<i64> = serde_json::from_str(&evidence)?;
+        tx.execute(
+            "UPDATE profile_suggestions SET status = 'applied', decided_at = ?2 WHERE id = ?1",
+            rusqlite::params![suggestion_id, timestamp(now)],
+        )?;
+        save_version(&tx, user_id, &profile, origin, &evidence, now)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// 前の案（無ければ今の版）の後に付けた評価の件数。案を作るかの判定に使う。
     pub fn ratings_since_review(&self, user_id: i64) -> Result<usize, DbError> {
-        let _ = user_id;
-        todo!()
+        let n: i64 = self.conn.query_row(
+            "SELECT count(*) FROM ratings
+             WHERE user_id = ?1
+               AND rated_at > coalesce(
+                 (SELECT max(at) FROM (
+                    SELECT created_at AS at FROM profile_suggestions WHERE user_id = ?1
+                    UNION ALL
+                    SELECT created_at FROM profile_versions
+                    WHERE user_id = ?1 AND retired_at IS NULL)),
+                 '')",
+            [user_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// 利用者の評価すべてを、hash が `profile_hash` のプロファイルの点数（一覧と同じ規則で選ぶ）で測った
     /// 一致率。点数の付いていない記事は数えない。
     pub fn rated_stats(&self, user_id: i64, profile_hash: &str) -> Result<VersionStats, DbError> {
-        let _ = (user_id, profile_hash);
-        todo!()
+        version_stats(
+            &self.conn,
+            user_id,
+            &Period {
+                id: 0,
+                hash: profile_hash.to_string(),
+                created_at: String::new(),
+                retired_at: None,
+                evidence: "[]".to_string(),
+            },
+        )
     }
 
     /// 案を自動で当てるか（利用者の設定。既定は当てる）。
     pub fn auto_apply_profile(&self, user_id: i64) -> Result<bool, DbError> {
-        let _ = user_id;
-        todo!()
+        Ok(self.conn.query_row(
+            "SELECT auto_apply_profile FROM users WHERE id = ?1",
+            [user_id],
+            |r| r.get(0),
+        )?)
     }
 }
 

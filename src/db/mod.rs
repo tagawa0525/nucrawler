@@ -148,6 +148,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0032_embeddings.sql"),
     include_str!("migrations/0033_text_embeddings.sql"),
     include_str!("migrations/0034_profile_versions.sql"),
+    include_str!("migrations/0035_profile_suggestions.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。

@@ -6,7 +6,6 @@
 
 use crate::config::SourceLabels;
 use crate::db::ListItem;
-use crate::web::html::display_title;
 
 /// XML の特殊文字を実体参照にし、XML 1.0 に書けない文字（タブ・改行・復帰以外の制御文字など）は
 /// 実体参照にもできないので落とす。
@@ -83,7 +82,7 @@ pub fn atom(
              <link rel=\"alternate\" href=\"{detail}\"/><link rel=\"related\" href=\"{url}\"/>\
              <author><name>{source}</name></author>{summary}</entry>",
             id = escape(&entry_id(&i.url)),
-            title = escape(display_title(i.title_ja.as_deref(), i)),
+            title = escape(i.display_title()),
             at = escape(&i.at),
             url = escape(&i.url),
             source = escape(source),

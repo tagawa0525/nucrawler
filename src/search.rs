@@ -248,7 +248,8 @@ pub fn result_line(item: &crate::db::ListItem) -> String {
         .score
         .map_or_else(|| "-".to_string(), |s| s.to_string());
     // 取得した題名には改行が混ざりうるので、空白をまとめて 1 行にする
-    let title = crate::web::html::display_title(item.title_ja.as_deref(), item)
+    let title = item
+        .display_title()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

@@ -777,7 +777,7 @@ fn story_others(i: &ListItem, page: &Page) -> String {
 /// 記事のカード。`swipe` なら一覧のカードとして、印（`marks`）を付けてその場で付け外しできるようにする
 /// （`MARKS_SCRIPT`）。そうでなければ（検索の結果）、印は見出しの下の行に記号で示す。
 pub(super) fn card(i: &ListItem, swipe: bool, page: &Page) -> String {
-    let title = display_title(i.title_ja.as_deref(), i);
+    let title = i.display_title();
     let score = score_badge(i);
     let lock = if i.locked_by.is_empty() {
         String::new()

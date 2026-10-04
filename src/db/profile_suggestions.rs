@@ -416,6 +416,40 @@ mod tests {
         );
     }
 
+    /// 案の後にプロファイルが変わったら（取り込み・戻し）、待っている案は置き換わり、採用できない
+    /// （案は前の版を基に作り、比べたので、新しい版を上書きしない）。
+    #[test]
+    fn a_new_version_supersedes_pending_suggestions() {
+        let db = Db::open_in_memory().unwrap();
+        let owner = db.owner_id().unwrap();
+        db.save_profile(owner, &profile("a"), t("2026-10-01T00:00:00Z"))
+            .unwrap();
+        let b = profile("b");
+        let reasons = reasons();
+        let id = db
+            .save_suggestion(
+                &suggestion(owner, &b, &reasons, &[]),
+                t("2026-10-02T00:00:00Z"),
+            )
+            .unwrap()
+            .unwrap();
+        db.save_profile(owner, &profile("c"), t("2026-10-03T00:00:00Z"))
+            .unwrap();
+        let saved = &db.profile_suggestions(owner).unwrap()[0];
+        assert_eq!(
+            (saved.status, saved.decided_at.as_deref()),
+            (
+                SuggestionStatus::Superseded,
+                Some("2026-10-03T00:00:00.000Z")
+            )
+        );
+        assert!(
+            !db.apply_suggestion(owner, id, ProfileOrigin::Suggest, t("2026-10-04T00:00:00Z"))
+                .unwrap()
+        );
+        assert_eq!(db.load_profile(owner).unwrap().unwrap().0, profile("c"));
+    }
+
     /// 案を作る間にプロファイルが変わっていたら（基にした hash が今の版と違う）、案を保存しない。
     #[test]
     fn skips_suggestions_made_from_an_old_profile() {

@@ -66,7 +66,7 @@ fn story_text() -> String {
             ORDER BY r.created_at DESC, r.id DESC LIMIT 1),
            {translation},
            CASE WHEN a.lang = 'ja' THEN a.title END)",
-        translation = super::read::latest_title_translation("a.id"),
+        translation = super::sql::latest_title_translation("a.id"),
     )
 }
 
@@ -283,8 +283,8 @@ impl Db {
                FROM articles AS a
                WHERE a.id IN ({ids_sql}))
              ORDER BY {order}",
-            title_ja = super::read::title_ja(
-                &super::read::latest_digest("title_ja", "a.id", ":user"),
+            title_ja = super::sql::title_ja(
+                &super::sql::latest_digest("title_ja", "a.id", ":user"),
                 "a.id",
             ),
         );

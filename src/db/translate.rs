@@ -121,7 +121,7 @@ impl Db {
                 OR (?7 = 0 AND relevant = 1 AND score >= ?8 AND at >= ?9)
              ORDER BY requested_at IS NULL, requested_at, score DESC, at DESC, id DESC
              LIMIT ?10",
-            digest_id = super::read::latest_digest("id", "a.id", "?1"),
+            digest_id = super::sql::latest_digest("id", "a.id", "?1"),
             available = super::claims::available(super::claims::Available {
                 article: "a.id",
                 stage: "'translate'",

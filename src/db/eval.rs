@@ -85,8 +85,8 @@ impl Db {
              FROM digests AS d
              JOIN artifacts AS r ON r.id = d.digest_id
              ORDER BY d.rated_at DESC, d.article_id DESC",
-            digest_id = super::read::latest_digest("id", "rt.article_id", ":user"),
-            topics = super::read::linked_topics("r"),
+            digest_id = super::sql::latest_digest("id", "rt.article_id", ":user"),
+            topics = super::sql::linked_topics("r"),
         ))?;
         let rows = stmt.query_map(rusqlite::named_params! {":user": user_id}, |r| {
             Ok((
@@ -162,9 +162,9 @@ impl Db {
              JOIN articles AS a ON a.id = r.article_id
              WHERE r.rn = 1
              ORDER BY r.profile_hash, r.backend, r.model, r.prompt_version, r.article_id",
-            topics = super::read::linked_topics("r"),
-            matched = super::read::matched_topics("r.score_id", "interest"),
-            excluded = super::read::matched_topics("r.score_id", "exclude"),
+            topics = super::sql::linked_topics("r"),
+            matched = super::sql::matched_topics("r.score_id", "interest"),
+            excluded = super::sql::matched_topics("r.score_id", "exclude"),
         ))?;
         let rows = stmt.query_map([user_id], |r| {
             Ok((

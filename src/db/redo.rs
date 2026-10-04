@@ -248,7 +248,7 @@ fn redo_filter() -> String {
         AND s.backend <> 'embedding'
         AND s.artifact_id = {digest_id}
       ORDER BY s.prompt_version DESC, s.score DESC LIMIT 1) >= :min_score)",
-        digest_id = super::read::latest_digest("id", "a.id", ":user"),
+        digest_id = super::sql::latest_digest("id", "a.id", ":user"),
     )
 }
 

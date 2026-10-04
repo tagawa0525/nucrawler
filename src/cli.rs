@@ -12,7 +12,8 @@ pub enum ParseError {
     SourcesUsage,
     #[error(
         "usage: nucrawler profile import FILE | nucrawler profile export | \
-         nucrawler profile suggest --out FILE [--max-llm-calls N]"
+         nucrawler profile suggest --out FILE [--max-llm-calls N] | \
+         nucrawler profile history | nucrawler profile revert VERSION"
     )]
     ProfileUsage,
     #[error("usage: nucrawler topics import FILE | nucrawler topics export")]
@@ -89,7 +90,7 @@ commands:
   sources   ソースの取得確認（sources check [ID]）
   serve     Web UI を起動（serve [--addr IP:PORT]、既定は設定の web.bind）
   mcp       MCP stdio サーバを起動
-  profile   関心プロファイルの取り込み・書き出し・更新案（profile import FILE / profile export / profile suggest --out FILE）
+  profile   関心プロファイルの取り込み・書き出し・更新案・履歴（profile import FILE / profile export / profile suggest --out FILE / profile history / profile revert VERSION）
   topics    トピックの語彙の取り込み・書き出し（topics import FILE / topics export）
   search    記事を検索（search [--since D] [--topic T] ... 語...、条件は Web の検索画面と同じ）
   eval      採点が記事に付けた評価（★1〜5）とどれだけ合っているかを表示（eval [--all] [--profile FILE [--max-llm-calls N]]）
@@ -349,6 +350,10 @@ pub fn parse_profile_args(args: &[String]) -> Result<ProfileArgs, ParseError> {
             file: PathBuf::from(file),
         }),
         [cmd] if cmd == "export" => Ok(ProfileArgs::Export),
+        [cmd] if cmd == "history" => Ok(ProfileArgs::History),
+        [cmd, version] if cmd == "revert" => Ok(ProfileArgs::Revert {
+            version: version.parse().map_err(|_| ParseError::ProfileUsage)?,
+        }),
         [cmd, rest @ ..] if cmd == "suggest" => parse_suggest_args(rest),
         _ => Err(ParseError::ProfileUsage),
     }

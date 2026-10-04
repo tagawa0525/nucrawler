@@ -246,8 +246,41 @@ impl std::fmt::Display for Change {
 /// `profile history` の表示：版ごとに番号・時刻（日本時間）・出どころ・使われていた間の一致率と、
 /// 1 つ前の版からの変更。新しい順に受け取り、そのまま並べる。
 pub fn render_versions(versions: &[crate::db::ProfileVersion]) -> String {
-    let _ = versions;
-    todo!()
+    use std::fmt::Write as _;
+    if versions.is_empty() {
+        return "no profile versions\n".to_string();
+    }
+    let mut text = String::new();
+    for (i, v) in versions.iter().enumerate() {
+        let current = if v.retired_at.is_none() {
+            "  (current)"
+        } else {
+            ""
+        };
+        let concordance = v
+            .stats
+            .concordance
+            .map(|c| format!(", concordance {c:.2}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            text,
+            "#{}  {}  {}{current}  {} rated{concordance}",
+            v.id,
+            crate::jst::format_local(&v.created_at),
+            v.origin.as_str(),
+            v.stats.rated,
+        );
+        match versions.get(i + 1) {
+            Some(older) => {
+                for change in diff(&older.profile, &v.profile) {
+                    let _ = writeln!(text, "    {change}");
+                }
+            }
+            None => text.push_str("    (first version)\n"),
+        }
+    }
+    text.push_str("\nrevert with `nucrawler profile revert VERSION`\n");
+    text
 }
 
 /// 内容から決まるハッシュ（16 進 16 桁）。採点はこの値ごとに記録するので、内容が変われば

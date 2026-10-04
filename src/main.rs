@@ -7,9 +7,9 @@ use nucrawler::cli::{self, Command, ProfileArgs, SearchArgs, SourcesArgs, Topics
 use nucrawler::config::{self, ConfigError};
 use nucrawler::db::{Db, DbError};
 use nucrawler::errors;
+use nucrawler::filelock::LockError;
 use nucrawler::http::{Fetcher, HttpError};
 use nucrawler::mcp::{self, McpError};
-use nucrawler::pipeline::lock::LockError;
 use nucrawler::pipeline::run::RunError;
 use nucrawler::profile::{self, ProfileError};
 use nucrawler::status;

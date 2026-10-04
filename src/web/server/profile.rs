@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::db::ProfileOrigin;
+
 pub(super) async fn profile_page(
     State(state): State<AppState>,
     Extension(me): Extension<crate::db::Viewer>,
@@ -9,9 +11,16 @@ pub(super) async fn profile_page(
     let page = with_db_and_config(&state, move |db, web, labels| {
         let (user, hash) = viewer(db, me)?;
         let versions = db.profile_versions(user)?;
+        let suggestions = db.profile_suggestions(user)?;
+        let view = html::ProfileView {
+            versions: &versions,
+            suggestions: &suggestions,
+            auto_apply: db.auto_apply_profile(user)?,
+            requested: db.review_requests()?.contains(&user),
+        };
         let parts = PageParts::new(db, me, hash.as_deref(), web)?;
         let page = parts.page(labels);
-        Ok(html::profile_page(&versions, &page))
+        Ok(html::profile_page(view, &page))
     })
     .await?;
     Ok(Html(page))
@@ -32,6 +41,69 @@ pub(super) async fn revert_profile_version(
     })
     .await?;
     Ok(Redirect::to("/settings/profile"))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct AutoApplyForm {
+    /// チェックしたときだけ送られる
+    auto: Option<String>,
+}
+
+pub(super) async fn set_auto_apply(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Form(form): Form<AutoApplyForm>,
+) -> Result<Redirect, AppError> {
+    let on = form.auto.is_some();
+    with_db(&state, move |db| {
+        Ok(db.set_auto_apply_profile(me.user_id, on)?)
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn request_review(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        Ok(db.request_review(me.user_id, Utc::now())?)
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn apply_suggestion(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Path(id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        suggestion_result(db.apply_suggestion(me.user_id, id, ProfileOrigin::Suggest, Utc::now()))
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+pub(super) async fn dismiss_suggestion(
+    State(state): State<AppState>,
+    Extension(me): Extension<crate::db::Viewer>,
+    Path(id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    with_db(&state, move |db| {
+        suggestion_result(db.dismiss_suggestion(me.user_id, id, Utc::now()))
+    })
+    .await?;
+    Ok(Redirect::to("/settings/profile"))
+}
+
+/// ほかの利用者の案も、無い案と同じに扱う。もう待っていない案（別の画面で採用したなど）は何もしない。
+fn suggestion_result(result: Result<bool, DbError>) -> Result<(), AppError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(DbError::UnknownProfileSuggestion(_)) => Err(AppError::NotFound),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

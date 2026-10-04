@@ -11,25 +11,22 @@ const FEW_LABELS: usize = 5;
 /// 一致率：評価の違う記事の組のうち、評価の高い方の点数が高い割合（同点は半分と数える）。
 /// 評価が 2 通りだけなら AUC と同じ。評価の違う組が無ければ `None`。
 pub fn concordance(pairs: &[(u8, Rating)]) -> Option<f64> {
+    // 評価と点数ごとの件数から数える（組を総当たりすると、評価の件数の 2 乗に比例する）
+    let mut counts = [[0u64; 256]; Rating::MAX as usize];
+    for &(score, rating) in pairs {
+        counts[usize::from(rating.get() - Rating::MIN)][usize::from(score)] += 1;
+    }
     // 同点を半分と数えるため、2 倍で数える
-    let (mut twice, mut total) = (0usize, 0usize);
-    for (i, (score_a, rating_a)) in pairs.iter().enumerate() {
-        for (score_b, rating_b) in &pairs[i + 1..] {
-            if rating_a == rating_b {
-                continue;
+    let (mut twice, mut total) = (0u64, 0u64);
+    for high in 1..counts.len() {
+        for low in 0..high {
+            // 評価の低い方で、今の点数より低い点数の件数
+            let mut below = 0u64;
+            for (h, l) in counts[high].iter().zip(&counts[low]) {
+                twice += h * (2 * below + l);
+                below += l;
             }
-            // 評価の高い方の点数から見た順
-            let (high, low) = if rating_a > rating_b {
-                (score_a, score_b)
-            } else {
-                (score_b, score_a)
-            };
-            twice += match high.cmp(low) {
-                std::cmp::Ordering::Greater => 2,
-                std::cmp::Ordering::Equal => 1,
-                std::cmp::Ordering::Less => 0,
-            };
-            total += 1;
+            total += counts[high].iter().sum::<u64>() * below;
         }
     }
     (total > 0).then(|| twice as f64 / (2 * total) as f64)

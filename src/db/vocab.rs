@@ -21,29 +21,14 @@ pub struct TopicMerge {
 }
 
 impl Db {
-    /// ユーザーのプロファイルを保存する（既にあれば置き換える）。
+    /// ユーザーのプロファイルを取り込みの版として保存する（今と同じ中身なら何もしない）。
     pub fn save_profile(
         &self,
         user_id: i64,
         profile: &crate::profile::Profile,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), DbError> {
-        self.conn.execute(
-            "INSERT INTO profiles (user_id, interests, excludes, hash, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (user_id) DO UPDATE SET
-               interests = excluded.interests,
-               excludes = excluded.excludes,
-               hash = excluded.hash,
-               updated_at = excluded.updated_at",
-            rusqlite::params![
-                user_id,
-                serde_json::to_string(&profile.interests)?,
-                serde_json::to_string(&profile.exclude)?,
-                crate::profile::hash(profile),
-                timestamp(now),
-            ],
-        )?;
+        self.save_profile_version(user_id, profile, ProfileOrigin::Import, &[], now)?;
         Ok(())
     }
 

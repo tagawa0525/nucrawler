@@ -343,6 +343,20 @@ async fn profile(
         ProfileArgs::Suggest { out, max_llm_calls } => {
             cmd::suggest(config, data, &out, max_llm_calls).await
         }
+        ProfileArgs::History => {
+            let (db, owner) = open(data)?;
+            print!("{}", profile::render_versions(&db.profile_versions(owner)?));
+            Ok(())
+        }
+        ProfileArgs::Revert { version } => {
+            let (db, owner) = open(data)?;
+            if db.revert_profile(owner, version, chrono::Utc::now())? {
+                tracing::info!(version, "profile reverted");
+            } else {
+                tracing::info!(version, "the profile already has this content");
+            }
+            Ok(())
+        }
     }
 }
 

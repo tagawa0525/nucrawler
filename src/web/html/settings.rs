@@ -73,7 +73,8 @@ pub fn settings_page(
         .unwrap_or_default();
     let body = format!(
         "<p class=\"meta\"><a href=\"/\">← 一覧</a></p><h1>設定</h1>\
-         <ul class=\"menu\"><li><a href=\"/glossary\">訳語集</a> \
+         <ul class=\"menu\"><li><a href=\"/settings/profile\">興味プロファイル</a></li>\
+         <li><a href=\"/glossary\">訳語集</a> \
          <span class=\"meta\">{glossary_terms} 語</span></li>\
          {inbox}</ul>\
          <h2>フィード</h2>{feed}\

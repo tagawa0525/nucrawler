@@ -11,6 +11,7 @@ mod embed_scores;
 mod embeddings;
 mod eval;
 mod notes;
+mod profile_versions;
 mod read;
 mod recommend;
 mod redo;
@@ -34,6 +35,7 @@ pub use embed_scores::*;
 pub use embeddings::*;
 pub use eval::*;
 pub use notes::*;
+pub use profile_versions::*;
 pub use read::*;
 pub use redo::*;
 pub use score::*;
@@ -89,6 +91,9 @@ pub enum DbError {
     /// 語を自分自身に統合しようとした
     #[error("cannot merge topic {0:?} into itself")]
     SelfMerge(String),
+    /// 利用者のプロファイルの版に無い
+    #[error("unknown profile version {0}")]
+    UnknownProfileVersion(i64),
     /// ログイン ID がほかの利用者と重なった
     #[error("login {0:?} is already taken")]
     LoginTaken(String),
@@ -134,6 +139,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0031_login.sql"),
     include_str!("migrations/0032_embeddings.sql"),
     include_str!("migrations/0033_text_embeddings.sql"),
+    include_str!("migrations/0034_profile_versions.sql"),
 ];
 
 /// 現在時刻（UTC、RFC 3339、ミリ秒まで）を返す SQL 式。
@@ -633,6 +639,60 @@ mod tests {
             )
             .unwrap(),
             ["1|1", "2|1", "3|3"]
+        );
+    }
+
+    /// 既存のプロファイルを、中身・hash・時刻を保ったまま最初の版（取り込み、今の版）にする。
+    #[test]
+    fn migration_makes_each_profile_its_first_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE profile_versions"))
+            .unwrap();
+        for sql in &MIGRATIONS[..before] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO users (id, login, display_name) VALUES (2, 'o@example.com', 'O');
+             INSERT INTO profiles (user_id, interests, excludes, hash, updated_at) VALUES
+               (1, '[{\"topic\":\"燃料\",\"weight\":0.9}]', '[\"核融合\"]', 'h1',
+                '2026-09-27T00:25:29.766Z'),
+               (2, '[]', '[]', 'h2', '2026-09-28T00:00:00.000Z');",
+        )
+        .unwrap();
+        let db = Db::init(conn).unwrap();
+        assert_eq!(
+            db.query_strings(
+                "SELECT user_id || '|' || interests || '|' || excludes || '|' || hash || '|' ||
+                        origin || '|' || evidence || '|' || created_at || '|' ||
+                        coalesce(retired_at, '-')
+                 FROM profile_versions ORDER BY user_id"
+            )
+            .unwrap(),
+            [
+                "1|[{\"topic\":\"燃料\",\"weight\":0.9}]|[\"核融合\"]|h1|import|[]|\
+                 2026-09-27T00:25:29.766Z|-",
+                "2|[]|[]|h2|import|[]|2026-09-28T00:00:00.000Z|-",
+            ]
+        );
+        let (profile, hash) = db.load_profile(1).unwrap().unwrap();
+        assert_eq!(
+            (profile.interests[0].topic.as_str(), hash.as_str()),
+            ("燃料", "h1")
+        );
+        // 今の版は利用者ごとに 1 つ
+        assert!(
+            db.conn()
+                .execute(
+                    "INSERT INTO profile_versions (user_id, interests, excludes, hash, origin, created_at)
+                     VALUES (1, '[]', '[]', 'h3', 'import', '2026-10-01T00:00:00.000Z')",
+                    [],
+                )
+                .is_err()
         );
     }
 

@@ -35,6 +35,7 @@ mod json;
 mod list;
 mod notes;
 mod pages;
+mod profile;
 #[cfg(test)]
 mod test_support;
 
@@ -46,6 +47,7 @@ use json::*;
 use list::*;
 use notes::*;
 use pages::*;
+use profile::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -119,6 +121,11 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/logout", post(logout))
         .route("/settings/feed-token", post(rotate_feed_token))
         .route("/settings/password", post(change_password))
+        .route("/settings/profile", get(profile_page))
+        .route(
+            "/settings/profile/versions/{id}/revert",
+            post(revert_profile_version),
+        )
         // 外側の層から順に掛かる：Origin の確認（ログインを含むすべての書き込み）→ ログインの確認
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

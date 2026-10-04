@@ -88,8 +88,9 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
 }
 
 impl Db {
-    /// 認証の状態を書き換えるトランザクション。始めた時点で書き込みのロックを取り、ほかのプロセスの書き込みと重ならない。
-    fn immediate(&self) -> Result<rusqlite::Transaction<'_>, DbError> {
+    /// 読んでから書き換えるトランザクション（認証の状態・プロファイルの版）。始めた時点で書き込みのロックを取り、
+    /// ほかのプロセスの書き込みと重ならない。
+    pub(super) fn immediate(&self) -> Result<rusqlite::Transaction<'_>, DbError> {
         Ok(rusqlite::Transaction::new_unchecked(
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,

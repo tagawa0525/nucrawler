@@ -7,7 +7,7 @@ nucrawler status
 nucrawler sources check [ID]
 nucrawler serve [--addr IP:PORT]
 nucrawler mcp
-nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N]
+nucrawler profile import FILE | nucrawler profile export | nucrawler profile suggest --out FILE [--max-llm-calls N] | nucrawler profile history | nucrawler profile revert VERSION
 nucrawler topics import FILE | nucrawler topics export
 nucrawler search [--since D] [--until D] [--topic T]... [--source ID]... [--lang en|ja] [--translated] [--min-rating 1-5] [--read | --unread] [--bookmarked | --unbookmarked] [--unrated] [--min-score N] [--sort newest|score] [--limit N] [語]...
 nucrawler eval [--all] [--profile FILE [--max-llm-calls N]]
@@ -69,6 +69,15 @@ LLM の呼び出しの上限は `redo` と同じ。`[embedding]` があれば、
 今のプロファイルとの差分（Rust で計算したもの）と、変更ごとの根拠を表示し、案を FILE に書く（既にあるファイルは
 上書きしない）。案は取り込まないので、`eval --profile FILE` で今のプロファイルと比べてから `profile import FILE` する。
 評価が無いことは関心が無い根拠にしない（表示されなかった記事には評価できないため）。LLM の呼び出しは 1 回。
+
+## profile history・profile revert
+
+プロファイルは保存するたびに版として残る（取り込み・案の採用・前の版に戻すなど）。`profile history` は版を新しい順に
+並べ、版ごとに、出どころ・その版が今のプロファイルだった間に付けた評価での一致率（一覧と同じ規則で選んだ点数で測る。
+案の根拠にした記事は除く）・1 つ前の版からの変更を出す。一致率は版が今でなくなった時点の値で固まる。
+
+`profile revert VERSION` は、その版の中身を新しい版として保存し、今のプロファイルにする。LLM の点数はプロファイルの
+中身ごとに残っているので、前の版に戻すと採点し直さずに前の点数が使われる。
 
 ## search
 

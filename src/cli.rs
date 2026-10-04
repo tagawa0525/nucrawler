@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::pipeline::Stage;
+use crate::pipeline::{RedoKind, Stage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -195,13 +195,6 @@ pub fn parse_crawl_args(args: &[String]) -> Result<CrawlArgs, ParseError> {
         return Err(usage());
     }
     Ok(parsed)
-}
-
-/// `redo` で作り直す成果物。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RedoKind {
-    Digest,
-    Translate,
 }
 
 /// `redo` サブコマンドの引数。

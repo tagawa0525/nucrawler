@@ -5,11 +5,10 @@
 use chrono::{DateTime, Utc};
 
 use super::llm_call::LlmStage;
-use super::{Cancel, Halt, RedoSpec, Stage, Target};
+use super::{Cancel, Halt, RedoKind, RedoSpec, Stage, Target};
 use super::{
     digest, embed, embed_profiles, extract, fetch, score, story, suggest, tidy, title, translate,
 };
-use crate::cli::RedoKind;
 use crate::config::{Config, LlmConfig, LlmTask, Source};
 use crate::db::{Db, DbError, Evidence, RedoFilter};
 use crate::http::Fetcher;

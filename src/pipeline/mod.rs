@@ -96,6 +96,13 @@ pub enum Target {
     Redo(RedoSpec),
 }
 
+/// `redo` で作り直す成果物。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedoKind {
+    Digest,
+    Translate,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RedoSpec {
     pub filter: crate::db::RedoFilter,

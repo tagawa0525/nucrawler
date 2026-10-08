@@ -255,7 +255,7 @@ mod tests {
     fn llm_cfg(batch: usize) -> LlmConfig {
         LlmConfig {
             digest_batch_size: batch,
-            ..LlmConfig::default()
+            ..LlmConfig::for_tests()
         }
     }
 

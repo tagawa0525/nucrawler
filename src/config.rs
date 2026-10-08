@@ -358,6 +358,23 @@ impl Default for LlmConfig {
     }
 }
 
+#[cfg(test)]
+impl LlmConfig {
+    /// 工程のテスト用の設定。モデル名を既定値から切り離し、既定のモデルを替えても期待値が変わらないようにする。
+    pub(crate) fn for_tests() -> Self {
+        let model = || "sonnet".to_string();
+        Self {
+            digest_model: model(),
+            suggest_model: model(),
+            translate_model: model(),
+            tidy_model: model(),
+            title_model: model(),
+            story_model: model(),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {

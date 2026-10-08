@@ -354,7 +354,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &now,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             &PipelineConfig::default(),
             now(),
         )

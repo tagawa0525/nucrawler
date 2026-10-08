@@ -340,20 +340,37 @@ impl Default for LlmConfig {
             command: None,
             copilot_command: None,
             timeout_secs: 300,
-            digest_model: "sonnet".into(),
+            digest_model: "haiku".into(),
             digest_batch_size: 5,
             max_input_chars: 6000,
-            suggest_model: "sonnet".into(),
-            translate_model: "sonnet".into(),
+            suggest_model: "haiku".into(),
+            translate_model: "haiku".into(),
             translate_min_score: 80,
             translate_max_input_chars: 20000,
-            tidy_model: "sonnet".into(),
+            tidy_model: "haiku".into(),
             tidy_interval_days: 7,
-            title_model: "sonnet".into(),
+            title_model: "haiku".into(),
             title_batch_size: 30,
-            story_model: "sonnet".into(),
+            story_model: "haiku".into(),
             story_batch_size: 10,
             concurrency: 2,
+        }
+    }
+}
+
+#[cfg(test)]
+impl LlmConfig {
+    /// 工程のテスト用の設定。モデル名を既定値から切り離し、既定のモデルを替えても期待値が変わらないようにする。
+    pub(crate) fn for_tests() -> Self {
+        let model = || "sonnet".to_string();
+        Self {
+            digest_model: model(),
+            suggest_model: model(),
+            translate_model: model(),
+            tidy_model: model(),
+            title_model: model(),
+            story_model: model(),
+            ..Self::default()
         }
     }
 }
@@ -954,17 +971,17 @@ mod tests {
         assert_eq!(d.command_for(LlmBackend::CopilotCli), "copilot");
         assert_eq!(d.backend_for(LlmTask::Suggest), LlmBackend::ClaudeCli);
         assert_eq!(d.timeout_secs, 300);
-        assert_eq!(d.digest_model, "sonnet");
+        assert_eq!(d.digest_model, "haiku");
         assert_eq!(d.digest_batch_size, 5);
         assert_eq!(d.max_input_chars, 6000);
-        assert_eq!(d.suggest_model, "sonnet");
-        assert_eq!(d.translate_model, "sonnet");
+        assert_eq!(d.suggest_model, "haiku");
+        assert_eq!(d.translate_model, "haiku");
         assert_eq!(d.translate_min_score, 80);
         assert_eq!(d.translate_max_input_chars, 20000);
-        assert_eq!(d.tidy_model, "sonnet");
+        assert_eq!(d.tidy_model, "haiku");
         assert_eq!(d.tidy_interval_days, 7);
-        assert_eq!((d.title_model.as_str(), d.title_batch_size), ("sonnet", 30));
-        assert_eq!((d.story_model.as_str(), d.story_batch_size), ("sonnet", 10));
+        assert_eq!((d.title_model.as_str(), d.title_batch_size), ("haiku", 30));
+        assert_eq!((d.story_model.as_str(), d.story_batch_size), ("haiku", 10));
         assert_eq!(d.concurrency, 2);
     }
 

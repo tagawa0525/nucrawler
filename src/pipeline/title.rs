@@ -199,7 +199,7 @@ mod tests {
             },
             &LlmConfig {
                 title_batch_size: batch,
-                ..LlmConfig::default()
+                ..LlmConfig::for_tests()
             },
             now(),
         )
@@ -357,7 +357,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &|| late,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             now(),
         )
         .await
@@ -396,7 +396,7 @@ mod tests {
             &LlmConfig {
                 title_batch_size: 1,
                 concurrency: 2,
-                ..LlmConfig::default()
+                ..LlmConfig::for_tests()
             },
             now(),
         )

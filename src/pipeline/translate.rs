@@ -348,7 +348,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &now,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             &PipelineConfig::default(),
             owner,
             &Target::Pending { requests_only },
@@ -606,7 +606,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &|| now,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             &PipelineConfig::default(),
             owner,
             &target,
@@ -636,7 +636,7 @@ mod tests {
         });
         let opus = LlmConfig {
             translate_model: "opus".into(),
-            ..LlmConfig::default()
+            ..LlmConfig::for_tests()
         };
         let llm = FakeLlm::new([ok("再訳")]);
         let summary = translate_articles(
@@ -680,7 +680,7 @@ mod tests {
                 cancel: &cancel,
                 clock: &now,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             &PipelineConfig::default(),
             owner,
             &Target::Pending {
@@ -805,7 +805,7 @@ mod tests {
             },
             &LlmConfig {
                 concurrency: 2,
-                ..LlmConfig::default()
+                ..LlmConfig::for_tests()
             },
             &PipelineConfig::default(),
             owner,
@@ -845,7 +845,7 @@ mod tests {
             },
             &LlmConfig {
                 concurrency: 2,
-                ..LlmConfig::default()
+                ..LlmConfig::for_tests()
             },
             &PipelineConfig::default(),
             owner,
@@ -888,7 +888,7 @@ mod tests {
             },
             &LlmConfig {
                 concurrency: 2,
-                ..LlmConfig::default()
+                ..LlmConfig::for_tests()
             },
             &PipelineConfig::default(),
             owner,

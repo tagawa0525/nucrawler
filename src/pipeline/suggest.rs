@@ -118,7 +118,7 @@ mod tests {
                 cancel: &Cancel::default(),
                 clock: &now,
             },
-            &LlmConfig::default(),
+            &LlmConfig::for_tests(),
             &profile(),
             &evidence(),
         )
@@ -139,7 +139,7 @@ mod tests {
         assert_eq!(summary.tally.calls, 1);
         let reqs = llm.requests();
         assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].model, LlmConfig::default().suggest_model);
+        assert_eq!(reqs[0].model, LlmConfig::for_tests().suggest_model);
         assert_eq!(reqs[0].system, crate::prompt::suggest::system_prompt());
         assert_eq!(
             reqs[0].prompt,

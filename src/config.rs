@@ -971,17 +971,17 @@ mod tests {
         assert_eq!(d.command_for(LlmBackend::CopilotCli), "copilot");
         assert_eq!(d.backend_for(LlmTask::Suggest), LlmBackend::ClaudeCli);
         assert_eq!(d.timeout_secs, 300);
-        assert_eq!(d.digest_model, "sonnet");
+        assert_eq!(d.digest_model, "haiku");
         assert_eq!(d.digest_batch_size, 5);
         assert_eq!(d.max_input_chars, 6000);
-        assert_eq!(d.suggest_model, "sonnet");
-        assert_eq!(d.translate_model, "sonnet");
+        assert_eq!(d.suggest_model, "haiku");
+        assert_eq!(d.translate_model, "haiku");
         assert_eq!(d.translate_min_score, 80);
         assert_eq!(d.translate_max_input_chars, 20000);
-        assert_eq!(d.tidy_model, "sonnet");
+        assert_eq!(d.tidy_model, "haiku");
         assert_eq!(d.tidy_interval_days, 7);
-        assert_eq!((d.title_model.as_str(), d.title_batch_size), ("sonnet", 30));
-        assert_eq!((d.story_model.as_str(), d.story_batch_size), ("sonnet", 10));
+        assert_eq!((d.title_model.as_str(), d.title_batch_size), ("haiku", 30));
+        assert_eq!((d.story_model.as_str(), d.story_batch_size), ("haiku", 10));
         assert_eq!(d.concurrency, 2);
     }
 

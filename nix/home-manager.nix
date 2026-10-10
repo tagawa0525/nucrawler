@@ -38,7 +38,7 @@ let
     db="''${XDG_DATA_HOME:-$HOME/.local/share}/nucrawler/nucrawler.db"
     pending=$(${lib.getExe pkgs.sqlite} -readonly "$db" 'SELECT count(*) FROM profile_review_requests') || pending=unknown
     [ "$pending" = 0 ] && exit 0
-    ${systemctl} start nucrawler-embedding-hold-requests.service
+    ${systemctl} start nucrawler-embedding-hold@requests.service
   '';
   toml = pkgs.formats.toml { };
   bin = lib.getExe cfg.package;
@@ -252,7 +252,7 @@ in
               ExecStartPre = "-${startEmbeddingForRequests}";
               # 保持の unit は requests の後ろに並ばないので待っても循環しないが、サーバーの停止（podman stop）で
               # requests の終わりを遅らせない
-              ExecStopPost = "-${systemctl} --no-block stop nucrawler-embedding-hold-requests.service";
+              ExecStopPost = "-${systemctl} --no-block stop nucrawler-embedding-hold@requests.service";
             };
           };
     }
@@ -261,7 +261,7 @@ in
         Unit = {
           Description = "nucrawler embedding server (text-embeddings-inference)";
           # 使う unit（crawl、下の保持用）が全部終わると止まる。手で単独で start しても、使う unit が無いので
-          # すぐ止まる。手で使うときは nucrawler-embedding-hold を start する
+          # すぐ止まる。手で使うときは nucrawler-embedding-hold@<名前> を start する
           StopWhenUnneeded = true;
         };
         Service = {
@@ -284,26 +284,24 @@ in
         # ログイン時には起動しない。起動は使う unit の Wants（nucrawler-crawl、保持用）から
       };
     }
-    // lib.optionalAttrs emb.enable (
-      lib.genAttrs [ "nucrawler-embedding-hold" "nucrawler-embedding-hold-requests" ] (name: {
+    // lib.optionalAttrs emb.enable {
+      # embedding のサーバーを使っている間だけ残る unit。使う側ごとに別のインスタンス名で start/stop する
+      # （同じ名前を共有すると、start しても参照は増えず、先に終えた側の stop で、使っている側のサーバーが止まる）。
+      # start は応答するまで待つので、そのあとに使える
+      "nucrawler-embedding-hold@" = {
         Unit = {
-          Description =
-            if name == "nucrawler-embedding-hold" then
-              "keep the embedding server running (start before eval --profile or crawl --only embed, stop after)"
-            else
-              "keep the embedding server running for nucrawler-requests";
+          Description = "keep the embedding server running for %i";
           Wants = [ "nucrawler-embedding.service" ];
           After = [ "nucrawler-embedding.service" ];
         };
         Service = {
           Type = "oneshot";
-          # active の間はサーバーが使われているものとして残る。start は応答するまで待つので、そのあとに使える
           RemainAfterExit = true;
           ExecStart = waitForEmbedding;
           TimeoutStartSec = 960;
         };
-      })
-    )
+      };
+    }
     // lib.optionalAttrs cfg.serve.enable {
       nucrawler-serve = {
         Unit.Description = "nucrawler web ui";

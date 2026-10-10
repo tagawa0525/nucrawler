@@ -19,8 +19,9 @@ README の設定例で入る user unit：
   それを呼ぶよう設定する。常駐はしない：使う unit が全部終わると止まる（計画 018）
   - 全体の `nucrawler-crawl` は、起動して待つ
   - `nucrawler-requests` は、プロファイルの見直しを頼まれているときだけ起動する
-  - `eval --profile` や `crawl --only embed` など、手で使うときは `systemctl --user start nucrawler-embedding-hold`
-    （応答するまで待つ）で起動し、終わったら `systemctl --user stop nucrawler-embedding-hold` で止める。
+  - `eval --profile` や `crawl --only embed` など、手で使うときは `systemctl --user start nucrawler-embedding-hold@<名前>`
+    （応答するまで待つ）で起動し、終わったら同じ名前で `stop` する。名前は使う側ごとに替える（`@eval`、`@embed` など。
+    同じ名前を共有すると、先に終えた側の `stop` で、使っている側のサーバーが止まる）。
     `nucrawler-embedding` を単独で start しても、使う unit が無いのですぐ止まる
   - クラウドの API を使うなら、`embeddingServer.enable` を外し、`settings.embedding` に url・model・認証を書く
 - unit は利用者のプロファイルの `claude` を使う。別の場所にあるなら

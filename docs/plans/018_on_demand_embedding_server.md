@@ -41,10 +41,11 @@ systemd の参照カウントで動かす。サーバーの unit（`nucrawler-em
 - **全体の crawl**：`Wants/After` でサーバーを起動し、応答を待つ（`ExecStartPre`）。サーバーが起動できなくても
   crawl は続け、embed の失敗として報告する。終わると、ほかに使う unit が無ければ systemd が止める
 - **requests**：実行の前に、DB の `profile_review_requests` が空かを見る（`startEmbeddingForRequests`）。空でなければ
-  `nucrawler-embedding-hold-requests.service` を start してサーバーを起動し、終わりに `--no-block` で stop する。
+  `nucrawler-embedding-hold@requests.service` を start してサーバーを起動し、終わりに `--no-block` で stop する。
   読めないときは、頼まれているものとして起動する（起動し損ねて頼みが残り続けるより、無駄に起動するほうがよい）
-- **手動**：`nucrawler-embedding-hold.service` を `start` する（応答するまで待つ）。使い終わったら `stop` する。
-  保持の unit を使う側ごとに分けるので、ある側が終わっても、ほかの側が使っているサーバーは止まらない
+- **手動**：`nucrawler-embedding-hold@<名前>.service` を `start` する（応答するまで待つ）。使い終わったら同じ名前で
+  `stop` する。保持の unit はテンプレートで、使う側ごとに別の名前で start する。start は、すでに active な unit には
+  参照を足さないので、名前を共有すると先に終えた側の `stop` で、使っている側のサーバーが止まる（transient unit で確認）
 
 ## 検討した案
 
@@ -66,6 +67,14 @@ systemd の参照カウントで動かす。サーバーの unit（`nucrawler-em
   待ち行列に並ぶので、先行するジョブの後ろで点数が付くまで数時間遅れうる。定常の crawl の embedding は数秒で、
   「全コアを使う、または 1 分以上」の基準に当たらないので割に合わない。採らない
 - **常駐のまま `Nice=`・`CPUQuota=` で抑える**：待機中の 4 GB は減らない。採らない
+
+## 既知の限界
+
+- requests の事前確認は、`nucrawler` が `--wait-lock` で取るロックより前にある。ほかの crawl の待ち中に見直しが
+  頼まれると、その実行は、サーバーを起動しないまま review ステージで頼みを見つけ、embedding の呼び出しに失敗する。
+  頼みは案を保存するまで残るので失われず、次の実行（15 分後）の事前確認で起動して処理される。確実にするには、
+  ロックを共有する仕組みを Rust に足すか、requests のたびに起動するしかない。前者はクラウドに出すと不要になり、
+  後者は 1 日 96 回のモデルの読み込みになるので、採らない
 
 ## 未確認
 

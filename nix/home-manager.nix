@@ -216,8 +216,9 @@ in
     };
 
     systemd.user.services = {
-      # embed ステージを含むのは全体を流す crawl だけなので、embedding のサーバーを待つのもこれだけにする。
-      # サーバーが止まっていても crawl は続き、embed の失敗として報告する
+      # embed ステージを含むのは全体を流す crawl だけなので、embedding のサーバーを起動して待つのも、
+      # 終わったら止めるのもこれだけにする（常駐させない。計画 018）。
+      # サーバーが起動できなくても crawl は続き、embed の失敗として報告する
       nucrawler-crawl =
         lib.recursiveUpdate (crawlService "nucrawler: fetch, extract, digest, score and translate" [ ])
           {
@@ -225,8 +226,11 @@ in
               Wants = [ "nucrawler-embedding.service" ];
               After = [ "nucrawler-embedding.service" ];
             };
-            # 失敗しても（- を付けて）crawl は続ける
-            Service = lib.optionalAttrs emb.enable { ExecStartPre = "-${waitForEmbedding}"; };
+            # 失敗しても（- を付けて）crawl は続ける。crawl の成否にかかわらず終わりにサーバーを止める
+            Service = lib.optionalAttrs emb.enable {
+              ExecStartPre = "-${waitForEmbedding}";
+              ExecStopPost = "-${lib.getExe' pkgs.systemd "systemctl"} --user stop nucrawler-embedding.service";
+            };
           };
       nucrawler-fetch = crawlService "nucrawler: fetch and extract only" [
         "--until"
@@ -254,7 +258,7 @@ in
           Restart = "on-failure";
           RestartSec = 30;
         };
-        Install.WantedBy = [ "default.target" ];
+        # 起動は nucrawler-crawl（Wants）か手動（eval --profile、embed rebuild の前）。ログイン時には起動しない
       };
     }
     // lib.optionalAttrs cfg.serve.enable {

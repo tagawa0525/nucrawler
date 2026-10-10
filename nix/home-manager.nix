@@ -275,7 +275,10 @@ in
             emb.image
             "--model-id ${emb.model}"
           ];
-          ExecStop = "${emb.podman} stop nucrawler-embedding";
+          # 起動の直後（コンテナを作る前）に止められると stop の対象が無い。--ignore は対象が無いときだけ
+          # 成功にする（使う unit が無い状態で home-manager の切り替えが起動したときに起こる）。
+          # 先頭に - を付けると権限エラーなど本物の失敗まで隠れる
+          ExecStop = "${emb.podman} stop --ignore nucrawler-embedding";
           # rootless の podman は newuidmap（/run/wrappers/bin）を使う
           Environment = [ "PATH=/run/wrappers/bin:/run/current-system/sw/bin" ];
           Restart = "on-failure";

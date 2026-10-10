@@ -28,6 +28,18 @@ let
     echo "the embedding server did not become ready" >&2
     exit 1
   '';
+  systemctl = "${lib.getExe' pkgs.systemd "systemctl"} --user";
+
+  # nucrawler-requests は、プロファイルの見直しを頼まれているときだけ embedding を呼ぶ（15 分ごとの実行の
+  # ほとんどは呼ばない）ので、頼まれているときだけサーバーを起動する。頼みの有無は DB の
+  # profile_review_requests（src/db/profile_suggestions.rs）で見る。読めないときは頼まれているものとして
+  # 起動する（起動し損ねて頼みが残り続けるより、無駄に起動するほうがよい）
+  startEmbeddingForRequests = pkgs.writeShellScript "nucrawler-start-embedding-for-requests" ''
+    db="''${XDG_DATA_HOME:-$HOME/.local/share}/nucrawler/nucrawler.db"
+    pending=$(${lib.getExe pkgs.sqlite} -readonly "$db" 'SELECT count(*) FROM profile_review_requests') || pending=unknown
+    [ "$pending" = 0 ] && exit 0
+    ${systemctl} start nucrawler-embedding-hold@requests.service
+  '';
   toml = pkgs.formats.toml { };
   bin = lib.getExe cfg.package;
 
@@ -216,8 +228,9 @@ in
     };
 
     systemd.user.services = {
-      # embed ステージを含むのは全体を流す crawl だけなので、embedding のサーバーを待つのもこれだけにする。
-      # サーバーが止まっていても crawl は続き、embed の失敗として報告する
+      # embed ステージを含む全体の crawl は、embedding のサーバーを起動して待つ。サーバーは、使う unit が
+      # 全部終わると systemd が止める（常駐させない。計画 018）。
+      # サーバーが起動できなくても crawl は続き、embed の失敗として報告する
       nucrawler-crawl =
         lib.recursiveUpdate (crawlService "nucrawler: fetch, extract, digest, score and translate" [ ])
           {
@@ -232,11 +245,25 @@ in
         "--until"
         "extract"
       ];
-      nucrawler-requests = crawlService "nucrawler: translate requested articles" [ "--requests-only" ];
+      nucrawler-requests =
+        lib.recursiveUpdate (crawlService "nucrawler: translate requested articles" [ "--requests-only" ])
+          {
+            Service = lib.optionalAttrs emb.enable {
+              ExecStartPre = "-${startEmbeddingForRequests}";
+              # 保持の unit は requests の後ろに並ばないので待っても循環しないが、サーバーの停止（podman stop）で
+              # requests の終わりを遅らせない
+              ExecStopPost = "-${systemctl} --no-block stop nucrawler-embedding-hold@requests.service";
+            };
+          };
     }
     // lib.optionalAttrs emb.enable {
       nucrawler-embedding = {
-        Unit.Description = "nucrawler embedding server (text-embeddings-inference)";
+        Unit = {
+          Description = "nucrawler embedding server (text-embeddings-inference)";
+          # 使う unit（crawl、下の保持用）が全部終わると止まる。手で単独で start しても、使う unit が無いので
+          # すぐ止まる。手で使うときは nucrawler-embedding-hold@<名前> を start する
+          StopWhenUnneeded = true;
+        };
         Service = {
           # モデルは ~/.cache/huggingface に置き、起動のたびに取得し直さない
           ExecStartPre = "-${emb.podman} rm -f nucrawler-embedding";
@@ -254,7 +281,25 @@ in
           Restart = "on-failure";
           RestartSec = 30;
         };
-        Install.WantedBy = [ "default.target" ];
+        # ログイン時には起動しない。起動は使う unit の Wants（nucrawler-crawl、保持用）から
+      };
+    }
+    // lib.optionalAttrs emb.enable {
+      # embedding のサーバーを使っている間だけ残る unit。使う側ごとに別のインスタンス名で start/stop する
+      # （同じ名前を共有すると、start しても参照は増えず、先に終えた側の stop で、使っている側のサーバーが止まる）。
+      # start は応答するまで待つので、そのあとに使える
+      "nucrawler-embedding-hold@" = {
+        Unit = {
+          Description = "keep the embedding server running for %i";
+          Wants = [ "nucrawler-embedding.service" ];
+          After = [ "nucrawler-embedding.service" ];
+        };
+        Service = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = waitForEmbedding;
+          TimeoutStartSec = 960;
+        };
       };
     }
     // lib.optionalAttrs cfg.serve.enable {

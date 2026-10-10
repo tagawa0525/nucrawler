@@ -15,8 +15,15 @@ README の設定例で入る user unit：
   LLM をどれだけ使うかは時刻ではなく `[quota]` の時間帯ごとの上限で決まる。
   timer はマシンのタイムゾーンで動き、`[quota]` の時間帯は `timezone_offset_hours`（既定 JST）で判定する
 - `services.nucrawler.embeddingServer.enable = true;` にすると、embedding のサーバー（text-embeddings-inference で
-  `cl-nagoya/ruri-v3-310m` を動かす。Podman を使う）を `nucrawler-embedding.service` として常駐させ、`[embedding]` も
-  それを呼ぶよう設定する
+  `cl-nagoya/ruri-v3-310m` を動かす。Podman を使う）を `nucrawler-embedding.service` にし、`[embedding]` も
+  それを呼ぶよう設定する。常駐はしない：使う unit が全部終わると止まる（計画 018）
+  - 全体の `nucrawler-crawl` は、起動して待つ
+  - `nucrawler-requests` は、プロファイルの見直しを頼まれているときだけ起動する
+  - `eval --profile` や `crawl --only embed` など、手で使うときは `systemctl --user start nucrawler-embedding-hold@<名前>`
+    （応答するまで待つ）で起動し、終わったら同じ名前で `stop` する。名前は使う側ごとに替える（`@eval`、`@embed` など。
+    同じ名前を共有すると、先に終えた側の `stop` で、使っている側のサーバーが止まる）。
+    `nucrawler-embedding` を単独で start しても、使う unit が無いのですぐ止まる
+  - クラウドの API を使うなら、`embeddingServer.enable` を外し、`settings.embedding` に url・model・認証を書く
 - unit は利用者のプロファイルの `claude` を使う。別の場所にあるなら
   `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す
 - 設定ファイルは `services.nucrawler.settings` と `sourcesFile` から生成される

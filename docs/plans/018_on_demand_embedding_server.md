@@ -5,7 +5,7 @@
 ## 背景
 
 `embeddingServer.enable` のサーバー（text-embeddings-inference、CPU 版）は、ログイン時から常駐していた。
-embedding を呼ぶのは `crawl` の embed・review ステージと、手で実行する `eval --profile`・`embed rebuild` だけで、
+embedding を呼ぶのは `crawl` の embed・review ステージと、手で実行する `eval --profile` だけで、
 Web UI と `crawl --requests-only`・`--until extract` は呼ばない。
 
 r995 での実測（2026-10-10）：起動から 2 日 20 時間で CPU 時間は合計 40 分 44 秒（平均 1% 弱）、メモリは 4.2 GB。
@@ -17,8 +17,8 @@ r995 での実測（2026-10-10）：起動から 2 日 20 時間で CPU 時間�
 
 - サーバーの unit（`nucrawler-embedding.service`）は `WantedBy` を外し、ログイン時に起動しない
 - `nucrawler-crawl` は従来どおり `Wants/After` でサーバーを起動して応答を待ち、終わり（成否を問わない）に
-  `ExecStopPost` で止める。サーバーが起動できなくても crawl は続け、embed の失敗として報告する
-- crawl の外で使うとき（`eval --profile`、`embed rebuild` の後の全件の embedding）は、手で
+  `ExecStopPost` で `systemctl --user --no-block stop` する（`After=` で停止は crawl の後に並ぶので、待つと crawl の停止完了を待つ停止ジョブと循環する）。サーバーが起動できなくても crawl は続け、embed の失敗として報告する
+- crawl の外で使うとき（`eval --profile`、`crawl --only embed` で手動で流す全件の embedding）は、手で
   `systemctl --user start nucrawler-embedding` し、終わったら `stop` する
 
 ## 検討した案
@@ -37,5 +37,5 @@ r995 での実測（2026-10-10）：起動から 2 日 20 時間で CPU 時間�
 
 - 毎回のモデルの読み込みにかかる時間。モジュールのコメントは「数分」とするが、`~/.cache/huggingface` に
   キャッシュがあるときの実測値は無い。待つ上限は従来どおり 900 秒
-- 大量の embedding（`embed rebuild` の後）は、重い計算の基準に当たりうる。そのときは
+- 大量の embedding（`embed rebuild` は保存済みを消すだけで、作り直しは次の crawl の embed ステージ）は、重い計算の基準に当たりうる。そのときは
   `sbatch --exclusive --wait` の中でサーバーを起動して流す運用とし、仕組みは作らない

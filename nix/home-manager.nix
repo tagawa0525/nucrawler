@@ -229,7 +229,9 @@ in
             # 失敗しても（- を付けて）crawl は続ける。crawl の成否にかかわらず終わりにサーバーを止める
             Service = lib.optionalAttrs emb.enable {
               ExecStartPre = "-${waitForEmbedding}";
-              ExecStopPost = "-${lib.getExe' pkgs.systemd "systemctl"} --user stop nucrawler-embedding.service";
+              # After があるので停止は crawl の後に並ぶ。待つと crawl の停止完了を待つ embedding の停止ジョブと循環するので、
+              # --no-block で停止ジョブを積むだけにする
+              ExecStopPost = "-${lib.getExe' pkgs.systemd "systemctl"} --user --no-block stop nucrawler-embedding.service";
             };
           };
       nucrawler-fetch = crawlService "nucrawler: fetch and extract only" [
@@ -258,7 +260,7 @@ in
           Restart = "on-failure";
           RestartSec = 30;
         };
-        # 起動は nucrawler-crawl（Wants）か手動（eval --profile、embed rebuild の前）。ログイン時には起動しない
+        # 起動は nucrawler-crawl（Wants）か手動（eval --profile、crawl --only embed の前）。ログイン時には起動しない
       };
     }
     // lib.optionalAttrs cfg.serve.enable {

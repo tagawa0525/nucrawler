@@ -17,7 +17,7 @@ README の設定例で入る user unit：
 - `services.nucrawler.embeddingServer.enable = true;` にすると、embedding のサーバー（text-embeddings-inference で
   `cl-nagoya/ruri-v3-310m` を動かす。Podman を使う）を `nucrawler-embedding.service` にし、`[embedding]` も
   それを呼ぶよう設定する。常駐はしない：`nucrawler-crawl` が起動して、終わると止める。`eval --profile` や
-  `embed rebuild` の後の全件の embedding など、crawl の外で使うときは `systemctl --user start nucrawler-embedding`
+  `crawl --only embed` で全件の embedding を流すなど、crawl の外で使うときは `systemctl --user start nucrawler-embedding`
   で起動し、終わったら `systemctl --user stop nucrawler-embedding` で止める
 - unit は利用者のプロファイルの `claude` を使う。別の場所にあるなら
   `services.nucrawler.extraPackages = [ pkgs.claude-code ];` のように渡す

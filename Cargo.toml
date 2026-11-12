@@ -7,28 +7,28 @@ edition = "2024"
 argon2 = "0.6"
 axum = { version = "0.8.9", default-features = false, features = ["tokio", "http1", "form", "query"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
-dom_smoothie = "0.18.2"
-ego-tree = "0.11.0"
-encoding_rs = "0.8.42"
-feed-rs = "2.4.0"
+dom_smoothie = "0.19.0"
+ego-tree = "0.11.1"
+encoding_rs = "0.8.44"
+feed-rs = "3.0.0"
 getrandom = "0.4"
 pdf-extract = "0.12.1"
 reqwest = { version = "0.13.5", features = ["gzip"] }
-rmcp = { version = "3.4.1", default-features = false, features = ["server", "macros", "transport-io"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
-scraper = "0.27.0"
+rmcp = { version = "3.10.0", default-features = false, features = ["server", "macros", "transport-io"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "functions"] }
+scraper = "0.29.0"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 thiserror = "2.0.21"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "process", "io-util"] }
-toml = "1.1.6"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "process", "io-util"] }
+toml = "1.2.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
 
 [dev-dependencies]
 # テストで時計を止め、同時に終わる呼び出しを確実に作る（tokio::test の start_paused）
-tokio = { version = "1.53.1", features = ["test-util"] }
+tokio = { version = "1.54.1", features = ["test-util"] }
 
 # パスワードのハッシュ（argon2id）は計算の重い処理なので、テストのビルドでも最適化して、ログインのテストを速くする
 [profile.dev.package.argon2]
